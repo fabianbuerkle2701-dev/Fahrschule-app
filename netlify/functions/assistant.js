@@ -1,4 +1,3 @@
-netlify/functions/assistant.js
 // Nimmt eine Anweisung in normaler Sprache + eine Schülerliste entgegen
 // und gibt strukturiert zurück, welche Aktion ausgeführt werden soll.
 // Der Schlüssel kommt aus der Netlify-Umgebungsvariable ANTHROPIC_API_KEY.
