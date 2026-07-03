@@ -550,7 +550,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.14.2";
+const APP_VERSION = "1.15.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -580,6 +580,12 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.15.1", date:"Juni 2026", changes:[
+    "Neu: Terminvorschlag per WhatsApp senden. Im Kalender einen Schüler und Wunschtermine wählen, die App legt sie als offene Vorschläge an und öffnet eine fertige WhatsApp-Nachricht mit dem Buchungslink. Der Schüler bestätigt dann bequem über den Link",
+  ]},
+  { v:"1.15.0", date:"Juni 2026", changes:[
+    "Buchungsseite: Fahrschüler können jetzt oben ihren Namen eingeben. Ihre eigenen Termine werden dann farbig hervorgehoben, auch beim erneuten Öffnen oder auf einem anderen Gerät. Fremde Namen bleiben weiterhin verborgen",
+  ]},
   { v:"1.14.2", date:"Juni 2026", changes:[
     "Adminbereich übersichtlicher: Meine Fahrschule, Fahrzeuge, Führerscheinklassen, Ausbildungsfahrt-Arten und Kosten sind jetzt aufklappbare Menüs. Standardmäßig zugeklappt, du öffnest nur, was du brauchst",
   ]},
@@ -1061,6 +1067,12 @@ async function publicProposeAppointment(code,p_start,p_end,p_name,p_note){
     { code, p_start, p_end, p_name:p_name||null, p_note:p_note||null });
   if(error){ console.error(error); throw new Error(error.message); }
   return data;
+}
+// Eigene Termine eines Fahrschülers anhand seines Namens (datenschutzfreundlich, nur eigene)
+async function publicMySlots(code,name,von,bis){
+  const { data, error } = await sb.rpc("public_my_slots",{ code, p_name:name, von, bis });
+  if(error){ console.error(error); return []; } // bei Fehler einfach keine Hervorhebung
+  return data||[];
 }
 // Buchungs-Code des eingeloggten Fahrlehrers holen/anlegen
 async function fetchBookingCode(uid){
@@ -1721,6 +1733,7 @@ function App(){
   const [assistant,setAssistant]=useState(null); // null | {open, busy, error, input, proposal}
   const [calImport,setCalImport]=useState(null); // null | {busy, error, items} Kalender-Screenshot-Import
   const [waPrompt,setWaPrompt]=useState(null); // null | {appt, stu}
+  const [proposalForm,setProposalForm]=useState(null); // null | {student_id, slots:[{date,start,end}], busy, error}
   const [theme,setTheme]=useState(()=>{ try{ return localStorage.getItem("v3_theme")||"light"; }catch(e){ return "light"; } });
   const [sortBy,setSortBy]=useState(()=>{ try{ return localStorage.getItem("v3_sort")||"name"; }catch(e){ return "name"; } });
   const [settingsTab,setSettingsTab]=useState("darstellung"); // Unterreiter der Einstellungen
@@ -2443,6 +2456,40 @@ function App(){
       return created;
     }catch(e){ alert("Termin konnte nicht gespeichert werden:\n"+e.message); setSaved(true); }
   }
+  // ── Terminvorschlag an Schüler senden (per WhatsApp, mit Buchungslink zum Bestätigen) ──
+  function openProposalForm(){
+    setProposalForm({ student_id:"", slots:[{ date:ymd(new Date()), start:"09:00", end:"10:00" }], busy:false, error:"" });
+  }
+  async function sendProposal(){
+    const f=proposalForm; if(!f) return;
+    if(!f.student_id){ setProposalForm({...f,error:"Bitte einen Schüler auswählen."}); return; }
+    const stu=students.find(s=>s.id===f.student_id);
+    if(!stu){ setProposalForm({...f,error:"Schüler nicht gefunden."}); return; }
+    for(const s of f.slots){
+      if(!s.date||!s.start){ setProposalForm({...f,error:"Bitte bei jedem Termin Datum und Uhrzeit angeben."}); return; }
+    }
+    setProposalForm({...f,busy:true,error:""});
+    // Für jeden Wunschtermin einen offenen Vorschlag anlegen, mit dem Namen des Schülers im Titel,
+    // damit die Buchungsseite ihn per Namen wiedererkennt (wie ein selbst vorgeschlagener Termin).
+    const created=[];
+    const studentName=dispName(stu);
+    for(const s of f.slots){
+      const startISO=combineDT(s.date,s.start);
+      const endISO=s.end?combineDT(s.date,s.end):null;
+      const appt={ title:studentName, start_at:startISO, end_at:endISO, status:"pending", note:"", art:"ÜST", student_id:stu.id };
+      const c=await addAppt(appt);
+      if(c) created.push(c);
+    }
+    setProposalForm(null);
+    if(created.length){
+      // WhatsApp mit fertiger Nachricht öffnen
+      const num=stu.tel?waNumber(stu.tel):"";
+      const text=encodeURIComponent(waProposalText(created,stu));
+      window.open("https://wa.me/"+num+"?text="+text,"_blank");
+    }else{
+      alert("Die Terminvorschläge konnten nicht angelegt werden.");
+    }
+  }
   async function updateAppt(id,patch){
     setSaved(false);
     setAppts(prev=>prev.map(a=>a.id===id?{...a,...patch}:a).sort((a,b)=>a.start_at.localeCompare(b.start_at)));
@@ -2560,6 +2607,23 @@ function App(){
     const url="https://wa.me/"+num+"?text="+text;
     window.open(url,"_blank");
     setWaPrompt(null);
+  }
+  // WhatsApp-Text für einen Terminvorschlag vom Fahrlehrer an den Schüler (mit Buchungslink zum Bestätigen)
+  function waProposalText(slots,stu){
+    const list=Array.isArray(slots)?slots:[slots];
+    const name=(stu&&stu.vorname)?stu.vorname.trim():"";
+    const schule=(school&&school.name)||"deiner Fahrschule";
+    const greet=name?("Hallo "+name+", "):"Hallo, ";
+    const url=bookingURL();
+    if(list.length===1){
+      const s=list[0];
+      const d=new Date(s.start_at);
+      const dLong=d.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"});
+      const t=hm(s.start_at)+(s.end_at?" bis "+hm(s.end_at):"");
+      return greet+"ich schlage dir einen Fahrstunden-Termin vor:\n\n"+dLong+", "+t+" Uhr\n\nÖffne diesen Link, gib deinen Namen ein und bestätige den Termin:\n"+url+"\n\n"+schule;
+    }
+    const zeilen=list.map(s=>"• "+new Date(s.start_at).toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"})+", "+hm(s.start_at)+(s.end_at?" bis "+hm(s.end_at):"")+" Uhr").join("\n");
+    return greet+"ich schlage dir folgende Fahrstunden-Termine vor:\n\n"+zeilen+"\n\nÖffne diesen Link, gib deinen Namen ein und bestätige die Termine:\n"+url+"\n\n"+schule;
   }
   // Bestätigung erneut per WhatsApp öffnen, gebündelt für alle bestätigten,
   // zukünftigen Termine desselben Schülers (falls man die Nachricht weggedrückt hat)
@@ -3798,6 +3862,12 @@ function App(){
         <button className={calMode==="woche"?"on":""} onClick={()=>setCalMode("woche")}>Woche</button>
         <button className={calMode==="tag"?"on":""} onClick={()=>setCalMode("tag")}>Tag</button>
       </div>
+
+      <button className="btn btn-ghost btn-block" style={{marginBottom:12,gap:8,color:"#128C3E",border:"1.5px solid #25D366"}}
+        onClick={openProposalForm}>
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z"/></svg>
+        Terminvorschlag per WhatsApp senden
+      </button>
 
       {/* UE-Übersicht: Woche und Monat (nur bestätigte Termine, 1 UE = 45 Min) */}
       <div style={{display:"flex",gap:10,marginBottom:12}}>
@@ -5846,6 +5916,53 @@ function App(){
         <button className="btn btn-ghost btn-block" onClick={()=>setWaPrompt(null)}>Schließen</button>
       </div>
     </div>}
+    {proposalForm&&<div onClick={()=>!proposalForm.busy&&setProposalForm(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",
+        alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,
+        borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",
+        maxHeight:"88vh",overflowY:"auto"}}>
+        <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:4}}>Terminvorschlag senden</h3>
+        <p style={{fontSize:13,color:"var(--muted)",marginBottom:16,lineHeight:1.5}}>
+          Wähle einen Schüler und einen oder mehrere Wunschtermine. Die App legt sie als offene Vorschläge an und öffnet eine fertige WhatsApp-Nachricht mit deinem Buchungslink, über den der Schüler bestätigt.
+        </p>
+
+        <div className="field" style={{marginBottom:14}}>
+          <label>Schüler</label>
+          <select value={proposalForm.student_id} onChange={e=>setProposalForm({...proposalForm,student_id:e.target.value})}
+            style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"var(--card)"}}>
+            <option value="">Bitte wählen…</option>
+            {students.filter(s=>s._isMine&&!s.archived).map(s=><option key={s.id} value={s.id}>{dispName(s)}</option>)}
+          </select>
+        </div>
+
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:8}}>Wunschtermine</label>
+        {proposalForm.slots.map((s,idx)=>
+          <div key={idx} style={{display:"flex",gap:8,marginBottom:8,alignItems:"center"}}>
+            <input type="date" value={s.date} onChange={e=>setProposalForm({...proposalForm,slots:proposalForm.slots.map((x,i)=>i===idx?{...x,date:e.target.value}:x)})}
+              style={{flex:"1 1 40%",border:"1.5px solid var(--line)",borderRadius:10,padding:"10px",fontSize:15}}/>
+            <input type="time" value={s.start} onChange={e=>setProposalForm({...proposalForm,slots:proposalForm.slots.map((x,i)=>i===idx?{...x,start:e.target.value}:x)})}
+              style={{flex:"1 1 25%",border:"1.5px solid var(--line)",borderRadius:10,padding:"10px",fontSize:15}}/>
+            <input type="time" value={s.end} onChange={e=>setProposalForm({...proposalForm,slots:proposalForm.slots.map((x,i)=>i===idx?{...x,end:e.target.value}:x)})}
+              style={{flex:"1 1 25%",border:"1.5px solid var(--line)",borderRadius:10,padding:"10px",fontSize:15}}/>
+            {proposalForm.slots.length>1&&<button onClick={()=>setProposalForm({...proposalForm,slots:proposalForm.slots.filter((_,i)=>i!==idx)})}
+              style={{border:"none",background:"none",color:"#B3362A",fontSize:20,padding:"2px 4px",lineHeight:1,flexShrink:0}}>×</button>}
+          </div>)}
+        <button className="btn btn-ghost btn-block" style={{marginBottom:14,color:"var(--orange-deep)"}}
+          onClick={()=>setProposalForm({...proposalForm,slots:[...proposalForm.slots,{date:proposalForm.slots[proposalForm.slots.length-1]?.date||ymd(new Date()),start:"09:00",end:"10:00"}]})}>
+          + weiterer Termin
+        </button>
+
+        {proposalForm.error&&<div style={{fontSize:13,color:"#B3362A",marginBottom:12}}>{proposalForm.error}</div>}
+
+        <button className="btn btn-primary btn-block" style={{marginBottom:8,background:"#25D366",borderColor:"#25D366"}}
+          disabled={proposalForm.busy} onClick={sendProposal}>
+          {proposalForm.busy?"Wird angelegt…":"Anlegen und WhatsApp öffnen"}
+        </button>
+        <button className="btn btn-ghost btn-block" disabled={proposalForm.busy} onClick={()=>setProposalForm(null)}>Abbrechen</button>
+      </div>
+    </div>}
     {apptForm&&<div onClick={()=>setApptForm(null)}
       style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",
         alignItems:"flex-end",justifyContent:"center"}}>
@@ -6075,6 +6192,9 @@ function BookingPage({code}){
   const [busy,setBusy]=React.useState([]);
   const [loadingBusy,setLoadingBusy]=React.useState(false);
   const [mineSlots,setMineSlots]=React.useState(()=>{ try{ return JSON.parse(localStorage.getItem("v3_mine_"+code)||"[]"); }catch(e){ return []; } });
+  // Name des Fahrschülers (bleibt auf dem Gerät gespeichert), um eigene Termine geräteübergreifend wiederzuerkennen
+  const [myName,setMyName]=React.useState(()=>{ try{ return localStorage.getItem("v3_myname_"+code)||""; }catch(e){ return ""; } });
+  const [nameSlots,setNameSlots]=React.useState([]); // Startzeiten der eigenen Termine, per Name vom Server geholt
   const [form,setForm]=React.useState(null); // {date,start,end,name,note}
   const [done,setDone]=React.useState(false);
   const [sending,setSending]=React.useState(false);
@@ -6096,6 +6216,16 @@ function BookingPage({code}){
       .catch(()=>{ setBusy([]); setLoadingBusy(false); });
   },[info,week,code,done]);
 
+  // Eigene Termine per Name laden (geräteübergreifende Wiedererkennung)
+  React.useEffect(()=>{
+    if(!info||!myName.trim()){ setNameSlots([]); return; }
+    const von=startOfWeek(week).toISOString();
+    const bis=addDays(startOfWeek(week),7).toISOString();
+    publicMySlots(code,myName.trim(),von,bis)
+      .then(rows=>setNameSlots((rows||[]).map(r=>r.start_at)))
+      .catch(()=>setNameSlots([]));
+  },[info,week,code,myName,done]);
+
   if(info===undefined) return <Splash text="Lädt…"/>;
   if(info===null) return <div style={{minHeight:"100vh",background:"var(--paper)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
     <div className="card" style={{padding:"26px 20px",textAlign:"center",maxWidth:380}}>
@@ -6113,12 +6243,17 @@ function BookingPage({code}){
   const canGoBack=ymd(startOfWeek(week))>ymd(startOfWeek(new Date()));
   const byDay={};
   busy.forEach(b=>{ const k=ymd(b.start_at); (byDay[k]=byDay[k]||[]).push(b); });
-  // Menge der eigenen Startzeiten (auf Minute genau), zur Hervorhebung
-  const mineSet=new Set((mineSlots||[]).map(x=>new Date(x).getTime()));
+  // Menge der eigenen Startzeiten (auf Minute genau), zur Hervorhebung.
+  // Kombiniert lokal gespeicherte Termine (dieses Gerät) mit per Name gefundenen (geräteübergreifend).
+  const mineSet=new Set([...(mineSlots||[]),...(nameSlots||[])].map(x=>new Date(x).getTime()));
   const isMine=(b)=>mineSet.has(new Date(b.start_at).getTime());
 
   function openForm(dateStr){
-    setForm({ vorname:"", nachname:"", note:"",
+    // Namen aus dem gespeicherten myName vorbelegen (erste Wort = Vorname, Rest = Nachname)
+    const parts=(myName||"").trim().split(/\s+/);
+    const vn=parts.length?parts[0]:"";
+    const nn=parts.length>1?parts.slice(1).join(" "):"";
+    setForm({ vorname:vn, nachname:nn, note:"",
       slots:[{ date:dateStr||ymd(new Date()), start:"09:00", end:"10:00" }] });
     setErr("");
   }
@@ -6157,13 +6292,17 @@ function BookingPage({code}){
         results.push({ok:false, s, reason});
       }
     }
-    // Eigene Termine im Browser merken (nur auf diesem Gerät)
+    // Eigene Termine im Browser merken (dieses Gerät) und Namen für geräteübergreifende Wiedererkennung speichern
     if(newMine.length){
       try{
         const merged=Array.from(new Set([...(mineSlots||[]), ...newMine]));
         localStorage.setItem("v3_mine_"+code, JSON.stringify(merged));
         setMineSlots(merged);
       }catch(e){ /* Speicher nicht verfügbar, dann eben ohne Hervorhebung */ }
+      try{
+        localStorage.setItem("v3_myname_"+code, fullName);
+        setMyName(fullName);
+      }catch(e){}
     }
     setSending(false);
     const ok=results.filter(r=>r.ok).length;
@@ -6214,9 +6353,23 @@ function BookingPage({code}){
         </div>
       </div>
 
-      {mineSlots&&mineSlots.length>0&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,padding:"9px 12px",borderRadius:10,background:"var(--orange-soft)",border:"1px solid var(--orange)"}}>
+      <div className="card" style={{padding:"13px 15px",marginBottom:14}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:7}}>Dein Name</label>
+        <input type="text" defaultValue={myName} placeholder="z.B. Anna Müller"
+          onBlur={e=>{
+            const v=e.target.value.trim();
+            setMyName(v);
+            try{ if(v) localStorage.setItem("v3_myname_"+code,v); else localStorage.removeItem("v3_myname_"+code); }catch(err){}
+          }}
+          style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"11px 13px",fontSize:16}}/>
+        <div style={{fontSize:12,color:"var(--muted)",marginTop:7,lineHeight:1.45}}>
+          Gib deinen Namen ein, dann werden deine eigenen Termine farbig hervorgehoben, auch wenn du den Link später erneut oder auf einem anderen Gerät öffnest. Schreib ihn genau so wie beim Vorschlagen.
+        </div>
+      </div>
+
+      {(mineSet.size>0)&&<div style={{display:"flex",alignItems:"center",gap:8,marginBottom:14,padding:"9px 12px",borderRadius:10,background:"var(--orange-soft)",border:"1px solid var(--orange)"}}>
         <div style={{width:14,height:14,borderRadius:4,background:"var(--orange)",flexShrink:0}}/>
-        <div style={{fontSize:12.5,color:"var(--ink-2)",lineHeight:1.45}}>Farbig hervorgehoben sind deine eigenen Termine auf diesem Gerät.</div>
+        <div style={{fontSize:12.5,color:"var(--ink-2)",lineHeight:1.45}}>Farbig hervorgehoben sind deine eigenen Termine.</div>
       </div>}
 
       <button className="btn btn-primary btn-block" style={{marginBottom:14}} onClick={()=>openForm()}>+ Termin vorschlagen</button>
