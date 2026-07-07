@@ -550,7 +550,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.15.4";
+const APP_VERSION = "1.16.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -580,6 +580,11 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.16.0", date:"Juli 2026", changes:[
+    "Neu: Fahrzeug-Kalender. Belegungsplan der Fahrzeuge als Tages-Zeitstrahl, pro Fahrzeug umschaltbar, in Echtzeit für alle Fahrlehrer. Freie Zeit antippen zum Buchen, mit automatischer Prüfung auf Doppelbelegung. Buchungen pro Fahrlehrer farblich unterschieden",
+    "Der Fahrzeug-Kalender ist über einen festen, teilbaren Link auch für Fahrlehrer ohne App erreichbar (Adminbereich → Fahrzeug-Kalender)",
+    "Fahrzeuge haben jetzt einen Typ (Automatik/Schaltwagen) und lassen sich deaktivieren statt löschen, damit die Historie erhalten bleibt",
+  ]},
   { v:"1.15.4", date:"Juli 2026", changes:[
     "Behoben: Beim Terminvorschlag per WhatsApp öffnete sich auf dem Handy oft keine Nachricht. Jetzt legt die App die Vorschläge an und zeigt danach einen WhatsApp-öffnen-Knopf, der zuverlässig auch auf dem iPhone funktioniert",
   ]},
@@ -1089,6 +1094,37 @@ async function fetchBookingCode(uid){
   const { data, error } = await sb.from("profiles").select("booking_code").eq("id",uid).maybeSingle();
   if(error){ console.error(error); return null; }
   return data && data.booking_code;
+}
+// ── Fahrzeug-Belegungskalender (bookings) ──
+// Kalender-Code der Fahrschule holen (für den teilbaren Link)
+async function fetchCalCode(schoolId){
+  const { data, error } = await sb.from("schools").select("cal_code").eq("id",schoolId).maybeSingle();
+  if(error){ console.error(error); return null; }
+  return data && data.cal_code;
+}
+// Fahrschul-Infos + Fahrzeuge über den Kalender-Code (öffentlich, für Link-Nutzer)
+async function calInfo(code){
+  const { data, error } = await sb.rpc("cal_info",{ p_code:code });
+  if(error){ console.error(error); throw new Error(error.message); }
+  return (data&&data[0])||null;
+}
+// Buchungen eines Zeitraums über den Kalender-Code
+async function calBookings(code,von,bis){
+  const { data, error } = await sb.rpc("cal_bookings",{ p_code:code, von, bis });
+  if(error){ console.error(error); throw new Error(error.message); }
+  return data||[];
+}
+// Buchung anlegen (mit Überschneidungsprüfung in der Datenbank)
+async function calBook(code,vehicleId,teacherName,start,end,note){
+  const { data, error } = await sb.rpc("cal_book",
+    { p_code:code, p_vehicle_id:vehicleId, p_teacher_name:teacherName, p_start:start, p_end:end, p_note:note||null });
+  if(error){ throw new Error(error.message); }
+  return data;
+}
+// Buchung löschen
+async function calDelete(code,id){
+  const { error } = await sb.rpc("cal_delete",{ p_code:code, p_id:id });
+  if(error){ throw new Error(error.message); }
 }
 // Hellere/dunklere Variante einer Hex-Farbe (für --orange-deep, hover etc.)
 function shade(hex,pct){
@@ -1679,6 +1715,7 @@ function App(){
   const [tpl,setTpl]=useState(null); // {adk:[],strecken:[]}
   const [school,setSchool]=useState(null); // {id,name,subtitle,color,logo}
   const [isSchoolAdmin,setIsSchoolAdmin]=useState(false); // darf Fahrschul-Einstellungen ändern
+  const [calShare,setCalShare]=useState(null); // null | {code} für den Fahrzeug-Kalender (Link + Ansicht)
   const [appts,setAppts]=useState([]); // Termine
   const [bookingCode,setBookingCode]=useState(null);
   const [adminSchools,setAdminSchools]=useState(null); // null=nicht geladen
@@ -4031,6 +4068,13 @@ function App(){
     fetchSchoolLeistungen(school.id).then(list=>setSchoolLeistungen({busy:false,error:"",list}))
       .catch(e=>setSchoolLeistungen({busy:false,error:e.message||"Fehler beim Laden",list:[]}));
   }
+  // Fahrzeug-Kalender in der App öffnen (holt den Kalender-Code der Fahrschule)
+  function openCalendar(){
+    if(!school||!school.id) return;
+    setCalShare({code:null,busy:true});
+    fetchCalCode(school.id).then(c=>setCalShare({code:c,busy:false}))
+      .catch(()=>setCalShare({code:null,busy:false}));
+  }
   // Offene-Posten-Dashboard öffnen: offene Beträge pro Schüler, über alle Fahrlehrer hinweg
   function openOffenePosten(){
     if(!school||!school.id) return;
@@ -4287,32 +4331,36 @@ function App(){
         {vehicles.length===0
           ? <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:10}}>Noch keine Fahrzeuge angelegt.</div>
           : <div style={{marginBottom:10}}>{vehicles.map((v,idx)=>
-              <div key={v.id||idx} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:(idx<vehicles.length-1?"1px solid var(--line)":"none")}}>
+              <div key={v.id||idx} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderBottom:(idx<vehicles.length-1?"1px solid var(--line)":"none"),opacity:v.inactive?0.5:1}}>
                 <div style={{flex:1}}>
-                  <div style={{fontSize:14,fontWeight:600}}>{v.name||"Fahrzeug"}</div>
-                  {v.plate&&<div style={{fontSize:12,color:"var(--muted)"}}>{v.plate}</div>}
+                  <div style={{fontSize:14,fontWeight:600}}>{v.name||"Fahrzeug"}{v.inactive?" (inaktiv)":""}</div>
+                  <div style={{fontSize:12,color:"var(--muted)"}}>{[v.plate,v.type].filter(Boolean).join(" · ")}</div>
                 </div>
+                <button onClick={()=>saveVehicles(vehicles.map((x,i)=>i===idx?{...x,inactive:!x.inactive}:x))}
+                  aria-label="Fahrzeug aktiv schalten"
+                  style={{border:"none",background:"none",color:"var(--muted)",fontSize:13,fontWeight:700,padding:"4px 8px"}}>{v.inactive?"Aktivieren":"Deaktivieren"}</button>
                 <button onClick={()=>{
                   const newName=prompt("Bezeichnung des Fahrzeugs (z.B. VW Golf):",v.name||"");
                   if(newName===null) return;
                   const newPlate=prompt("Kennzeichen (optional):",v.plate||"");
                   if(newPlate===null) return;
-                  saveVehicles(vehicles.map((x,i)=>i===idx?{...x,name:newName.trim()||x.name,plate:newPlate.trim()}:x));
+                  const newType=prompt("Typ (Automatik oder Schaltwagen):",v.type||"Automatik");
+                  if(newType===null) return;
+                  saveVehicles(vehicles.map((x,i)=>i===idx?{...x,name:newName.trim()||x.name,plate:newPlate.trim(),type:newType.trim()}:x));
                 }} aria-label="Fahrzeug bearbeiten"
                   style={{border:"none",background:"none",color:"var(--muted)",fontSize:13,fontWeight:700,padding:"4px 8px"}}>Bearbeiten</button>
-                <button onClick={()=>{ if(confirm("Dieses Fahrzeug entfernen?")) saveVehicles(vehicles.filter((_,i)=>i!==idx)); }}
-                  aria-label="Fahrzeug entfernen"
-                  style={{border:"none",background:"none",color:"#B3362A",fontSize:18,padding:"2px 4px",lineHeight:1}}>×</button>
               </div>)}</div>}
         <button className="btn btn-ghost btn-block" style={{color:"var(--orange-deep)"}} onClick={()=>{
           const name=prompt("Bezeichnung des Fahrzeugs (z.B. VW Golf):");
           if(name===null||!name.trim()) return;
           const plate=prompt("Kennzeichen (optional):");
           if(plate===null) return;
-          saveVehicles([...vehicles,{id:"veh_"+Date.now().toString(36),name:name.trim(),plate:plate.trim()}]);
+          const type=prompt("Typ (Automatik oder Schaltwagen):","Automatik");
+          if(type===null) return;
+          saveVehicles([...vehicles,{id:"veh_"+Date.now().toString(36),name:name.trim(),plate:plate.trim(),type:type.trim()}]);
         }}>+ Fahrzeug hinzufügen</button>
         <p style={{fontSize:11.5,color:"var(--muted)",margin:"10px 0 0",lineHeight:1.5}}>
-          Diese Fahrzeuge stehen allen Fahrlehrern deiner Fahrschule zur Auswahl, zum Beispiel beim Anlegen einer Leistung.
+          Diese Fahrzeuge stehen allen Fahrlehrern deiner Fahrschule zur Auswahl, im Fahrzeug-Kalender und beim Anlegen einer Leistung. Deaktivierte Fahrzeuge bleiben in der Historie erhalten, sind aber nicht mehr auswählbar.
         </p>
       </div> : <div className="card" style={{padding:"13px 14px"}}>
         {vehicles.length===0
@@ -4403,6 +4451,20 @@ function App(){
         </p>
       </div>}
       </Collapsible>
+
+      {/* Fahrzeug-Kalender */}
+      <div className="eyebrow">Fahrzeug-Kalender</div>
+      <button className="btn btn-ghost btn-block" style={{justifyContent:"space-between",padding:"14px"}}
+        onClick={openCalendar}>
+        <span style={{display:"flex",alignItems:"center",gap:10}}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+          Fahrzeug-Kalender öffnen
+        </span>
+        <span style={{color:"var(--muted)"}}>›</span>
+      </button>
+      <p style={{fontSize:11.5,color:"var(--muted)",margin:"6px 4px 14px",lineHeight:1.5}}>
+        Belegungsplan der Fahrzeuge, in Echtzeit für alle Fahrlehrer. Hier findest du auch den teilbaren Link für Fahrlehrer ohne App.
+      </p>
 
       {/* Leistungen (schulweit) */}
       {canEditSchool&&<>
@@ -5784,6 +5846,29 @@ function App(){
         <button className="btn btn-ghost btn-block" style={{marginTop:16}} onClick={()=>setAdminTeachers(null)}>Schließen</button>
       </div>
     </div>}
+    {calShare&&<div style={{position:"fixed",inset:0,background:"var(--bg)",zIndex:150,overflowY:"auto"}}>
+      <div style={{position:"sticky",top:0,background:"var(--card)",borderBottom:"1px solid var(--line)",padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between",zIndex:10}}>
+        <button className="btn btn-ghost" style={{padding:"8px 12px"}} onClick={()=>setCalShare(null)}>‹ Zurück</button>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15}}>Fahrzeug-Kalender</div>
+        <div style={{width:70}}/>
+      </div>
+      {calShare.busy
+        ? <div style={{padding:40,textAlign:"center",color:"var(--muted)"}}>Kalender lädt…</div>
+        : !calShare.code
+          ? <div style={{padding:40,textAlign:"center",color:"var(--muted)"}}>Der Kalender-Code konnte nicht geladen werden. Ist der SQL-Schritt für den Kalender ausgeführt?</div>
+          : <div>
+              {canEditSchool&&(()=>{
+                const link=window.location.origin+window.location.pathname+"?kalender="+calShare.code;
+                return <div className="card" style={{margin:"14px 16px 0",padding:"13px 14px"}}>
+                  <div style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:12,textTransform:"uppercase",letterSpacing:".05em",color:"var(--muted)",marginBottom:7}}>Teilbarer Link für Fahrlehrer ohne App</div>
+                  <div style={{fontSize:12.5,wordBreak:"break-all",background:"var(--field-bg)",borderRadius:9,padding:"9px 11px",marginBottom:9}}>{link}</div>
+                  <button className="btn btn-ghost btn-block" style={{color:"var(--orange-deep)"}}
+                    onClick={()=>{ try{ navigator.clipboard.writeText(link); alert("Link kopiert."); }catch(e){ alert("Link:\n"+link); } }}>Link kopieren</button>
+                </div>;
+              })()}
+              <VehicleCalendar code={calShare.code} defaultTeacher={(session&&session.user&&session.user.email)?session.user.email.split("@")[0]:undefined}/>
+            </div>}
+    </div>}
     {schoolLeistungen&&<div onClick={()=>setSchoolLeistungen(null)}
       style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:620,
@@ -6543,11 +6628,216 @@ function BookingPage({code}){
   </div>;
 }
 
+function getCalCodeFromURL(){
+  try{
+    const u=new URL(window.location.href);
+    const q=u.searchParams.get("kalender");
+    if(q) return q;
+    const h=u.hash||"";
+    const m=h.match(/kalender[\/=]([A-Za-z0-9]+)/);
+    if(m) return m[1];
+  }catch(e){}
+  return null;
+}
+
+// Farbpalette zur Unterscheidung der Fahrlehrer im Kalender
+const CAL_COLORS=["#E8871E","#2E7DD1","#1B8F4D","#B3362A","#7A4Fc9","#0C8C8C","#C7511F","#8A6D00"];
+function colorForName(name){
+  let h=0; const s=(name||"").trim().toLowerCase();
+  for(let i=0;i<s.length;i++) h=(h*31+s.charCodeAt(i))%CAL_COLORS.length;
+  return CAL_COLORS[h];
+}
+
+// Gemeinsame Kalender-Ansicht, genutzt vom öffentlichen Link (CalendarPage)
+// und in der App (Kalender-Tab). code = cal_code der Fahrschule.
+// activeVehicleIds = optionale Einschränkung, welche Fahrzeuge auswählbar sind.
+function VehicleCalendar({code, teacherNames, defaultTeacher}){
+  const [info,setInfo]=React.useState(undefined); // undefined=lädt, null=ungültig
+  const [day,setDay]=React.useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
+  const [vehId,setVehId]=React.useState("");
+  const [rows,setRows]=React.useState([]);
+  const [loading,setLoading]=React.useState(false);
+  const [form,setForm]=React.useState(null); // null | {start,end,teacher,note,busy,error}
+
+  // Infos + Fahrzeuge laden
+  React.useEffect(()=>{
+    let on=true;
+    calInfo(code).then(d=>{ if(!on) return;
+      setInfo(d);
+      const vs=(d&&d.vehicles)||[];
+      // Nur aktive Fahrzeuge (inactive!==true), erstes vorauswählen
+      const active=vs.filter(v=>!v.inactive);
+      if(active.length) setVehId(active[0].id);
+    }).catch(()=>{ if(on) setInfo(null); });
+    return ()=>{on=false;};
+  },[code]);
+
+  // Buchungen des Tages laden
+  const reload=React.useCallback(()=>{
+    const von=new Date(day); von.setHours(0,0,0,0);
+    const bis=new Date(day); bis.setHours(24,0,0,0);
+    setLoading(true);
+    calBookings(code,von.toISOString(),bis.toISOString())
+      .then(r=>{ setRows(r||[]); setLoading(false); })
+      .catch(()=>{ setRows([]); setLoading(false); });
+  },[code,day]);
+  React.useEffect(()=>{ if(info) reload(); },[info,day,reload]);
+
+  // Realtime: bei Änderungen an bookings neu laden
+  React.useEffect(()=>{
+    if(!info) return;
+    const ch=sb.channel("cal_"+code)
+      .on("postgres_changes",{event:"*",schema:"public",table:"bookings"},()=>reload())
+      .subscribe();
+    return ()=>{ try{ sb.removeChannel(ch); }catch(e){} };
+  },[info,code,reload]);
+
+  if(info===undefined) return <div style={{padding:40,textAlign:"center",color:"var(--muted)"}}>Kalender lädt…</div>;
+  if(info===null) return <div style={{padding:40,textAlign:"center",color:"var(--muted)"}}>Dieser Kalender-Link ist ungültig.</div>;
+
+  const vehicles=((info.vehicles)||[]).filter(v=>!v.inactive);
+  const veh=vehicles.find(v=>v.id===vehId);
+  const dayRows=rows.filter(r=>r.vehicle_id===vehId).slice().sort((a,b)=>a.start_at.localeCompare(b.start_at));
+
+  const PXH=64, startH=7, endH=20, totalH=endH-startH;
+  const hours=[]; for(let h=startH;h<=endH;h++) hours.push(h);
+  function yFor(dt){ const d=new Date(dt); const hh=d.getHours()+d.getMinutes()/60; return (hh-startH)*PXH; }
+
+  const dayLabel=day.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
+
+  function openBookingAt(hour){
+    const s=String(hour).padStart(2,"0")+":00";
+    const e=String(Math.min(endH,hour+1)).padStart(2,"0")+":00";
+    setForm({ start:s, end:e, teacher:defaultTeacher||"", note:"", busy:false, error:"" });
+  }
+  async function saveBooking(){
+    const f=form; if(!f) return;
+    if(!veh){ setForm({...f,error:"Bitte ein Fahrzeug wählen."}); return; }
+    if(!f.teacher.trim()){ setForm({...f,error:"Bitte Fahrlehrer angeben."}); return; }
+    if(!f.start||!f.end){ setForm({...f,error:"Bitte Von- und Bis-Zeit angeben."}); return; }
+    const startISO=new Date(ymd(day)+"T"+f.start+":00").toISOString();
+    const endISO=new Date(ymd(day)+"T"+f.end+":00").toISOString();
+    setForm({...f,busy:true,error:""});
+    try{
+      await calBook(code,veh.id,f.teacher.trim(),startISO,endISO,f.note);
+      setForm(null); reload();
+    }catch(e){ setForm({...f,busy:false,error:e.message||"Buchung fehlgeschlagen"}); }
+  }
+  async function removeBooking(id){
+    if(!confirm("Diese Buchung löschen?")) return;
+    try{ await calDelete(code,id); reload(); }catch(e){ alert("Löschen fehlgeschlagen:\n"+e.message); }
+  }
+
+  return <div style={{maxWidth:640,margin:"0 auto",padding:"0 0 40px"}}>
+    {/* Kopf */}
+    <div style={{padding:"18px 16px 8px"}}>
+      <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,lineHeight:1.1}}>Fahrzeug-Kalender</h2>
+      <div style={{fontSize:12.5,color:"var(--muted)",marginTop:3}}>{info.school_name}</div>
+    </div>
+
+    {/* Tages-Navigation */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"6px 16px 12px"}}>
+      <button className="btn btn-ghost" style={{padding:"8px 12px"}} onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()-1); setDay(d); }}>‹</button>
+      <div style={{flex:1,textAlign:"center",fontSize:13.5,fontWeight:600}}>{dayLabel}</div>
+      <button className="btn btn-ghost" style={{padding:"8px 12px"}} onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()+1); setDay(d); }}>›</button>
+    </div>
+
+    {/* Fahrzeug-Tabs */}
+    {vehicles.length===0
+      ? <div style={{margin:"0 16px",padding:"16px",borderRadius:12,background:"var(--field-bg)",fontSize:13.5,color:"var(--muted)",textAlign:"center"}}>Für diese Fahrschule sind keine Fahrzeuge hinterlegt.</div>
+      : vehicles.length>1 && <div style={{display:"flex",gap:8,overflowX:"auto",padding:"0 16px 12px"}}>
+          {vehicles.map(v=>
+            <button key={v.id} onClick={()=>setVehId(v.id)}
+              style={{flexShrink:0,padding:"8px 14px",borderRadius:99,fontSize:13,fontWeight:700,fontFamily:"var(--font-d)",
+                border:"1.5px solid "+(v.id===vehId?"var(--orange)":"var(--line)"),
+                background:v.id===vehId?"var(--orange-soft)":"var(--card)",color:v.id===vehId?"var(--orange-deep)":"var(--ink)"}}>
+              {v.name}
+            </button>)}
+        </div>}
+
+    {/* Zeitstrahl */}
+    {veh&&<div className="card" style={{margin:"0 16px",overflow:"hidden"}}>
+      <div style={{position:"relative",height:totalH*PXH,paddingLeft:50}}>
+        {hours.map(h=>
+          <div key={h} style={{position:"absolute",left:0,right:0,top:(h-startH)*PXH,borderTop:"1px solid var(--line)"}}
+            onClick={()=>openBookingAt(h)}>
+            <span style={{position:"absolute",left:0,top:-8,width:42,textAlign:"right",fontSize:11,color:"var(--muted)",fontFamily:"var(--font-d)"}}>{String(h).padStart(2,"0")}:00</span>
+          </div>)}
+        {isToday(day)&&(()=>{ const ny=yFor(new Date()); return (ny>=0&&ny<=totalH*PXH)?<div style={{position:"absolute",left:50,right:0,top:ny,borderTop:"2px solid #D63A2E",zIndex:2}}><div style={{position:"absolute",left:-5,top:-4,width:8,height:8,borderRadius:"50%",background:"#D63A2E"}}/></div>:null; })()}
+        {dayRows.map(r=>{
+          const top=Math.max(0,yFor(r.start_at));
+          const h=Math.max(24,yFor(r.end_at)-yFor(r.start_at));
+          const c=colorForName(r.teacher_name);
+          return <button key={r.id} onClick={()=>removeBooking(r.id)}
+            style={{position:"absolute",top,height:h,left:56,right:8,background:c+"22",border:"1.5px solid "+c,borderRadius:8,padding:"5px 9px",overflow:"hidden",textAlign:"left",zIndex:1}}>
+            <div style={{fontSize:11,fontWeight:800,fontFamily:"var(--font-d)",color:c}}>{hm(r.start_at)}–{hm(r.end_at)}</div>
+            <div style={{fontSize:12.5,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.teacher_name}</div>
+            {r.note&&h>52&&<div style={{fontSize:11,color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.note}</div>}
+          </button>;
+        })}
+      </div>
+    </div>}
+    {veh&&<div style={{textAlign:"center",fontSize:12,color:"var(--muted)",marginTop:10}}>Tippe auf eine freie Zeit zum Buchen. Tippe auf eine Buchung zum Löschen.</div>}
+
+    {/* Buchungs-Formular */}
+    {form&&<div onClick={()=>!form.busy&&setForm(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",maxHeight:"88vh",overflowY:"auto"}}>
+        <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:4}}>Fahrzeug buchen</h3>
+        <p style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>{veh?veh.name:""} · {day.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"})}</p>
+
+        <div className="field" style={{marginBottom:12}}>
+          <label>Fahrlehrer</label>
+          {(teacherNames&&teacherNames.length)
+            ? <select value={form.teacher} onChange={e=>setForm({...form,teacher:e.target.value})}
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"var(--card)"}}>
+                <option value="">Bitte wählen…</option>
+                {teacherNames.map(n=><option key={n} value={n}>{n}</option>)}
+              </select>
+            : <input type="text" value={form.teacher} onChange={e=>setForm({...form,teacher:e.target.value})} placeholder="Name des Fahrlehrers"/>}
+        </div>
+
+        <div style={{display:"flex",gap:10,marginBottom:12}}>
+          <div className="field" style={{flex:1}}>
+            <label>Von</label>
+            <input type="time" value={form.start} onChange={e=>setForm({...form,start:e.target.value})}/>
+          </div>
+          <div className="field" style={{flex:1}}>
+            <label>Bis</label>
+            <input type="time" value={form.end} onChange={e=>setForm({...form,end:e.target.value})}/>
+          </div>
+        </div>
+
+        <div className="field" style={{marginBottom:16}}>
+          <label>Notiz (optional)</label>
+          <input type="text" value={form.note} onChange={e=>setForm({...form,note:e.target.value})} placeholder="z.B. Prüfung, Schülername"/>
+        </div>
+
+        {form.error&&<div style={{fontSize:13,color:"#B3362A",marginBottom:12}}>{form.error}</div>}
+        <button className="btn btn-primary btn-block" style={{marginBottom:8}} disabled={form.busy} onClick={saveBooking}>{form.busy?"Wird gebucht…":"Buchen"}</button>
+        <button className="btn btn-ghost btn-block" disabled={form.busy} onClick={()=>setForm(null)}>Abbrechen</button>
+      </div>
+    </div>}
+  </div>;
+}
+
+// Öffentliche Kalender-Seite (für den teilbaren Link, ohne App-Konto)
+function CalendarPage({code}){
+  return <div style={{minHeight:"100vh",background:"var(--bg)"}}>
+    <VehicleCalendar code={code}/>
+  </div>;
+}
+
 function Root(){
   const code=getBookingCodeFromURL();
   if(code) return <BookingPage code={code}/>;
+  const calCode=getCalCodeFromURL();
+  if(calCode) return <CalendarPage code={calCode}/>;
   return <App/>;
 }
+
+
 
 ReactDOM.createRoot(document.getElementById("root")).render(<ErrorBoundary><Root/></ErrorBoundary>);
 </script>
