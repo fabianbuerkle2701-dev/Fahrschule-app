@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.0";
+const APP_VERSION = "1.20.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.1", date:"Juli 2026", changes:[
+    "Monatsabo: Fahrlehrer müssen jetzt aktiv zustimmen (Ich bin einverstanden), bevor ein Abo für sie wirksam wird. Danach läuft eine 7-tägige kostenlose Probezeit. Läuft sie ohne Zahlung ab, wird der Zugriff pausiert (eigener Bildschirm mit Bezahlen-Knopf), die Daten bleiben dabei immer erhalten und sind sofort wieder da, sobald bezahlt wurde (benötigt SQL-Schritt)",
+  ]},
   { v:"1.20.0", date:"Juli 2026", changes:[
     "Neu: Monatsabo pro Fahrlehrer. Der zentrale App-Admin kann in der Konten-Liste pro Fahrlehrer ein Abo aktivieren, einen Monatsbeitrag festlegen und Zahlungen als erledigt markieren. Zahlungspflichtige Fahrlehrer sehen in ihren Einstellungen den Betrag und einen Jetzt mit PayPal bezahlen-Knopf. Der PayPal-Zahlungsempfänger wird zentral vom App-Admin hinterlegt (benötigt SQL-Schritt und neue Netlify-Funktion admin-set-subscription.js)",
   ]},
@@ -1109,9 +1112,9 @@ async function saveAppSettings(patch){
   const { error } = await sb.from("app_settings").update(patch).eq("id",1);
   if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
 }
-// Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt)
+// Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt, Zustimmungszeitpunkt)
 async function fetchOwnSubscription(uid){
-  const { data, error } = await sb.from("profiles").select("subscription_active,subscription_amount,subscription_last_paid").eq("id",uid).maybeSingle();
+  const { data, error } = await sb.from("profiles").select("subscription_active,subscription_amount,subscription_last_paid,subscription_accepted_at").eq("id",uid).maybeSingle();
   if(error){ console.error(error); return null; }
   return data;
 }
@@ -1121,6 +1124,13 @@ async function markOwnPaymentDone(uid){
   const { error } = await sb.from("profiles").update({ subscription_last_paid:today }).eq("id",uid);
   if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
   return today;
+}
+// Dem Abo zustimmen: startet damit die 7-tägige kostenlose Probezeit
+async function acceptSubscription(uid){
+  const now=new Date().toISOString();
+  const { error } = await sb.from("profiles").update({ subscription_accepted_at:now }).eq("id",uid);
+  if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
+  return now;
 }
 async function createSchool(name){
   const { data, error } = await sb.from("schools")
@@ -1809,6 +1819,44 @@ function Splash({text}){
   </div>;
 }
 
+// Zeigt entweder die Zustimmungs-Ansicht (7 Tage kostenlos testen) oder den Sperr-Bildschirm
+// nach abgelaufener Probezeit. Ersetzt in beiden Fällen die normale App-Oberfläche komplett,
+// die eigenen Daten (Schüler, Termine usw.) bleiben davon unberührt und sind sofort wieder da.
+function SubscriptionGate({kind,sub,paypalLink,onAccept,onPaid}){
+  const amount=sub&&sub.subscription_amount!=null?Number(sub.subscription_amount).toFixed(2).replace(".",",")+" €":null;
+  return <div style={{minHeight:"100vh",background:"var(--paper)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+    <div className="card" style={{padding:"28px 22px",textAlign:"center",maxWidth:400}}>
+      <div style={{fontSize:40,marginBottom:10}}>{kind==="accept"?"👋":"🔒"}</div>
+      {kind==="accept"&&<>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:8}}>Monatsabo</div>
+        <p style={{fontSize:14,color:"var(--ink-2)",lineHeight:1.6,marginBottom:6}}>
+          Für dieses Konto ist ein Monatsabo eingerichtet{amount?" von "+amount:""}. Du kannst die App zunächst <b>7 Tage kostenlos</b> testen. Erst danach wird eine Zahlung fällig.
+        </p>
+        <p style={{fontSize:12.5,color:"var(--muted)",marginBottom:18}}>
+          Nach Ablauf der 7 Tage ohne Zahlung wird der Zugriff pausiert. Deine Daten bleiben dabei erhalten.
+        </p>
+        <button className="btn btn-primary btn-block" onClick={onAccept}>Ich bin einverstanden · 7 Tage testen</button>
+      </>}
+      {kind==="locked"&&<>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:8}}>Testzeitraum abgelaufen</div>
+        <p style={{fontSize:14,color:"var(--ink-2)",lineHeight:1.6,marginBottom:6}}>
+          Die kostenlose Probezeit ist abgelaufen{amount?", der Monatsbeitrag beträgt "+amount:""}. Bitte zahle, um weiter auf deine Daten zugreifen zu können.
+        </p>
+        <p style={{fontSize:12.5,color:"var(--muted)",marginBottom:18}}>
+          Deine Schüler- und Termindaten sind nicht verloren, sie sind sofort wieder da, sobald bezahlt wurde.
+        </p>
+        {paypalLink&&<a href={paypalLink.startsWith("http")?paypalLink:"https://paypal.me/"+paypalLink.replace(/^paypal\.me\//i,"")}
+          target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-block" style={{marginBottom:10}}>
+          Jetzt mit PayPal bezahlen
+        </a>}
+        <button className="btn btn-ghost btn-block" onClick={()=>{ if(confirm("Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich abgeschickt wurde.")) onPaid(); }}>
+          Ich habe bezahlt
+        </button>
+      </>}
+    </div>
+  </div>;
+}
+
 function Auth(){
   const [mode,setMode]=useState("login"); // login | register
   const [email,setEmail]=useState("");
@@ -2128,7 +2176,11 @@ function App(){
   const [paypalLink,setPaypalLink]=useState(null); // zentraler Zahlungsempfänger, für alle gleich
   useEffect(()=>{
     if(!uid) return;
-    fetchOwnSubscription(uid).then(setMySubscription).catch(()=>setMySubscription(null));
+    // Bei einem Ladefehler bewusst so tun, als gäbe es kein aktives Abo (subscription_active:false),
+    // damit die App niemals dauerhaft hängen bleibt oder jemanden fälschlich aussperrt, nur weil
+    // die Abo-Prüfung selbst gerade nicht erreichbar war.
+    fetchOwnSubscription(uid).then(s=>setMySubscription(s||{subscription_active:false}))
+      .catch(e=>{ console.error("Abo-Status konnte nicht geladen werden:",e); setMySubscription({subscription_active:false}); });
     fetchAppSettings().then(s=>setPaypalLink((s&&s.paypal_link)||"")).catch(()=>setPaypalLink(""));
   },[uid]);
 
@@ -2442,6 +2494,33 @@ function App(){
 
   if(session===undefined) return <Splash text="Lädt…"/>;
   if(session===null) return <Auth/>;
+
+  // Abo-Status auswerten: kein Abo nötig, muss noch zustimmen, Probezeit läuft, oder gesperrt.
+  // isAdmin (zentraler App-Admin) ist von der Sperrung immer ausgenommen, damit er sich selbst
+  // niemals aussperren kann.
+  const TRIAL_DAYS=7;
+  function subscriptionGateStatus(){
+    if(isAdmin(session)) return "ok";
+    if(mySubscription===null) return "loading";
+    if(!mySubscription.subscription_active) return "ok";
+    if(mySubscription.subscription_last_paid) return "ok"; // schon mindestens einmal bezahlt
+    if(!mySubscription.subscription_accepted_at) return "not_accepted";
+    const acceptedAt=new Date(mySubscription.subscription_accepted_at).getTime();
+    const daysLeft=TRIAL_DAYS-Math.floor((Date.now()-acceptedAt)/86400000);
+    if(daysLeft>0) return "trial";
+    return "locked";
+  }
+  const gate=subscriptionGateStatus();
+  if(gate==="loading") return <Splash text="Lädt…"/>;
+  if(gate==="not_accepted") return <SubscriptionGate kind="accept" sub={mySubscription} onAccept={async()=>{
+    try{ const now=await acceptSubscription(uid); setMySubscription(s=>({...s,subscription_accepted_at:now})); }
+    catch(e){ alert("Fehler:\n"+e.message); }
+  }}/>;
+  if(gate==="locked") return <SubscriptionGate kind="locked" sub={mySubscription} paypalLink={paypalLink} onPaid={async()=>{
+    try{ const d=await markOwnPaymentDone(uid); setMySubscription(s=>({...s,subscription_last_paid:d})); }
+    catch(e){ alert("Fehler:\n"+e.message); }
+  }}/>;
+
   if(students===null||tpl===null) return <Splash text="Lade Daten…"/>;
 
   const active=students.find(s=>s.id===activeId)||students[0]||null;
