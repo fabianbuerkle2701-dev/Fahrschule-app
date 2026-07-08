@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.1";
+const APP_VERSION = "1.20.2";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.2", date:"Juli 2026", changes:[
+    "Neu: Hat ein Fahrlehrer noch keine eigenen Strecken angelegt, wird ihm beim Öffnen der Übersicht automatisch die Vorlage seines Fahrschul-Admins zur Übernahme angeboten (Vorlage übernehmen). Danach bleibt sie für ihn frei änderbar. Bestehende, eigene Vorlagen werden niemals automatisch überschrieben",
+  ]},
   { v:"1.20.1", date:"Juli 2026", changes:[
     "Monatsabo: Fahrlehrer müssen jetzt aktiv zustimmen (Ich bin einverstanden), bevor ein Abo für sie wirksam wird. Danach läuft eine 7-tägige kostenlose Probezeit. Läuft sie ohne Zahlung ab, wird der Zugriff pausiert (eigener Bildschirm mit Bezahlen-Knopf), die Daten bleiben dabei immer erhalten und sind sofort wieder da, sobald bezahlt wurde (benötigt SQL-Schritt)",
   ]},
@@ -1030,6 +1033,25 @@ async function fetchTemplate(uid, schoolName){
   const { error:e2 } = await sb.from("templates").upsert({ owner:uid, adk:fresh.adk, strecken:fresh.strecken });
   if(e2) console.error(e2);
   return fresh;
+}
+// Vorlage des Fahrschul-Admins holen, als Vorschlag für Fahrlehrer mit noch leerer eigener Vorlage.
+// Gibt null zurück, wenn kein Admin gefunden wurde oder dessen Vorlage selbst leer ist.
+async function fetchSchoolAdminTemplate(schoolId,ownUid){
+  if(!schoolId) return null;
+  const { data:admins, error } = await sb.from("profiles").select("id").eq("school_id",schoolId).eq("school_admin",true);
+  if(error||!admins||!admins.length) return null;
+  // Ersten Admin nehmen, der nicht man selbst ist und eine echte, gefüllte Vorlage hat
+  for(const a of admins){
+    if(a.id===ownUid) continue;
+    const { data, error:e2 } = await sb.from("templates").select("adk,strecken,adk_titel,strecken_titel").eq("owner",a.id).maybeSingle();
+    if(e2||!data) continue;
+    const hasAdk=Array.isArray(data.adk)&&data.adk.length>0;
+    const hasStrecken=Array.isArray(data.strecken)&&data.strecken.length>0;
+    if(hasAdk||hasStrecken){
+      return { adk:hasAdk?data.adk:[], strecken:hasStrecken?data.strecken:[], adkTitel:data.adk_titel||"", streckenTitel:data.strecken_titel||"" };
+    }
+  }
+  return null;
 }
 async function saveTemplate(uid,tpl){
   const { error } = await sb.from("templates")
@@ -2027,6 +2049,7 @@ function App(){
   const [session,setSession]=useState(undefined); // undefined=checking, null=logged out, obj=in
   const [students,setStudents]=useState(null);
   const [tpl,setTpl]=useState(null); // {adk:[],strecken:[]}
+  const [adminTplSuggestion,setAdminTplSuggestion]=useState(null); // {adk,strecken,...} | null, Vorschlag vom Fahrschul-Admin
   const [school,setSchool]=useState(null); // {id,name,subtitle,color,logo}
   const [isSchoolAdmin,setIsSchoolAdmin]=useState(false); // darf Fahrschul-Einstellungen ändern
   const [calShare,setCalShare]=useState(null); // null | {code} für den Fahrzeug-Kalender (Link + Ansicht)
@@ -2223,6 +2246,7 @@ function App(){
     setSyncing(true); setLoadErr("");
     touchLastSeen(uid); // letzten Zugriff merken
     // Zuerst Fahrschule holen, damit die Vorlage (V3 vs. BVF) richtig gewählt wird
+    let myRights=false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
     fetchMySchool(uid).then(schoolData=>{
       const sc = schoolData || {...DEFAULT_SCHOOL};
       setSchool(sc);
@@ -2249,8 +2273,11 @@ function App(){
           }catch(e){}
         }
       }).catch(()=>{});
-      return Promise.all([fetchStudents(uid), fetchTemplate(uid, sc.name), fetchAppointments(uid), fetchBookingCode(uid)]);
-    }).then(([list,tplData,apptData,code])=>{
+      // Rechte separat, aber verlässlich (ohne Race Condition) für die Admin-Vorlage-Prüfung holen
+      return Promise.all([fetchStudents(uid), fetchTemplate(uid, sc.name), fetchAppointments(uid), fetchBookingCode(uid), fetchMyRights(uid).catch(()=>false)])
+        .then(res=>[...res, sc]); // Fahrschule selbst mit durchreichen, ohne auf State-Timing angewiesen zu sein
+    }).then(([list,tplData,apptData,code,rights,sc])=>{
+      myRights=rights;
       setSyncing(false);
       setStudents(list||[]);
       saveCache(uid,list||[]);
@@ -2259,6 +2286,16 @@ function App(){
       saveTplCache(uid,tplData);
       setAppts(apptData||[]);
       setBookingCode(code||null);
+      // Prüfen, ob der Fahrschul-Admin eine eigene, gefüllte Vorlage bereitstellt, die als
+      // Ausgangspunkt übernommen werden kann. Nur relevant, wenn die eigene Vorlage noch leer ist
+      // (keine Strecken vorhanden) und man nicht selbst Fahrschul-Admin ist, damit niemals
+      // eigene Arbeit überschrieben wird. myRights kommt direkt aus der Ladekette (kein veralteter State).
+      try{
+        const ownEmpty = (!tplData.strecken||tplData.strecken.length===0);
+        if(ownEmpty && sc && sc.id && !myRights){
+          fetchSchoolAdminTemplate(sc.id,uid).then(sugg=>{ if(sugg) setAdminTplSuggestion(sugg); }).catch(()=>{});
+        }
+      }catch(e){}
       // Onboarding: nur für neue Nutzer (keine Schüler, noch nie gesehen)
       try{
         const seen=localStorage.getItem("v3_onboarding_done");
@@ -3659,6 +3696,24 @@ function App(){
     const showReife=ueberTab==="reife";
     return <div className="pad">
       {studentHeader()}
+      {adminTplSuggestion&&<div className="card" style={{padding:"13px 14px",marginBottom:14,border:"1.5px solid var(--orange)"}}>
+        <div style={{fontWeight:700,fontSize:14,marginBottom:5}}>Vorlage deiner Fahrschule verfügbar</div>
+        <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 11px"}}>
+          Dein Fahrschul-Admin hat eine ADK/Strecken-Vorlage hinterlegt. Du kannst sie als Ausgangspunkt übernehmen und danach weiterhin für dich selbst anpassen.
+        </p>
+        <div style={{display:"flex",gap:8}}>
+          <button className="btn btn-primary" style={{flex:1,fontSize:13,padding:"9px 12px"}}
+            onClick={async()=>{
+              const next={ adk:deepCopy(adminTplSuggestion.adk&&adminTplSuggestion.adk.length?adminTplSuggestion.adk:tpl.adk),
+                strecken:deepCopy(adminTplSuggestion.strecken||[]),
+                adkTitel:adminTplSuggestion.adkTitel||tpl.adkTitel, streckenTitel:adminTplSuggestion.streckenTitel||tpl.streckenTitel };
+              writeTemplate(next);
+              setAdminTplSuggestion(null);
+              showFlash("✓ Vorlage übernommen");
+            }}>Vorlage übernehmen</button>
+          <button className="btn btn-ghost" style={{fontSize:13,padding:"9px 12px"}} onClick={()=>setAdminTplSuggestion(null)}>Nicht jetzt</button>
+        </div>
+      </div>}
       <div className="seg" role="tablist">
         {[["adk","ADK"],["strecken","Strecken"],["beide","Beide"],["reife","Reife"]].map(([k,l])=>
           <button key={k} className={ueberTab===k?"on":""} onClick={()=>setUeberTab(k)}>{l}</button>)}
