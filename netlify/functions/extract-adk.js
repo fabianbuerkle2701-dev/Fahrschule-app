@@ -79,9 +79,20 @@ Regeln:
     let text = "";
     if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
     text = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    // Falls die KI trotz Anweisung zusätzlichen Text vor oder nach dem JSON geschrieben hat,
+    // gezielt nur den JSON-Block herausschneiden (vom ersten { bis zum letzten passenden }).
     let parsed;
     try { parsed = JSON.parse(text); }
-    catch (e) { return { statusCode: 502, headers, body: JSON.stringify({ error: "Antwort konnte nicht gelesen werden", raw: text }) }; }
+    catch (e) {
+      const first = text.indexOf("{");
+      const last = text.lastIndexOf("}");
+      if (first !== -1 && last !== -1 && last > first) {
+        try { parsed = JSON.parse(text.slice(first, last + 1)); }
+        catch (e2) { return { statusCode: 502, headers, body: JSON.stringify({ error: "Antwort konnte nicht gelesen werden", raw: text }) }; }
+      } else {
+        return { statusCode: 502, headers, body: JSON.stringify({ error: "Antwort konnte nicht gelesen werden", raw: text }) };
+      }
+    }
     return { statusCode: 200, headers, body: JSON.stringify(parsed) };
   } catch (e) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
