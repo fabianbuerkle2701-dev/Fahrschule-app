@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.19.13";
+const APP_VERSION = "1.20.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.0", date:"Juli 2026", changes:[
+    "Neu: Monatsabo pro Fahrlehrer. Der zentrale App-Admin kann in der Konten-Liste pro Fahrlehrer ein Abo aktivieren, einen Monatsbeitrag festlegen und Zahlungen als erledigt markieren. Zahlungspflichtige Fahrlehrer sehen in ihren Einstellungen den Betrag und einen Jetzt mit PayPal bezahlen-Knopf. Der PayPal-Zahlungsempfänger wird zentral vom App-Admin hinterlegt (benötigt SQL-Schritt und neue Netlify-Funktion admin-set-subscription.js)",
+  ]},
   { v:"1.19.13", date:"Juli 2026", changes:[
     "ADK-Karte aus Foto: robustere Erkennung der KI-Antwort, falls zusätzlicher Text vor oder nach dem eigentlichen Ergebnis steht. Bei einem Lesefehler wird jetzt zusätzlich die Rohantwort angezeigt, um die Ursache leichter zu finden (benötigt aktualisierte Netlify-Funktion extract-adk.js)",
   ]},
@@ -1096,6 +1099,29 @@ async function fetchWorkHours(uid){
   if(error) throw new Error(error.message||"Arbeitszeiten konnten nicht geladen werden");
   return data && data.work_hours;
 }
+// Zentrale App-Einstellung (aktuell nur der PayPal-Link) laden, für jeden eingeloggten Fahrlehrer lesbar
+async function fetchAppSettings(){
+  const { data, error } = await sb.from("app_settings").select("paypal_link").eq("id",1).maybeSingle();
+  if(error){ console.error(error); return null; }
+  return data;
+}
+async function saveAppSettings(patch){
+  const { error } = await sb.from("app_settings").update(patch).eq("id",1);
+  if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
+}
+// Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt)
+async function fetchOwnSubscription(uid){
+  const { data, error } = await sb.from("profiles").select("subscription_active,subscription_amount,subscription_last_paid").eq("id",uid).maybeSingle();
+  if(error){ console.error(error); return null; }
+  return data;
+}
+// Eigene Zahlung selbst als "bezahlt" markieren (z.B. nach PayPal-Zahlung)
+async function markOwnPaymentDone(uid){
+  const today=new Date().toISOString().slice(0,10);
+  const { error } = await sb.from("profiles").update({ subscription_last_paid:today }).eq("id",uid);
+  if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
+  return today;
+}
 async function createSchool(name){
   const { data, error } = await sb.from("schools")
     .insert({ name:name.trim(), subtitle:DEFAULT_SCHOOL.subtitle, color:DEFAULT_SCHOOL.color }).select().single();
@@ -1178,6 +1204,20 @@ async function adminDeleteAccount(targetUid){
   const data = await resp.json();
   if(!resp.ok) throw new Error(data.error||"Löschen fehlgeschlagen");
   return true;
+}
+// Abo-Status/Betrag eines Fahrlehrers setzen, oder eine Zahlung als heute erledigt markieren.
+async function adminSetSubscription(targetUid,patch){
+  const { data:sess } = await sb.auth.getSession();
+  const token = sess && sess.session && sess.session.access_token;
+  if(!token) throw new Error("Nicht angemeldet");
+  const resp = await fetch("/.netlify/functions/admin-set-subscription", {
+    method:"POST",
+    headers: { "Content-Type":"application/json", Authorization: "Bearer "+token },
+    body: JSON.stringify({ targetUid, ...patch }),
+  });
+  const data = await resp.json();
+  if(!resp.ok) throw new Error(data.error||"Speichern fehlgeschlagen");
+  return data.profile;
 }
 async function adminSaveSchoolLogo(id,logo){
   const { error } = await sb.from("schools").update({ logo:logo||"" }).eq("id",id);
@@ -1946,6 +1986,7 @@ function App(){
   const [bookingCode,setBookingCode]=useState(null);
   const [adminSchools,setAdminSchools]=useState(null); // null=nicht geladen
   const [adminAccounts,setAdminAccounts]=useState(null); // null=nicht geladen, {busy,error,list}
+  const [paypalLinkEdit,setPaypalLinkEdit]=useState(null); // null solange nicht geladen; sonst string
   const [adminBusy,setAdminBusy]=useState(false);
   const [adminEdit,setAdminEdit]=useState(null); // Fahrschule, die gerade bearbeitet wird
   const [adminTeachers,setAdminTeachers]=useState(null); // {school, list} oder null
@@ -2080,6 +2121,15 @@ function App(){
     if(!uid) return;
     fetchWorkHours(uid).then(h=>{ setWorkHours(h||{}); setWorkHoursError(""); })
       .catch(e=>{ console.error(e); setWorkHoursError(e.message||"Unbekannter Fehler"); });
+  },[uid]);
+
+  // Eigener Abo-Status (nur relevant, falls der zentrale Admin dieses Konto zahlungspflichtig gemacht hat)
+  const [mySubscription,setMySubscription]=useState(null); // null solange nicht geladen
+  const [paypalLink,setPaypalLink]=useState(null); // zentraler Zahlungsempfänger, für alle gleich
+  useEffect(()=>{
+    if(!uid) return;
+    fetchOwnSubscription(uid).then(setMySubscription).catch(()=>setMySubscription(null));
+    fetchAppSettings().then(s=>setPaypalLink((s&&s.paypal_link)||"")).catch(()=>setPaypalLink(""));
   },[uid]);
 
   // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
@@ -4439,6 +4489,33 @@ function App(){
       setAdminAccounts(prev=>prev?{...prev,busy:false,error:"Löschen fehlgeschlagen: "+e.message}:prev);
     }
   }
+  // Abo an/aus umschalten
+  async function toggleSubscription(acc){
+    try{
+      await adminSetSubscription(acc.id,{subscription_active:!acc.subscription_active});
+      setAdminAccounts(prev=>prev?{...prev,list:prev.list.map(a=>a.id===acc.id?{...a,subscription_active:!a.subscription_active}:a)}:prev);
+    }catch(e){ alert("Konnte nicht geändert werden:\n"+e.message); }
+  }
+  // Monatsbeitrag eines Fahrlehrers ändern
+  async function editSubscriptionAmount(acc){
+    const input=prompt('Monatsbeitrag für '+acc.email+' in Euro (leer lassen = kein fester Betrag):', acc.subscription_amount!=null?String(acc.subscription_amount):"");
+    if(input===null) return;
+    const val=input.trim()===""?null:Number(input.replace(",","."));
+    if(val!==null && (isNaN(val)||val<0)){ alert("Bitte eine gültige Zahl eingeben."); return; }
+    try{
+      await adminSetSubscription(acc.id,{subscription_amount:val});
+      setAdminAccounts(prev=>prev?{...prev,list:prev.list.map(a=>a.id===acc.id?{...a,subscription_amount:val}:a)}:prev);
+    }catch(e){ alert("Konnte nicht gespeichert werden:\n"+e.message); }
+  }
+  // Zahlung als heute erledigt markieren
+  async function markPaidToday(acc){
+    if(!confirm('Zahlung von '+acc.email+' als heute erhalten markieren?')) return;
+    try{
+      const today=new Date().toISOString().slice(0,10);
+      await adminSetSubscription(acc.id,{mark_paid_today:true});
+      setAdminAccounts(prev=>prev?{...prev,list:prev.list.map(a=>a.id===acc.id?{...a,subscription_last_paid:today}:a)}:prev);
+    }catch(e){ alert("Konnte nicht gespeichert werden:\n"+e.message); }
+  }
   // Neue Fahrschule direkt im Admin-Bereich anlegen
   async function adminAddSchool(){
     const name=prompt("Name der neuen Fahrschule:");
@@ -4567,6 +4644,22 @@ function App(){
         <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:21}}>Admin · Fahrschulen</h2>
       </div>
 
+      {/* PayPal-Zahlungsempfänger für das Monatsabo */}
+      <div className="eyebrow" style={{marginTop:0}}>Zahlungsempfänger (Monatsabo)</div>
+      <div className="card" style={{padding:"13px 14px",marginBottom:18}}>
+        <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 10px"}}>
+          PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer führt.
+        </p>
+        {paypalLinkEdit===null
+          ? <button className="btn btn-ghost" onClick={()=>fetchAppSettings().then(s=>setPaypalLinkEdit((s&&s.paypal_link)||""))}>Laden</button>
+          : <div style={{display:"flex",gap:8}}>
+              <input type="text" value={paypalLinkEdit} onChange={e=>setPaypalLinkEdit(e.target.value)} placeholder="z.B. paypal.me/deinname oder name@email.de"
+                style={{flex:1,border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",fontSize:14}}/>
+              <button className="btn btn-ghost" style={{padding:"9px 14px",fontSize:13}}
+                onClick={()=>saveAppSettings({paypal_link:paypalLinkEdit}).then(()=>showFlash("✓ Gespeichert")).catch(e=>alert("Fehler:\n"+e.message))}>Speichern</button>
+            </div>}
+      </div>
+
       {/* Alle registrierten Konten */}
       <div className="eyebrow" style={{marginTop:0}}>Alle registrierten Konten</div>
       {adminAccounts===null
@@ -4597,6 +4690,26 @@ function App(){
                   {!acc.is_central_admin&&<button className="btn btn-ghost" style={{padding:"7px 11px",fontSize:12.5,color:"#B3362A",flexShrink:0}}
                     disabled={adminAccounts.busy} onClick={()=>doDeleteAccount(acc)}>Löschen</button>}
                 </div>
+                {!acc.is_central_admin&&<div style={{marginTop:10,paddingTop:10,borderTop:"1px solid var(--line)",display:"flex",alignItems:"center",flexWrap:"wrap",gap:8}}>
+                  <button onClick={()=>toggleSubscription(acc)}
+                    style={{display:"flex",alignItems:"center",gap:7,padding:"5px 10px 5px 6px",borderRadius:99,
+                      background:acc.subscription_active?"var(--orange-soft)":"var(--field-bg)",fontSize:12,fontWeight:700,
+                      color:acc.subscription_active?"var(--orange-deep)":"var(--muted)"}}>
+                    <span style={{width:30,height:17,borderRadius:99,background:acc.subscription_active?"var(--orange)":"var(--line)",position:"relative",flexShrink:0,transition:"background .15s"}}>
+                      <span style={{position:"absolute",top:2,left:acc.subscription_active?15:2,width:13,height:13,borderRadius:99,background:"#fff",transition:"left .15s"}}/>
+                    </span>
+                    Abo {acc.subscription_active?"aktiv":"aus"}
+                  </button>
+                  <button onClick={()=>editSubscriptionAmount(acc)} style={{fontSize:12,color:"var(--muted)",padding:"5px 2px"}}>
+                    {acc.subscription_amount!=null?Number(acc.subscription_amount).toFixed(2).replace(".",",")+" €/Monat":"Betrag festlegen"}
+                  </button>
+                  {acc.subscription_active&&<button onClick={()=>markPaidToday(acc)} style={{fontSize:12,color:"var(--muted)",padding:"5px 2px",textDecoration:"underline"}}>
+                    Als bezahlt markieren
+                  </button>}
+                  {acc.subscription_active&&<span style={{fontSize:11,color:"var(--muted)",marginLeft:"auto"}}>
+                    {acc.subscription_last_paid?"Zuletzt bezahlt: "+new Date(acc.subscription_last_paid).toLocaleDateString("de-DE"):"Noch nicht bezahlt"}
+                  </span>}
+                </div>}
               </div>)}
           </div>}
 
@@ -4689,6 +4802,36 @@ function App(){
       </>}
 
       {settingsTab==="fahrlehrer"&&<>
+      {/* Monatsabo, nur sichtbar wenn zahlungspflichtig */}
+      {mySubscription&&mySubscription.subscription_active&&<>
+        <div className="eyebrow" style={{marginTop:0}}>Monatsabo</div>
+        <div className="card" style={{padding:"13px 14px",marginBottom:18}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:6}}>
+            <span style={{fontSize:14,fontWeight:700}}>Monatsbeitrag</span>
+            <span style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19}}>
+              {mySubscription.subscription_amount!=null?Number(mySubscription.subscription_amount).toFixed(2).replace(".",",")+" €":"–"}
+            </span>
+          </div>
+          <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 12px"}}>
+            {mySubscription.subscription_last_paid
+              ? "Zuletzt bezahlt am "+new Date(mySubscription.subscription_last_paid).toLocaleDateString("de-DE")+"."
+              : "Noch keine Zahlung hinterlegt."}
+          </p>
+          {paypalLink&&(paypalLink.startsWith("http")||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
+            ? <a href={paypalLink.startsWith("http")?paypalLink:"https://paypal.me/"+paypalLink.replace(/^paypal\.me\//i,"")}
+                target="_blank" rel="noopener noreferrer" className="btn btn-primary btn-block" style={{marginBottom:9,textAlign:"center"}}>
+                Jetzt mit PayPal bezahlen
+              </a>
+            : <div style={{background:"var(--orange-soft)",borderRadius:10,padding:"10px 12px",marginBottom:9,fontSize:13,lineHeight:1.5}}>
+                Bitte den Betrag manuell per PayPal an <b>{paypalLink}</b> senden.
+              </div>)}
+          <button className="btn btn-ghost btn-block" onClick={async()=>{
+              if(!confirm("Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde.")) return;
+              try{ const d=await markOwnPaymentDone(uid); setMySubscription(s=>({...s,subscription_last_paid:d})); showFlash("✓ Als bezahlt markiert"); }
+              catch(e){ alert("Fehler:\n"+e.message); }
+            }}>Ich habe bezahlt</button>
+        </div>
+      </>}
       {/* Mein Name */}
       <div className="eyebrow" style={{marginTop:0}}>Mein Name</div>
       <div className="card" style={{padding:"13px 14px"}}>
