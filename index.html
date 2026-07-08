@@ -550,7 +550,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.16.6";
+const APP_VERSION = "1.17.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -580,6 +580,17 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.17.0", date:"Juli 2026", changes:[
+    "Fahrzeug-Kalender hat jetzt eine Wochenansicht. Oben zwischen Tag und Woche umschalten. Die Woche zeigt alle sieben Tage untereinander mit den Buchungen des gewählten Fahrzeugs, der heutige Tag ist hervorgehoben. Zum Buchen einen Tag öffnen",
+  ]},
+  { v:"1.16.8", date:"Juli 2026", changes:[
+    "Fahrzeug-Kalender: Beim Buchen gibt es jetzt Schnellwahl-Knöpfe für die Startzeit in Viertelstunden (:00, :15, :30, :45) und für die Dauer (1 FS, Prüfung, 1 Std, 2 FS, 3 FS). Von- und Bis-Zeit lassen sich weiterhin frei anpassen",
+  ]},
+  { v:"1.16.7", date:"Juli 2026", changes:[
+    "Fahrzeug-Kalender zeigt jetzt volle 24 Stunden (0 bis 24 Uhr), damit auch Nachtfahrten eingetragen werden können",
+    "Die erste und letzte Uhrzeit werden nicht mehr abgeschnitten",
+    "Der Name des ausgewählten Fahrzeugs steht jetzt immer über dem Zeitstrahl, auch wenn nur ein Fahrzeug freigegeben ist",
+  ]},
   { v:"1.16.6", date:"Juli 2026", changes:[
     "Fahrzeug-Kalender im V3-Design: oranger Kopfbereich mit Logo-Kachel, klarere Tagesnavigation mit Heute-Hinweis und Fahrzeug-Tabs im gewohnten Stil",
   ]},
@@ -6699,6 +6710,7 @@ function colorForName(name){
 function VehicleCalendar({code, teacherNames, defaultTeacher}){
   const [info,setInfo]=React.useState(undefined); // undefined=lädt, null=ungültig
   const [day,setDay]=React.useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; });
+  const [calView,setCalView]=React.useState("tag"); // "tag" | "woche"
   const [vehId,setVehId]=React.useState("");
   const [rows,setRows]=React.useState([]);
   const [loading,setLoading]=React.useState(false);
@@ -6719,14 +6731,20 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
 
   // Buchungen des Tages laden
   const reload=React.useCallback(()=>{
-    const von=new Date(day); von.setHours(0,0,0,0);
-    const bis=new Date(day); bis.setHours(24,0,0,0);
+    let von,bis;
+    if(calView==="woche"){
+      von=startOfWeek(day);
+      bis=addDays(startOfWeek(day),7);
+    }else{
+      von=new Date(day); von.setHours(0,0,0,0);
+      bis=new Date(day); bis.setHours(24,0,0,0);
+    }
     setLoading(true);
     calBookings(code,von.toISOString(),bis.toISOString())
       .then(r=>{ setRows(r||[]); setLoading(false); })
       .catch(()=>{ setRows([]); setLoading(false); });
-  },[code,day]);
-  React.useEffect(()=>{ if(info) reload(); },[info,day,reload]);
+  },[code,day,calView]);
+  React.useEffect(()=>{ if(info) reload(); },[info,day,calView,reload]);
 
   // Realtime: bei Änderungen an bookings neu laden (defensiv, falls Realtime nicht verfügbar)
   React.useEffect(()=>{
@@ -6749,7 +6767,7 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
   const veh=vehicles.find(v=>v.id===vehId);
   const dayRows=rows.filter(r=>r.vehicle_id===vehId).slice().sort((a,b)=>a.start_at.localeCompare(b.start_at));
 
-  const PXH=64, startH=7, endH=20, totalH=endH-startH;
+  const PXH=60, startH=0, endH=24, totalH=endH-startH;
   const hours=[]; for(let h=startH;h<=endH;h++) hours.push(h);
   function yFor(dt){ const d=new Date(dt); const hh=d.getHours()+d.getMinutes()/60; return (hh-startH)*PXH; }
 
@@ -6757,7 +6775,7 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
 
   function openBookingAt(hour){
     const s=String(hour).padStart(2,"0")+":00";
-    const e=String(Math.min(endH,hour+1)).padStart(2,"0")+":00";
+    const e=(hour+1>=24?"23:59":String(hour+1).padStart(2,"0")+":00");
     setForm({ start:s, end:e, teacher:defaultTeacher||"", note:"", busy:false, error:"" });
   }
   async function saveBooking(){
@@ -6792,15 +6810,27 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
       </div>
     </div>
 
-    {/* Tages-Navigation */}
-    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"14px 16px 12px"}}>
-      <button onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()-1); setDay(d); }}
+    {/* Umschalter Tag / Woche */}
+    <div style={{display:"flex",gap:6,padding:"14px 16px 4px"}}>
+      {[["tag","Tag"],["woche","Woche"]].map(([v,lbl])=>
+        <button key={v} onClick={()=>setCalView(v)}
+          style={{flex:1,padding:"9px 0",borderRadius:11,fontSize:13.5,fontWeight:700,fontFamily:"var(--font-d)",
+            border:"1.5px solid "+(calView===v?"var(--orange)":"var(--line)"),
+            background:calView===v?"var(--orange)":"var(--card)",color:calView===v?"#fff":"var(--ink)"}}>{lbl}</button>)}
+    </div>
+
+    {/* Navigation (Tag oder Woche) */}
+    <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,padding:"8px 16px 12px"}}>
+      <button onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()-(calView==="woche"?7:1)); setDay(d); }}
         style={{width:38,height:38,borderRadius:11,border:"1.5px solid var(--line)",background:"var(--card)",color:"var(--ink)",fontSize:18,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>‹</button>
       <div style={{flex:1,textAlign:"center"}}>
-        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,lineHeight:1.1}}>{isToday(day)?"Heute":dayLabel.split(",")[0]}</div>
-        <div style={{fontSize:12,color:"var(--muted)",marginTop:1}}>{dayLabel.split(",").slice(1).join(",").trim()}</div>
+        {calView==="woche"
+          ? <><div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,lineHeight:1.1}}>Woche</div>
+              <div style={{fontSize:12,color:"var(--muted)",marginTop:1}}>{startOfWeek(day).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})} – {addDays(startOfWeek(day),6).toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})}</div></>
+          : <><div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,lineHeight:1.1}}>{isToday(day)?"Heute":dayLabel.split(",")[0]}</div>
+              <div style={{fontSize:12,color:"var(--muted)",marginTop:1}}>{dayLabel.split(",").slice(1).join(",").trim()}</div></>}
       </div>
-      <button onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()+1); setDay(d); }}
+      <button onClick={()=>{ const d=new Date(day); d.setDate(d.getDate()+(calView==="woche"?7:1)); setDay(d); }}
         style={{width:38,height:38,borderRadius:11,border:"1.5px solid var(--line)",background:"var(--card)",color:"var(--ink)",fontSize:18,fontWeight:700,display:"flex",alignItems:"center",justifyContent:"center"}}>›</button>
     </div>
 
@@ -6817,20 +6847,23 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
             </button>)}
         </div>}
 
-    {/* Zeitstrahl */}
-    {veh&&<div className="card" style={{margin:"0 16px",overflow:"hidden"}}>
-      <div style={{position:"relative",height:totalH*PXH,paddingLeft:50}}>
+    {/* Zeitstrahl (Tagesansicht) */}
+    {veh&&calView==="tag"&&<div className="card" style={{margin:"0 16px",overflow:"hidden"}}>
+      <div style={{padding:"12px 0",fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,textAlign:"center",borderBottom:"1px solid var(--line)",color:"var(--orange-deep)"}}>
+        {veh.name}{veh.plate?" · "+veh.plate:""}{veh.type?" · "+veh.type:""}
+      </div>
+      <div style={{position:"relative",height:totalH*PXH+24,paddingLeft:50}}>
         {hours.slice(0,-1).map(h=>
           <div key={h} onClick={()=>openBookingAt(h)}
-            style={{position:"absolute",left:50,right:0,top:(h-startH)*PXH,height:PXH,borderTop:"1px solid var(--line)",cursor:"pointer"}}
+            style={{position:"absolute",left:50,right:0,top:12+(h-startH)*PXH,height:PXH,borderTop:"1px solid var(--line)",cursor:"pointer"}}
             title="Zum Buchen tippen"/>
         )}
         {hours.map(h=>
-          <span key={"lbl"+h} style={{position:"absolute",left:0,top:(h-startH)*PXH-8,width:42,textAlign:"right",fontSize:11,color:"var(--muted)",fontFamily:"var(--font-d)",pointerEvents:"none"}}>{String(h).padStart(2,"0")}:00</span>
+          <span key={"lbl"+h} style={{position:"absolute",left:0,top:12+(h-startH)*PXH-8,width:42,textAlign:"right",fontSize:11,color:"var(--muted)",fontFamily:"var(--font-d)",pointerEvents:"none"}}>{String(h).padStart(2,"0")}:00</span>
         )}
-        {isToday(day)&&(()=>{ const ny=yFor(new Date()); return (ny>=0&&ny<=totalH*PXH)?<div style={{position:"absolute",left:50,right:0,top:ny,borderTop:"2px solid #D63A2E",zIndex:2,pointerEvents:"none"}}><div style={{position:"absolute",left:-5,top:-4,width:8,height:8,borderRadius:"50%",background:"#D63A2E"}}/></div>:null; })()}
+        {isToday(day)&&(()=>{ const ny=12+yFor(new Date()); return (ny>=12&&ny<=totalH*PXH+12)?<div style={{position:"absolute",left:50,right:0,top:ny,borderTop:"2px solid #D63A2E",zIndex:2,pointerEvents:"none"}}><div style={{position:"absolute",left:-5,top:-4,width:8,height:8,borderRadius:"50%",background:"#D63A2E"}}/></div>:null; })()}
         {dayRows.map(r=>{
-          const top=Math.max(0,yFor(r.start_at));
+          const top=12+Math.max(0,yFor(r.start_at));
           const h=Math.max(24,yFor(r.end_at)-yFor(r.start_at));
           const c=colorForName(r.teacher_name);
           return <button key={r.id} onClick={()=>removeBooking(r.id)}
@@ -6842,7 +6875,44 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
         })}
       </div>
     </div>}
-    {veh&&<div style={{textAlign:"center",fontSize:12,color:"var(--muted)",marginTop:10}}>Tippe auf eine freie Zeit zum Buchen. Tippe auf eine Buchung zum Löschen.</div>}
+    {veh&&calView==="tag"&&<div style={{textAlign:"center",fontSize:12,color:"var(--muted)",marginTop:10}}>Tippe auf eine freie Zeit zum Buchen. Tippe auf eine Buchung zum Löschen.</div>}
+
+    {/* Wochenansicht */}
+    {veh&&calView==="woche"&&<div style={{padding:"0 16px"}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,textAlign:"center",color:"var(--orange-deep)",marginBottom:10}}>
+        {veh.name}{veh.plate?" · "+veh.plate:""}
+      </div>
+      {[0,1,2,3,4,5,6].map(off=>{
+        const d=addDays(startOfWeek(day),off);
+        const dstr=ymd(d);
+        const list=rows.filter(r=>r.vehicle_id===vehId && ymd(r.start_at)===dstr).slice().sort((a,b)=>a.start_at.localeCompare(b.start_at));
+        const heute=ymd(new Date())===dstr;
+        return <div key={off} className="card" style={{padding:"11px 13px",marginBottom:8,border:heute?"1.5px solid var(--orange)":"1px solid var(--line)"}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:list.length?8:0}}>
+            <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14}}>
+              {d.toLocaleDateString("de-DE",{weekday:"long"})} <span style={{color:"var(--muted)",fontWeight:600,fontSize:12.5}}>{d.toLocaleDateString("de-DE",{day:"2-digit",month:"2-digit"})}</span>{heute?<span style={{color:"var(--orange-deep)",fontSize:11.5,marginLeft:6}}>Heute</span>:null}
+            </div>
+            <button onClick={()=>{ setDay(new Date(dstr+"T00:00:00")); setCalView("tag"); }}
+              style={{border:"none",background:"none",color:"var(--orange-deep)",fontSize:12.5,fontWeight:700,padding:"2px 4px"}}>Tag öffnen ›</button>
+          </div>
+          {list.length===0
+            ? <div style={{fontSize:12.5,color:"var(--muted)"}}>Keine Buchung</div>
+            : <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                {list.map(r=>{ const c=colorForName(r.teacher_name);
+                  return <button key={r.id} onClick={()=>removeBooking(r.id)}
+                    style={{display:"flex",alignItems:"center",gap:9,background:c+"18",border:"1px solid "+c,borderRadius:9,padding:"7px 10px",textAlign:"left"}}>
+                    <div style={{width:4,height:30,borderRadius:99,background:c,flexShrink:0}}/>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:12.5,fontWeight:700,fontFamily:"var(--font-d)"}}>{hm(r.start_at)}–{hm(r.end_at)} · {r.teacher_name}</div>
+                      {r.note&&<div style={{fontSize:11.5,color:"var(--muted)",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.note}</div>}
+                    </div>
+                  </button>;
+                })}
+              </div>}
+        </div>;
+      })}
+      <div style={{textAlign:"center",fontSize:12,color:"var(--muted)",marginTop:4,marginBottom:8}}>Zum Buchen einen Tag öffnen. Tippe auf eine Buchung zum Löschen.</div>
+    </div>}
 
     {/* Buchungs-Formular */}
     {form&&<div onClick={()=>!form.busy&&setForm(null)}
@@ -6863,7 +6933,7 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
             : <input type="text" value={form.teacher} onChange={e=>setForm({...form,teacher:e.target.value})} placeholder="Name des Fahrlehrers"/>}
         </div>
 
-        <div style={{display:"flex",gap:10,marginBottom:12}}>
+        <div style={{display:"flex",gap:10,marginBottom:10}}>
           <div className="field" style={{flex:1}}>
             <label>Von</label>
             <input type="time" value={form.start} onChange={e=>setForm({...form,start:e.target.value})}/>
@@ -6871,6 +6941,30 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
           <div className="field" style={{flex:1}}>
             <label>Bis</label>
             <input type="time" value={form.end} onChange={e=>setForm({...form,end:e.target.value})}/>
+          </div>
+        </div>
+
+        <div style={{marginBottom:8}}>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>Startzeit · Viertelstunde</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {[":00",":15",":30",":45"].map(mm=>{
+              const hh=(form.start||"09:00").split(":")[0];
+              const val=hh+mm;
+              const active=form.start===val;
+              return <button key={mm} onClick={()=>setForm({...form,start:val})}
+                style={{padding:"6px 12px",borderRadius:99,fontSize:13,fontWeight:700,fontFamily:"var(--font-d)",border:"1.5px solid "+(active?"var(--orange)":"var(--line)"),background:active?"var(--orange-soft)":"var(--card)",color:active?"var(--orange-deep)":"var(--ink)"}}>{mm}</button>;
+            })}
+          </div>
+        </div>
+
+        <div style={{marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:700,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",marginBottom:6}}>Dauer</div>
+          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+            {[45,55,60,90,135].map(min=>
+              <button key={min} onClick={()=>setForm({...form,end:addMinutesToTime(form.start||"09:00",min)})}
+                style={{padding:"6px 12px",borderRadius:99,fontSize:13,fontWeight:700,fontFamily:"var(--font-d)",border:"1.5px solid var(--line)",background:"var(--card)",color:"var(--ink)"}}>
+                {min===45?"1 FS":min===55?"Prüfung":min===60?"1 Std":min===90?"2 FS":min===135?"3 FS":min+" min"} ({min} min)
+              </button>)}
           </div>
         </div>
 
