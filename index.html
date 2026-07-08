@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.2";
+const APP_VERSION = "1.20.3";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,10 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.3", date:"Juli 2026", changes:[
+    "Die offene Liste aller Fahrschulen bei der Registrierung wurde aus Datenschutzgründen entfernt. Neue Fahrlehrer wählen jetzt nur noch zwischen Einladungscode und Neue Fahrschule gründen",
+    "Neu: Beim ersten Login (auch bei bestehenden Konten, die es noch nicht ausgefüllt haben) müssen Name, Adresse, Telefonnummer und Geburtsdatum angegeben werden, bevor es weitergeht (benötigt SQL-Schritt)",
+  ]},
   { v:"1.20.2", date:"Juli 2026", changes:[
     "Neu: Hat ein Fahrlehrer noch keine eigenen Strecken angelegt, wird ihm beim Öffnen der Übersicht automatisch die Vorlage seines Fahrschul-Admins zur Übernahme angeboten (Vorlage übernehmen). Danach bleibt sie für ihn frei änderbar. Bestehende, eigene Vorlagen werden niemals automatisch überschrieben",
   ]},
@@ -1132,6 +1136,16 @@ async function fetchAppSettings(){
 }
 async function saveAppSettings(patch){
   const { error } = await sb.from("app_settings").update(patch).eq("id",1);
+  if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
+}
+// Persönliche Profildaten laden (Name, Adresse, Telefon, Geburtsdatum). Gibt null bei Fehler zurück.
+async function fetchProfileData(uid){
+  const { data, error } = await sb.from("profiles").select("display_name,address,phone,birthdate").eq("id",uid).maybeSingle();
+  if(error){ console.error(error); return null; }
+  return data;
+}
+async function saveProfileData(uid,patch){
+  const { error } = await sb.from("profiles").upsert({ id:uid, ...patch }, { onConflict:"id" });
   if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
 }
 // Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt, Zustimmungszeitpunkt)
@@ -1841,6 +1855,53 @@ function Splash({text}){
   </div>;
 }
 
+// Zeigt beim ersten Login einen Pflicht-Bildschirm, der Name, Adresse, Telefon und Geburtsdatum
+// abfragt, bevor die normale App-Oberfläche zugänglich wird. Wird nur angezeigt, solange
+// mindestens eines dieser Felder noch fehlt.
+function ProfileGate({initial,onSave}){
+  const [vals,setVals]=useState({
+    display_name:(initial&&initial.display_name)||"",
+    address:(initial&&initial.address)||"",
+    phone:(initial&&initial.phone)||"",
+    birthdate:(initial&&initial.birthdate)||"",
+  });
+  const [busy,setBusy]=useState(false);
+  const [err,setErr]=useState("");
+  const complete=vals.display_name.trim()&&vals.address.trim()&&vals.phone.trim()&&vals.birthdate;
+  async function submit(){
+    if(!complete){ setErr("Bitte alle Felder ausfüllen."); return; }
+    setBusy(true); setErr("");
+    try{ await onSave(vals); }
+    catch(e){ setErr(e.message||"Speichern fehlgeschlagen"); setBusy(false); }
+  }
+  return <div style={{minHeight:"100vh",background:"var(--paper)",display:"flex",alignItems:"center",justifyContent:"center",padding:24}}>
+    <div className="card" style={{padding:"26px 22px",maxWidth:420,width:"100%"}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:6,textAlign:"center"}}>Deine Angaben</div>
+      <p style={{fontSize:13,color:"var(--muted)",lineHeight:1.5,marginBottom:18,textAlign:"center"}}>
+        Bevor es losgeht, brauchen wir noch ein paar Angaben zu dir.
+      </p>
+      <div className="field" style={{marginBottom:12}}>
+        <label>Vor- und Nachname</label>
+        <input type="text" value={vals.display_name} onChange={e=>setVals(v=>({...v,display_name:e.target.value}))}/>
+      </div>
+      <div className="field" style={{marginBottom:12}}>
+        <label>Adresse</label>
+        <input type="text" value={vals.address} onChange={e=>setVals(v=>({...v,address:e.target.value}))} placeholder="Straße, PLZ, Ort"/>
+      </div>
+      <div className="field" style={{marginBottom:12}}>
+        <label>Telefonnummer</label>
+        <input type="tel" value={vals.phone} onChange={e=>setVals(v=>({...v,phone:e.target.value}))}/>
+      </div>
+      <div className="field" style={{marginBottom:18}}>
+        <label>Geburtsdatum</label>
+        <input type="date" value={vals.birthdate} onChange={e=>setVals(v=>({...v,birthdate:e.target.value}))}/>
+      </div>
+      {err&&<div style={{background:"#FDECEA",color:"#B3362A",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{err}</div>}
+      <button className="btn btn-primary btn-block" disabled={busy||!complete} onClick={submit}>{busy?"Speichert…":"Weiter"}</button>
+    </div>
+  </div>;
+}
+
 // Zeigt entweder die Zustimmungs-Ansicht (7 Tage kostenlos testen) oder den Sperr-Bildschirm
 // nach abgelaufener Probezeit. Ersetzt in beiden Fällen die normale App-Oberfläche komplett,
 // die eigenen Daten (Schüler, Termine usw.) bleiben davon unberührt und sind sofort wieder da.
@@ -1890,7 +1951,7 @@ function Auth(){
   const [schoolList,setSchoolList]=useState([]);
   const [schoolId,setSchoolId]=useState("");      // gewählte Fahrschule
   const [newSchoolName,setNewSchoolName]=useState(""); // falls neue angelegt wird
-  const [joinMode,setJoinMode]=useState("list"); // "list" | "new" | "invite"
+  const [joinMode,setJoinMode]=useState("invite"); // "new" | "invite" ("list" entfernt aus Datenschutzgründen)
   const [inviteCode,setInviteCode]=useState("");
 
   useEffect(()=>{
@@ -1990,24 +2051,16 @@ function Auth(){
             <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11.5,letterSpacing:".09em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:4}}>Deine Fahrschule</label>
             <div className="seg" style={{marginBottom:9}}>
               <button className={joinMode==="invite"?"on":""} onClick={()=>{setJoinMode("invite");setErr("");}}>Einladungscode</button>
-              <button className={joinMode==="list"?"on":""} onClick={()=>{setJoinMode("list");setErr("");}}>Aus Liste</button>
               <button className={joinMode==="new"?"on":""} onClick={()=>{setJoinMode("new");setErr("");}}>Neu gründen</button>
             </div>
             {joinMode==="invite" &&
               <input type="text" value={inviteCode} onChange={e=>setInviteCode(e.target.value)} placeholder="Einladungscode von deinem Fahrschul-Admin"
                 style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>}
-            {joinMode==="list" &&
-              <select value={schoolId} onChange={e=>setSchoolId(e.target.value)}
-                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"#fff"}}>
-                {schoolList.length===0&&<option value="">Lädt…</option>}
-                {schoolList.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>}
             {joinMode==="new" &&
               <input type="text" value={newSchoolName} onChange={e=>setNewSchoolName(e.target.value)} placeholder="Name deiner Fahrschule"
                 style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>}
             <p style={{fontSize:11.5,color:"var(--muted)",marginTop:7,lineHeight:1.5}}>
-              {joinMode==="invite"?"Frag deinen Fahrschul-Admin nach dem Code, du findest ihn nicht selbst in einer Liste.":
-               joinMode==="list"?"Wähle deine Fahrschule aus der Liste aller registrierten Fahrschulen.":
+              {joinMode==="invite"?"Frag deinen Fahrschul-Admin nach dem Einladungscode.":
                "Gründet deine Fahrschule gerade erst hier eine neue, dann bist du automatisch ihr Admin."}
             </p>
           </div>}
@@ -2205,6 +2258,19 @@ function App(){
     fetchOwnSubscription(uid).then(s=>setMySubscription(s||{subscription_active:false}))
       .catch(e=>{ console.error("Abo-Status konnte nicht geladen werden:",e); setMySubscription({subscription_active:false}); });
     fetchAppSettings().then(s=>setPaypalLink((s&&s.paypal_link)||"")).catch(()=>setPaypalLink(""));
+  },[uid]);
+
+  // Eigene Profildaten (Name, Adresse, Telefon, Geburtsdatum), müssen beim ersten Login vollständig sein.
+  // "complete" bewusst true bei Ladefehler, damit niemand fälschlich blockiert wird.
+  const [profileData,setProfileData]=useState(null); // null solange nicht geladen
+  const [profileComplete,setProfileComplete]=useState(true);
+  useEffect(()=>{
+    if(!uid) return;
+    fetchProfileData(uid).then(d=>{
+      setProfileData(d||{});
+      const ok=!!(d&&d.display_name&&d.address&&d.phone&&d.birthdate);
+      setProfileComplete(ok);
+    }).catch(e=>{ console.error("Profildaten konnten nicht geladen werden:",e); setProfileData({}); setProfileComplete(true); });
   },[uid]);
 
   // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
@@ -2531,6 +2597,14 @@ function App(){
 
   if(session===undefined) return <Splash text="Lädt…"/>;
   if(session===null) return <Auth/>;
+
+  // Persönliche Angaben müssen vollständig sein, bevor es weitergeht (einmalig beim ersten Login).
+  if(profileData===null) return <Splash text="Lädt…"/>;
+  if(!profileComplete) return <ProfileGate initial={profileData} onSave={async(vals)=>{
+    await saveProfileData(uid,vals);
+    setProfileData(vals);
+    setProfileComplete(true);
+  }}/>;
 
   // Abo-Status auswerten: kein Abo nötig, muss noch zustimmen, Probezeit läuft, oder gesperrt.
   // isAdmin (zentraler App-Admin) ist von der Sperrung immer ausgenommen, damit er sich selbst
