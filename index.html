@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.19.8";
+const APP_VERSION = "1.19.9";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.19.9", date:"Juli 2026", changes:[
+    "Neu: Arbeitszeiten je Wochentag in den eigenen Einstellungen (Fahrlehrerbereich). Schüler können über den Buchungslink nur noch innerhalb dieser Zeiten einen Termin vorschlagen. Für den Fahrlehrer selbst gilt diese Einschränkung nicht, er kann weiterhin jederzeit Termine anlegen (benötigt SQL-Schritt)",
+  ]},
   { v:"1.19.8", date:"Juli 2026", changes:[
     "Behoben: Die Schülerliste stürzte ab (Fehler localeCompare is not a function), wenn bei der Sortierung nach Aktivität ein alter oder beschädigter Datensatz mit einem nicht-textlichen Datum dazwischen war. Solche Werte werden jetzt zuverlässig ignoriert statt die ganze Liste zum Absturz zu bringen",
   ]},
@@ -1067,6 +1070,18 @@ async function saveLimitsToProfile(uid,dayLim,weekLim){
 async function saveTeacherNameToProfile(uid,name){
   if(!uid) return;
   try{ await sb.from("profiles").upsert({ id:uid, display_name:name||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
+}
+// Arbeitszeiten je Wochentag speichern, damit Schüler über den Buchungslink nur innerhalb
+// dieser Zeiten einen Termin vorschlagen können. Format: {mo:{von,bis},di:{...},...} pro Tag,
+// leeres/fehlendes von+bis bedeutet "an diesem Tag nicht buchbar".
+async function saveWorkHoursToProfile(uid,hours){
+  if(!uid) return;
+  try{ await sb.from("profiles").upsert({ id:uid, work_hours:hours||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
+}
+async function fetchWorkHours(uid){
+  const { data, error } = await sb.from("profiles").select("work_hours").eq("id",uid).maybeSingle();
+  if(error) return null;
+  return data && data.work_hours;
 }
 async function createSchool(name){
   const { data, error } = await sb.from("schools")
@@ -2001,6 +2016,18 @@ function App(){
   const [weekLimit,setWeekLimit]=useState(()=>{ try{ const v=localStorage.getItem("v3_week_limit"); return v===null?0:(parseInt(v,10)||0); }catch(e){ return 0; } });
   const [teacherName,setTeacherName]=useState(()=>{ try{ return localStorage.getItem("v3_teacher_name")||""; }catch(e){ return ""; } });
   useEffect(()=>{ try{ localStorage.setItem("v3_teacher_name",teacherName); }catch(e){} },[teacherName]);
+  // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
+  const [workHours,setWorkHours]=useState(null); // null solange nicht geladen
+  useEffect(()=>{
+    if(!uid) return;
+    fetchWorkHours(uid).then(h=>setWorkHours(h||{}));
+  },[uid]);
+  const workHoursTimer=useRef(null);
+  function writeWorkHours(next){
+    setWorkHours(next);
+    if(workHoursTimer.current) clearTimeout(workHoursTimer.current);
+    workHoursTimer.current=setTimeout(()=>{ if(uid) saveWorkHoursToProfile(uid,next); },500);
+  }
   useEffect(()=>{ try{ localStorage.setItem("v3_day_limit",String(dayLimit)); }catch(e){} },[dayLimit]);
   useEffect(()=>{ try{ localStorage.setItem("v3_week_limit",String(weekLimit)); }catch(e){} },[weekLimit]);
   const [fontScale,setFontScale]=useState(()=>{ try{ return parseFloat(localStorage.getItem("v3_font"))||1; }catch(e){ return 1; } });
@@ -4653,6 +4680,29 @@ function App(){
         </div>
       </div>
 
+      {/* Arbeitszeiten */}
+      <div className="eyebrow">Meine Arbeitszeiten</div>
+      <div className="card" style={{padding:"13px 14px"}}>
+        <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 12px"}}>
+          Schüler können über deinen Buchungslink nur innerhalb dieser Zeiten einen Termin vorschlagen. Für dich selbst gilt diese Einschränkung nicht, du kannst jederzeit auch außerhalb Termine anlegen. Leer lassen = an diesem Tag nicht buchbar.
+        </p>
+        {workHours===null
+          ? <div style={{fontSize:13,color:"var(--muted)",padding:"6px 2px"}}>Lädt…</div>
+          : [["mo","Montag"],["di","Dienstag"],["mi","Mittwoch"],["do","Donnerstag"],["fr","Freitag"],["sa","Samstag"],["so","Sonntag"]].map(([k,label])=>{
+              const day=workHours[k]||{};
+              return <div key={k} style={{display:"flex",alignItems:"center",gap:9,marginBottom:9}}>
+                <div style={{width:82,fontSize:13.5,fontWeight:600,flexShrink:0}}>{label}</div>
+                <input type="time" value={day.von||""} onChange={e=>writeWorkHours({...workHours,[k]:{...day,von:e.target.value}})}
+                  style={{flex:1,border:"1.5px solid var(--line)",borderRadius:9,padding:"8px 9px",fontSize:14,minWidth:0}}/>
+                <span style={{color:"var(--muted)",fontSize:13}}>–</span>
+                <input type="time" value={day.bis||""} onChange={e=>writeWorkHours({...workHours,[k]:{...day,bis:e.target.value}})}
+                  style={{flex:1,border:"1.5px solid var(--line)",borderRadius:9,padding:"8px 9px",fontSize:14,minWidth:0}}/>
+                {(day.von||day.bis)&&<button onClick={()=>writeWorkHours({...workHours,[k]:{von:"",bis:""}})}
+                  style={{color:"var(--muted)",fontSize:12,flexShrink:0,padding:"4px 2px"}}>Leeren</button>}
+              </div>;
+            })}
+      </div>
+
       {/* Ausbildungslimit */}
       <div className="eyebrow">Mein Ausbildungslimit</div>
       <div className="card" style={{padding:"13px 14px"}}>
@@ -6925,12 +6975,27 @@ function BookingPage({code}){
   function updateSlot(i,patch){
     setForm(f=>({...f, slots:f.slots.map((s,idx)=>idx===i?{...s,...patch}:s)}));
   }
+  // Prüft, ob ein Termin (Datum + Start/Ende) innerhalb der Arbeitszeit des Fahrlehrers liegt.
+  // Kein work_hours-Eintrag oder kein Eintrag für den jeweiligen Tag = keine Einschränkung (erlaubt).
+  const DOW_KEYS=["so","mo","di","mi","do","fr","sa"]; // Date.getDay(): 0=So..6=Sa
+  function withinWorkHours(dateStr,start,end){
+    const wh=info&&info.work_hours;
+    if(!wh||typeof wh!=="object") return true;
+    const key=DOW_KEYS[new Date(dateStr+"T00:00:00").getDay()];
+    const day=wh[key];
+    if(!day||!day.von||!day.bis) return false; // Tag ist explizit als "nicht buchbar" oder ohne Zeiten hinterlegt
+    return start>=day.von && end<=day.bis;
+  }
   async function send(){
     if(!form.vorname.trim()||!form.nachname.trim()){ setErr("Bitte Vor- und Nachname angeben."); return; }
     if(!form.slots.length){ setErr("Bitte mindestens einen Termin angeben."); return; }
     for(const s of form.slots){
       if(!s.date||!s.start){ setErr("Bitte bei jedem Termin Datum und Uhrzeit angeben."); return; }
       if(ymd(s.date)<ymd(new Date())){ setErr("Bitte bei jedem Termin einen Tag ab heute wählen."); return; }
+      if(!withinWorkHours(s.date,s.start,s.end)){
+        setErr("Der Termin am "+dayMonth(new Date(s.date+"T00:00:00"))+" um "+s.start+" liegt außerhalb der Arbeitszeit deines Fahrlehrers. Bitte eine andere Zeit wählen.");
+        return;
+      }
     }
     setSending(true); setErr("");
     const fullName=(form.vorname.trim()+" "+form.nachname.trim()).trim();
@@ -7140,6 +7205,15 @@ function BookingPage({code}){
               <div className="field" style={{flex:1}}><label>Bis (optional)</label>
                 <input type="time" value={s.end} onChange={e=>updateSlot(i,{end:e.target.value})}/></div>
             </div>
+            {(()=>{
+              const wh=info&&info.work_hours;
+              if(!wh||typeof wh!=="object") return null;
+              const key=DOW_KEYS[new Date(s.date+"T00:00:00").getDay()];
+              const day=wh[key];
+              return <div style={{fontSize:12,color:(day&&day.von&&day.bis)?"var(--muted)":"#B3362A",marginTop:7}}>
+                {(day&&day.von&&day.bis) ? "Arbeitszeit an diesem Tag: "+day.von+" – "+day.bis : "An diesem Tag werden keine Termine angeboten."}
+              </div>;
+            })()}
             <div style={{background:"var(--orange-soft)",borderRadius:9,padding:"9px 11px",marginTop:8,fontSize:12.5,lineHeight:1.5,color:"var(--ink)"}}>
               Bitte wähle einen Zeitraum zwischen 45 und 90 Minuten, 60 Minuten sind auch möglich. Für eine erste Fahrstunde sind 60 Minuten empfohlen.
             </div>
