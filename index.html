@@ -550,7 +550,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.18.0";
+const APP_VERSION = "1.18.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -580,6 +580,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.18.1", date:"Juli 2026", changes:[
+    "Neu: In den Einstellungen (Fahrlehrerbereich) lässt sich der eigene Anzeigename hinterlegen. Dieser wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, statt des E-Mail-Teils",
+  ]},
   { v:"1.18.0", date:"Juli 2026", changes:[
     "Termin anlegen: Der Schüler wird jetzt über ein Namensfeld gesucht und automatisch zugeordnet, statt aus einer langen Liste gewählt. Tippen, passenden Schüler antippen, fertig. Ohne Schüler geht weiterhin auch",
   ]},
@@ -984,6 +987,11 @@ async function touchLastSeen(uid){
 async function saveLimitsToProfile(uid,dayLim,weekLim){
   if(!uid) return;
   try{ await sb.from("profiles").upsert({ id:uid, day_limit:dayLim, week_limit:weekLim }, { onConflict:"id" }); }catch(e){ /* offline o.ä. */ }
+}
+// Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender). Wenn die Spalte fehlt, bleibt localStorage die Quelle.
+async function saveTeacherNameToProfile(uid,name){
+  if(!uid) return;
+  try{ await sb.from("profiles").upsert({ id:uid, display_name:name||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
 }
 async function createSchool(name){
   const { data, error } = await sb.from("schools")
@@ -1831,6 +1839,8 @@ function App(){
   },[settingsTab,session,isSchoolAdmin]);
   const [dayLimit,setDayLimit]=useState(()=>{ try{ const v=localStorage.getItem("v3_day_limit"); return v===null?495:(parseInt(v,10)||0); }catch(e){ return 495; } });
   const [weekLimit,setWeekLimit]=useState(()=>{ try{ const v=localStorage.getItem("v3_week_limit"); return v===null?0:(parseInt(v,10)||0); }catch(e){ return 0; } });
+  const [teacherName,setTeacherName]=useState(()=>{ try{ return localStorage.getItem("v3_teacher_name")||""; }catch(e){ return ""; } });
+  useEffect(()=>{ try{ localStorage.setItem("v3_teacher_name",teacherName); }catch(e){} },[teacherName]);
   useEffect(()=>{ try{ localStorage.setItem("v3_day_limit",String(dayLimit)); }catch(e){} },[dayLimit]);
   useEffect(()=>{ try{ localStorage.setItem("v3_week_limit",String(weekLimit)); }catch(e){} },[weekLimit]);
   const [fontScale,setFontScale]=useState(()=>{ try{ return parseFloat(localStorage.getItem("v3_font"))||1; }catch(e){ return 1; } });
@@ -1876,6 +1886,22 @@ function App(){
     if(!limitSyncReady.current){ limitSyncReady.current=true; return; }
     saveLimitsToProfile(uid,dayLimit,weekLimit);
   },[uid,dayLimit,weekLimit]);
+
+  const nameSyncReady=useRef(false);
+  useEffect(()=>{
+    if(!uid){ nameSyncReady.current=false; return; }
+    if(!nameSyncReady.current){
+      nameSyncReady.current=true;
+      // Einmalig den gespeicherten Namen aus dem Profil holen (für neue Geräte), nur wenn lokal noch keiner da ist
+      if(!teacherName){
+        sb.from("profiles").select("display_name").eq("id",uid).maybeSingle()
+          .then(({data})=>{ if(data&&data.display_name) setTeacherName(data.display_name); })
+          .catch(()=>{});
+      }
+      return;
+    }
+    saveTeacherNameToProfile(uid,teacherName);
+  },[uid,teacherName]);
 
   const [loadErr,setLoadErr]=useState("");
 
@@ -4284,8 +4310,21 @@ function App(){
       </>}
 
       {settingsTab==="fahrlehrer"&&<>
+      {/* Mein Name */}
+      <div className="eyebrow" style={{marginTop:0}}>Mein Name</div>
+      <div className="card" style={{padding:"13px 14px"}}>
+        <div className="field">
+          <label>Anzeigename (z.B. Fabian Bürkle)</label>
+          <input type="text" value={teacherName} placeholder="Vor- und Nachname"
+            onChange={e=>setTeacherName(e.target.value)}/>
+          <div style={{fontSize:11.5,color:"var(--muted)",marginTop:6,lineHeight:1.5}}>
+            Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer.
+          </div>
+        </div>
+      </div>
+
       {/* Ausbildungslimit */}
-      <div className="eyebrow" style={{marginTop:0}}>Mein Ausbildungslimit</div>
+      <div className="eyebrow">Mein Ausbildungslimit</div>
       <div className="card" style={{padding:"13px 14px"}}>
         <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 12px"}}>
           Lege fest, wie viele Minuten praktische Ausbildung du pro Tag und pro Woche höchstens leisten darfst. Termine, die dein Limit überschreiten würden, lassen sich nicht bestätigen. 0 bedeutet kein Limit. Es zählen nur bestätigte Termine.
@@ -5924,7 +5963,7 @@ function App(){
                     onClick={()=>{ try{ navigator.clipboard.writeText(link); alert("Link kopiert."); }catch(e){ alert("Link:\n"+link); } }}>Link kopieren</button>
                 </div>;
               })()}
-              <VehicleCalendar code={calShare.code} defaultTeacher={(session&&session.user&&session.user.email)?session.user.email.split("@")[0]:undefined}/>
+              <VehicleCalendar code={calShare.code} defaultTeacher={teacherName||undefined}/>
             </div>}
     </div>}
     {schoolLeistungen&&<div onClick={()=>setSchoolLeistungen(null)}
