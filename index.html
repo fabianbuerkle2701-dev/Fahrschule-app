@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.19.4";
+const APP_VERSION = "1.19.8";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,18 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.19.8", date:"Juli 2026", changes:[
+    "Behoben: Die Schülerliste stürzte ab (Fehler localeCompare is not a function), wenn bei der Sortierung nach Aktivität ein alter oder beschädigter Datensatz mit einem nicht-textlichen Datum dazwischen war. Solche Werte werden jetzt zuverlässig ignoriert statt die ganze Liste zum Absturz zu bringen",
+  ]},
+  { v:"1.19.7", date:"Juli 2026", changes:[
+    "Bei der Registrierung muss das Passwort jetzt zur Sicherheit ein zweites Mal eingegeben werden, mit sofortiger Meldung, falls beide nicht übereinstimmen",
+  ]},
+  { v:"1.19.6", date:"Juli 2026", changes:[
+    "Neu: Einladungscode pro Fahrschule. Der Fahrschul-Admin findet ihn in den Fahrschul-Einstellungen und kann ihn jederzeit neu erzeugen. Bei der Registrierung kann jetzt statt einer Fahrschul-Liste dieser Code eingegeben werden, um sofort und sicher der richtigen Fahrschule zugeordnet zu werden (benötigt SQL-Schritt)",
+  ]},
+  { v:"1.19.5", date:"Juli 2026", changes:[
+    "Nach einem Update öffnet sich beim ersten Start automatisch das Was-ist-neu-Fenster mit den Änderungen. Bei einer neuen Installation erscheint es nicht, nur bei echten Updates",
+  ]},
   { v:"1.19.4", date:"Juli 2026", changes:[
     "ADK-Karte per Foto übertragen erkennt jetzt jeden einzelnen Punkt statt nur den Fortschritt pro Abschnitt, mit Vorher-/Nachher-Anzeige je Punkt zum Prüfen vor der Übernahme",
     "Der Knopf ADK-Karte per Foto übertragen ist jetzt zusätzlich zentral bei den Schülerdaten zu finden, nicht nur in der Übersicht",
@@ -1010,6 +1022,22 @@ async function fetchSchoolList(){
   if(error){ console.error(error); return []; }
   return data||[];
 }
+// Per Einladungscode direkt der passenden Fahrschule beitreten (sicher, ohne die Fahrschulliste zu sehen)
+async function joinSchoolByCode(code){
+  const { data, error } = await sb.rpc("join_school_by_code",{ p_code:(code||"").trim() });
+  if(error){ throw new Error(error.message||"Einladungscode ungültig"); }
+  const row=Array.isArray(data)?data[0]:data;
+  if(!row) throw new Error("Einladungscode ungültig");
+  return { id:row.school_id, name:row.school_name };
+}
+// Einladungscode einer Fahrschule neu erzeugen (nur für Admins der eigenen Fahrschule sinnvoll,
+// die Berechtigung dafür regelt die update-Regel der schools-Tabelle)
+async function regenerateInviteCode(schoolId){
+  const fresh=Math.random().toString(36).slice(2,10);
+  const { error } = await sb.from("schools").update({ invite_code:fresh }).eq("id",schoolId);
+  if(error){ throw new Error(error.message||"Code konnte nicht gespeichert werden"); }
+  return fresh;
+}
 async function fetchMySchool(uid){
   // profile -> school_id -> school
   const { data:prof, error:pe } = await sb.from("profiles").select("school_id").eq("id",uid).maybeSingle();
@@ -1350,8 +1378,13 @@ function secBack(stu,sec){ const str=stu.strecken||{}; let soll=0,done=0;
   return soll?Math.round(done/soll*100):0; }
 function lastActivity(s){
   let max="";
-  Object.values(s.items||{}).forEach(it=>{ if(it&&typeof it==="object"&&it.dates) it.dates.forEach(d=>{ if(d>max) max=d; }); });
-  (s.adkDates?Object.values(s.adkDates):[]).forEach(d=>{ if(d>max) max=d; });
+  // Nur echte Datums-Zeichenketten berücksichtigen (Format YYYY-MM-DD). Andere, z.B. defekte
+  // oder sehr alte Datensätze mit falschem Typ in "dates", werden bewusst ignoriert, damit die
+  // Sortierung niemals an einem einzelnen kaputten Eintrag abstürzt.
+  const isDateStr=d=>typeof d==="string" && /^\d{4}-\d{2}-\d{2}/.test(d);
+  Object.values(s.items||{}).forEach(it=>{ if(it&&typeof it==="object"&&Array.isArray(it.dates)) it.dates.forEach(d=>{ if(isDateStr(d) && d>max) max=d; }); });
+  // adkDates ist {itemId: [datumstexte]}. Über die inneren Listen iterieren, nicht über die Listen selbst.
+  (s.adkDates?Object.values(s.adkDates):[]).forEach(arr=>{ (Array.isArray(arr)?arr:[]).forEach(d=>{ if(isDateStr(d) && d>max) max=d; }); });
   return max;
 }
 function countStunden(s){
@@ -1712,13 +1745,15 @@ function Auth(){
   const [mode,setMode]=useState("login"); // login | register
   const [email,setEmail]=useState("");
   const [pw,setPw]=useState("");
+  const [pw2,setPw2]=useState(""); // Passwort-Wiederholung, nur bei der Registrierung
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState("");
   const [info,setInfo]=useState("");
   const [schoolList,setSchoolList]=useState([]);
   const [schoolId,setSchoolId]=useState("");      // gewählte Fahrschule
   const [newSchoolName,setNewSchoolName]=useState(""); // falls neue angelegt wird
-  const [creatingNew,setCreatingNew]=useState(false);
+  const [joinMode,setJoinMode]=useState("list"); // "list" | "new" | "invite"
+  const [inviteCode,setInviteCode]=useState("");
 
   useEffect(()=>{
     if(mode==="register" && schoolList.length===0){
@@ -1732,8 +1767,10 @@ function Auth(){
     if(!e||!pw){ setErr("Bitte E-Mail und Passwort eingeben."); return; }
     if(pw.length<6){ setErr("Das Passwort muss mindestens 6 Zeichen haben."); return; }
     if(mode==="register"){
-      if(creatingNew && !newSchoolName.trim()){ setErr("Bitte den Namen deiner Fahrschule eingeben."); return; }
-      if(!creatingNew && !schoolId){ setErr("Bitte deine Fahrschule auswählen."); return; }
+      if(pw!==pw2){ setErr("Die beiden Passwörter stimmen nicht überein."); return; }
+      if(joinMode==="new" && !newSchoolName.trim()){ setErr("Bitte den Namen deiner Fahrschule eingeben."); return; }
+      if(joinMode==="list" && !schoolId){ setErr("Bitte deine Fahrschule auswählen."); return; }
+      if(joinMode==="invite" && !inviteCode.trim()){ setErr("Bitte den Einladungscode eingeben."); return; }
     }
     setBusy(true);
     try{
@@ -1747,15 +1784,21 @@ function Auth(){
           if(se2){ setErr(uebersetze(se2.message)); setBusy(false); return; }
           newUid = (si&&si.user&&si.user.id) || newUid;
         }
-        // Fahrschule zuordnen (neu anlegen oder bestehende wählen)
-        let sid=schoolId;
-        if(creatingNew){
-          try{ const created=await createSchool(newSchoolName); sid=created.id; }
-          catch(se){ console.error(se); alert("Fahrschule anlegen fehlgeschlagen:\n"+(se.message||se)); sid=""; }
-        }
-        if(newUid && sid){
-          try{ await assignSchool(newUid,sid,e,creatingNew); }
-          catch(se){ console.error(se); alert("Zuordnung zur Fahrschule fehlgeschlagen:\n"+(se.message||se)); }
+        if(joinMode==="invite"){
+          // Per Einladungscode direkt und sicher der richtigen Fahrschule beitreten
+          try{ await joinSchoolByCode(inviteCode); }
+          catch(se){ console.error(se); alert("Einladungscode ungültig oder Beitritt fehlgeschlagen:\n"+(se.message||se)); }
+        }else{
+          // Fahrschule zuordnen (neu anlegen oder bestehende wählen)
+          let sid=schoolId;
+          if(joinMode==="new"){
+            try{ const created=await createSchool(newSchoolName); sid=created.id; }
+            catch(se){ console.error(se); alert("Fahrschule anlegen fehlgeschlagen:\n"+(se.message||se)); sid=""; }
+          }
+          if(newUid && sid){
+            try{ await assignSchool(newUid,sid,e,joinMode==="new"); }
+            catch(se){ console.error(se); alert("Zuordnung zur Fahrschule fehlgeschlagen:\n"+(se.message||se)); }
+          }
         }
         setInfo("Konto erstellt. Du wirst angemeldet…");
       } else {
@@ -1798,20 +1841,37 @@ function Auth(){
               onChange={e=>setPw(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter"&&mode==="login") submit(); }}
               style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>
           </div>
+          {mode==="register"&&<div style={{marginBottom:11}}>
+            <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11.5,letterSpacing:".09em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:4}}>Passwort bestätigen</label>
+            <input type="password" autoComplete="new-password" value={pw2}
+              onChange={e=>setPw2(e.target.value)} onKeyDown={e=>{ if(e.key==="Enter") submit(); }}
+              style={{width:"100%",border:"1.5px solid "+(pw2&&pw2!==pw?"#D66":"var(--line)"),borderRadius:11,padding:"12px 13px",fontSize:16}}/>
+            {pw2&&pw2!==pw&&<div style={{fontSize:12,color:"#B3362A",marginTop:5}}>Stimmt noch nicht mit dem Passwort überein.</div>}
+          </div>}
           {mode==="register"&&<div style={{marginBottom:16}}>
             <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11.5,letterSpacing:".09em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:4}}>Deine Fahrschule</label>
-            {!creatingNew
-              ? <select value={schoolId} onChange={e=>setSchoolId(e.target.value)}
-                  style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"#fff"}}>
-                  {schoolList.length===0&&<option value="">Lädt…</option>}
-                  {schoolList.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              : <input type="text" value={newSchoolName} onChange={e=>setNewSchoolName(e.target.value)} placeholder="Name deiner Fahrschule"
-                  style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>}
-            <button onClick={()=>{setCreatingNew(!creatingNew);setErr("");}}
-              style={{marginTop:7,fontSize:12.5,fontWeight:700,color:"var(--orange-deep)",textDecoration:"underline"}}>
-              {creatingNew?"« Doch aus Liste wählen":"Meine Fahrschule ist nicht dabei »"}
-            </button>
+            <div className="seg" style={{marginBottom:9}}>
+              <button className={joinMode==="invite"?"on":""} onClick={()=>{setJoinMode("invite");setErr("");}}>Einladungscode</button>
+              <button className={joinMode==="list"?"on":""} onClick={()=>{setJoinMode("list");setErr("");}}>Aus Liste</button>
+              <button className={joinMode==="new"?"on":""} onClick={()=>{setJoinMode("new");setErr("");}}>Neu gründen</button>
+            </div>
+            {joinMode==="invite" &&
+              <input type="text" value={inviteCode} onChange={e=>setInviteCode(e.target.value)} placeholder="Einladungscode von deinem Fahrschul-Admin"
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>}
+            {joinMode==="list" &&
+              <select value={schoolId} onChange={e=>setSchoolId(e.target.value)}
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"#fff"}}>
+                {schoolList.length===0&&<option value="">Lädt…</option>}
+                {schoolList.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>}
+            {joinMode==="new" &&
+              <input type="text" value={newSchoolName} onChange={e=>setNewSchoolName(e.target.value)} placeholder="Name deiner Fahrschule"
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16}}/>}
+            <p style={{fontSize:11.5,color:"var(--muted)",marginTop:7,lineHeight:1.5}}>
+              {joinMode==="invite"?"Frag deinen Fahrschul-Admin nach dem Code, du findest ihn nicht selbst in einer Liste.":
+               joinMode==="list"?"Wähle deine Fahrschule aus der Liste aller registrierten Fahrschulen.":
+               "Gründet deine Fahrschule gerade erst hier eine neue, dann bist du automatisch ihr Admin."}
+            </p>
           </div>}
           {err&&<div style={{background:"#FDECEA",color:"#B3362A",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{err}</div>}
           {info&&<div style={{background:"var(--green-bg)",color:"var(--green)",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{info}</div>}
@@ -1895,6 +1955,16 @@ function App(){
   const [stuSig,setStuSig]=useState(null);
   const [updateToast,setUpdateToast]=useState(false);
   const [showChangelog,setShowChangelog]=useState(false);
+  // Beim Start prüfen, ob seit dem letzten Öffnen ein Update passiert ist. Wenn ja, automatisch
+  // "Was ist neu" zeigen. Bei einer ganz neuen Installation (noch nie eine Version gesehen)
+  // wird nichts automatisch geöffnet, nur die aktuelle Version wird gemerkt.
+  useEffect(()=>{
+    try{
+      const seen=localStorage.getItem("v3_last_seen_version");
+      if(seen && seen!==APP_VERSION){ setShowChangelog(true); }
+      localStorage.setItem("v3_last_seen_version",APP_VERSION);
+    }catch(e){}
+  },[]);
   const [undo,setUndo]=useState(null); // null | {label, onUndo, kind}
   const undoTimer=useRef(null);
   const [flash,setFlash]=useState(""); // kurze Bestätigung wie "Link kopiert"
@@ -3118,7 +3188,7 @@ function App(){
         const pb=gesamtPct(b);
         return pb-pa;
       } else if(sortBy==="aktivitaet"){
-        return (lastActivity(b)||"").localeCompare(lastActivity(a)||"");
+        return String(lastActivity(b)||"").localeCompare(String(lastActivity(a)||""));
       }
       return dispName(a).localeCompare(dispName(b),"de");
     });
@@ -4652,6 +4722,30 @@ function App(){
         <p style={{fontSize:11.5,color:"var(--muted)",margin:"12px 0 0",lineHeight:1.5}}>
           Name, Untertitel, Logo und Farbe gelten für alle Fahrlehrer deiner Fahrschule. Das Logo erscheint in der App und auf den PDF-Dokumenten.
         </p>
+        <div style={{marginTop:16,paddingTop:14,borderTop:"1px solid var(--line)"}}>
+          <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".08em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:8}}>Einladungscode für neue Fahrlehrer</label>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
+            <div style={{flex:1,fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,letterSpacing:".08em",padding:"11px 13px",background:"var(--field-bg)",borderRadius:11,border:"1.5px solid var(--line)"}}>
+              {(school&&school.invite_code)||"–"}
+            </div>
+            <button className="btn btn-ghost" style={{padding:"11px 13px",fontSize:13}}
+              onClick={async()=>{
+                if(!school||!school.invite_code) return;
+                try{ await navigator.clipboard.writeText(school.invite_code); showFlash("✓ Code kopiert"); }
+                catch(e){ prompt("Code zum Kopieren:",school.invite_code); }
+              }}>Kopieren</button>
+          </div>
+          <button className="btn btn-ghost" style={{marginTop:9,fontSize:12.5,padding:"8px 12px"}}
+            onClick={async()=>{
+              if(!school) return;
+              if(!confirm("Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr.")) return;
+              try{ const fresh=await regenerateInviteCode(school.id); writeSchool({...school,invite_code:fresh}); showFlash("✓ Neuer Code erzeugt"); }
+              catch(e){ alert("Code konnte nicht erzeugt werden:\n"+(e.message||e)); }
+            }}>Neuen Code erzeugen</button>
+          <p style={{fontSize:11.5,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
+            Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet, ohne aus einer Liste wählen zu müssen.
+          </p>
+        </div>
       </div> : <div className="card" style={{padding:"13px 14px"}}>
         <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:12}}>
           <img src={logoFor(school)} alt="Logo" style={{width:54,height:54,borderRadius:14,objectFit:"cover",border:"2px solid var(--line)",background:"#fff"}}/>
