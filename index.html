@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.18.9";
+const APP_VERSION = "1.19.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,12 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.19.1", date:"Juli 2026", changes:[
+    "Behoben: Der Buchungslink konnte bei manchen Fahrlehrern ohne Buchungscode geteilt werden und war dann unbrauchbar (leer hinter ?buchen=). Beim Teilen wird der Code jetzt geprüft und bei Bedarf sofort neu erzeugt, mit klarer Meldung statt eines stillen Fehlers",
+  ]},
+  { v:"1.19.0", date:"Juli 2026", changes:[
+    "Die Überschriften Ausbildungsdiagrammkarte und Strecken & Sonderfahrten in der Übersicht lassen sich jetzt umbenennen (unter Einstellungen, Fahrlehrerbereich, ADK & Strecken bearbeiten, neues Feld Überschrift in der Übersicht)",
+  ]},
   { v:"1.18.9", date:"Juli 2026", changes:[
     "Der allgemeine App-Name heißt jetzt überall Allindrive statt Fahrschule V3 (Titel, Name beim Hinzufügen zum Startbildschirm). Eure echte Fahrschule Fahrschule V3 in den Fahrschul-Einstellungen bleibt davon unberührt",
   ]},
@@ -969,7 +975,7 @@ async function fetchTemplate(uid, schoolName){
   const { data, error } = await sb.from("templates").select("*").eq("owner",uid).maybeSingle();
   if(error){ console.error(error); throw new Error("Vorlage laden fehlgeschlagen: "+(error.message||"")); }
   if(data && Array.isArray(data.adk) && data.adk.length){
-    return { adk:data.adk, strecken:Array.isArray(data.strecken)?data.strecken:[] };
+    return { adk:data.adk, strecken:Array.isArray(data.strecken)?data.strecken:[], adkTitel:data.adk_titel||"", streckenTitel:data.strecken_titel||"" };
   }
   // Noch keine Vorlage: Starter je nach Fahrschule wählen.
   // V3 bekommt ihre bestehende Vorlage, alle anderen die volle BVF-Karte mit leeren Strecken.
@@ -983,7 +989,7 @@ async function fetchTemplate(uid, schoolName){
 }
 async function saveTemplate(uid,tpl){
   const { error } = await sb.from("templates")
-    .upsert({ owner:uid, adk:tpl.adk, strecken:tpl.strecken, updated_at:new Date().toISOString() });
+    .upsert({ owner:uid, adk:tpl.adk, strecken:tpl.strecken, adk_titel:tpl.adkTitel||null, strecken_titel:tpl.streckenTitel||null, updated_at:new Date().toISOString() });
   if(error) console.error(error);
 }
 
@@ -1210,7 +1216,7 @@ async function fetchBookingCode(uid){
   // damit der Buchungslink für diesen Fahrlehrer von Anfang an funktioniert.
   const fresh=Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,5);
   const { error:upErr } = await sb.from("profiles").upsert({ id:uid, booking_code:fresh }, { onConflict:"id" });
-  if(upErr){ console.error(upErr); return null; }
+  if(upErr){ console.error("Buchungscode konnte nicht erzeugt werden:",upErr); return null; }
   return fresh;
 }
 // ── Fahrzeug-Belegungskalender (bookings) ──
@@ -2893,7 +2899,26 @@ function App(){
     return base+"?buchen="+(bookingCode||"");
   }
   async function shareBooking(){
+    // Sicherheits-Check: niemals einen Link ohne echten Buchungscode teilen
+    if(!bookingCode){
+      showFlash("Erzeuge Buchungscode…");
+      try{
+        const fresh=await fetchBookingCode(uid);
+        if(fresh){ setBookingCode(fresh); }
+        else{
+          alert("Der Buchungslink konnte nicht erzeugt werden. Das ist meist eine Berechtigungsfrage in der Datenbank (fehlende oder zu enge Regel für profiles). Bitte kurz erneut versuchen oder Bescheid geben, damit die Ursache geprüft werden kann.");
+          return;
+        }
+      }catch(e){
+        alert("Der Buchungslink konnte nicht erzeugt werden:\n"+(e.message||"unbekannter Fehler"));
+        return;
+      }
+    }
     const url=bookingURL();
+    if(!url.includes("?buchen=")||url.endsWith("?buchen=")){
+      alert("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
+      return;
+    }
     const text="Hier kannst du einen Fahrstunden-Termin vorschlagen: "+url;
     try{
       if(navigator.share){ await navigator.share({title:"Termin vorschlagen",text,url}); return; }
@@ -3294,14 +3319,14 @@ function App(){
       {showReife&&renderReife()}
       {showAdk&&<div style={{marginBottom:showStr?20:0}}>
         <div className="card hero" style={{borderColor:"var(--green)"}}>
-          <div className="label">Ausbildungsdiagrammkarte</div>
+          <div className="label">{tpl.adkTitel||"Ausbildungsdiagrammkarte"}</div>
           <div className="num" style={{color:"var(--green)"}}>{adkPct}%</div>
         </div>
         {tpl.adk.map(sec=>uebRow(sec.title,sec.color,secLern(active,sec),sec.id))}
       </div>}
       {showStr&&<div>
         <div className="card hero" style={{borderColor:"var(--blue)"}}>
-          <div className="label">Strecken & Sonderfahrten</div>
+          <div className="label">{tpl.streckenTitel||"Strecken & Sonderfahrten"}</div>
           <div className="num" style={{color:"var(--blue)"}}>{strPct}%</div>
         </div>
         {tpl.strecken.map(sec=>uebRow(sec.title,sec.color,secBack(active,sec),sec.id))}
@@ -4983,6 +5008,14 @@ function App(){
       <div className="seg">
         {[["adk","ADK"],["strecken","Strecken"]].map(([k,l])=>
           <button key={k} className={vorlageKind===k?"on":""} onClick={()=>{setVorlageKind(k);setOpenSection(null);}}>{l}</button>)}
+      </div>
+
+      <div className="field" style={{margin:"12px 2px"}}>
+        <label>Überschrift in der Übersicht</label>
+        <input type="text"
+          value={kind==="adk"?(tpl.adkTitel||"Ausbildungsdiagrammkarte"):(tpl.streckenTitel||"Strecken & Sonderfahrten")}
+          onChange={e=>writeTemplate(kind==="adk"?{...tpl,adkTitel:e.target.value}:{...tpl,streckenTitel:e.target.value})}/>
+        <div style={{fontSize:11.5,color:"var(--muted)",marginTop:6}}>So heißt dieser Bereich oben im Reiter Übersicht, z.B. „Themen und Strecken" statt „Strecken & Sonderfahrten".</div>
       </div>
 
       <div className="card" style={{padding:"10px 13px",marginBottom:12,fontSize:12.5,color:"var(--ink-2)",lineHeight:1.5}}>
