@@ -550,7 +550,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.17.2";
+const APP_VERSION = "1.18.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -580,6 +580,12 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.18.0", date:"Juli 2026", changes:[
+    "Termin anlegen: Der Schüler wird jetzt über ein Namensfeld gesucht und automatisch zugeordnet, statt aus einer langen Liste gewählt. Tippen, passenden Schüler antippen, fertig. Ohne Schüler geht weiterhin auch",
+  ]},
+  { v:"1.17.3", date:"Juli 2026", changes:[
+    "Fahrzeug-Kalender: Ein Tipp auf eine Buchung öffnet jetzt das Bearbeiten-Fenster (Fahrlehrer, Von/Bis, Notiz ändern) statt sofort zu löschen. Ganz unten gibt es einen Löschen-Knopf. Jeder kann jede Buchung bearbeiten und löschen",
+  ]},
   { v:"1.17.2", date:"Juli 2026", changes:[
     "Der Fahrzeug-Kalender ist jetzt für alle Fahrlehrer leicht erreichbar über den Tab Mehr unten rechts, nicht mehr nur über den Adminbereich. Den teilbaren Link sehen weiterhin nur Admins",
   ]},
@@ -6203,11 +6209,38 @@ function App(){
         </div>
         <div className="field" style={{marginBottom:12}}>
           <label>Schüler (optional)</label>
-          <select value={apptForm.student_id} onChange={e=>setApptForm({...apptForm,student_id:e.target.value})}
-            style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"var(--card)"}}>
-            <option value="">– kein Schüler –</option>
-            {students.filter(s=>s._isMine&&!s.archived).map(s=><option key={s.id} value={s.id}>{dispName(s)}</option>)}
-          </select>
+          {(() => {
+            const chosen = apptForm.student_id ? students.find(s=>s.id===apptForm.student_id) : null;
+            if(chosen){
+              // Ein Schüler ist zugeordnet: als Chip anzeigen mit Möglichkeit, ihn zu entfernen
+              return <div style={{display:"flex",alignItems:"center",gap:10,border:"1.5px solid var(--orange)",background:"var(--orange-soft)",borderRadius:11,padding:"11px 13px"}}>
+                <div style={{flex:1,fontSize:15,fontWeight:600,color:"var(--orange-deep)"}}>{dispName(chosen)}</div>
+                <button onClick={()=>setApptForm({...apptForm,student_id:"",studentSearch:""})}
+                  style={{border:"none",background:"none",color:"var(--muted)",fontSize:13,fontWeight:700,padding:"2px 4px"}}>ändern</button>
+              </div>;
+            }
+            const q=(apptForm.studentSearch||"").trim().toLowerCase();
+            const treffer = q ? students.filter(s=>s._isMine&&!s.archived&&dispName(s).toLowerCase().includes(q)).slice(0,6) : [];
+            return <>
+              <input type="text" value={apptForm.studentSearch||""} placeholder="Namen tippen zum Suchen…"
+                onChange={e=>{
+                  const val=e.target.value;
+                  // Automatische Zuordnung bei genau einem exakten Namenstreffer
+                  const exact=students.filter(s=>s._isMine&&!s.archived&&dispName(s).toLowerCase()===val.trim().toLowerCase());
+                  if(exact.length===1) setApptForm({...apptForm,studentSearch:val,student_id:exact[0].id});
+                  else setApptForm({...apptForm,studentSearch:val});
+                }}
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"var(--card)"}}/>
+              {treffer.length>0&&<div style={{marginTop:6,border:"1px solid var(--line)",borderRadius:11,overflow:"hidden"}}>
+                {treffer.map((s,idx)=>
+                  <button key={s.id} onClick={()=>setApptForm({...apptForm,student_id:s.id,studentSearch:dispName(s)})}
+                    style={{width:"100%",textAlign:"left",padding:"11px 13px",border:"none",borderBottom:idx<treffer.length-1?"1px solid var(--line)":"none",background:"var(--card)",fontSize:15,color:"var(--ink)"}}>
+                    {dispName(s)}
+                  </button>)}
+              </div>}
+              {q&&treffer.length===0&&<div style={{marginTop:6,fontSize:12.5,color:"var(--muted)"}}>Kein Schüler gefunden. Du kannst den Termin auch ohne Schüler anlegen.</div>}
+            </>;
+          })()}
         </div>
         <div className="field" style={{marginBottom:16}}>
           <label>Notiz (optional)</label>
@@ -6785,24 +6818,32 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
   function openBookingAt(hour){
     const s=String(hour).padStart(2,"0")+":00";
     const e=(hour+1>=24?"23:59":String(hour+1).padStart(2,"0")+":00");
-    setForm({ start:s, end:e, teacher:defaultTeacher||"", note:"", busy:false, error:"" });
+    setForm({ id:null, start:s, end:e, teacher:defaultTeacher||"", note:"", busy:false, error:"" });
+  }
+  // Bestehende Buchung antippen: Bearbeiten-Fenster öffnen (mit Löschen unten)
+  function openBookingEdit(r){
+    setForm({ id:r.id, date:ymd(r.start_at), start:hm(r.start_at), end:hm(r.end_at), teacher:r.teacher_name||"", note:r.note||"", busy:false, error:"" });
   }
   async function saveBooking(){
     const f=form; if(!f) return;
     if(!veh){ setForm({...f,error:"Bitte ein Fahrzeug wählen."}); return; }
     if(!f.teacher.trim()){ setForm({...f,error:"Bitte Fahrlehrer angeben."}); return; }
     if(!f.start||!f.end){ setForm({...f,error:"Bitte Von- und Bis-Zeit angeben."}); return; }
-    const startISO=new Date(ymd(day)+"T"+f.start+":00").toISOString();
-    const endISO=new Date(ymd(day)+"T"+f.end+":00").toISOString();
+    const basisDatum=f.date||ymd(day); // beim Bearbeiten das Datum der Buchung behalten
+    const startISO=new Date(basisDatum+"T"+f.start+":00").toISOString();
+    const endISO=new Date(basisDatum+"T"+f.end+":00").toISOString();
     setForm({...f,busy:true,error:""});
     try{
+      // Beim Bearbeiten: alte Buchung entfernen, dann neu anlegen (die Datenbank prüft dabei erneut auf Doppelbelegung)
+      if(f.id){ await calDelete(code,f.id); }
       await calBook(code,veh.id,f.teacher.trim(),startISO,endISO,f.note);
       setForm(null); reload();
     }catch(e){ setForm({...f,busy:false,error:e.message||"Buchung fehlgeschlagen"}); }
   }
   async function removeBooking(id){
-    if(!confirm("Diese Buchung löschen?")) return;
-    try{ await calDelete(code,id); reload(); }catch(e){ alert("Löschen fehlgeschlagen:\n"+e.message); }
+    setForm(f=>f?{...f,busy:true,error:""}:f);
+    try{ await calDelete(code,id); setForm(null); reload(); }
+    catch(e){ setForm(f=>f?{...f,busy:false,error:"Löschen fehlgeschlagen: "+e.message}:f); }
   }
 
   return <div style={{maxWidth:640,margin:"0 auto",padding:"0 0 40px"}}>
@@ -6875,7 +6916,7 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
           const top=12+Math.max(0,yFor(r.start_at));
           const h=Math.max(24,yFor(r.end_at)-yFor(r.start_at));
           const c=colorForName(r.teacher_name);
-          return <button key={r.id} onClick={()=>removeBooking(r.id)}
+          return <button key={r.id} onClick={()=>openBookingEdit(r)}
             style={{position:"absolute",top,height:h,left:56,right:8,background:c+"22",border:"1.5px solid "+c,borderRadius:8,padding:"5px 9px",overflow:"hidden",textAlign:"left",zIndex:3}}>
             <div style={{fontSize:11,fontWeight:800,fontFamily:"var(--font-d)",color:c}}>{hm(r.start_at)}–{hm(r.end_at)}</div>
             <div style={{fontSize:12.5,fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{r.teacher_name}</div>
@@ -6908,7 +6949,7 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
             ? <div style={{fontSize:12.5,color:"var(--muted)"}}>Keine Buchung</div>
             : <div style={{display:"flex",flexDirection:"column",gap:6}}>
                 {list.map(r=>{ const c=colorForName(r.teacher_name);
-                  return <button key={r.id} onClick={()=>removeBooking(r.id)}
+                  return <button key={r.id} onClick={()=>openBookingEdit(r)}
                     style={{display:"flex",alignItems:"center",gap:9,background:c+"18",border:"1px solid "+c,borderRadius:9,padding:"7px 10px",textAlign:"left"}}>
                     <div style={{width:4,height:30,borderRadius:99,background:c,flexShrink:0}}/>
                     <div style={{flex:1,minWidth:0}}>
@@ -6928,8 +6969,8 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
       style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:200,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",maxHeight:"88vh",overflowY:"auto"}}>
         <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
-        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:4}}>Fahrzeug buchen</h3>
-        <p style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>{veh?veh.name:""} · {day.toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"})}</p>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:4}}>{form.id?"Buchung bearbeiten":"Fahrzeug buchen"}</h3>
+        <p style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>{veh?veh.name:""} · {new Date((form.date||ymd(day))+"T00:00:00").toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long"})}</p>
 
         <div className="field" style={{marginBottom:12}}>
           <label>Fahrlehrer</label>
@@ -6983,8 +7024,11 @@ function VehicleCalendar({code, teacherNames, defaultTeacher}){
         </div>
 
         {form.error&&<div style={{fontSize:13,color:"#B3362A",marginBottom:12}}>{form.error}</div>}
-        <button className="btn btn-primary btn-block" style={{marginBottom:8}} disabled={form.busy} onClick={saveBooking}>{form.busy?"Wird gebucht…":"Buchen"}</button>
-        <button className="btn btn-ghost btn-block" disabled={form.busy} onClick={()=>setForm(null)}>Abbrechen</button>
+        <button className="btn btn-primary btn-block" style={{marginBottom:8}} disabled={form.busy} onClick={saveBooking}>{form.busy?"Wird gespeichert…":(form.id?"Änderungen speichern":"Buchen")}</button>
+        <button className="btn btn-ghost btn-block" style={{marginBottom:form.id?8:0}} disabled={form.busy} onClick={()=>setForm(null)}>Abbrechen</button>
+        {form.id&&<button className="btn btn-ghost btn-block" disabled={form.busy}
+          style={{color:"#B3362A",borderColor:"#E7B8B2"}}
+          onClick={()=>{ if(confirm("Diese Buchung wirklich löschen?")) removeBooking(form.id); }}>Buchung löschen</button>}
       </div>
     </div>}
   </div>;
