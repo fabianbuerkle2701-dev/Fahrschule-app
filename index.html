@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.18.6";
+const APP_VERSION = "1.18.8";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,13 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.18.8", date:"Juli 2026", changes:[
+    "Der Sonntag wird in der Wochenansicht des Terminkalenders nicht mehr angezeigt, da er grundsätzlich frei ist",
+  ]},
+  { v:"1.18.7", date:"Juli 2026", changes:[
+    "Neu: Adminbereich zeigt jetzt eine Liste aller registrierten Konten mit Löschen-Funktion (löscht Profil und Anmelde-Konto vollständig, nur für den zentralen App-Admin)",
+    "Behoben: Neu registrierte Fahrlehrer hatten keinen Buchungscode, wodurch ihr Buchungslink ungültig war und Schüler stattdessen den normalen Login sahen. Der Code wird jetzt automatisch erzeugt, sobald sich der Fahrlehrer anmeldet",
+  ]},
   { v:"1.18.6", date:"Juli 2026", changes:[
     "Die Link-Vorschau beim Teilen des Buchungslinks (z.B. in WhatsApp) zeigt jetzt Allindrive und Termine buchen statt v3-fahrschule",
   ]},
@@ -1071,6 +1078,32 @@ async function adminDeleteSchool(id){
   const { error } = await sb.from("schools").delete().eq("id",id);
   if(error){ console.error(error); throw new Error(error.message); }
 }
+// Alle registrierten Konten laden (ruft die geschützte Netlify-Funktion auf, nur für den zentralen Admin)
+async function adminFetchAllAccounts(){
+  const { data:sess } = await sb.auth.getSession();
+  const token = sess && sess.session && sess.session.access_token;
+  if(!token) throw new Error("Nicht angemeldet");
+  const resp = await fetch("/.netlify/functions/admin-list-accounts", {
+    headers: { Authorization: "Bearer "+token },
+  });
+  const data = await resp.json();
+  if(!resp.ok) throw new Error(data.error||"Konnte Konten nicht laden");
+  return data.accounts||[];
+}
+// Ein Konto vollständig löschen (Profil + echtes Anmelde-Konto), über die geschützte Netlify-Funktion
+async function adminDeleteAccount(targetUid){
+  const { data:sess } = await sb.auth.getSession();
+  const token = sess && sess.session && sess.session.access_token;
+  if(!token) throw new Error("Nicht angemeldet");
+  const resp = await fetch("/.netlify/functions/admin-delete-account", {
+    method:"POST",
+    headers: { "Content-Type":"application/json", Authorization: "Bearer "+token },
+    body: JSON.stringify({ targetUid }),
+  });
+  const data = await resp.json();
+  if(!resp.ok) throw new Error(data.error||"Löschen fehlgeschlagen");
+  return true;
+}
 async function adminSaveSchoolLogo(id,logo){
   const { error } = await sb.from("schools").update({ logo:logo||"" }).eq("id",id);
   if(error){ console.error(error); throw new Error(error.message); }
@@ -1169,7 +1202,13 @@ async function publicMySlots(code,name,von,bis){
 async function fetchBookingCode(uid){
   const { data, error } = await sb.from("profiles").select("booking_code").eq("id",uid).maybeSingle();
   if(error){ console.error(error); return null; }
-  return data && data.booking_code;
+  if(data && data.booking_code) return data.booking_code;
+  // Kein Code vorhanden (z.B. neu registriertes Konto): einen erzeugen und speichern,
+  // damit der Buchungslink für diesen Fahrlehrer von Anfang an funktioniert.
+  const fresh=Math.random().toString(36).slice(2,8)+Math.random().toString(36).slice(2,5);
+  const { error:upErr } = await sb.from("profiles").upsert({ id:uid, booking_code:fresh }, { onConflict:"id" });
+  if(upErr){ console.error(upErr); return null; }
+  return fresh;
 }
 // ── Fahrzeug-Belegungskalender (bookings) ──
 // Kalender-Code der Fahrschule holen (für den teilbaren Link)
@@ -1799,6 +1838,7 @@ function App(){
   const [appts,setAppts]=useState([]); // Termine
   const [bookingCode,setBookingCode]=useState(null);
   const [adminSchools,setAdminSchools]=useState(null); // null=nicht geladen
+  const [adminAccounts,setAdminAccounts]=useState(null); // null=nicht geladen, {busy,error,list}
   const [adminBusy,setAdminBusy]=useState(false);
   const [adminEdit,setAdminEdit]=useState(null); // Fahrschule, die gerade bearbeitet wird
   const [adminTeachers,setAdminTeachers]=useState(null); // {school, list} oder null
@@ -3843,7 +3883,8 @@ function App(){
   }
 
   function renderKalender(){
-    const days=[0,1,2,3,4,5,6].map(i=>addDays(calWeek,i));
+    // Sonntag ist grundsätzlich frei und wird in der Wochenansicht nicht angezeigt (Montag bis Samstag)
+    const days=[0,1,2,3,4,5].map(i=>addDays(calWeek,i));
     const weekEnd=addDays(calWeek,6);
     const byDay={};
     appts.forEach(a=>{ const k=ymd(a.start_at); (byDay[k]=byDay[k]||[]).push(a); });
@@ -4124,6 +4165,22 @@ function App(){
     adminFetchSchools().then(list=>{ setAdminSchools(list); setAdminBusy(false); })
       .catch(e=>{ setAdminBusy(false); alert("Konnte Fahrschulen nicht laden:\n"+e.message+"\n\nHast du den Admin-SQL-Block ausgeführt?"); });
   }
+  // Liste aller registrierten Konten laden (zentraler Admin)
+  function loadAllAccounts(){
+    setAdminAccounts({busy:true,error:"",list:[]});
+    adminFetchAllAccounts().then(list=>setAdminAccounts({busy:false,error:"",list}))
+      .catch(e=>setAdminAccounts({busy:false,error:e.message||"Fehler beim Laden",list:[]}));
+  }
+  async function doDeleteAccount(acc){
+    if(!confirm('Konto "'+acc.email+'" wirklich vollständig löschen?\n\nDas entfernt das Profil UND das Anmelde-Konto bei Supabase. Die Person kann sich danach nicht mehr einloggen. Schülerdaten, die diesem Konto gehören, bleiben ohne Besitzer erhalten. Das kann nicht rückgängig gemacht werden.')) return;
+    setAdminAccounts(prev=>prev?{...prev,busy:true}:prev);
+    try{
+      await adminDeleteAccount(acc.id);
+      setAdminAccounts(prev=>prev?{busy:false,error:"",list:prev.list.filter(a=>a.id!==acc.id)}:prev);
+    }catch(e){
+      setAdminAccounts(prev=>prev?{...prev,busy:false,error:"Löschen fehlgeschlagen: "+e.message}:prev);
+    }
+  }
   // Neue Fahrschule direkt im Admin-Bereich anlegen
   async function adminAddSchool(){
     const name=prompt("Name der neuen Fahrschule:");
@@ -4252,6 +4309,40 @@ function App(){
         <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:21}}>Admin · Fahrschulen</h2>
       </div>
 
+      {/* Alle registrierten Konten */}
+      <div className="eyebrow" style={{marginTop:0}}>Alle registrierten Konten</div>
+      {adminAccounts===null
+        ? <div className="card" style={{padding:"16px 14px",marginBottom:18,textAlign:"center"}}>
+            <div style={{fontSize:13,color:"var(--muted)",marginBottom:12}}>Zeigt jedes Anmelde-Konto, unabhängig von Fahrschulen.</div>
+            <button className="btn btn-ghost" onClick={loadAllAccounts}>Konten laden</button>
+          </div>
+        : <div style={{marginBottom:18}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+              <span style={{fontSize:13,color:"var(--muted)"}}>{adminAccounts.list.length} Konten</span>
+              <button className="btn btn-ghost" style={{padding:"6px 11px",fontSize:12.5}} disabled={adminAccounts.busy} onClick={loadAllAccounts}>Aktualisieren</button>
+            </div>
+            {adminAccounts.error&&<div style={{fontSize:13,color:"#B3362A",marginBottom:10}}>{adminAccounts.error}</div>}
+            {adminAccounts.list.map(acc=>
+              <div key={acc.id} className="card" style={{padding:"11px 13px",marginBottom:8}}>
+                <div style={{display:"flex",alignItems:"center",gap:10}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:14,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                      {acc.email}
+                      {acc.is_central_admin&&<span style={{fontSize:10,fontWeight:800,color:"#fff",background:"var(--orange)",borderRadius:5,padding:"2px 6px",marginLeft:7,textTransform:"uppercase"}}>App-Admin</span>}
+                      {acc.school_admin&&!acc.is_central_admin&&<span style={{fontSize:10,fontWeight:800,color:"#fff",background:"var(--orange)",borderRadius:5,padding:"2px 6px",marginLeft:7,textTransform:"uppercase"}}>Admin</span>}
+                    </div>
+                    <div style={{fontSize:11.5,color:"var(--muted)",marginTop:2}}>
+                      {acc.school_name?acc.school_name:"Keine Fahrschule"}
+                      {acc.created_at?" · registriert "+new Date(acc.created_at).toLocaleDateString("de-DE"):""}
+                    </div>
+                  </div>
+                  {!acc.is_central_admin&&<button className="btn btn-ghost" style={{padding:"7px 11px",fontSize:12.5,color:"#B3362A",flexShrink:0}}
+                    disabled={adminAccounts.busy} onClick={()=>doDeleteAccount(acc)}>Löschen</button>}
+                </div>
+              </div>)}
+          </div>}
+
+      <div className="eyebrow">Fahrschulen</div>
       {adminSchools===null
         ? <div className="card" style={{padding:"22px 16px",textAlign:"center"}}>
             <div style={{fontSize:13.5,color:"var(--muted)",marginBottom:14}}>Lade alle Fahrschulen, um sie zu verwalten.</div>
