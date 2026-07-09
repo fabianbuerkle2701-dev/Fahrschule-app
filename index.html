@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.3";
+const APP_VERSION = "1.20.4";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -586,6 +586,11 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.4", date:"Juli 2026", changes:[
+    "Behoben: Speichern der eigenen Angaben (Name, Adresse usw.) schlug mit einem Datenbankfehler fehl",
+    "Das Adressfeld ist jetzt in Straße, Hausnummer, PLZ und Ort aufgeteilt, statt einem einzigen Freitextfeld",
+    "Der Einladungscode steht jetzt direkt und gut sichtbar oben im Adminbereich, nicht mehr versteckt im Bereich Meine Fahrschule",
+  ]},
   { v:"1.20.3", date:"Juli 2026", changes:[
     "Die offene Liste aller Fahrschulen bei der Registrierung wurde aus Datenschutzgründen entfernt. Neue Fahrlehrer wählen jetzt nur noch zwischen Einladungscode und Neue Fahrschule gründen",
     "Neu: Beim ersten Login (auch bei bestehenden Konten, die es noch nicht ausgefüllt haben) müssen Name, Adresse, Telefonnummer und Geburtsdatum angegeben werden, bevor es weitergeht (benötigt SQL-Schritt)",
@@ -1140,12 +1145,14 @@ async function saveAppSettings(patch){
 }
 // Persönliche Profildaten laden (Name, Adresse, Telefon, Geburtsdatum). Gibt null bei Fehler zurück.
 async function fetchProfileData(uid){
-  const { data, error } = await sb.from("profiles").select("display_name,address,phone,birthdate").eq("id",uid).maybeSingle();
+  const { data, error } = await sb.from("profiles").select("display_name,street,house_no,zip,city,phone,birthdate").eq("id",uid).maybeSingle();
   if(error){ console.error(error); return null; }
   return data;
 }
 async function saveProfileData(uid,patch){
-  const { error } = await sb.from("profiles").upsert({ id:uid, ...patch }, { onConflict:"id" });
+  const { data:sess } = await sb.auth.getSession();
+  const email = sess && sess.session && sess.session.user && sess.session.user.email;
+  const { error } = await sb.from("profiles").upsert({ id:uid, email, ...patch }, { onConflict:"id" });
   if(error) throw new Error(error.message||"Speichern fehlgeschlagen");
 }
 // Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt, Zustimmungszeitpunkt)
@@ -1861,13 +1868,16 @@ function Splash({text}){
 function ProfileGate({initial,onSave}){
   const [vals,setVals]=useState({
     display_name:(initial&&initial.display_name)||"",
-    address:(initial&&initial.address)||"",
+    street:(initial&&initial.street)||"",
+    house_no:(initial&&initial.house_no)||"",
+    zip:(initial&&initial.zip)||"",
+    city:(initial&&initial.city)||"",
     phone:(initial&&initial.phone)||"",
     birthdate:(initial&&initial.birthdate)||"",
   });
   const [busy,setBusy]=useState(false);
   const [err,setErr]=useState("");
-  const complete=vals.display_name.trim()&&vals.address.trim()&&vals.phone.trim()&&vals.birthdate;
+  const complete=vals.display_name.trim()&&vals.street.trim()&&vals.house_no.trim()&&vals.zip.trim()&&vals.city.trim()&&vals.phone.trim()&&vals.birthdate;
   async function submit(){
     if(!complete){ setErr("Bitte alle Felder ausfüllen."); return; }
     setBusy(true); setErr("");
@@ -1884,9 +1894,25 @@ function ProfileGate({initial,onSave}){
         <label>Vor- und Nachname</label>
         <input type="text" value={vals.display_name} onChange={e=>setVals(v=>({...v,display_name:e.target.value}))}/>
       </div>
-      <div className="field" style={{marginBottom:12}}>
-        <label>Adresse</label>
-        <input type="text" value={vals.address} onChange={e=>setVals(v=>({...v,address:e.target.value}))} placeholder="Straße, PLZ, Ort"/>
+      <div style={{display:"flex",gap:10,marginBottom:12}}>
+        <div className="field" style={{flex:3}}>
+          <label>Straße</label>
+          <input type="text" value={vals.street} onChange={e=>setVals(v=>({...v,street:e.target.value}))}/>
+        </div>
+        <div className="field" style={{flex:1}}>
+          <label>Nr.</label>
+          <input type="text" value={vals.house_no} onChange={e=>setVals(v=>({...v,house_no:e.target.value}))}/>
+        </div>
+      </div>
+      <div style={{display:"flex",gap:10,marginBottom:12}}>
+        <div className="field" style={{flex:1}}>
+          <label>PLZ</label>
+          <input type="text" inputMode="numeric" value={vals.zip} onChange={e=>setVals(v=>({...v,zip:e.target.value}))}/>
+        </div>
+        <div className="field" style={{flex:2}}>
+          <label>Ort</label>
+          <input type="text" value={vals.city} onChange={e=>setVals(v=>({...v,city:e.target.value}))}/>
+        </div>
       </div>
       <div className="field" style={{marginBottom:12}}>
         <label>Telefonnummer</label>
@@ -2268,7 +2294,7 @@ function App(){
     if(!uid) return;
     fetchProfileData(uid).then(d=>{
       setProfileData(d||{});
-      const ok=!!(d&&d.display_name&&d.address&&d.phone&&d.birthdate);
+      const ok=!!(d&&d.display_name&&d.street&&d.house_no&&d.zip&&d.city&&d.phone&&d.birthdate);
       setProfileComplete(ok);
     }).catch(e=>{ console.error("Profildaten konnten nicht geladen werden:",e); setProfileData({}); setProfileComplete(true); });
   },[uid]);
@@ -5115,6 +5141,31 @@ function App(){
       </>}
 
       {settingsTab==="admin"&&<>
+      {/* Einladungscode für neue Fahrlehrer, direkt sichtbar */}
+      {canEditSchool&&<div className="card" style={{padding:"13px 14px",marginBottom:16}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".08em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:8}}>Einladungscode für neue Fahrlehrer</label>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <div style={{flex:1,fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,letterSpacing:".08em",padding:"11px 13px",background:"var(--field-bg)",borderRadius:11,border:"1.5px solid var(--line)"}}>
+            {(school&&school.invite_code)||"–"}
+          </div>
+          <button className="btn btn-ghost" style={{padding:"11px 13px",fontSize:13}}
+            onClick={async()=>{
+              if(!school||!school.invite_code) return;
+              try{ await navigator.clipboard.writeText(school.invite_code); showFlash("✓ Code kopiert"); }
+              catch(e){ prompt("Code zum Kopieren:",school.invite_code); }
+            }}>Kopieren</button>
+        </div>
+        <button className="btn btn-ghost" style={{marginTop:9,fontSize:12.5,padding:"8px 12px"}}
+          onClick={async()=>{
+            if(!school) return;
+            if(!confirm("Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr.")) return;
+            try{ const fresh=await regenerateInviteCode(school.id); writeSchool({...school,invite_code:fresh}); showFlash("✓ Neuer Code erzeugt"); }
+            catch(e){ alert("Code konnte nicht erzeugt werden:\n"+(e.message||e)); }
+          }}>Neuen Code erzeugen</button>
+        <p style={{fontSize:11.5,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
+          Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet.
+        </p>
+      </div>}
       {/* Fahrschule (Design) */}
       <Collapsible title="Meine Fahrschule" subtitle="Name, Logo, Farbe">
       {canEditSchool ? <div className="card" style={{padding:"13px 14px"}}>
@@ -5162,30 +5213,6 @@ function App(){
         <p style={{fontSize:11.5,color:"var(--muted)",margin:"12px 0 0",lineHeight:1.5}}>
           Name, Untertitel, Logo und Farbe gelten für alle Fahrlehrer deiner Fahrschule. Das Logo erscheint in der App und auf den PDF-Dokumenten.
         </p>
-        <div style={{marginTop:16,paddingTop:14,borderTop:"1px solid var(--line)"}}>
-          <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".08em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:8}}>Einladungscode für neue Fahrlehrer</label>
-          <div style={{display:"flex",alignItems:"center",gap:10}}>
-            <div style={{flex:1,fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,letterSpacing:".08em",padding:"11px 13px",background:"var(--field-bg)",borderRadius:11,border:"1.5px solid var(--line)"}}>
-              {(school&&school.invite_code)||"–"}
-            </div>
-            <button className="btn btn-ghost" style={{padding:"11px 13px",fontSize:13}}
-              onClick={async()=>{
-                if(!school||!school.invite_code) return;
-                try{ await navigator.clipboard.writeText(school.invite_code); showFlash("✓ Code kopiert"); }
-                catch(e){ prompt("Code zum Kopieren:",school.invite_code); }
-              }}>Kopieren</button>
-          </div>
-          <button className="btn btn-ghost" style={{marginTop:9,fontSize:12.5,padding:"8px 12px"}}
-            onClick={async()=>{
-              if(!school) return;
-              if(!confirm("Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr.")) return;
-              try{ const fresh=await regenerateInviteCode(school.id); writeSchool({...school,invite_code:fresh}); showFlash("✓ Neuer Code erzeugt"); }
-              catch(e){ alert("Code konnte nicht erzeugt werden:\n"+(e.message||e)); }
-            }}>Neuen Code erzeugen</button>
-          <p style={{fontSize:11.5,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
-            Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet, ohne aus einer Liste wählen zu müssen.
-          </p>
-        </div>
       </div> : <div className="card" style={{padding:"13px 14px"}}>
         <div style={{display:"flex",alignItems:"center",gap:14,marginBottom:12}}>
           <img src={logoFor(school)} alt="Logo" style={{width:54,height:54,borderRadius:14,objectFit:"cover",border:"2px solid var(--line)",background:"#fff"}}/>
