@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.16";
+const APP_VERSION = "1.20.18";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -588,6 +588,13 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.18", date:"Juli 2026", changes:[
+    "Die Buchungsseite zeigt jetzt direkt bei jedem Tag, bis wann geöffnet ist (z.B. 08:00 – 18:00 Uhr oder ganztägig geöffnet), und markiert komplett gesperrte Tage deutlich als Geschlossen, statt dass man das erst beim Terminversuch merkt",
+  ]},
+  { v:"1.20.17", date:"Juli 2026", changes:[
+    "Wählt ein Schüler auf der Buchungsseite einen Tag, den der Fahrlehrer komplett gesperrt hat, springt das Datum jetzt automatisch auf den nächsten freien Tag, genau wie bisher schon bei Sonntag",
+    "Die Uhrzeit-Felder auf der Buchungsseite sind jetzt zusätzlich auf das eingestellte Zeitfenster des jeweiligen Tages begrenzt",
+  ]},
   { v:"1.20.16", date:"Juli 2026", changes:[
     "Was ist neu? zeigt jetzt nur noch die aktuellste Version, mit einem Knopf Ältere Versionen anzeigen bei Bedarf, statt einer ewig langen Liste",
     "Behoben: Die eigene Nachricht beim Buchungslink wurde beim erneuten Öffnen nicht gespeichert (derselbe Grund wie zuvor bei den Arbeitszeiten: eine fehlende Pflichtangabe beim Speichern). Zur Sicherheit wurden zwei weitere, ähnlich gefährdete Speicherstellen (Anzeigename, Tageslimit) vorsorglich mit demselben Fix versehen",
@@ -7612,15 +7619,30 @@ function BookingPage({code}){
   function removeSlot(i){
     setForm(f=>({...f, slots:f.slots.filter((_,idx)=>idx!==i)}));
   }
+  const DOW_KEYS=["so","mo","di","mi","do","fr","sa"]; // Date.getDay(): 0=So..6=Sa
   function updateSlot(i,patch){
-    // Wählt jemand einen Sonntag, sofort auf den nächsten Montag springen (Sonntag ist grundsätzlich
-    // kein Buchungstag), statt erst beim Absenden eine Fehlermeldung zu zeigen.
+    // Wählt jemand einen gesperrten Tag (Sonntag fest, oder vom Fahrlehrer explizit gesperrt),
+    // automatisch auf den nächsten wirklich buchbaren Tag springen, statt erst beim Absenden
+    // eine Fehlermeldung zu zeigen.
     if(patch.date){
-      const dow=new Date(patch.date+"T00:00:00").getDay();
-      if(dow===0){
-        const next=new Date(patch.date+"T00:00:00"); next.setDate(next.getDate()+1);
-        patch={...patch, date:ymd(next)};
-        setErr("Sonntags werden keine Termine angeboten, auf Montag gesprungen.");
+      let d=new Date(patch.date+"T00:00:00");
+      const wh=info&&info.work_hours;
+      const isBlocked=(dt)=>{
+        const key=DOW_KEYS[dt.getDay()];
+        if(key==="so") return true;
+        const day=wh&&typeof wh==="object"?wh[key]:null;
+        return !!(day&&day.blocked);
+      };
+      if(isBlocked(d)){
+        let jumped=false;
+        for(let i2=0;i2<8;i2++){ // maximal eine Woche weitersuchen, niemals endlos
+          d=new Date(d.getTime()+86400000);
+          if(!isBlocked(d)){ jumped=true; break; }
+        }
+        if(jumped){
+          patch={...patch, date:ymd(d)};
+          setErr("An diesem Tag werden keine Termine angeboten, auf den nächsten freien Tag gesprungen.");
+        }
       }
     }
     setForm(f=>({...f, slots:f.slots.map((s,idx)=>idx===i?{...s,...patch}:s)}));
@@ -7630,7 +7652,6 @@ function BookingPage({code}){
   // day.blocked = Tag komplett gesperrt, unabhängig von Zeiten.
   // day.von/day.bis gesetzt = nur innerhalb dieses Zeitfensters buchbar.
   // Sonntag ist grundsätzlich gesperrt, unabhängig von gespeicherten Daten (kein Arbeitstag).
-  const DOW_KEYS=["so","mo","di","mi","do","fr","sa"]; // Date.getDay(): 0=So..6=Sa
   function withinWorkHours(dateStr,start,end){
     const key=DOW_KEYS[new Date(dateStr+"T00:00:00").getDay()];
     if(key==="so") return false;
@@ -7769,6 +7790,11 @@ function BookingPage({code}){
         const k=ymd(d);
         const list=(byDay[k]||[]).sort((a,b)=>a.start_at.localeCompare(b.start_at));
         const today=isToday(d);
+        // Öffnungszeiten-Info für diesen Tag ermitteln (aus den Arbeitszeiten des Fahrlehrers)
+        const dowKey=DOW_KEYS[d.getDay()];
+        const dayHours=(info&&info.work_hours&&typeof info.work_hours==="object")?info.work_hours[dowKey]:null;
+        const dayBlocked=dowKey==="so"||!!(dayHours&&dayHours.blocked);
+        const hoursLabel=dayBlocked?null:((dayHours&&dayHours.von&&dayHours.bis)?dayHours.von+" – "+dayHours.bis+" Uhr":"ganztägig geöffnet");
         // Belegte Minuten an diesem Tag (bestätigte Termine), für die Limit-Anzeige
         const dayLim=(info&&info.day_limit)||0;
         const usedMin=(byDay[k]||[]).filter(b=>b.status!=="pending").reduce((sum,b)=>{
@@ -7780,21 +7806,29 @@ function BookingPage({code}){
         const pct=dayLim>0?Math.min(100,Math.round(usedMin/dayLim*100)):0;
         const near=dayLim>0&&usedMin>=dayLim*0.85;
         const barCol=dayFull?"#B3362A":(near?"var(--amber)":"var(--orange)");
-        return <div key={k} className="card" style={{marginBottom:10,overflow:"hidden",border:today?"2px solid var(--orange)":undefined}}>
+        return <div key={k} className="card" style={{marginBottom:10,overflow:"hidden",border:today?"2px solid var(--orange)":undefined,opacity:dayBlocked?0.6:1}}>
           <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"10px 14px",
             background:today?"var(--orange-soft)":"var(--field-bg)",borderBottom:"1px solid var(--line)"}}>
-            <div style={{display:"flex",alignItems:"baseline",gap:8}}>
-              <span style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,textTransform:"capitalize"}}>{weekdayShort(d)}</span>
-              <span style={{fontSize:13,color:"var(--muted)"}}>{dayMonth(d)}.</span>
+            <div>
+              <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                <span style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,textTransform:"capitalize"}}>{weekdayShort(d)}</span>
+                <span style={{fontSize:13,color:"var(--muted)"}}>{dayMonth(d)}.</span>
+              </div>
+              {dayBlocked
+                ? <div style={{fontSize:11.5,color:"#B3362A",marginTop:2}}>Geschlossen</div>
+                : <div style={{fontSize:11.5,color:"var(--muted)",marginTop:2}}>{hoursLabel}</div>}
             </div>
-            {dayFull
+            {dayBlocked
+              ? <span style={{padding:"6px 12px",borderRadius:8,fontSize:12.5,fontWeight:700,fontFamily:"var(--font-d)",
+                  background:"var(--field-bg)",color:"#B3362A",border:"1px solid #B3362A"}}>Geschlossen</span>
+              : dayFull
               ? <span style={{padding:"6px 12px",borderRadius:8,fontSize:12.5,fontWeight:700,fontFamily:"var(--font-d)",
                   background:"var(--field-bg)",color:"#B3362A",border:"1px solid #B3362A"}}>Ausgebucht</span>
               : <button onClick={()=>openForm(k)} style={{padding:"6px 12px",borderRadius:8,border:"none",
                   background:"var(--orange)",fontSize:13,fontWeight:700,fontFamily:"var(--font-d)",color:"#fff",
                   display:"inline-flex",alignItems:"center",gap:5}}>+ Termin</button>}
           </div>
-          {dayLim>0&&<div style={{padding:"9px 14px",borderBottom:"1px solid var(--line)"}}>
+          {dayLim>0&&!dayBlocked&&<div style={{padding:"9px 14px",borderBottom:"1px solid var(--line)"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",marginBottom:5}}>
               <span style={{fontSize:11.5,color:"var(--muted)"}}>Belegt an diesem Tag</span>
               <span style={{fontSize:12,fontWeight:700,fontFamily:"var(--font-d)",color:barCol,fontVariantNumeric:"tabular-nums"}}>{usedMin} / {dayLim} Min</span>
@@ -7804,7 +7838,7 @@ function BookingPage({code}){
             </div>
           </div>}
           {list.length===0
-            ? <div style={{padding:"11px 14px",fontSize:13,color:"var(--muted)"}}>frei</div>
+            ? <div style={{padding:"11px 14px",fontSize:13,color:"var(--muted)"}}>{dayBlocked?"An diesem Tag werden keine Termine angeboten":"frei"}</div>
             : <div>{list.map((b,i)=>{
                 const mine=isMine(b);
                 return <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"10px 14px",borderTop:"1px solid var(--line)",
@@ -7855,12 +7889,21 @@ function BookingPage({code}){
               <label>Datum</label>
               <input type="date" min={ymd(new Date())} value={s.date} onChange={e=>updateSlot(i,{date:e.target.value})}/>
             </div>
-            <div style={{display:"flex",gap:10}}>
-              <div className="field" style={{flex:1}}><label>Von</label>
-                <input type="time" value={s.start} onChange={e=>updateSlot(i,{start:e.target.value})}/></div>
-              <div className="field" style={{flex:1}}><label>Bis (optional)</label>
-                <input type="time" value={s.end} onChange={e=>updateSlot(i,{end:e.target.value})}/></div>
-            </div>
+            {(()=>{
+              // Zeitfenster des gewählten Tages ermitteln, um die Uhrzeit-Felder technisch
+              // auf dieses Fenster zu begrenzen (min/max), statt nur hinterher abzulehnen.
+              const key=DOW_KEYS[new Date(s.date+"T00:00:00").getDay()];
+              const wh=info&&info.work_hours;
+              const day=wh&&typeof wh==="object"?wh[key]:null;
+              const timeMin=(day&&day.von)?day.von:undefined;
+              const timeMax=(day&&day.bis)?day.bis:undefined;
+              return <div style={{display:"flex",gap:10}}>
+                <div className="field" style={{flex:1}}><label>Von</label>
+                  <input type="time" value={s.start} min={timeMin} max={timeMax} onChange={e=>updateSlot(i,{start:e.target.value})}/></div>
+                <div className="field" style={{flex:1}}><label>Bis (optional)</label>
+                  <input type="time" value={s.end} min={timeMin} max={timeMax} onChange={e=>updateSlot(i,{end:e.target.value})}/></div>
+              </div>;
+            })()}
             {(()=>{
               const key=DOW_KEYS[new Date(s.date+"T00:00:00").getDay()];
               if(key==="so") return <div style={{fontSize:12,color:"#B3362A",marginTop:7}}>Sonntags werden keine Termine angeboten.</div>;
