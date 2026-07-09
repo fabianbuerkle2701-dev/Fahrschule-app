@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.19";
+const APP_VERSION = "1.20.20";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -588,6 +588,11 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.20", date:"Juli 2026", changes:[
+    "Die Fehlermeldung bei einem Termin außerhalb der Arbeitszeit nennt jetzt genau die betroffene Uhrzeit und ob sie vor Beginn oder nach Ende der Arbeitszeit liegt, statt nur pauschal die Startzeit zu nennen",
+    "Die Öffnungszeiten-Anzeige auf der Buchungsseite ist jetzt farblich klarer: fett und rot bei eingeschränkter Zeit, grün bei ganztägig geöffnet",
+    "Zusätzliche Absicherung: Start-/Endzeit werden jetzt aktiv zurückgesetzt, wenn sie beim Datumswechsel nicht mehr zum neuen Tag passen, statt nur in der Anzeige gefiltert zu werden",
+  ]},
   { v:"1.20.19", date:"Juli 2026", changes:[
     "Die Uhrzeit-Auswahl auf der Buchungsseite ist jetzt eine Auswahlliste in Viertelstunden-Schritten statt eines freien Zeitfelds, und enthält ausschließlich Zeiten innerhalb der vom Fahrlehrer eingestellten Arbeitszeit des jeweiligen Tages. Zeiten außerhalb sind technisch gar nicht mehr wählbar",
   ]},
@@ -7647,6 +7652,22 @@ function BookingPage({code}){
           setErr("An diesem Tag werden keine Termine angeboten, auf den nächsten freien Tag gesprungen.");
         }
       }
+      // Sicherheitsbereinigung: passen die bisherigen Start-/Endzeiten nicht mehr zum neuen Tag
+      // (z.B. weil der neue Tag ein engeres Zeitfenster hat), aktiv im State zurücksetzen, statt
+      // nur in der Anzeige zu filtern. Verhindert, dass ein alter, nicht mehr gültiger Wert
+      // unbemerkt bis zum Absenden erhalten bleibt.
+      const key2=DOW_KEYS[d.getDay()];
+      const day2=wh&&typeof wh==="object"?wh[key2]:null;
+      setForm(f=>({...f, slots:f.slots.map((s,idx)=>{
+        if(idx!==i) return s;
+        const merged={...s,...patch};
+        if(day2&&day2.von&&day2.bis){
+          if(merged.start&&(merged.start<day2.von||merged.start>day2.bis)) merged.start=day2.von;
+          if(merged.end&&(merged.end<day2.von||merged.end>day2.bis)) merged.end="";
+        }
+        return merged;
+      })}));
+      return;
     }
     setForm(f=>({...f, slots:f.slots.map((s,idx)=>idx===i?{...s,...patch}:s)}));
   }
@@ -7673,7 +7694,21 @@ function BookingPage({code}){
       if(!s.date||!s.start){ setErr("Bitte bei jedem Termin Datum und Uhrzeit angeben."); return; }
       if(ymd(s.date)<ymd(new Date())){ setErr("Bitte bei jedem Termin einen Tag ab heute wählen."); return; }
       if(!withinWorkHours(s.date,s.start,s.end)){
-        setErr("Der Termin am "+dayMonth(new Date(s.date+"T00:00:00"))+" um "+s.start+" liegt außerhalb der Arbeitszeit deines Fahrlehrers. Bitte eine andere Zeit wählen.");
+        const key=DOW_KEYS[new Date(s.date+"T00:00:00").getDay()];
+        const wh=info&&info.work_hours;
+        const day=wh&&typeof wh==="object"?wh[key]:null;
+        const dTxt=dayMonth(new Date(s.date+"T00:00:00"));
+        let msg;
+        if(key==="so"||(day&&day.blocked)){
+          msg="Am "+dTxt+" werden keine Termine angeboten.";
+        }else if(day&&day.von&&day.bis&&s.start<day.von){
+          msg=s.start+" Uhr liegt vor der Arbeitszeit deines Fahrlehrers am "+dTxt+" (ab "+day.von+" Uhr).";
+        }else if(day&&day.von&&day.bis&&s.end&&s.end>day.bis){
+          msg=s.end+" Uhr liegt nach der Arbeitszeit deines Fahrlehrers am "+dTxt+" (bis "+day.bis+" Uhr).";
+        }else{
+          msg="Der Termin am "+dTxt+" liegt außerhalb der Arbeitszeit deines Fahrlehrers.";
+        }
+        setErr(msg+" Bitte eine andere Zeit wählen.");
         return;
       }
     }
@@ -7797,7 +7832,8 @@ function BookingPage({code}){
         const dowKey=DOW_KEYS[d.getDay()];
         const dayHours=(info&&info.work_hours&&typeof info.work_hours==="object")?info.work_hours[dowKey]:null;
         const dayBlocked=dowKey==="so"||!!(dayHours&&dayHours.blocked);
-        const hoursLabel=dayBlocked?null:((dayHours&&dayHours.von&&dayHours.bis)?dayHours.von+" – "+dayHours.bis+" Uhr":"ganztägig geöffnet");
+        const hasTimeLimit=!dayBlocked&&dayHours&&dayHours.von&&dayHours.bis;
+        const hoursLabel=dayBlocked?null:(hasTimeLimit?dayHours.von+" – "+dayHours.bis+" Uhr":"ganztägig geöffnet");
         // Belegte Minuten an diesem Tag (bestätigte Termine), für die Limit-Anzeige
         const dayLim=(info&&info.day_limit)||0;
         const usedMin=(byDay[k]||[]).filter(b=>b.status!=="pending").reduce((sum,b)=>{
@@ -7819,7 +7855,7 @@ function BookingPage({code}){
               </div>
               {dayBlocked
                 ? <div style={{fontSize:11.5,color:"#B3362A",marginTop:2}}>Geschlossen</div>
-                : <div style={{fontSize:11.5,color:"var(--muted)",marginTop:2}}>{hoursLabel}</div>}
+                : <div style={{fontSize:11.5,fontWeight:hasTimeLimit?800:600,color:hasTimeLimit?"#B3362A":"#1B8F4D",marginTop:2}}>{hoursLabel}</div>}
             </div>
             {dayBlocked
               ? <span style={{padding:"6px 12px",borderRadius:8,fontSize:12.5,fontWeight:700,fontFamily:"var(--font-d)",
