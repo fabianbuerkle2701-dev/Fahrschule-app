@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.6";
+const APP_VERSION = "1.20.9";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -588,6 +588,16 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.9", date:"Juli 2026", changes:[
+    "Neu: Die Nachricht, die beim Verschicken des Buchungslinks per WhatsApp geht, ist jetzt in den Einstellungen unter Nachricht beim Buchungslink frei bearbeitbar. Leer lassen = eingebaute Standard-Nachricht wird verwendet. Mit {LINK} lässt sich festlegen, wo der Link im Text erscheinen soll (benötigt SQL-Schritt)",
+  ]},
+  { v:"1.20.8", date:"Juli 2026", changes:[
+    "Die WhatsApp-Bestätigungsnachricht an den Schüler nennt jetzt zusätzlich die Dauer in Minuten (z.B. 09:00 bis 09:45 Uhr (45 Minuten))",
+    "Korrigiert: Der Hinweistext beim Verschicken des Buchungslinks sagte fälschlich, es käme keine extra Nachricht. Er sagt jetzt richtig, dass nach der Bestätigung eine WhatsApp-Nachricht mit den Details folgt",
+  ]},
+  { v:"1.20.7", date:"Juli 2026", changes:[
+    "Die WhatsApp-Nachricht beim Verschicken des Buchungslinks enthält jetzt eine kurze Schritt-für-Schritt-Anleitung für den Schüler",
+  ]},
   { v:"1.20.6", date:"Juli 2026", changes:[
     "Behoben: Aufklappbare Bereiche in den Einstellungen (Meine Fahrschule, Fahrzeuge, Führerscheinklassen, Ausbildungsfahrt-Arten, Kosten) klappten sich nach einer Änderung darin ungewollt wieder zu. Sie bleiben jetzt offen",
   ]},
@@ -1130,6 +1140,16 @@ async function saveLimitsToProfile(uid,dayLim,weekLim){
 async function saveTeacherNameToProfile(uid,name){
   if(!uid) return;
   try{ await sb.from("profiles").upsert({ id:uid, display_name:name||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
+}
+// Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
+async function fetchBookingMessage(uid){
+  const { data, error } = await sb.from("profiles").select("booking_message").eq("id",uid).maybeSingle();
+  if(error){ console.error(error); return ""; }
+  return (data&&data.booking_message)||"";
+}
+async function saveBookingMessage(uid,text){
+  if(!uid) return;
+  try{ await sb.from("profiles").upsert({ id:uid, booking_message:text||null }, { onConflict:"id" }); }catch(e){ console.error(e); }
 }
 // Arbeitszeiten je Wochentag speichern, damit Schüler über den Buchungslink nur innerhalb
 // dieser Zeiten einen Termin vorschlagen können. Format: {mo:{von,bis},di:{...},...} pro Tag,
@@ -2331,6 +2351,19 @@ function App(){
     }).catch(e=>{ console.error("Profildaten konnten nicht geladen werden:",e); setProfileData({}); setProfileComplete(true); });
   },[uid]);
 
+  // Eigener Text für die Buchungslink-Nachricht. Leer = Standardtext wird verwendet.
+  const [bookingMessage,setBookingMessage]=useState(null); // null solange nicht geladen
+  useEffect(()=>{
+    if(!uid) return;
+    fetchBookingMessage(uid).then(setBookingMessage).catch(()=>setBookingMessage(""));
+  },[uid]);
+  const bookingMsgTimer=useRef(null);
+  function writeBookingMessage(text){
+    setBookingMessage(text);
+    if(bookingMsgTimer.current) clearTimeout(bookingMsgTimer.current);
+    bookingMsgTimer.current=setTimeout(()=>{ if(uid) saveBookingMessage(uid,text); },500);
+  }
+
   // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
   const limitSyncReady=useRef(false);
   useEffect(()=>{
@@ -3438,7 +3471,14 @@ function App(){
       alert("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
       return;
     }
-    const text="Hier kannst du einen Fahrstunden-Termin vorschlagen: "+url;
+    const defaultText="Hier kannst du einen Fahrstunden-Termin vorschlagen:\n"+url+
+      "\n\nSo geht's:\n1. Link antippen\n2. Namen eingeben\n3. Wunschtermin(e) auswählen\n4. Absenden\n\nIch bestätige den Termin danach und schicke dir eine WhatsApp-Nachricht mit den Details.";
+    // Eigenen Text verwenden, falls hinterlegt (Platzhalter {LINK} wird ersetzt; steht kein
+    // Platzhalter drin, wird der Link automatisch ans Ende angehängt, damit er nie fehlt)
+    let text=defaultText;
+    if(bookingMessage&&bookingMessage.trim()){
+      text=bookingMessage.includes("{LINK}") ? bookingMessage.split("{LINK}").join(url) : bookingMessage.trim()+"\n\n"+url;
+    }
     try{
       if(navigator.share){ await navigator.share({title:"Termin vorschlagen",text,url}); return; }
     }catch(e){ /* abgebrochen */ return; }
@@ -5149,6 +5189,24 @@ function App(){
                 </div>;
               })}
         </div>}
+      </div>
+
+      <div className="eyebrow">Nachricht beim Buchungslink</div>
+      <div className="card" style={{padding:"13px 14px"}}>
+        <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 10px"}}>
+          Dieser Text wird verschickt, wenn du den Buchungslink an einen Schüler sendest. Lässt du das Feld leer, wird die eingebaute Standard-Nachricht verwendet. Schreib {"{LINK}"} an die Stelle, wo der Link erscheinen soll, sonst wird er automatisch ans Ende angehängt.
+        </p>
+        {bookingMessage===null
+          ? <div style={{fontSize:13,color:"var(--muted)",padding:"6px 2px"}}>Lädt…</div>
+          : <>
+              <textarea value={bookingMessage} onChange={e=>writeBookingMessage(e.target.value)}
+                placeholder={"Hier kannst du einen Fahrstunden-Termin vorschlagen:\n{LINK}\n\nSo geht's: ..."}
+                rows={6}
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"10px 12px",fontSize:14,fontFamily:"inherit",resize:"vertical"}}/>
+              {bookingMessage.trim()&&<button className="btn btn-ghost" style={{marginTop:9,fontSize:12.5,padding:"8px 12px"}}
+                onClick={()=>{ if(confirm("Eigenen Text löschen und zur Standard-Nachricht zurückkehren?")) writeBookingMessage(""); }}>
+                Zurücksetzen auf Standard</button>}
+            </>}
       </div>
 
       {/* Ausbildungslimit */}
