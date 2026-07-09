@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.15";
+const APP_VERSION = "1.20.16";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -588,6 +588,10 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.16", date:"Juli 2026", changes:[
+    "Was ist neu? zeigt jetzt nur noch die aktuellste Version, mit einem Knopf Ältere Versionen anzeigen bei Bedarf, statt einer ewig langen Liste",
+    "Behoben: Die eigene Nachricht beim Buchungslink wurde beim erneuten Öffnen nicht gespeichert (derselbe Grund wie zuvor bei den Arbeitszeiten: eine fehlende Pflichtangabe beim Speichern). Zur Sicherheit wurden zwei weitere, ähnlich gefährdete Speicherstellen (Anzeigename, Tageslimit) vorsorglich mit demselben Fix versehen",
+  ]},
   { v:"1.20.15", date:"Juli 2026", changes:[
     "Die Zustimmung zur Datenschutzerklärung auf der Buchungsseite ist jetzt kein separates Häkchen mehr, sondern nur ein Hinweistext direkt unter dem Absenden-Knopf (mit Link). Das Absenden selbst gilt als Zustimmung, kein Extra-Klick nötig",
   ]},
@@ -1153,12 +1157,20 @@ async function touchLastSeen(uid){
 // Persönliches Limit am Profil speichern, damit die Buchungsseite es lesen kann
 async function saveLimitsToProfile(uid,dayLim,weekLim){
   if(!uid) return;
-  try{ await sb.from("profiles").upsert({ id:uid, day_limit:dayLim, week_limit:weekLim }, { onConflict:"id" }); }catch(e){ /* offline o.ä. */ }
+  try{
+    const { data:sess } = await sb.auth.getSession();
+    const email = sess && sess.session && sess.session.user && sess.session.user.email;
+    await sb.from("profiles").upsert({ id:uid, email, day_limit:dayLim, week_limit:weekLim }, { onConflict:"id" });
+  }catch(e){ console.error("Limits speichern fehlgeschlagen:",e); }
 }
-// Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender). Wenn die Spalte fehlt, bleibt localStorage die Quelle.
+// Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender).
 async function saveTeacherNameToProfile(uid,name){
   if(!uid) return;
-  try{ await sb.from("profiles").upsert({ id:uid, display_name:name||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
+  try{
+    const { data:sess } = await sb.auth.getSession();
+    const email = sess && sess.session && sess.session.user && sess.session.user.email;
+    await sb.from("profiles").upsert({ id:uid, email, display_name:name||null }, { onConflict:"id" });
+  }catch(e){ console.error("Anzeigename speichern fehlgeschlagen:",e); }
 }
 // Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
 async function fetchBookingMessage(uid){
@@ -1168,7 +1180,10 @@ async function fetchBookingMessage(uid){
 }
 async function saveBookingMessage(uid,text){
   if(!uid) return;
-  try{ await sb.from("profiles").upsert({ id:uid, booking_message:text||null }, { onConflict:"id" }); }catch(e){ console.error(e); }
+  const { data:sess } = await sb.auth.getSession();
+  const email = sess && sess.session && sess.session.user && sess.session.user.email;
+  const { error } = await sb.from("profiles").upsert({ id:uid, email, booking_message:text||null }, { onConflict:"id" });
+  if(error) throw new Error(error.message||"Nachricht konnte nicht gespeichert werden");
 }
 // Arbeitszeiten je Wochentag speichern, damit Schüler über den Buchungslink nur innerhalb
 // dieser Zeiten einen Termin vorschlagen können. Format: {mo:{von,bis},di:{...},...} pro Tag,
@@ -2248,6 +2263,7 @@ function App(){
   const [stuSig,setStuSig]=useState(null);
   const [updateToast,setUpdateToast]=useState(false);
   const [showChangelog,setShowChangelog]=useState(false);
+  const [changelogExpanded,setChangelogExpanded]=useState(false); // zeigt ältere Versionen, falls gewünscht
   // Beim Start prüfen, ob seit dem letzten Öffnen ein Update passiert ist. Wenn ja, automatisch
   // "Was ist neu" zeigen. Bei einer ganz neuen Installation (noch nie eine Version gesehen)
   // wird nichts automatisch geöffnet, nur die aktuelle Version wird gemerkt.
@@ -2381,6 +2397,7 @@ function App(){
 
   // Eigener Text für die Buchungslink-Nachricht. Leer = Standardtext wird verwendet.
   const [bookingMessage,setBookingMessage]=useState(null); // null solange nicht geladen
+  const [bookingMessageError,setBookingMessageError]=useState("");
   useEffect(()=>{
     if(!uid) return;
     fetchBookingMessage(uid).then(setBookingMessage).catch(()=>setBookingMessage(""));
@@ -2389,7 +2406,11 @@ function App(){
   function writeBookingMessage(text){
     setBookingMessage(text);
     if(bookingMsgTimer.current) clearTimeout(bookingMsgTimer.current);
-    bookingMsgTimer.current=setTimeout(()=>{ if(uid) saveBookingMessage(uid,text); },500);
+    bookingMsgTimer.current=setTimeout(()=>{
+      if(!uid) return;
+      saveBookingMessage(uid,text).then(()=>setBookingMessageError(""))
+        .catch(e=>{ console.error("Buchungsnachricht speichern fehlgeschlagen:",e); setBookingMessageError("Speichern fehlgeschlagen: "+(e.message||"unbekannter Fehler")); });
+    },500);
   }
 
   // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
@@ -5281,6 +5302,7 @@ function App(){
         <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,margin:"0 0 10px"}}>
           Dieser Text wird verschickt, wenn du den Buchungslink an einen Schüler sendest. Lässt du das Feld leer, wird die eingebaute Standard-Nachricht verwendet. Schreib {"{LINK}"} an die Stelle, wo der Link erscheinen soll, sonst wird er automatisch ans Ende angehängt.
         </p>
+        {bookingMessageError&&<div style={{fontSize:12.5,color:"#B3362A",background:"#FDECEA",borderRadius:10,padding:"10px 12px",marginBottom:10}}>{bookingMessageError}</div>}
         {bookingMessage===null
           ? <div style={{fontSize:13,color:"var(--muted)",padding:"6px 2px"}}>Lädt…</div>
           : <>
@@ -6924,14 +6946,14 @@ function App(){
         </>}
       </div>
     </div>}
-    {showChangelog&&<div onClick={()=>setShowChangelog(false)}
+    {showChangelog&&<div onClick={()=>{ setShowChangelog(false); setChangelogExpanded(false); }}
       style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:120,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,
         borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",maxHeight:"85vh",overflowY:"auto"}}>
         <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
         <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,marginBottom:4}}>Was ist neu?</h3>
         <p style={{fontSize:13,color:"var(--muted)",marginBottom:18}}>Die neuesten Verbesserungen der App</p>
-        {CHANGELOG.map((entry,idx)=>
+        {(changelogExpanded?CHANGELOG:CHANGELOG.slice(0,1)).map((entry,idx)=>
           <div key={entry.v} style={{marginBottom:18}}>
             <div style={{display:"flex",alignItems:"baseline",gap:8,marginBottom:8}}>
               <span style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,
@@ -6944,7 +6966,11 @@ function App(){
               {entry.changes.map((c,i)=><li key={i} style={{marginBottom:3}}>{c}</li>)}
             </ul>
           </div>)}
-        <button className="btn btn-ghost btn-block" style={{marginTop:6}} onClick={()=>setShowChangelog(false)}>Schließen</button>
+        {!changelogExpanded&&CHANGELOG.length>1&&
+          <button className="btn btn-ghost btn-block" style={{marginBottom:10,fontSize:13}} onClick={()=>setChangelogExpanded(true)}>
+            Ältere Versionen anzeigen
+          </button>}
+        <button className="btn btn-ghost btn-block" style={{marginTop:6}} onClick={()=>{ setShowChangelog(false); setChangelogExpanded(false); }}>Schließen</button>
       </div>
     </div>}
     {flash&&<div style={{position:"fixed",left:"50%",transform:"translateX(-50%)",
