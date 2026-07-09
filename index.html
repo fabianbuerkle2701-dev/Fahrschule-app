@@ -556,7 +556,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.12";
+const APP_VERSION = "1.20.13";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -588,6 +588,9 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.13", date:"Juli 2026", changes:[
+    "Behoben: Änderungen an Meine Arbeitszeiten (z.B. einen Tag sperren) wurden lautlos nicht gespeichert, weil beim Speichern eine Pflichtangabe fehlte. Fehler beim Speichern werden jetzt sichtbar angezeigt, statt im Hintergrund zu verschwinden",
+  ]},
   { v:"1.20.12", date:"Juli 2026", changes:[
     "Arbeitszeiten neu geregelt: Tage sind jetzt standardmäßig ganztägig buchbar. Mit dem Kreuz neben einem Tag lässt er sich komplett aus der Buchbarkeit herausnehmen. Trägst du zusätzlich eine Zeit ein, ist der Tag nur in diesem Fenster buchbar. Sonntag bleibt weiterhin fest gesperrt",
   ]},
@@ -1165,7 +1168,10 @@ async function saveBookingMessage(uid,text){
 // leeres/fehlendes von+bis bedeutet "an diesem Tag nicht buchbar".
 async function saveWorkHoursToProfile(uid,hours){
   if(!uid) return;
-  try{ await sb.from("profiles").upsert({ id:uid, work_hours:hours||null }, { onConflict:"id" }); }catch(e){ /* Spalte evtl. nicht vorhanden, nicht schlimm */ }
+  const { data:sess } = await sb.auth.getSession();
+  const email = sess && sess.session && sess.session.user && sess.session.user.email;
+  const { error } = await sb.from("profiles").upsert({ id:uid, email, work_hours:hours||null }, { onConflict:"id" });
+  if(error) throw new Error(error.message||"Arbeitszeiten konnten nicht gespeichert werden");
 }
 async function fetchWorkHours(uid){
   const { data, error } = await sb.from("profiles").select("work_hours").eq("id",uid).maybeSingle();
@@ -2286,7 +2292,13 @@ function App(){
   function writeWorkHours(next){
     setWorkHours(next);
     if(workHoursTimer.current) clearTimeout(workHoursTimer.current);
-    workHoursTimer.current=setTimeout(()=>{ if(uid) saveWorkHoursToProfile(uid,next); },500);
+    workHoursTimer.current=setTimeout(()=>{
+      if(!uid) return;
+      saveWorkHoursToProfile(uid,next).catch(e=>{
+        console.error("Arbeitszeiten speichern fehlgeschlagen:",e);
+        setWorkHoursError("Speichern fehlgeschlagen: "+(e.message||"unbekannter Fehler")+". Bitte erneut versuchen.");
+      });
+    },500);
   }
   useEffect(()=>{ try{ localStorage.setItem("v3_day_limit",String(dayLimit)); }catch(e){} },[dayLimit]);
   useEffect(()=>{ try{ localStorage.setItem("v3_week_limit",String(weekLimit)); }catch(e){} },[weekLimit]);
