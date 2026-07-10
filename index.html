@@ -571,7 +571,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.35";
+const APP_VERSION = "1.20.36";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -603,6 +603,11 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.36", date:"Juli 2026", changes:[
+    "Neu: Fahrschüler-Bereich. Über den bestehenden Buchungslink gibt es jetzt oben den Reiter Mein Fortschritt. Dort meldet sich der Schüler mit Namen und persönlichem PIN an und sieht seinen ADK-Stand, seine Strecken und seinen kompletten Terminverlauf (anstehend und vergangen)",
+    "PIN je Schüler: In den Schülerdaten (Profil) vergibt der Fahrlehrer einen Start-PIN und teilt den Zugang per Knopf. Beim ersten Login legt der Schüler daraus einen eigenen PIN fest, den nur er kennt. Danach bleibt er auf seinem Gerät angemeldet. Vergisst er den PIN, setzt der Fahrlehrer einfach einen neuen Start-PIN, der den selbst gewählten überschreibt",
+    "Hinweis für Fabian: Dieser Bereich benötigt zwei neue Supabase-Funktionen (public_student_overview und public_student_set_pin). Das passende SQL liegt der Lieferung als eigene Datei bei und muss einmalig im Supabase SQL-Editor ausgeführt werden, sonst zeigt der Bereich einen Ladefehler",
+  ]},
   { v:"1.20.35", date:"Juli 2026", changes:[
     "Aufgeräumter Kalender: Buchungslink senden, Termine aus Screenshot übernehmen und Urlaub eintragen stecken jetzt in einem Klappmenü Kalender-Aktionen. Auch die offenen Terminvorschläge sind eingeklappt und zeigen nur noch die Anzahl, zum Bestätigen einfach aufklappen",
   ]},
@@ -1509,6 +1514,19 @@ async function publicMySlots(code,name,von,bis){
   const { data, error } = await sb.rpc("public_my_slots",{ code, p_name:name, von, bis });
   if(error){ console.error(error); return []; } // bei Fehler einfach keine Hervorhebung
   return data||[];
+}
+// Fahrschüler-Bereich: ADK, Strecken und Terminverlauf, per Code + Name + PIN.
+// Braucht die Supabase-RPCs public_student_overview und public_student_set_pin (SQL liegt bei).
+async function publicStudentOverview(code,name,pin){
+  const { data, error } = await sb.rpc("public_student_overview",{ code, p_name:name, p_pin:pin });
+  if(error){ console.error(error); throw new Error(error.message); }
+  return (data&&data[0])||null;
+}
+// Schüler ändert seinen PIN selbst (alter PIN muss stimmen). Gibt true bei Erfolg.
+async function publicStudentSetPin(code,name,oldPin,newPin){
+  const { data, error } = await sb.rpc("public_student_set_pin",{ code, p_name:name, p_old:oldPin, p_new:newPin });
+  if(error){ console.error(error); throw new Error(error.message); }
+  return data===true;
 }
 // Buchungs-Code des eingeloggten Fahrlehrers holen/anlegen
 async function fetchBookingCode(uid){
@@ -3661,6 +3679,24 @@ function App(){
     catch(e){ prompt("Link zum Kopieren:",url); }
   }
 
+  // Fahrschüler-Zugang teilen: Buchungslink + Name + persönlicher PIN
+  async function shareStudentAccess(s){
+    if(!bookingCode){
+      showFlash("Erzeuge Buchungscode…");
+      try{ const fresh=await fetchBookingCode(uid); if(fresh) setBookingCode(fresh); else { alert("Der Link konnte nicht erzeugt werden."); return; } }
+      catch(e){ alert("Der Link konnte nicht erzeugt werden:\n"+(e.message||"unbekannter Fehler")); return; }
+    }
+    if(!(s.pin&&s.pin.length>=4)){ alert("Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben."); return; }
+    const url=bookingURL();
+    const text="Hallo "+((s.vorname||"").trim()||"")+",\n\nüber diesen Link kannst du jederzeit deinen Ausbildungsfortschritt (ADK), deine Strecken und deine Termine ansehen:\n"+url+
+      "\n\nSo geht's:\n1. Link antippen\n2. oben auf Mein Fortschritt tippen\n3. deinen Namen ("+dispName(s)+") und deinen PIN eingeben\n\nDein persönlicher PIN: "+s.pin+"\n\nBitte gib den PIN nicht weiter.";
+    try{
+      if(navigator.share){ await navigator.share({title:"Dein Fahrschüler-Zugang",text}); return; }
+    }catch(e){ return; }
+    try{ await navigator.clipboard.writeText(text); showFlash("✓ Zugangs-Text kopiert"); }
+    catch(e){ prompt("Text zum Kopieren:",text); }
+  }
+
   // Bulk: fill or clear a whole ADK section
   function bulkADKSection(sec,fill){
     const items={...active.items};
@@ -4430,6 +4466,38 @@ function App(){
         <label>Bemerkungen</label>
         <textarea rows={3} defaultValue={active.bemerkungen||""}
           onBlur={e=>{ if(e.target.value!==(active.bemerkungen||"")) updateActive({bemerkungen:e.target.value}); }}/>
+      </div>
+
+      {/* Fahrschüler-Zugang: eigener PIN, damit der Schüler seinen Fortschritt sehen kann */}
+      <div className="card" style={{padding:"14px 15px",marginTop:6,marginBottom:4}}>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:14,marginBottom:4}}>Fahrschüler-Zugang</div>
+        <p style={{fontSize:12.5,color:"var(--muted)",lineHeight:1.5,marginBottom:12}}>
+          Vergib einen persönlichen PIN. Damit kann {dispName(active)} über deinen Buchungslink im Bereich Mein Fortschritt den eigenen ADK-Stand, die Strecken und den Terminverlauf ansehen. Ohne PIN ist der Zugang gesperrt.
+        </p>
+        <div className="field" style={{marginBottom:10}}>
+          <label>PIN (4 bis 8 Ziffern)</label>
+          <input type="text" inputMode="numeric" maxLength={8} value={active.pin||""} placeholder="z.B. 2468"
+            onChange={e=>updateActive({pin:e.target.value.replace(/\D/g,"").slice(0,8), pinCustom:"", pinChanged:false})}
+            style={{letterSpacing:"0.2em",fontFamily:"var(--font-d)",fontWeight:700}}/>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="btn btn-ghost" style={{flex:1,justifyContent:"center",gap:8}}
+            onClick={()=>updateActive({pin:String(Math.floor(1000+Math.random()*9000)), pinCustom:"", pinChanged:false})}>
+            Zufälligen PIN erzeugen
+          </button>
+          <button className="btn btn-primary" style={{flex:1,justifyContent:"center",gap:8}}
+            disabled={!(active.pin&&active.pin.length>=4)}
+            onClick={()=>shareStudentAccess(active)}>
+            Zugang teilen
+          </button>
+        </div>
+        {!(active.pin&&active.pin.length>=4)&&
+          <p style={{fontSize:11.5,color:"var(--muted)",marginTop:8}}>Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.</p>}
+        <p style={{fontSize:11.5,color:"var(--muted)",marginTop:8,lineHeight:1.5}}>
+          {active.pinChanged
+            ? "Der Schüler hat den PIN inzwischen selbst geändert. Du siehst hier nur noch den Start-PIN. Vergibst du einen neuen PIN, wird der selbst gewählte des Schülers überschrieben und er legt beim nächsten Login wieder einen eigenen fest."
+            : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt."}
+        </p>
       </div>
       </>}
 
@@ -7743,6 +7811,215 @@ function getBookingCodeFromURL(){
   return null;
 }
 
+// ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
+function StudentArea({code,info}){
+  const LS_NAME="v3_sa_name_"+code, LS_PIN="v3_sa_pin_"+code;
+  const [name,setName]=React.useState(()=>{ try{ return localStorage.getItem(LS_NAME)||""; }catch(e){ return ""; } });
+  const [pin,setPin]=React.useState(()=>{ try{ return localStorage.getItem(LS_PIN)||""; }catch(e){ return ""; } });
+  const [data,setData]=React.useState(null);   // Überblick nach erfolgreichem Login
+  const [loading,setLoading]=React.useState(false);
+  const [err,setErr]=React.useState("");
+  // PIN-Ändern (Erst-Login oder freiwillig)
+  const [changing,setChanging]=React.useState(false);
+  const [np1,setNp1]=React.useState(""), [np2,setNp2]=React.useState("");
+  const [changeErr,setChangeErr]=React.useState(""), [changeBusy,setChangeBusy]=React.useState(false);
+
+  async function login(useName,usePin){
+    const n=(useName!==undefined?useName:name).trim(), p=(usePin!==undefined?usePin:pin).trim();
+    if(!n||!p){ setErr("Bitte Namen und PIN eingeben."); return; }
+    setLoading(true); setErr("");
+    try{
+      const d=await publicStudentOverview(code,n,p);
+      if(!d){ setErr("Name oder PIN stimmt nicht. Bitte prüfe die Schreibweise deines Namens und den PIN von deinem Fahrlehrer."); setLoading(false); return; }
+      setData(d);
+      try{ localStorage.setItem(LS_NAME,n); localStorage.setItem(LS_PIN,p); }catch(e){}
+      // Erst-Login: noch der Start-PIN vom Fahrlehrer -> zum eigenen PIN auffordern
+      if(d.pin_ist_start){ setChanging(true); }
+    }catch(e){ setErr("Es gab ein Problem beim Laden. Bitte später erneut versuchen."); }
+    setLoading(false);
+  }
+
+  // Beim Öffnen automatisch anmelden, wenn Name+PIN auf dem Gerät gespeichert sind
+  React.useEffect(()=>{ if(name&&pin&&!data){ login(name,pin); } /* eslint-disable-next-line */ },[]);
+
+  async function saveNewPin(){
+    if(np1.length<4){ setChangeErr("Der neue PIN muss mindestens 4 Ziffern haben."); return; }
+    if(np1!==np2){ setChangeErr("Die beiden neuen PINs stimmen nicht überein."); return; }
+    if(np1===pin){ setChangeErr("Bitte einen anderen als den bisherigen PIN wählen."); return; }
+    setChangeBusy(true); setChangeErr("");
+    try{
+      const ok=await publicStudentSetPin(code,name.trim(),pin.trim(),np1);
+      if(!ok){ setChangeErr("Der PIN konnte nicht geändert werden. Bitte erneut versuchen."); setChangeBusy(false); return; }
+      setPin(np1);
+      try{ localStorage.setItem(LS_PIN,np1); }catch(e){}
+      setChanging(false); setNp1(""); setNp2("");
+      setData(d=>d?{...d,pin_ist_start:false}:d);
+    }catch(e){ setChangeErr("Der PIN konnte nicht geändert werden. Bitte erneut versuchen."); }
+    setChangeBusy(false);
+  }
+
+  function logout(){
+    setData(null); setPin(""); setErr("");
+    try{ localStorage.removeItem(LS_PIN); }catch(e){}
+  }
+
+  const inp={width:"100%",border:"1.5px solid var(--line)",borderRadius:11,padding:"12px 13px",fontSize:16,background:"var(--field-bg)",color:"var(--ink)"};
+
+  // ── Nicht eingeloggt: Login-Maske ──
+  if(!data){
+    return <div className="card" style={{padding:"20px 18px"}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:18,marginBottom:6}}>Mein Fortschritt</div>
+      <p style={{fontSize:13,color:"var(--muted)",lineHeight:1.5,marginBottom:16}}>
+        Melde dich mit deinem Namen und deinem persönlichen PIN an. Den PIN bekommst du von deinem Fahrlehrer. Danach siehst du deinen Ausbildungsstand, deine Strecken und deine Termine.
+      </p>
+      <div style={{marginBottom:12}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:6}}>Dein Name</label>
+        <input type="text" value={name} placeholder="z.B. Anna Müller" onChange={e=>setName(e.target.value)} style={inp}/>
+      </div>
+      <div style={{marginBottom:16}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:6}}>Dein PIN</label>
+        <input type="password" inputMode="numeric" value={pin} placeholder="••••"
+          onChange={e=>setPin(e.target.value.replace(/\D/g,"").slice(0,8))}
+          onKeyDown={e=>{ if(e.key==="Enter") login(); }}
+          style={{...inp,letterSpacing:"0.3em",fontFamily:"var(--font-d)",fontWeight:700}}/>
+      </div>
+      {err&&<div style={{background:"#FDECEA",color:"#B3362A",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{err}</div>}
+      <button className="btn btn-primary btn-block" disabled={loading} onClick={()=>login()}>
+        {loading?"Wird geprüft…":"Anmelden"}
+      </button>
+    </div>;
+  }
+
+  // ── Erst-Login: PIN ändern (Pflicht) ──
+  if(changing){
+    return <div className="card" style={{padding:"20px 18px"}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:18,marginBottom:6}}>Eigenen PIN festlegen</div>
+      <p style={{fontSize:13,color:"var(--muted)",lineHeight:1.5,marginBottom:16}}>
+        Das ist dein erster Login. Bitte ersetze den Start-PIN deines Fahrlehrers durch einen eigenen, den nur du kennst. Diesen gibst du ab jetzt immer ein.
+      </p>
+      <div style={{marginBottom:12}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:6}}>Bisheriger PIN</label>
+        <input type="password" inputMode="numeric" value={pin} disabled style={{...inp,letterSpacing:"0.3em",opacity:.7}}/>
+      </div>
+      <div style={{marginBottom:12}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:6}}>Neuer PIN (4 bis 8 Ziffern)</label>
+        <input type="password" inputMode="numeric" value={np1} onChange={e=>setNp1(e.target.value.replace(/\D/g,"").slice(0,8))}
+          style={{...inp,letterSpacing:"0.3em",fontFamily:"var(--font-d)",fontWeight:700}}/>
+      </div>
+      <div style={{marginBottom:16}}>
+        <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:11,letterSpacing:".06em",textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:6}}>Neuer PIN wiederholen</label>
+        <input type="password" inputMode="numeric" value={np2} onChange={e=>setNp2(e.target.value.replace(/\D/g,"").slice(0,8))}
+          onKeyDown={e=>{ if(e.key==="Enter") saveNewPin(); }}
+          style={{...inp,letterSpacing:"0.3em",fontFamily:"var(--font-d)",fontWeight:700,border:"1.5px solid "+(np2&&np2!==np1?"#D66":"var(--line)")}}/>
+      </div>
+      {changeErr&&<div style={{background:"#FDECEA",color:"#B3362A",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{changeErr}</div>}
+      <button className="btn btn-primary btn-block" disabled={changeBusy} onClick={saveNewPin}>
+        {changeBusy?"Wird gespeichert…":"PIN speichern"}
+      </button>
+    </div>;
+  }
+
+  // ── Eingeloggt: Überblick ──
+  const adk=Array.isArray(data.adk)?data.adk:[];
+  const strecken=Array.isArray(data.strecken)?data.strecken:[];
+  const stu=data.student||{};
+  const appts=Array.isArray(data.appointments)?data.appointments:[];
+  const adkPct=adk.length?calcLern(stu.items||{},adk,stu):0;
+  const strPct=strecken.length?calcBack(stu,strecken):0;
+  const now=new Date();
+  const kommend=appts.filter(a=>new Date(a.start_at)>=now).sort((a,b)=>a.start_at.localeCompare(b.start_at));
+  const vergangen=appts.filter(a=>new Date(a.start_at)<now).sort((a,b)=>b.start_at.localeCompare(a.start_at));
+
+  const Ring=({pct,label})=>{
+    const r=26, C=2*Math.PI*r, off=C*(1-Math.max(0,Math.min(100,pct))/100);
+    return <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:6}}>
+      <svg width="68" height="68" viewBox="0 0 68 68">
+        <circle cx="34" cy="34" r={r} fill="none" stroke="var(--line)" strokeWidth="7"/>
+        <circle cx="34" cy="34" r={r} fill="none" stroke="var(--orange)" strokeWidth="7" strokeLinecap="round"
+          strokeDasharray={C} strokeDashoffset={off} transform="rotate(-90 34 34)"/>
+        <text x="34" y="39" textAnchor="middle" fontSize="16" fontWeight="800" fill="var(--ink)" fontFamily="var(--font-d)">{pct}%</text>
+      </svg>
+      <div style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>{label}</div>
+    </div>;
+  };
+
+  return <div>
+    <div className="card" style={{padding:"16px 16px 18px",marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <div>
+          <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:17}}>Hallo {(stu.vorname||name.split(" ")[0]||"").trim()||name}!</div>
+          <div style={{fontSize:12,color:"var(--muted)"}}>Dein Ausbildungsstand</div>
+        </div>
+        <button className="btn btn-ghost" style={{padding:"7px 11px",fontSize:12.5}} onClick={logout}>Abmelden</button>
+      </div>
+      <div style={{display:"flex",justifyContent:"space-around"}}>
+        {adk.length>0 && <Ring pct={adkPct} label={data.adk_titel||"Ausbildung"}/>}
+        {strecken.length>0 && <Ring pct={strPct} label={data.strecken_titel||"Strecken"}/>}
+      </div>
+    </div>
+
+    {adk.length>0 && <div className="card" style={{padding:"14px 15px",marginBottom:14}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:10}}>{data.adk_titel||"Ausbildungsdiagrammkarte"}</div>
+      {adk.map(sec=>{
+        const p=secLern(stu,sec);
+        return <div key={sec.id} style={{marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+            <span style={{fontSize:13.5,fontWeight:700}}>{sec.title}</span>
+            <span style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>{p}%</span>
+          </div>
+          <div style={{height:8,borderRadius:99,background:"var(--line)",overflow:"hidden"}}>
+            <div style={{height:"100%",width:p+"%",background:sec.color||"var(--orange)",borderRadius:99}}/>
+          </div>
+        </div>;
+      })}
+    </div>}
+
+    {strecken.length>0 && <div className="card" style={{padding:"14px 15px",marginBottom:14}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:10}}>{data.strecken_titel||"Strecken & Sonderfahrten"}</div>
+      {strecken.map(sec=>{
+        const p=secBack(stu,sec);
+        return <div key={sec.id} style={{marginBottom:12}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:5}}>
+            <span style={{fontSize:13.5,fontWeight:700}}>{sec.title}</span>
+            <span style={{fontSize:12,fontWeight:700,color:"var(--muted)"}}>{p}%</span>
+          </div>
+          <div style={{height:8,borderRadius:99,background:"var(--line)",overflow:"hidden"}}>
+            <div style={{height:"100%",width:p+"%",background:sec.color||"var(--orange)",borderRadius:99}}/>
+          </div>
+        </div>;
+      })}
+    </div>}
+
+    <div className="card" style={{padding:"14px 15px",marginBottom:14}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:10}}>Meine Termine</div>
+      {kommend.length===0&&vergangen.length===0 &&
+        <div style={{fontSize:13,color:"var(--muted)"}}>Für dich sind noch keine Termine eingetragen.</div>}
+      {kommend.length>0 && <>
+        <div style={{fontSize:11.5,fontWeight:700,letterSpacing:".05em",textTransform:"uppercase",color:"var(--muted)",margin:"4px 0 6px"}}>Anstehend</div>
+        {kommend.map((a,i)=><ApptRow key={"k"+i} a={a}/>)}
+      </>}
+      {vergangen.length>0 && <>
+        <div style={{fontSize:11.5,fontWeight:700,letterSpacing:".05em",textTransform:"uppercase",color:"var(--muted)",margin:"12px 0 6px"}}>Verlauf</div>
+        {vergangen.map((a,i)=><ApptRow key={"v"+i} a={a} past/>)}
+      </>}
+    </div>
+  </div>;
+}
+
+function ApptRow({a,past}){
+  return <div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:"1px solid var(--line)",opacity:past?0.7:1}}>
+    <div style={{width:52,flexShrink:0}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:13}}>{hm(a.start_at)}</div>
+      <div style={{fontSize:11,color:"var(--muted)"}}>{a.end_at?hm(a.end_at):""}</div>
+    </div>
+    <div style={{flex:1}}>
+      <div style={{fontSize:13.5,fontWeight:600}}>{fmtDLong(a.start_at)}</div>
+      {a.title&&<div style={{fontSize:12,color:"var(--muted)"}}>{a.title}</div>}
+    </div>
+    {a.status==="pending" && <span style={{fontSize:10.5,fontWeight:700,color:"var(--amber)",textTransform:"uppercase",letterSpacing:".03em"}}>offen</span>}
+  </div>;
+}
+
 function BookingPage({code}){
   const [info,setInfo]=React.useState(undefined); // undefined=lädt, null=ungültig
   const [week,setWeek]=React.useState(()=>startOfWeek(new Date()));
@@ -7757,6 +8034,7 @@ function BookingPage({code}){
   const [done,setDone]=React.useState(false);
   const [sending,setSending]=React.useState(false);
   const [err,setErr]=React.useState("");
+  const [tab,setTab]=React.useState("termine"); // "termine" | "fortschritt"
 
   React.useEffect(()=>{
     publicBookingInfo(code).then(d=>{
@@ -7971,6 +8249,14 @@ function BookingPage({code}){
     </header>
 
     <div className="pad">
+      <div className="seg" style={{marginBottom:16}}>
+        <button className={tab==="termine"?"on":""} onClick={()=>setTab("termine")}>Termine</button>
+        <button className={tab==="fortschritt"?"on":""} onClick={()=>setTab("fortschritt")}>Mein Fortschritt</button>
+      </div>
+
+      {tab==="fortschritt" && <StudentArea code={code} info={info}/>}
+
+      {tab==="termine" && <>
       {done&&<div className="card" style={{padding:"16px",marginBottom:14,background:"var(--green-bg)",border:"1.5px solid var(--green)"}}>
         <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:16,color:"var(--green)"}}>✓ Vielen Dank!</div>
         <div style={{fontSize:13.5,color:"var(--ink-2)",marginTop:4,lineHeight:1.5}}>Deine Anfrage ist eingegangen. Dein Fahrlehrer prüft den Termin und bestätigt ihn. Du bekommst dann Bescheid.</div>
@@ -8100,6 +8386,7 @@ function BookingPage({code}){
         </div>;
       })}
     </div>
+    </>}
 
     {form&&<div onClick={()=>setForm(null)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
       <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,
