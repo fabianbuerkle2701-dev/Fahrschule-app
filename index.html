@@ -571,7 +571,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.33";
+const APP_VERSION = "1.20.34";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -603,6 +603,10 @@ const APPT_ART = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.20.34", date:"Juli 2026", changes:[
+    "Neu: Urlaub eintragen im Kalender. Ein Zeitraum (von/bis) wird als ganztägig belegt eingetragen: Schüler können über den Buchungslink an diesen Tagen nichts vorschlagen, und die Tage zählen nicht zu den Unterrichtsstunden oder Tages-/Wochenlimits. Urlaubstage erscheinen im Kalender als eigener Banner und lassen sich durch Antippen wieder löschen",
+    "Behoben: Terminarten, die als zählt nicht als Fahrstunde markiert sind (z.B. Privater Termin), wurden trotzdem in die Wochen- und Monats-UE-Zählung einbezogen. Sie werden jetzt korrekt herausgerechnet, ebenso sonstige Tätigkeiten",
+  ]},
   { v:"1.20.33", date:"Juli 2026", changes:[
     "Behoben: Termine mit einer Endzeit vor der Startzeit (z.B. 11:00 bis 10:00 Uhr) können nicht mehr angelegt werden. Die Prüfung greift überall: auf der Buchungsseite, beim Terminvorschlag per WhatsApp und beim Anlegen/Bearbeiten von Terminen im Kalender",
   ]},
@@ -2393,6 +2397,7 @@ function App(){
   const [adkImport,setAdkImport]=useState(null); // null | {busy, error, results} ADK-Karte-Screenshot-Import
   const [waPrompt,setWaPrompt]=useState(null); // null | {appt, stu}
   const [proposalForm,setProposalForm]=useState(null); // null | {student_id, slots:[{date,start,end}], busy, error}
+  const [urlaubForm,setUrlaubForm]=useState(null); // null | {von, bis, busy, error} Urlaub eintragen
   const [theme,setTheme]=useState(()=>{ try{ return localStorage.getItem("v3_theme")||"dark"; }catch(e){ return "dark"; } });
   const [sortBy,setSortBy]=useState(()=>{ try{ return localStorage.getItem("v3_sort")||"name"; }catch(e){ return "name"; } });
   const [settingsTab,setSettingsTab]=useState("darstellung"); // Unterreiter der Einstellungen
@@ -3320,6 +3325,28 @@ function App(){
   // ── Terminvorschlag an Schüler senden (per WhatsApp, mit Buchungslink zum Bestätigen) ──
   function openProposalForm(){
     setProposalForm({ student_id:"", art:"ÜST", slots:[{ date:ymd(new Date()), start:"09:00", end:"10:00" }], busy:false, error:"" });
+  }
+  // ── Urlaub eintragen: blockt jeden Tag im Zeitraum komplett (00:00–23:59) und zählt nirgends als Unterrichtszeit ──
+  async function saveUrlaub(){
+    const f=urlaubForm; if(!f) return;
+    if(!f.von){ setUrlaubForm({...f,error:"Bitte ein Datum wählen."}); return; }
+    const von=f.von, bis=f.bis||f.von;
+    if(bis<von){ setUrlaubForm({...f,error:"Das Ende darf nicht vor dem Anfang liegen."}); return; }
+    const days=Math.round((new Date(bis+"T12:00:00")-new Date(von+"T12:00:00"))/86400000)+1;
+    if(days>60){ setUrlaubForm({...f,error:"Bitte maximal 60 Tage am Stück eintragen."}); return; }
+    setUrlaubForm({...f,busy:true,error:""});
+    let created=0;
+    for(let i=0;i<days;i++){
+      const d=ymd(addDays(new Date(von+"T12:00:00"),i));
+      // Doppelte Urlaubstage vermeiden
+      const schon=(appts||[]).some(a=>isUrlaub(a)&&ymd(a.start_at)===d);
+      if(schon) continue;
+      const c=await addAppt({ title:"Urlaub", start_at:combineDT(d,"00:00"), end_at:combineDT(d,"23:59"),
+        status:"confirmed", note:URLAUB_MARK, art:"" });
+      if(c) created++;
+    }
+    setUrlaubForm(null);
+    if(created===0) alert("Für diesen Zeitraum war bereits Urlaub eingetragen.");
   }
   async function sendProposal(){
     const f=proposalForm; if(!f) return;
@@ -4540,9 +4567,16 @@ function App(){
   // "Sonstige Tätigkeit" wird im note-Feld mit einem Marker gespeichert (kein DB-Umbau nötig)
   const SONST_MARK="\u00A7SONST\u00A7";
   function isSonstige(a){ return !!(a&&typeof a.note==="string"&&a.note.indexOf(SONST_MARK)===0); }
+  // Urlaub wird ebenfalls über einen Marker im note-Feld gespeichert (kein DB-Umbau nötig).
+  // Ein Urlaubstag ist ein bestätigter Ganztages-Termin (00:00–23:59), der den Tag für
+  // Buchungen blockiert, aber nirgends als Unterrichtszeit zählt.
+  const URLAUB_MARK="\u00A7URLAUB\u00A7";
+  function isUrlaub(a){ return !!(a&&typeof a.note==="string"&&a.note.indexOf(URLAUB_MARK)===0); }
   function noteText(a){ // sichtbarer Notiztext ohne Marker
     const n=(a&&a.note)||"";
-    return n.indexOf(SONST_MARK)===0 ? n.slice(SONST_MARK.length) : n;
+    if(n.indexOf(SONST_MARK)===0) return n.slice(SONST_MARK.length);
+    if(n.indexOf(URLAUB_MARK)===0) return n.slice(URLAUB_MARK.length);
+    return n;
   }
   function makeNote(sonstige,text){ return (sonstige?SONST_MARK:"")+(text||""); }
   // Art der Ausbildungsfahrt (ÜST, AB, ÜL, ...). Fällt auf ÜST zurück, falls leer/unbekannt (z.B. wenn ein
@@ -4580,7 +4614,7 @@ function App(){
   }
   // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
   function confirmedMinutesOnDay(dateKey,exceptId){
-    return (appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&a.id!==exceptId&&ymd(a.start_at)===dateKey)
+    return (appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&a.id!==exceptId&&ymd(a.start_at)===dateKey)
       .reduce((sum,a)=>sum+apptMin(a),0);
   }
   // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
@@ -4594,7 +4628,7 @@ function App(){
     if(weekLimit>0){
       const d=new Date(dateKey+"T12:00:00");
       const ws=ymd(startOfWeek(d)); const we=ymd(addDays(startOfWeek(d),6));
-      const usedW=(appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&a.id!==exceptId&&ymd(a.start_at)>=ws&&ymd(a.start_at)<=we)
+      const usedW=(appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&a.id!==exceptId&&ymd(a.start_at)>=ws&&ymd(a.start_at)<=we)
         .reduce((sum,a)=>sum+apptMin(a),0);
       if(usedW+minutes>weekLimit){
         return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits "+usedW+" von "+weekLimit+" Minuten bestätigt. Dieser Termin ("+minutes+" Min) würde auf "+(usedW+minutes)+" Minuten führen.";
@@ -4658,7 +4692,9 @@ function App(){
     function sumUE(list){ return list.reduce((sum,a)=>sum+ueOf(a),0); }
     const weekStartT=calWeek.getTime();
     const weekEndT=addDays(calWeek,7).getTime();
-    const confirmed=appts.filter(a=>a.status==="confirmed");
+    // Zählen nur echte Ausbildungszeit: keine sonstigen Tätigkeiten, kein Urlaub und keine
+    // Terminarten, die als "zählt nicht als Fahrstunde" markiert sind (z.B. Privater Termin).
+    const confirmed=appts.filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&artCounts(apptArt(a)));
     const weekAppts=confirmed.filter(a=>{ const t=new Date(a.start_at).getTime(); return t>=weekStartT&&t<weekEndT; });
     const monthRef=new Date(calWeek); // Monat der gezeigten Woche
     const monthAppts=confirmed.filter(a=>{ const d=new Date(a.start_at); return d.getMonth()===monthRef.getMonth()&&d.getFullYear()===monthRef.getFullYear(); });
@@ -4688,6 +4724,15 @@ function App(){
         {list.length===0
           ? <div style={{padding:"12px 14px",fontSize:13,color:"var(--muted)"}}>keine Termine</div>
           : <div>{list.map(a=>{
+              if(isUrlaub(a)){
+                return <button key={a.id} onClick={()=>openEditAppt(a)}
+                  style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 14px",textAlign:"left",
+                    borderTop:"1px solid var(--line)",borderLeft:"4px solid var(--amber)",background:"var(--amber-bg)"}}>
+                  <span style={{fontSize:17}}>🌴</span>
+                  <span style={{flex:1,fontFamily:"var(--font-d)",fontWeight:800,fontSize:14.5,color:"var(--amber)"}}>Urlaub</span>
+                  <span style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".04em"}}>Ganzer Tag</span>
+                </button>;
+              }
               const pend=a.status==="pending";
               const name=apptStudentName(a);
               const hasLeist=!pend&&apptHasLeistung(a);
@@ -4722,7 +4767,9 @@ function App(){
     // Tag als senkrechter Zeitstrahl (Stunden am Rand, Termine als Blöcke), für die Tagesansicht
     function dayTimeline(d){
       const k=ymd(d);
-      const list=(byDay[k]||[]).slice().sort((a,b)=>a.start_at.localeCompare(b.start_at));
+      const fullList=(byDay[k]||[]).slice().sort((a,b)=>a.start_at.localeCompare(b.start_at));
+      const urlaubDay=fullList.find(a=>isUrlaub(a));
+      const list=fullList.filter(a=>!isUrlaub(a));
       const PXH=64; // Pixel pro Stunde
       // Zeitbereich: mindestens 06:00–21:00, erweitert sich falls ein Termin außerhalb liegt
       let startH=6, endH=21;
@@ -4755,6 +4802,13 @@ function App(){
       cols.forEach((col,ci)=>col.forEach(item=>{ blockMeta[item.a.id]={col:ci}; }));
       const nowY=isToday(d)?yFor(new Date()):null;
       return <div className="card" style={{overflow:"hidden"}}>
+        {urlaubDay&&<button onClick={()=>openEditAppt(urlaubDay)}
+          style={{width:"100%",display:"flex",alignItems:"center",gap:10,padding:"12px 14px",textAlign:"left",
+            borderBottom:"1px solid var(--line)",borderLeft:"4px solid var(--amber)",background:"var(--amber-bg)"}}>
+          <span style={{fontSize:17}}>🌴</span>
+          <span style={{flex:1,fontFamily:"var(--font-d)",fontWeight:800,fontSize:14.5,color:"var(--amber)"}}>Urlaub</span>
+          <span style={{fontSize:11,fontWeight:700,color:"var(--muted)",textTransform:"uppercase",letterSpacing:".04em"}}>Ganzer Tag</span>
+        </button>}
         <div style={{position:"relative",height:totalH*PXH,paddingLeft:50}}>
           {/* Stundenlinien */}
           {hours.map(h=>
@@ -4853,6 +4907,16 @@ function App(){
         <input type="file" accept="image/*" multiple style={{display:"none"}}
           onChange={e=>{ const fs=Array.from(e.target.files||[]); e.target.value=""; handleCalImportFiles(fs); }}/>
       </label>
+
+      {/* Urlaub eintragen: blockt ganze Tage, zählt nicht als Unterrichtszeit */}
+      <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+        <button className="btn btn-ghost" style={{flex:1,justifyContent:"flex-start",gap:9}}
+          onClick={()=>setUrlaubForm({von:ymd(new Date()),bis:ymd(new Date()),busy:false,error:""})}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/></svg>
+          Urlaub eintragen
+        </button>
+        <Help text="Trägt für den gewählten Zeitraum Urlaub ein. Diese Tage sind über den Buchungslink komplett belegt und zählen nicht zu deinen Unterrichtsstunden."/>
+      </div>
 
       {/* Offene Vorschläge */}
       {pending.length>0&&<div className="card" style={{marginBottom:14,overflow:"hidden",border:"2px solid var(--amber)"}}>
@@ -7328,6 +7392,38 @@ function App(){
         <button className="btn btn-ghost btn-block" onClick={()=>setWaPrompt(null)}>Schließen</button>
       </div>
     </div>}
+    {urlaubForm&&<div onClick={()=>!urlaubForm.busy&&setUrlaubForm(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",
+        alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,
+        borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",
+        maxHeight:"88vh",overflowY:"auto"}}>
+        <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:19,marginBottom:4}}>Urlaub eintragen</h3>
+        <p style={{fontSize:13,color:"var(--muted)",lineHeight:1.5,marginBottom:16}}>
+          Jeder Tag im Zeitraum wird komplett geblockt: Schüler können über den Buchungslink nichts vorschlagen,
+          und die Tage zählen nicht zu deinen Unterrichtsstunden.
+        </p>
+        <div style={{display:"flex",gap:10,marginBottom:14}}>
+          <div className="field" style={{flex:1}}>
+            <label>Von</label>
+            <input type="date" value={urlaubForm.von} min={ymd(new Date())}
+              onChange={e=>{ const v=e.target.value; setUrlaubForm(f=>({...f,von:v,bis:(f.bis&&f.bis>=v)?f.bis:v,error:""})); }}/>
+          </div>
+          <div className="field" style={{flex:1}}>
+            <label>Bis</label>
+            <input type="date" value={urlaubForm.bis} min={urlaubForm.von}
+              onChange={e=>setUrlaubForm(f=>({...f,bis:e.target.value,error:""}))}/>
+          </div>
+        </div>
+        {urlaubForm.error&&<div style={{background:"#FDECEA",color:"#B3362A",borderRadius:10,padding:"9px 11px",fontSize:13,marginBottom:12}}>{urlaubForm.error}</div>}
+        <button className="btn btn-primary btn-block" disabled={urlaubForm.busy} onClick={saveUrlaub}>
+          {urlaubForm.busy?"Trägt ein…":"Urlaub eintragen"}
+        </button>
+        <button className="btn btn-ghost btn-block" style={{marginTop:8}} disabled={urlaubForm.busy} onClick={()=>setUrlaubForm(null)}>Abbrechen</button>
+      </div>
+    </div>}
+
     {proposalForm&&<div onClick={()=>!proposalForm.busy&&setProposalForm(null)}
       style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:100,display:"flex",
         alignItems:"flex-end",justifyContent:"center"}}>
