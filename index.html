@@ -573,7 +573,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.21.2";
+const APP_VERSION = "1.22.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -612,6 +612,10 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.22.0", date:"Juli 2026", changes:[
+    "Neu: Standorte / Filialen. Unter Mehr › Einstellungen › Adminbereich › Standorte legt die Fahrschule Filialen mit Name, Adresse und Kontakt (Telefon, E-Mail) an. Im Schülerprofil wird jeder Schüler einem Standort zugewiesen. Der Schüler sieht seinen Standort samt Kontaktdaten im Fahrschüler-Bereich der Buchungsseite",
+    "Hinweis für Fabian: Die Standorte benötigen eine neue Spalte (schools.locations) und eine Anpassung von public_student_overview (liefert jetzt zusätzlich location). Das passende SQL liegt als eigene Datei bei und muss einmalig im SQL-Editor ausgeführt werden",
+  ]},
   { v:"1.21.2", date:"Juli 2026", changes:[
     "Neu: Video-Bibliothek. Unter Mehr › Videos lädt der Fahrlehrer Videos hoch (Theorieunterricht, Prüfungsstrecken, Abfahrtskontrolle, Sonstiges). Die Fahrschüler sehen sie im neuen Reiter Videos auf der Buchungsseite, ganz ohne Login. Ist die Fahrschule mit mehreren Fahrlehrern verknüpft, gilt eine gemeinsame, schulweite Bibliothek",
     "In beiden Video-Ansichten kann jetzt über Reiter zwischen den Kategorien umgeschaltet werden",
@@ -1360,7 +1364,8 @@ async function saveSchool(school){
   const { error } = await sb.from("schools")
     .update({ name:school.name, subtitle:school.subtitle, color:school.color, logo:school.logo||"",
       price_hour:(school.price_hour===""||school.price_hour==null)?null:Number(school.price_hour),
-      packages:school.packages||[], vehicles:school.vehicles||[], klassen:school.klassen||[], arten:school.arten||[] }).eq("id",school.id);
+      packages:school.packages||[], vehicles:school.vehicles||[], klassen:school.klassen||[], arten:school.arten||[],
+      locations:school.locations||[] }).eq("id",school.id);
   if(error) console.error(error);
 }
 
@@ -2426,11 +2431,13 @@ function App(){
   const klassen = (school && Array.isArray(school.klassen) && school.klassen.length>0) ? school.klassen : LFK_KLASSEN;
   // Ausbildungsfahrt-Arten: nutzt die feste You-Drive-Standardliste, bis ein Fahrschul-Admin eine eigene anlegt
   const arten = (school && Array.isArray(school.arten) && school.arten.length>0) ? school.arten : APPT_ART;
+  const locations = (school && Array.isArray(school.locations)) ? school.locations : [];
   function savePricePerHour(v){ if(school) writeSchool({...school, price_hour:(v===""?"":v)}); }
   function savePackages(list){ if(school) writeSchool({...school, packages:list}); }
   function saveVehicles(list){ if(school) writeSchool({...school, vehicles:list}); }
   function saveKlassen(list){ if(school) writeSchool({...school, klassen:list}); }
   function saveArten(list){ if(school) writeSchool({...school, arten:list}); }
+  function saveLocations(list){ if(school) writeSchool({...school, locations:list}); }
   const [stuSig,setStuSig]=useState(null);
   const [updateToast,setUpdateToast]=useState(false);
   const [showChangelog,setShowChangelog]=useState(false);
@@ -2477,6 +2484,7 @@ function App(){
   const [theme,setTheme]=useState(()=>{ try{ return localStorage.getItem("v3_theme")||"dark"; }catch(e){ return "dark"; } });
   const [sortBy,setSortBy]=useState(()=>{ try{ return localStorage.getItem("v3_sort")||"name"; }catch(e){ return "name"; } });
   const [settingsTab,setSettingsTab]=useState("darstellung"); // Unterreiter der Einstellungen
+  const [locEdit,setLocEdit]=useState(null); // null | {index|null, name, street, zip, city, phone, email}
   useEffect(()=>{
     if(settingsTab==="admin"&&!(isAdmin(session)||isSchoolAdmin)) setSettingsTab("darstellung");
   },[settingsTab,session,isSchoolAdmin]);
@@ -4537,6 +4545,13 @@ function App(){
       {f("geb","Geburtsdatum","date")}
       {f("tel","Telefon","tel")}
       {f("anschrift","Anschrift")}
+      {locations.length>0 && <div className="field">
+        <label>Standort / Filiale</label>
+        <select value={active.location_id||""} onChange={e=>updateActive({location_id:e.target.value})}>
+          <option value="">– Kein Standort zugewiesen –</option>
+          {locations.map(loc=><option key={loc.id} value={loc.id}>{loc.name}</option>)}
+        </select>
+      </div>}
       <div style={{display:"flex",gap:10}}>
         <div style={{flex:1}}>{f("lenkrad","Lenkrad (Pos.)","number")}</div>
         <div style={{flex:1}}>{f("kopfstuetze","Kopfstütze (Pos.)","number")}</div>
@@ -5750,6 +5765,65 @@ function App(){
         <p style={{fontSize:12.5,color:"var(--muted)",margin:0,lineHeight:1.5}}>
           Die Fahrschul-Einstellungen können nur von einem Fahrschul-Admin geändert werden. Wende dich an den Inhaber deiner Fahrschule, wenn hier etwas angepasst werden soll.
         </p>
+      </div>}
+      </Collapsible>
+
+      {/* Standorte / Filialen */}
+      <Collapsible title="Standorte" subtitle={locations.length+(locations.length===1?" Standort":" Standorte")}>
+      {canEditSchool ? <div className="card" style={{padding:"13px 14px"}}>
+        {locations.length===0 && !locEdit &&
+          <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:12}}>Noch keine Standorte angelegt. Lege für jede Filiale einen Standort an, dem du dann Schüler zuweisen kannst.</div>}
+        {locations.map((loc,i)=>
+          <div key={i} style={{display:"flex",alignItems:"flex-start",gap:10,padding:"10px 0",borderTop:i===0?"none":"1px solid var(--line)"}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14.5}}>{loc.name}</div>
+              {(loc.street||loc.zip||loc.city)&&<div style={{fontSize:12.5,color:"var(--muted)",marginTop:2}}>{[loc.street,[loc.zip,loc.city].filter(Boolean).join(" ")].filter(Boolean).join(", ")}</div>}
+              {(loc.phone||loc.email)&&<div style={{fontSize:12.5,color:"var(--muted)",marginTop:2}}>{[loc.phone,loc.email].filter(Boolean).join(" · ")}</div>}
+            </div>
+            <div style={{display:"flex",gap:6,flexShrink:0}}>
+              <button className="btn btn-ghost" style={{padding:"6px 10px",fontSize:12.5}}
+                onClick={()=>setLocEdit({index:i,name:loc.name||"",street:loc.street||"",zip:loc.zip||"",city:loc.city||"",phone:loc.phone||"",email:loc.email||""})}>Bearbeiten</button>
+              <button className="btn btn-ghost" style={{padding:"6px 10px",fontSize:12.5,color:"#B3362A"}}
+                onClick={()=>{ if(confirm("Standort \""+loc.name+"\" löschen? Zugewiesene Schüler verlieren die Zuordnung.")){ const next=locations.filter((_,j)=>j!==i); saveLocations(next); } }}>Löschen</button>
+            </div>
+          </div>)}
+
+        {locEdit ? <div style={{marginTop:14,paddingTop:14,borderTop:"1px solid var(--line)"}}>
+          <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,marginBottom:10}}>{locEdit.index===null?"Neuer Standort":"Standort bearbeiten"}</div>
+          <div className="field" style={{marginBottom:8}}><label>Name der Filiale</label>
+            <input type="text" value={locEdit.name} onChange={e=>setLocEdit(l=>({...l,name:e.target.value}))} placeholder="z.B. Filiale Offenburg"/></div>
+          <div className="field" style={{marginBottom:8}}><label>Straße und Hausnummer</label>
+            <input type="text" value={locEdit.street} onChange={e=>setLocEdit(l=>({...l,street:e.target.value}))}/></div>
+          <div style={{display:"flex",gap:8,marginBottom:8}}>
+            <div className="field" style={{width:110}}><label>PLZ</label>
+              <input type="text" value={locEdit.zip} onChange={e=>setLocEdit(l=>({...l,zip:e.target.value}))}/></div>
+            <div className="field" style={{flex:1}}><label>Ort</label>
+              <input type="text" value={locEdit.city} onChange={e=>setLocEdit(l=>({...l,city:e.target.value}))}/></div>
+          </div>
+          <div className="field" style={{marginBottom:8}}><label>Telefon</label>
+            <input type="tel" value={locEdit.phone} onChange={e=>setLocEdit(l=>({...l,phone:e.target.value}))}/></div>
+          <div className="field" style={{marginBottom:12}}><label>E-Mail</label>
+            <input type="email" value={locEdit.email} onChange={e=>setLocEdit(l=>({...l,email:e.target.value}))}/></div>
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn btn-primary" onClick={()=>{
+              if(!locEdit.name.trim()){ alert("Bitte einen Namen für den Standort eingeben."); return; }
+              const entry={ id:(locEdit.index!==null&&locations[locEdit.index]&&locations[locEdit.index].id)||uniqueId("loc"),
+                name:locEdit.name.trim(), street:locEdit.street.trim(), zip:locEdit.zip.trim(), city:locEdit.city.trim(),
+                phone:locEdit.phone.trim(), email:locEdit.email.trim() };
+              const next=locEdit.index===null?[...locations,entry]:locations.map((l,j)=>j===locEdit.index?entry:l);
+              saveLocations(next); setLocEdit(null);
+            }}>Speichern</button>
+            <button className="btn btn-ghost" onClick={()=>setLocEdit(null)}>Abbrechen</button>
+          </div>
+        </div> : <button className="btn btn-ghost" style={{marginTop:12}} onClick={()=>setLocEdit({index:null,name:"",street:"",zip:"",city:"",phone:"",email:""})}>+ Standort hinzufügen</button>}
+      </div> : <div className="card" style={{padding:"13px 14px"}}>
+        {locations.length===0
+          ? <p style={{fontSize:12.5,color:"var(--muted)",margin:0}}>Es sind keine Standorte hinterlegt.</p>
+          : locations.map((loc,i)=><div key={i} style={{padding:"8px 0",borderTop:i===0?"none":"1px solid var(--line)"}}>
+              <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14}}>{loc.name}</div>
+              {(loc.street||loc.city)&&<div style={{fontSize:12,color:"var(--muted)"}}>{[loc.street,[loc.zip,loc.city].filter(Boolean).join(" ")].filter(Boolean).join(", ")}</div>}
+            </div>)}
+        <p style={{fontSize:11.5,color:"var(--muted)",margin:"10px 0 0",lineHeight:1.5}}>Standorte können nur von einem Fahrschul-Admin verwaltet werden.</p>
       </div>}
       </Collapsible>
 
@@ -8184,6 +8258,15 @@ function StudentArea({code,info}){
         {strecken.length>0 && <Ring pct={strPct} label={data.strecken_titel||"Strecken"}/>}
       </div>
     </div>
+
+    {data.location && <div className="card" style={{padding:"14px 15px",marginBottom:14}}>
+      <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:6}}>Dein Standort</div>
+      <div style={{fontSize:14,fontWeight:700}}>{data.location.name}</div>
+      {(data.location.street||data.location.zip||data.location.city)&&
+        <div style={{fontSize:13,color:"var(--muted)",marginTop:3}}>{[data.location.street,[data.location.zip,data.location.city].filter(Boolean).join(" ")].filter(Boolean).join(", ")}</div>}
+      {data.location.phone&&<div style={{fontSize:13,marginTop:6}}><a href={"tel:"+data.location.phone} style={{color:"var(--orange-deep)",textDecoration:"none"}}>{data.location.phone}</a></div>}
+      {data.location.email&&<div style={{fontSize:13,marginTop:2}}><a href={"mailto:"+data.location.email} style={{color:"var(--orange-deep)",textDecoration:"none"}}>{data.location.email}</a></div>}
+    </div>}
 
     {adk.length>0 && <div className="card" style={{padding:"14px 15px",marginBottom:14}}>
       <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:10}}>{data.adk_titel||"Ausbildungsdiagrammkarte"}</div>
