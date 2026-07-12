@@ -573,7 +573,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.20.38";
+const APP_VERSION = "1.21.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -602,6 +602,13 @@ const APPT_ART = [
   { code:"SASF", label:"SASF · Seminarteilnahme ASF", color:"#FF9300" },
   { code:"TH",  label:"TH · Theorieunterricht", color:"#2B7FFF" },
   { code:"PRIVAT", label:"PRIVAT · Privater Termin", color:"#8B95A6", countsAsLesson:false },
+];
+// Kategorien für die Video-Bibliothek (Fahrschüler-Bereich)
+const VIDEO_KATEGORIEN = [
+  { code:"theorie", label:"Theorieunterricht" },
+  { code:"pruefstrecken", label:"Prüfungsstrecken" },
+  { code:"abfahrtskontrolle", label:"Abfahrtskontrolle" },
+  { code:"sonstiges", label:"Sonstiges" },
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
@@ -1494,6 +1501,40 @@ async function dbDeleteAppt(id){
   if(error){ console.error(error); throw new Error(error.message); }
 }
 
+/* ════════ Video-Bibliothek ════════ */
+async function fetchVideos(uid,schoolId){
+  let q=sb.from("videos").select("*");
+  q = schoolId ? q.or(`owner.eq.${uid},school_id.eq.${schoolId}`) : q.eq("owner",uid);
+  const { data, error } = await q.order("created_at",{ascending:false});
+  if(error){ console.error(error); return []; }
+  return data||[];
+}
+async function uploadVideo(uid,schoolId,file,title,category,onProgress){
+  const ext=(file.name.split(".").pop()||"mp4").toLowerCase();
+  const path=uid+"/"+uniqueId("vid")+"."+ext;
+  const { error:upErr } = await sb.storage.from("videos").upload(path,file,{ upsert:false, contentType:file.type||undefined });
+  if(upErr){ console.error(upErr); throw new Error(upErr.message); }
+  const row={ owner:uid, school_id:schoolId||null, title:title||file.name, category:category||"sonstiges",
+    storage_path:path, size_bytes:file.size||null };
+  const { data, error } = await sb.from("videos").insert(row).select().single();
+  if(error){ console.error(error); throw new Error(error.message); }
+  return data;
+}
+async function deleteVideo(video){
+  try{ await sb.storage.from("videos").remove([video.storage_path]); }catch(e){ console.error(e); }
+  const { error } = await sb.from("videos").delete().eq("id",video.id);
+  if(error){ console.error(error); throw new Error(error.message); }
+}
+function videoPublicUrl(path){
+  const { data } = sb.storage.from("videos").getPublicUrl(path);
+  return data && data.publicUrl;
+}
+async function publicVideos(code){
+  const { data, error } = await sb.rpc("public_videos",{ code });
+  if(error){ console.error(error); return []; }
+  return data||[];
+}
+
 /* ════════ Öffentliche Buchung (anonym, per Code) ════════ */
 async function publicBookingInfo(code){
   const { data, error } = await sb.rpc("public_booking_info",{ code });
@@ -2356,6 +2397,8 @@ function App(){
   const [studentTab,setStudentTab]=useState("profil"); // Unterreiter der Schüler-Detailansicht
   useEffect(()=>{ setStudentTab("profil"); },[activeId]);
   const [view,setView]=useState("liste");
+  const [videos,setVideos]=useState(null); // null=noch nicht geladen
+  const [videoUpload,setVideoUpload]=useState(null); // {file,title,category,busy,error}
   const [openSection,setOpenSection]=useState(null);
   const [ueberTab,setUeberTab]=useState("beide");
   const [editCounts,setEditCounts]=useState(false);
@@ -2482,6 +2525,11 @@ function App(){
   },[]);
 
   const uid = session && session.user ? session.user.id : null;
+
+  useEffect(()=>{
+    if(view!=="videos" || !uid) return;
+    fetchVideos(uid, school&&school.id).then(setVideos).catch(e=>{ console.error(e); setVideos([]); });
+  },[view,uid,school]);
 
   // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
   const [workHours,setWorkHours]=useState(null); // null solange nicht geladen
@@ -6056,6 +6104,94 @@ function App(){
     }catch(e){ alert("Backup konnte nicht erstellt werden."); }
   }
 
+  function renderVideos(){
+    const MAXMB=300;
+    const list=videos||[];
+    const byCat={};
+    VIDEO_KATEGORIEN.forEach(k=>byCat[k.code]=[]);
+    list.forEach(v=>{ (byCat[v.category]||(byCat[v.category]=[])).push(v); });
+
+    function onPickFile(e){
+      const file=e.target.files&&e.target.files[0];
+      e.target.value="";
+      if(!file) return;
+      if(file.size>MAXMB*1024*1024){ alert("Video ist zu groß (max. "+MAXMB+" MB)."); return; }
+      setVideoUpload({ file, title:file.name.replace(/\.[^.]+$/,""), category:"theorie", busy:false, error:"" });
+    }
+    async function onUpload(){
+      if(!videoUpload||!videoUpload.file) return;
+      if(!videoUpload.title.trim()){ setVideoUpload(u=>({...u,error:"Bitte einen Titel eingeben."})); return; }
+      setVideoUpload(u=>({...u,busy:true,error:""}));
+      try{
+        const row=await uploadVideo(uid, school&&school.id, videoUpload.file, videoUpload.title.trim(), videoUpload.category);
+        setVideos(v=>[row,...(v||[])]);
+        setVideoUpload(null);
+      }catch(e){
+        setVideoUpload(u=>({...u,busy:false,error:e.message||"Upload fehlgeschlagen."}));
+      }
+    }
+    async function onDelete(v){
+      if(!confirm("Video \""+v.title+"\" wirklich löschen?")) return;
+      try{
+        await deleteVideo(v);
+        setVideos(list=>list.filter(x=>x.id!==v.id));
+      }catch(e){ alert("Löschen fehlgeschlagen:\n"+e.message); }
+    }
+
+    return <div className="pad">
+      <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:22,margin:"4px 2px 14px"}}>Videos</h2>
+      <div style={{fontSize:13,color:"var(--muted)",margin:"0 2px 14px"}}>
+        Videos, die du hier hochlädst, sehen alle deine Fahrschüler im Fahrschüler-Bereich der Buchungsseite
+        {school&&school.id?" (schulweit sichtbar für alle Fahrlehrer deiner Fahrschule)":""}.
+      </div>
+
+      <div className="card" style={{padding:"14px 15px",marginBottom:16}}>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:10}}>Neues Video hochladen</div>
+        {!videoUpload && <label className="btn btn-primary" style={{display:"inline-block",cursor:"pointer"}}>
+          Video auswählen
+          <input type="file" accept="video/*" onChange={onPickFile} style={{display:"none"}}/>
+        </label>}
+        {videoUpload && <div>
+          <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:8}}>{videoUpload.file.name} · {(videoUpload.file.size/1024/1024).toFixed(1)} MB</div>
+          <div className="field" style={{marginBottom:8}}>
+            <label>Titel</label>
+            <input type="text" value={videoUpload.title} onChange={e=>setVideoUpload(u=>({...u,title:e.target.value}))}/>
+          </div>
+          <div className="field" style={{marginBottom:8}}>
+            <label>Kategorie</label>
+            <select value={videoUpload.category} onChange={e=>setVideoUpload(u=>({...u,category:e.target.value}))}>
+              {VIDEO_KATEGORIEN.map(k=><option key={k.code} value={k.code}>{k.label}</option>)}
+            </select>
+          </div>
+          {videoUpload.error && <div style={{fontSize:12.5,color:"var(--red,#B3362A)",marginBottom:8}}>{videoUpload.error}</div>}
+          <div style={{display:"flex",gap:8}}>
+            <button className="btn btn-primary" disabled={videoUpload.busy} onClick={onUpload}>
+              {videoUpload.busy?"Lädt hoch…":"Hochladen"}
+            </button>
+            <button className="btn btn-ghost" disabled={videoUpload.busy} onClick={()=>setVideoUpload(null)}>Abbrechen</button>
+          </div>
+        </div>}
+      </div>
+
+      {videos===null && <div style={{fontSize:13,color:"var(--muted)"}}>Lädt…</div>}
+      {videos!==null && list.length===0 && <div style={{fontSize:13,color:"var(--muted)"}}>Noch keine Videos hochgeladen.</div>}
+      {VIDEO_KATEGORIEN.map(k=>{
+        const items=byCat[k.code]||[];
+        if(items.length===0) return null;
+        return <div key={k.code} className="card" style={{padding:"14px 15px",marginBottom:14}}>
+          <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:8}}>{k.label}</div>
+          {items.map(v=><div key={v.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",borderTop:"1px solid var(--line)"}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:13.5,fontWeight:600}}>{v.title}</div>
+              <div style={{fontSize:11.5,color:"var(--muted)"}}>{v.size_bytes?(v.size_bytes/1024/1024).toFixed(1)+" MB":""}</div>
+            </div>
+            <button className="btn btn-ghost" style={{padding:"6px 10px",fontSize:12.5,color:"#B3362A",flexShrink:0}} onClick={()=>onDelete(v)}>Löschen</button>
+          </div>)}
+        </div>;
+      })}
+    </div>;
+  }
+
   function renderVorlage(){
     const kind = vorlageKind; // "adk" | "strecken"
     const list = kind==="adk" ? tpl.adk : tpl.strecken;
@@ -6526,7 +6662,7 @@ function App(){
 
   // Gruppierte Reiter
   const ausbildungViews=["adk","strecken","tagebuch"];
-  const mehrViews=["daten","einstellungen"];
+  const mehrViews=["daten","einstellungen","videos"];
   const ausbildungActive=ausbildungViews.indexOf(view)>=0;
   const mehrActive=mehrViews.indexOf(view)>=0;
   const pendingCount=(appts||[]).filter(a=>a.status==="pending").length;
@@ -6565,10 +6701,11 @@ function App(){
         {view==="liste"&&renderListe()}
         {view==="vorlage"&&renderVorlage()}
         {view==="einstellungen"&&renderEinstellungen()}
+        {view==="videos"&&renderVideos()}
         {view==="kalender"&&renderKalender()}
         {view==="admin"&&isAdmin(session)&&renderAdmin()}
         {view==="datenschutz"&&renderDatenschutz()}
-        {view!=="liste"&&view!=="vorlage"&&view!=="einstellungen"&&view!=="kalender"&&view!=="admin"&&view!=="datenschutz"&&!active&&<div className="pad"><div className="card" style={{padding:"22px 16px",textAlign:"center"}}>
+        {view!=="liste"&&view!=="vorlage"&&view!=="einstellungen"&&view!=="videos"&&view!=="kalender"&&view!=="admin"&&view!=="datenschutz"&&!active&&<div className="pad"><div className="card" style={{padding:"22px 16px",textAlign:"center"}}>
           <div style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:16,marginBottom:10}}>Kein Schüler ausgewählt</div>
           <button className="btn btn-primary" onClick={()=>setView("liste")}>Zur Schülerliste</button>
         </div></div>}
@@ -6623,7 +6760,7 @@ function App(){
               <button className="tabpop-item" onClick={()=>{ setTabMenu(null); openCalendar(); }}>
                 <span className="tabpop-ic"><IcCalendar/></span>Fahrzeug-Kalender
               </button>
-              {[["daten","Schülerdaten",<IcGear/>],["einstellungen","Einstellungen",<IcSettings/>]].map(([id,lbl,ic])=>
+              {[["daten","Schülerdaten",<IcGear/>],["einstellungen","Einstellungen",<IcSettings/>],["videos","Videos",<IcBook/>]].map(([id,lbl,ic])=>
                 <button key={id} className={"tabpop-item"+(view===id?" on":"")} onClick={()=>{setView(id);setTabMenu(null);}}>
                   <span className="tabpop-ic">{ic}</span>{lbl}
                 </button>)}
@@ -7840,6 +7977,49 @@ function getBookingCodeFromURL(){
   return null;
 }
 
+// ════════ Video-Bibliothek (öffentlich, kein Login nötig) ════════
+function VideoLibrary({code}){
+  const [list,setList]=React.useState(undefined); // undefined=lädt, null=fehler, []=leer
+  const [openId,setOpenId]=React.useState(null);
+
+  React.useEffect(()=>{
+    publicVideos(code).then(setList).catch(()=>setList(null));
+  },[code]);
+
+  if(list===undefined) return <div className="card" style={{padding:"16px",fontSize:13,color:"var(--muted)"}}>Lädt…</div>;
+  if(list===null) return <div className="card" style={{padding:"16px",fontSize:13,color:"var(--muted)"}}>Videos konnten nicht geladen werden.</div>;
+  if(list.length===0) return <div className="card" style={{padding:"16px",fontSize:13,color:"var(--muted)"}}>Es sind noch keine Videos hinterlegt.</div>;
+
+  const byCat={};
+  list.forEach(v=>{ (byCat[v.category]||(byCat[v.category]=[])).push(v); });
+
+  return <div>
+    {VIDEO_KATEGORIEN.map(k=>{
+      const items=byCat[k.code]||[];
+      if(items.length===0) return null;
+      return <div key={k.code} className="card" style={{padding:"14px 15px",marginBottom:14}}>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15,marginBottom:8}}>{k.label}</div>
+        {items.map(v=>{
+          const open=openId===v.id;
+          return <div key={v.id} style={{borderTop:"1px solid var(--line)",padding:"9px 0"}}>
+            <button onClick={()=>setOpenId(open?null:v.id)}
+              style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",gap:10,
+                background:"none",border:"none",textAlign:"left",padding:0,cursor:"pointer"}}>
+              <span style={{fontSize:13.5,fontWeight:600}}>{v.title}</span>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--muted)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"
+                style={{flexShrink:0,transform:open?"rotate(180deg)":"none",transition:"transform .2s"}}><polyline points="6 9 12 15 18 9"/></svg>
+            </button>
+            {open && <div style={{marginTop:10}}>
+              <video controls preload="metadata" style={{width:"100%",borderRadius:10,display:"block",background:"#000"}}
+                src={videoPublicUrl(v.storage_path)}/>
+            </div>}
+          </div>;
+        })}
+      </div>;
+    })}
+  </div>;
+}
+
 // ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
 function StudentArea({code,info}){
   const LS_NAME="v3_sa_name_"+code, LS_PIN="v3_sa_pin_"+code;
@@ -8285,9 +8465,11 @@ function BookingPage({code}){
       <div className="seg" style={{marginBottom:16}}>
         <button className={tab==="termine"?"on":""} onClick={()=>setTab("termine")}>Termine</button>
         <button className={tab==="fortschritt"?"on":""} onClick={()=>setTab("fortschritt")}>Mein Fortschritt</button>
+        <button className={tab==="videos"?"on":""} onClick={()=>setTab("videos")}>Videos</button>
       </div>
 
       {tab==="fortschritt" && <StudentArea code={code} info={info}/>}
+      {tab==="videos" && <VideoLibrary code={code}/>}
 
       {tab==="termine" && <>
       {done&&<div className="card" style={{padding:"16px",marginBottom:14,background:"var(--green-bg)",border:"1.5px solid var(--green)"}}>
