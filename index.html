@@ -573,7 +573,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.24.8";
+const APP_VERSION = "1.25.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -1651,6 +1651,14 @@ async function publicStudentSetPin(code,name,oldPin,newPin){
   const { data, error } = await sb.rpc("public_student_set_pin",{ code, p_name:name, p_old:oldPin, p_new:newPin });
   if(error){ console.error(error); throw new Error(error.message); }
   return data===true;
+}
+// Fahrschüler storniert einen eigenen Termin. Offene Anfragen (pending) werden sofort gelöscht,
+// bestätigte Termine werden nur als "Stornierung angefragt" markiert (Fahrlehrer bestätigt final).
+// Gibt "deleted" oder "requested" zurück.
+async function publicStudentCancelAppt(code,name,pin,apptId){
+  const { data, error } = await sb.rpc("public_student_cancel_appt",{ code, p_name:name, p_pin:pin, p_appt:apptId });
+  if(error){ console.error(error); throw new Error(error.message); }
+  return data;
 }
 // Buchungs-Code des eingeloggten Fahrlehrers holen/anlegen
 async function fetchBookingCode(uid){
@@ -3870,6 +3878,15 @@ function App(){
   async function rejectAppt(id){
     if(confirm("Diesen Terminvorschlag ablehnen und entfernen?")) await removeAppt(id,{label:"Vorschlag abgelehnt"});
   }
+  // Storno-Anfrage eines Fahrschülers: bestätigen (Termin löschen) oder ablehnen (Termin behalten).
+  async function confirmCancel(id){
+    if(confirm("Stornierung bestätigen? Der Termin wird damit endgültig gelöscht.")) await removeAppt(id,{label:"Termin storniert"});
+  }
+  async function rejectCancel(id){
+    if(confirm("Stornierung ablehnen? Der Termin bleibt bestehen (Status: bestätigt).")){
+      await updateAppt(id,{status:"confirmed"});
+    }
+  }
   function bookingURL(){
     const base=window.location.origin+window.location.pathname;
     return base+"?buchen="+(bookingCode||"");
@@ -5000,6 +5017,7 @@ function App(){
     const weekLabel=dayMonth(calWeek)+" – "+dayMonth(weekEnd)+"."+new Date(weekEnd).getFullYear();
     const dayLabel=new Date(calDay).toLocaleDateString("de-DE",{weekday:"long",day:"2-digit",month:"long",year:"numeric"});
     const pending=appts.filter(a=>a.status==="pending").sort((a,b)=>a.start_at.localeCompare(b.start_at));
+    const cancelRequests=appts.filter(a=>a.status==="cancel_requested").sort((a,b)=>a.start_at.localeCompare(b.start_at));
 
     // UE-Zählung: 1 UE = 45 Minuten, nur bestätigte Termine. Ohne Endzeit = 45 Min = 1 UE.
     function ueOf(a){
@@ -5267,6 +5285,25 @@ function App(){
             <div style={{display:"flex",gap:8,marginTop:8}}>
               <button className="btn btn-primary" style={{flex:1,padding:"9px",fontSize:13.5}} onClick={()=>confirmAppt(a.id)}>✓ Bestätigen</button>
               <button className="btn btn-ghost" style={{flex:1,padding:"9px",fontSize:13.5,color:"#B3362A"}} onClick={()=>rejectAppt(a.id)}>Ablehnen</button>
+            </div>
+          </div>)}
+      </div>}
+
+      {/* Stornierungs-Anfragen von Fahrschülern */}
+      {cancelRequests.length>0&&<div className="card" style={{marginBottom:14,overflow:"hidden",border:"2px solid #B3362A"}}>
+        <div style={{padding:"11px 14px",background:"#FDECEA",fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,color:"#B3362A"}}>
+          {cancelRequests.length} Stornierungs-Anfrage{cancelRequests.length===1?"":"n"}
+        </div>
+        {cancelRequests.map(a=>
+          <div key={a.id} style={{padding:"12px 14px",borderTop:"1px solid var(--line)"}}>
+            <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,marginBottom:2}}>{fmtDLong(a.start_at)}</div>
+            <div style={{fontSize:13.5,marginBottom:2}}>
+              {hm(a.start_at)}{a.end_at?" – "+hm(a.end_at):""} Uhr · {apptStudentName(a)||a.title||"Schüler"}
+            </div>
+            <div style={{fontSize:12.5,color:"#B3362A",fontWeight:600,marginBottom:8}}>Der Fahrschüler möchte diesen Termin stornieren.</div>
+            <div style={{display:"flex",gap:8,marginTop:8}}>
+              <button className="btn btn-ghost" style={{flex:1,padding:"9px",fontSize:13.5,color:"#B3362A"}} onClick={()=>confirmCancel(a.id)}>Stornierung bestätigen</button>
+              <button className="btn btn-ghost" style={{flex:1,padding:"9px",fontSize:13.5}} onClick={()=>rejectCancel(a.id)}>Termin behalten</button>
             </div>
           </div>)}
       </div>}
@@ -6613,10 +6650,13 @@ function App(){
           {myCity?<span>Freigegebene Vorlagen für <b>{myCity}</b> übernehmen, oder deine eigenen Strecken als Vorlage für deine Stadt vorschlagen.</span>
                  :<span>Wähle im Fahrlehrerbereich einen Standort mit Stadt, dann kannst du hier freigegebene Vorlagen deiner Stadt übernehmen und eigene vorschlagen.</span>}
           <div style={{marginTop:10,padding:"8px 10px",background:"#3a2f00",border:"1px solid #8a6d00",borderRadius:8,fontSize:11.5,color:"#ffd76a",fontFamily:"monospace",wordBreak:"break-all",lineHeight:1.5}}>
-            DIAGNOSE v1.24.8<br/>
-            gewählt: {myLocationId||"(leer)"} · Anzahl geladen: {locations.length}<br/>
-            {locations.map((l,i)=><span key={i}>#{i+1} id={l.id} name={l.name||"?"} city={l.city||"LEER"}<br/></span>)}
-            → myCity = {myCity||"(leer)"}
+            DIAGNOSE v1.24.9<br/>
+            gewählt: [{myLocationId}] · Anzahl: {locations.length}<br/>
+            {(()=>{ const l=locations.find(x=>x.id===myLocationId)||(locations.length===1?locations[0]:null);
+              if(!l) return "kein Standort gefunden (id-Vergleich schlägt fehl)";
+              return "gefunden: name="+(l.name||"?")+" · city-typ="+(typeof l.city)+" · city-wert=["+String(l.city)+"] · trim=["+(typeof l.city==="string"?l.city.trim():"n/a")+"]";
+            })()}<br/>
+            → myCity = [{myCity}]
           </div>
         </div>
         <div style={{display:"flex",flexDirection:"column",gap:8}}>
@@ -6969,7 +7009,7 @@ function App(){
   const mehrViews=["daten","einstellungen","videos"];
   const ausbildungActive=ausbildungViews.indexOf(view)>=0;
   const mehrActive=mehrViews.indexOf(view)>=0;
-  const pendingCount=(appts||[]).filter(a=>a.status==="pending").length;
+  const pendingCount=(appts||[]).filter(a=>a.status==="pending"||a.status==="cancel_requested").length;
 
   return <div>
     <div className="app">
@@ -8459,6 +8499,24 @@ function StudentArea({code,info}){
   // Beim Öffnen automatisch anmelden, wenn Name+PIN auf dem Gerät gespeichert sind
   React.useEffect(()=>{ if(name&&pin&&!data){ login(name,pin); } /* eslint-disable-next-line */ },[]);
 
+  const [cancelBusy,setCancelBusy]=React.useState("");
+  async function cancelAppt(a){
+    if(!a||!a.id) return;
+    const bestaetigt = a.status==="confirmed";
+    const frage = bestaetigt
+      ? "Diesen bestätigten Termin stornieren? Dein Fahrlehrer bekommt die Stornierung angezeigt und muss sie bestätigen."
+      : "Diese Terminanfrage wirklich löschen?";
+    if(!confirm(frage)) return;
+    setCancelBusy(a.id);
+    try{
+      const res=await publicStudentCancelAppt(code,name.trim(),pin.trim(),a.id);
+      // Überblick neu laden, damit der aktualisierte Status sofort erscheint
+      const d=await publicStudentOverview(code,name.trim(),pin.trim());
+      if(d) setData(d);
+    }catch(e){ alert("Das hat leider nicht geklappt. Bitte später erneut versuchen."); }
+    setCancelBusy("");
+  }
+
   async function saveNewPin(){
     if(np1.length<4){ setChangeErr("Der neue PIN muss mindestens 4 Ziffern haben."); return; }
     if(np1!==np2){ setChangeErr("Die beiden neuen PINs stimmen nicht überein."); return; }
@@ -8622,7 +8680,7 @@ function StudentArea({code,info}){
         <div style={{fontSize:13,color:"var(--muted)"}}>Für dich sind noch keine Termine eingetragen.</div>}
       {kommend.length>0 && <>
         <div style={{fontSize:11.5,fontWeight:700,letterSpacing:".05em",textTransform:"uppercase",color:"var(--muted)",margin:"4px 0 6px"}}>Anstehend</div>
-        {kommend.map((a,i)=><ApptRow key={"k"+i} a={a}/>)}
+        {kommend.map((a,i)=><ApptRow key={"k"+i} a={a} onCancel={cancelAppt} cancelBusy={cancelBusy}/>)}
       </>}
       {vergangen.length>0 && <div style={{marginTop:12}}>
         <Collapsible title={"Verlauf"} subtitle={vergangen.length+" vergangene Termine"}>
@@ -8633,20 +8691,28 @@ function StudentArea({code,info}){
   </div>;
 }
 
-function ApptRow({a,past}){
+function ApptRow({a,past,onCancel,cancelBusy}){
   const artInfo=a.art?APPT_ART.find(x=>x.code===a.art):null;
   const artLabel=artInfo?artInfo.label:a.art;
+  const stornoAngefragt=a.status==="cancel_requested";
+  const busy=cancelBusy===a.id;
   return <div style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:"1px solid var(--line)",opacity:past?0.7:1}}>
     <div style={{width:52,flexShrink:0}}>
       <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:13}}>{hm(a.start_at)}</div>
       <div style={{fontSize:11,color:"var(--muted)"}}>{a.end_at?hm(a.end_at):""}</div>
     </div>
-    <div style={{flex:1}}>
+    <div style={{flex:1,minWidth:0}}>
       <div style={{fontSize:13.5,fontWeight:600}}>{fmtDLong(a.start_at)}</div>
       {artLabel&&<div style={{fontSize:12,color:"var(--muted)"}}>{artLabel}</div>}
       {a.title&&<div style={{fontSize:12,color:"var(--muted)"}}>{a.title}</div>}
     </div>
     {a.status==="pending" && <span style={{fontSize:10.5,fontWeight:700,color:"var(--amber)",textTransform:"uppercase",letterSpacing:".03em"}}>offen</span>}
+    {stornoAngefragt && <span style={{fontSize:10.5,fontWeight:700,color:"#B3362A",textTransform:"uppercase",letterSpacing:".03em",textAlign:"right"}}>Storno<br/>angefragt</span>}
+    {onCancel && !stornoAngefragt && <button onClick={()=>onCancel(a)} disabled={busy} aria-label="Termin stornieren"
+      style={{flexShrink:0,width:32,height:32,borderRadius:8,border:"1.5px solid #F0CFC9",background:"#FDECEA",color:"#B3362A",
+        display:"inline-flex",alignItems:"center",justifyContent:"center",opacity:busy?0.5:1}}>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+    </button>}
   </div>;
 }
 
