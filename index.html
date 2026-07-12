@@ -573,7 +573,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.22.1";
+const APP_VERSION = "1.24.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -612,6 +612,13 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.24.0", date:"Juli 2026", changes:[
+    "Neu: Streckenvorlagen für Städte. Ein Fahrschul-Admin kann in der Strecken-Vorlage seine Strecken als Vorlage für seine Stadt vorschlagen (Stadt kommt aus dem eigenen Standort). Der App-Admin prüft und gibt sie frei. Danach können alle Fahrlehrer derselben Stadt die Vorlage über Vorlagen aus meiner Stadt übernehmen",
+    "Hinweis für Fabian: Braucht eine neue Tabelle route_templates mit Freigabe-Rechten. Das SQL steht in der Antwort zum Kopieren. Deine Freigabe-Warteschlange findest du unter Adminbereich › Streckenvorlagen prüfen",
+  ]},
+  { v:"1.23.0", date:"Juli 2026", changes:[
+    "Neu: Geburtstags-Hinweis. Hat heute ein Fahrschüler Geburtstag, erscheint beim Öffnen der App ein Popup (höchstens einmal pro Tag). Über Mehr › Einstellungen › Fahrlehrerbereich › Benachrichtigungen lässt sich der Hinweis ein- und ausschalten",
+  ]},
   { v:"1.22.1", date:"Juli 2026", changes:[
     "Neu: Jeder Fahrlehrer kann unter Mehr › Einstellungen › Fahrlehrerbereich seinen eigenen Standort festlegen. Neu angelegte Schüler bekommen diesen Standort automatisch zugewiesen (im Schülerprofil weiter änderbar)",
     "Hinweis für Fabian: Braucht eine neue Spalte profiles.default_location_id. Das SQL steht in der Antwort zum Kopieren",
@@ -1215,6 +1222,51 @@ async function saveTemplate(uid,tpl){
   const { error } = await sb.from("templates")
     .upsert({ owner:uid, adk:tpl.adk, strecken:tpl.strecken, adk_titel:tpl.adkTitel||null, strecken_titel:tpl.streckenTitel||null, updated_at:new Date().toISOString() });
   if(error) console.error(error);
+}
+
+/* ════════ Streckenvorlagen für Städte (Vorschlag → Admin-Prüfung → Übernahme) ════════ */
+// Ein Fahrschul-Admin schlägt eine Streckenvorlage für seine Stadt vor.
+async function proposeRouteTemplate(uid,city,title,strecken,name){
+  const { error } = await sb.from("route_templates").insert({
+    city:(city||"").trim(), title:(title||"").trim(), strecken:strecken||[],
+    status:"pending", proposed_by:uid, proposed_by_name:name||null });
+  if(error){ console.error(error); throw new Error(error.message); }
+}
+// Bestätigte Vorlagen der eigenen Stadt (case-insensitive Abgleich).
+async function fetchApprovedRouteTemplates(city){
+  const c=(city||"").trim();
+  if(!c) return [];
+  const { data, error } = await sb.from("route_templates").select("*")
+    .eq("status","approved").ilike("city",c).order("created_at",{ascending:false});
+  if(error){ console.error(error); return []; }
+  return data||[];
+}
+// Eigene Vorschläge (um Status zu sehen / zurückzuziehen).
+async function fetchMyRouteProposals(uid){
+  const { data, error } = await sb.from("route_templates").select("*")
+    .eq("proposed_by",uid).order("created_at",{ascending:false});
+  if(error){ console.error(error); return []; }
+  return data||[];
+}
+async function withdrawRouteTemplate(id){
+  const { error } = await sb.from("route_templates").delete().eq("id",id);
+  if(error){ console.error(error); throw new Error(error.message); }
+}
+// Admin (Fabian): offene Vorschläge laden, bestätigen, ablehnen.
+async function adminFetchPendingRouteTemplates(){
+  const { data, error } = await sb.from("route_templates").select("*")
+    .eq("status","pending").order("created_at",{ascending:true});
+  if(error){ console.error(error); throw new Error(error.message); }
+  return data||[];
+}
+async function adminApproveRouteTemplate(id){
+  const { error } = await sb.from("route_templates")
+    .update({ status:"approved", reviewed_at:new Date().toISOString() }).eq("id",id);
+  if(error){ console.error(error); throw new Error(error.message); }
+}
+async function adminRejectRouteTemplate(id){
+  const { error } = await sb.from("route_templates").delete().eq("id",id);
+  if(error){ console.error(error); throw new Error(error.message); }
 }
 
 /* ════════ Fahrschulen (Mandanten) ════════ */
@@ -2449,6 +2501,7 @@ function App(){
   // Ausbildungsfahrt-Arten: nutzt die feste You-Drive-Standardliste, bis ein Fahrschul-Admin eine eigene anlegt
   const arten = (school && Array.isArray(school.arten) && school.arten.length>0) ? school.arten : APPT_ART;
   const locations = (school && Array.isArray(school.locations)) ? school.locations : [];
+  const myCity = (()=>{ const l=locations.find(x=>x.id===myLocationId); return (l&&l.city&&l.city.trim())||""; })();
   function savePricePerHour(v){ if(school) writeSchool({...school, price_hour:(v===""?"":v)}); }
   function savePackages(list){ if(school) writeSchool({...school, packages:list}); }
   function saveVehicles(list){ if(school) writeSchool({...school, vehicles:list}); }
@@ -2499,10 +2552,14 @@ function App(){
   const [calToolsOpen,setCalToolsOpen]=useState(false); // Klappmenü: Buchungslink, Screenshot-Import, Urlaub
   const [pendingOpen,setPendingOpen]=useState(false); // Klappzustand der offenen Terminvorschläge
   const [theme,setTheme]=useState(()=>{ try{ return localStorage.getItem("v3_theme")||"dark"; }catch(e){ return "dark"; } });
+  const [birthdayNotify,setBirthdayNotify]=useState(()=>{ try{ return localStorage.getItem("v3_birthday")!=="0"; }catch(e){ return true; } });
   const [sortBy,setSortBy]=useState(()=>{ try{ return localStorage.getItem("v3_sort")||"name"; }catch(e){ return "name"; } });
   const [settingsTab,setSettingsTab]=useState("darstellung"); // Unterreiter der Einstellungen
   const [locEdit,setLocEdit]=useState(null); // null | {index|null, name, street, zip, city, phone, email}
   const [myLocationId,setMyLocationId]=useState(""); // eigener Standort des Fahrlehrers (für neue Schüler)
+  const [birthdayPopup,setBirthdayPopup]=useState(null); // null | Liste der Schüler mit Geburtstag heute
+  const [cityTplModal,setCityTplModal]=useState(null); // null | {busy,error,approved:[],mine:[]} Übernahme-/Vorschlag-Dialog
+  const [routeQueue,setRouteQueue]=useState(null); // null | Liste offener Streckenvorschläge (Admin)
   useEffect(()=>{
     if(settingsTab==="admin"&&!(isAdmin(session)||isSchoolAdmin)) setSettingsTab("darstellung");
   },[settingsTab,session,isSchoolAdmin]);
@@ -2564,6 +2621,27 @@ function App(){
     if(!uid){ setMyLocationId(""); return; }
     fetchMyLocation(uid).then(id=>setMyLocationId(id||"")).catch(()=>{});
   },[uid]);
+
+  // Geburtstags-Popup: prüft beim Start, ob heute eigene Schüler Geburtstag haben.
+  // Erscheint höchstens einmal pro Tag (Merker in localStorage), nur wenn aktiviert.
+  useEffect(()=>{
+    if(!birthdayNotify || !uid || !Array.isArray(students)) return;
+    const now=new Date();
+    const todayKey=now.getFullYear()+"-"+String(now.getMonth()+1).padStart(2,"0")+"-"+String(now.getDate()).padStart(2,"0");
+    let lastShown=""; try{ lastShown=localStorage.getItem("v3_bday_shown_"+uid)||""; }catch(e){}
+    if(lastShown===todayKey) return;
+    const mM=now.getMonth()+1, mD=now.getDate();
+    const heute=students.filter(s=>{
+      if(!s._isMine || s.archived || !s.geb) return false;
+      const d=new Date(s.geb);
+      if(isNaN(d)) return false;
+      return (d.getMonth()+1)===mM && d.getDate()===mD;
+    });
+    if(heute.length>0){
+      setBirthdayPopup(heute);
+      try{ localStorage.setItem("v3_bday_shown_"+uid,todayKey); }catch(e){}
+    }
+  },[students,uid,birthdayNotify]);
 
   useEffect(()=>{
     if(view!=="videos" || !uid) return;
@@ -2797,6 +2875,37 @@ function App(){
     if(tplTimer.current) clearTimeout(tplTimer.current);
     tplTimer.current=setTimeout(async()=>{ await saveTemplate(uid,next); setSaved(true); },500);
   },[uid]);
+
+  // Stadt-Streckenvorlagen: Dialog öffnen (lädt bestätigte Vorlagen der Stadt + eigene Vorschläge)
+  async function openCityTplModal(){
+    if(!myCity){ alert("Für Stadt-Vorlagen brauchst du zuerst einen Standort mit Stadt. Lege unter Einstellungen einen Standort an und wähle ihn im Fahrlehrerbereich als deinen Standort."); return; }
+    setCityTplModal({busy:true,error:"",approved:[],mine:[]});
+    try{
+      const [approved,mine]=await Promise.all([fetchApprovedRouteTemplates(myCity),fetchMyRouteProposals(uid)]);
+      setCityTplModal({busy:false,error:"",approved,mine});
+    }catch(e){ setCityTplModal({busy:false,error:e.message||"Konnte nicht laden.",approved:[],mine:[]}); }
+  }
+  // Bestätigte Vorlage in die eigene Strecken-Vorlage übernehmen (ersetzt die Strecken)
+  function adoptCityTemplate(t){
+    if(!confirm("Vorlage \""+t.title+"\" übernehmen? Deine aktuellen Strecken werden dadurch ersetzt (deine ADK bleibt unverändert).")) return;
+    writeTemplate({...tpl, strecken:deepCopy(Array.isArray(t.strecken)?t.strecken:[]), streckenTitel:t.title||tpl.streckenTitel});
+    setCityTplModal(null);
+    setVorlageKind("strecken"); setView("vorlage");
+    showFlash("✓ Vorlage übernommen");
+  }
+  // Eigene aktuelle Strecken als Vorschlag für die Stadt einreichen
+  async function proposeCurrentStrecken(){
+    if(!myCity){ alert("Du brauchst zuerst einen Standort mit Stadt (im Fahrlehrerbereich wählbar)."); return; }
+    if(!Array.isArray(tpl.strecken)||tpl.strecken.length===0){ alert("Du hast noch keine Strecken angelegt, die du vorschlagen könntest."); return; }
+    const title=prompt("Titel für die Streckenvorlage (z.B. \"Prüfungsstrecken "+myCity+"\"):",tpl.streckenTitel||("Strecken "+myCity));
+    if(title===null) return;
+    if(!title.trim()){ alert("Bitte einen Titel eingeben."); return; }
+    try{
+      await proposeRouteTemplate(uid,myCity,title.trim(),deepCopy(tpl.strecken),(school&&school.name)||"");
+      showFlash("✓ Vorschlag eingereicht");
+      if(cityTplModal){ const mine=await fetchMyRouteProposals(uid); setCityTplModal(m=>m?{...m,mine}:m); }
+    }catch(e){ alert("Vorschlag konnte nicht eingereicht werden:\n"+(e.message||e)); }
+  }
 
   // Debounced per-student cloud update
   const scheduleSave=useCallback((stu)=>{
@@ -5415,6 +5524,31 @@ function App(){
         <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:21}}>Admin · Fahrschulen</h2>
       </div>
 
+      {/* Streckenvorlagen prüfen (nur zentraler App-Admin) */}
+      {isAdmin(session)&&<>
+      <div className="eyebrow" style={{marginTop:0}}>Streckenvorlagen prüfen</div>
+      <div className="card" style={{padding:"13px 14px",marginBottom:18}}>
+        {routeQueue===null
+          ? <button className="btn btn-ghost" onClick={async()=>{ try{ const q=await adminFetchPendingRouteTemplates(); setRouteQueue(q); }catch(e){ alert("Fehler:\n"+(e.message||e)); } }}>Vorschläge laden</button>
+          : routeQueue.length===0
+            ? <div style={{fontSize:13,color:"var(--muted)"}}>Keine offenen Vorschläge.</div>
+            : routeQueue.map(t=>{
+                const secs=Array.isArray(t.strecken)?t.strecken:[];
+                return <div key={t.id} style={{padding:"11px 0",borderTop:"1px solid var(--line)"}}>
+                  <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15}}>{t.title}</div>
+                  <div style={{fontSize:12,color:"var(--muted)",margin:"2px 0 6px"}}>Stadt: {t.city}{t.proposed_by_name?" · von "+t.proposed_by_name:""} · {secs.length} Abschnitte</div>
+                  <div style={{fontSize:12,color:"var(--ink-2)",marginBottom:10,lineHeight:1.5}}>
+                    {secs.map(s=>s.title+" ("+((s.items&&s.items.length)||0)+")").join(", ")||"–"}
+                  </div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button className="btn btn-primary" style={{fontSize:13}} onClick={async()=>{ try{ await adminApproveRouteTemplate(t.id); setRouteQueue(q=>q.filter(x=>x.id!==t.id)); showFlash("✓ Freigegeben"); }catch(e){ alert("Fehler:\n"+(e.message||e)); } }}>Freigeben</button>
+                    <button className="btn btn-ghost" style={{fontSize:13,color:"#B3362A"}} onClick={async()=>{ if(!confirm("Vorschlag \""+t.title+"\" ablehnen und löschen?")) return; try{ await adminRejectRouteTemplate(t.id); setRouteQueue(q=>q.filter(x=>x.id!==t.id)); }catch(e){ alert("Fehler:\n"+(e.message||e)); } }}>Ablehnen</button>
+                  </div>
+                </div>;
+              })}
+      </div>
+      </>}
+
       {/* PayPal-Zahlungsempfänger für das Monatsabo */}
       <div className="eyebrow" style={{marginTop:0}}>Zahlungsempfänger (Monatsabo)</div>
       <div className="card" style={{padding:"13px 14px",marginBottom:18}}>
@@ -5573,6 +5707,17 @@ function App(){
       </>}
 
       {settingsTab==="fahrlehrer"&&<>
+      <div className="eyebrow" style={{marginTop:0}}>Benachrichtigungen</div>
+      <div className="card" style={{padding:"4px 14px 8px",marginBottom:16}}>
+        {settingRow("Geburtstage","Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat",
+          <button onClick={()=>{ const next=!birthdayNotify; setBirthdayNotify(next); try{ localStorage.setItem("v3_birthday",next?"1":"0"); }catch(e){} }}
+            aria-label="Geburtstags-Hinweis umschalten"
+            style={{width:52,height:30,borderRadius:99,border:"none",position:"relative",cursor:"pointer",
+              background:birthdayNotify?"var(--orange)":"#CFC7B8",transition:"background .2s"}}>
+            <span style={{position:"absolute",top:3,left:birthdayNotify?25:3,width:24,height:24,borderRadius:"50%",
+              background:"#fff",transition:"left .2s",boxShadow:"0 1px 3px rgba(0,0,0,.3)"}}/>
+          </button>)}
+      </div>
       {locations.length>0 && <>
       <div className="eyebrow" style={{marginTop:0}}>Mein Standort</div>
       <div className="card" style={{padding:"13px 14px",marginBottom:16}}>
@@ -6448,6 +6593,18 @@ function App(){
       <div className="card" style={{padding:"10px 13px",marginBottom:12,fontSize:12.5,color:"var(--ink-2)",lineHeight:1.5}}>
         Zum <b>Umbenennen</b> ins Namensfeld tippen. Zum <b>Verschieben</b> am Griff <span style={{color:"#B0A896"}}>⠿</span> ziehen. Mit <b>+</b> Punkte oder Abschnitte hinzufügen, mit dem roten Symbol löschen. Alles wird automatisch gespeichert.
       </div>
+
+      {isStrecken && <div className="card" style={{padding:"12px 13px",marginBottom:12}}>
+        <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,marginBottom:2}}>Stadt-Streckenvorlagen</div>
+        <div style={{fontSize:12,color:"var(--muted)",marginBottom:10,lineHeight:1.5}}>
+          {myCity?<span>Vorlagen für <b>{myCity}</b>, geprüft und freigegeben. Übernehmen ersetzt deine Strecken.</span>
+                 :<span>Wähle im Fahrlehrerbereich einen Standort mit Stadt, dann kannst du hier freigegebene Vorlagen deiner Stadt übernehmen.</span>}
+        </div>
+        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+          <button className="btn btn-ghost" style={{fontSize:13}} onClick={openCityTplModal} disabled={!myCity}>Vorlagen aus meiner Stadt</button>
+          {(isAdmin(session)||isSchoolAdmin)&&<button className="btn btn-ghost" style={{fontSize:13}} onClick={proposeCurrentStrecken} disabled={!myCity}>Diese Strecken vorschlagen</button>}
+        </div>
+      </div>}
 
       {list.map((sec,si)=>{
         const isOpen=openSection===sec.id;
@@ -7482,6 +7639,79 @@ function App(){
             setOnboarding(null);
           }}>Assistent schließen</button>
         </>}
+      </div>
+    </div>}
+    {cityTplModal&&<div onClick={()=>setCityTplModal(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:121,display:"flex",alignItems:"flex-end",justifyContent:"center"}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:560,
+        borderTopLeftRadius:20,borderTopRightRadius:20,padding:"20px 18px calc(20px + env(safe-area-inset-bottom))",maxHeight:"85vh",overflowY:"auto"}}>
+        <div style={{width:40,height:4,background:"var(--line)",borderRadius:99,margin:"0 auto 16px"}}/>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,marginBottom:4}}>Streckenvorlagen {myCity}</h3>
+        <p style={{fontSize:13,color:"var(--muted)",marginBottom:16}}>Freigegebene Vorlagen deiner Stadt zum Übernehmen. Übernehmen ersetzt deine aktuellen Strecken.</p>
+        {cityTplModal.busy && <div style={{fontSize:13,color:"var(--muted)"}}>Lädt…</div>}
+        {cityTplModal.error && <div style={{fontSize:13,color:"#B3362A",marginBottom:12}}>{cityTplModal.error}</div>}
+        {!cityTplModal.busy && cityTplModal.approved.length===0 &&
+          <div style={{fontSize:13,color:"var(--muted)",marginBottom:14}}>Für {myCity} sind noch keine freigegebenen Vorlagen vorhanden.</div>}
+        {cityTplModal.approved.map(t=>{
+          const secs=Array.isArray(t.strecken)?t.strecken.length:0;
+          return <div key={t.id} className="card" style={{padding:"12px 13px",marginBottom:10,border:"1px solid var(--line)"}}>
+            <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:15}}>{t.title}</div>
+            <div style={{fontSize:12,color:"var(--muted)",margin:"2px 0 10px"}}>{secs} {secs===1?"Abschnitt":"Abschnitte"}{t.proposed_by_name?" · von "+t.proposed_by_name:""}</div>
+            <button className="btn btn-primary" style={{fontSize:13}} onClick={()=>adoptCityTemplate(t)}>Übernehmen</button>
+          </div>;
+        })}
+
+        {(isAdmin(session)||isSchoolAdmin)&&<div style={{marginTop:6,paddingTop:14,borderTop:"1px solid var(--line)"}}>
+          <div style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:14,marginBottom:8}}>Meine Vorschläge</div>
+          {cityTplModal.mine.length===0
+            ? <div style={{fontSize:12.5,color:"var(--muted)",marginBottom:10}}>Du hast noch keine Vorlage vorgeschlagen.</div>
+            : cityTplModal.mine.map(t=>{
+                const st=t.status==="approved"?"Freigegeben":(t.status==="pending"?"In Prüfung":t.status);
+                const stColor=t.status==="approved"?"var(--green)":"var(--amber,#B7791F)";
+                return <div key={t.id} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 0",borderTop:"1px solid var(--line)"}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13.5,fontWeight:600}}>{t.title}</div>
+                    <div style={{fontSize:11.5,color:stColor,fontWeight:700}}>{st} · {t.city}</div>
+                  </div>
+                  <button className="btn btn-ghost" style={{padding:"6px 10px",fontSize:12.5,color:"#B3362A"}}
+                    onClick={async()=>{ if(!confirm("Vorschlag \""+t.title+"\" zurückziehen?")) return; try{ await withdrawRouteTemplate(t.id); const mine=await fetchMyRouteProposals(uid); setCityTplModal(m=>m?{...m,mine}:m); }catch(e){ alert("Konnte nicht zurückziehen:\n"+(e.message||e)); } }}>Zurückziehen</button>
+                </div>;
+              })}
+          <button className="btn btn-ghost btn-block" style={{marginTop:10,fontSize:13}} onClick={proposeCurrentStrecken} disabled={!myCity}>+ Aktuelle Strecken vorschlagen</button>
+        </div>}
+
+        <button className="btn btn-ghost btn-block" style={{marginTop:14}} onClick={()=>setCityTplModal(null)}>Schließen</button>
+      </div>
+    </div>}
+    {birthdayPopup&&<div onClick={()=>setBirthdayPopup(null)}
+      style={{position:"fixed",inset:0,background:"rgba(0,0,0,.5)",zIndex:121,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div onClick={e=>e.stopPropagation()} style={{background:"var(--card)",width:"100%",maxWidth:420,
+        borderRadius:20,padding:"24px 20px calc(20px + env(safe-area-inset-bottom))",maxHeight:"85vh",overflowY:"auto"}}>
+        <div style={{fontSize:40,textAlign:"center",marginBottom:6}}>🎉</div>
+        <h3 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:20,textAlign:"center",marginBottom:4}}>
+          {birthdayPopup.length===1?"Geburtstag heute":"Geburtstage heute"}
+        </h3>
+        <p style={{fontSize:13,color:"var(--muted)",textAlign:"center",marginBottom:18}}>
+          {birthdayPopup.length===1?"Eine deiner Fahrschüler hat heute Geburtstag":birthdayPopup.length+" deiner Fahrschüler haben heute Geburtstag"}
+        </p>
+        {birthdayPopup.map(s=>{
+          let alter=null;
+          try{ const d=new Date(s.geb), n=new Date(); alter=n.getFullYear()-d.getFullYear(); }catch(e){}
+          return <button key={s.id} onClick={()=>{ setActiveId(s.id); setView("adk"); setBirthdayPopup(null); }}
+            style={{width:"100%",display:"flex",alignItems:"center",gap:12,padding:"11px 12px",marginBottom:8,
+              background:"var(--field-bg)",border:"1px solid var(--line)",borderRadius:12,textAlign:"left",cursor:"pointer"}}>
+            <span style={{width:40,height:40,borderRadius:"50%",background:"var(--orange)",color:"#fff",flexShrink:0,
+              display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"var(--font-d)",fontWeight:800,fontSize:15}}>
+              {((s.vorname||" ")[0]||"")+((s.name||" ")[0]||"")}
+            </span>
+            <span style={{flex:1,minWidth:0}}>
+              <span style={{display:"block",fontFamily:"var(--font-d)",fontWeight:800,fontSize:15}}>{dispName(s)}</span>
+              {alter!=null&&<span style={{display:"block",fontSize:12.5,color:"var(--muted)"}}>wird heute {alter}</span>}
+            </span>
+            <span style={{color:"var(--muted)",fontSize:18,flexShrink:0}}>›</span>
+          </button>;
+        })}
+        <button className="btn btn-ghost btn-block" style={{marginTop:8}} onClick={()=>setBirthdayPopup(null)}>Schließen</button>
       </div>
     </div>}
     {showChangelog&&<div onClick={()=>{ setShowChangelog(false); setChangelogExpanded(false); }}
