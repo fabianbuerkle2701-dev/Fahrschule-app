@@ -573,7 +573,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.22.0";
+const APP_VERSION = "1.22.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -612,6 +612,10 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.22.1", date:"Juli 2026", changes:[
+    "Neu: Jeder Fahrlehrer kann unter Mehr › Einstellungen › Fahrlehrerbereich seinen eigenen Standort festlegen. Neu angelegte Schüler bekommen diesen Standort automatisch zugewiesen (im Schülerprofil weiter änderbar)",
+    "Hinweis für Fabian: Braucht eine neue Spalte profiles.default_location_id. Das SQL steht in der Antwort zum Kopieren",
+  ]},
   { v:"1.22.0", date:"Juli 2026", changes:[
     "Neu: Standorte / Filialen. Unter Mehr › Einstellungen › Adminbereich › Standorte legt die Fahrschule Filialen mit Name, Adresse und Kontakt (Telefon, E-Mail) an. Im Schülerprofil wird jeder Schüler einem Standort zugewiesen. Der Schüler sieht seinen Standort samt Kontaktdaten im Fahrschüler-Bereich der Buchungsseite",
     "Hinweis für Fabian: Die Standorte benötigen eine neue Spalte (schools.locations) und eine Anpassung von public_student_overview (liefert jetzt zusätzlich location). Das passende SQL liegt als eigene Datei bei und muss einmalig im SQL-Editor ausgeführt werden",
@@ -1286,6 +1290,19 @@ async function saveBookingMessage(uid,text){
   const email = sess && sess.session && sess.session.user && sess.session.user.email;
   const { error } = await sb.from("profiles").upsert({ id:uid, email, booking_message:text||null }, { onConflict:"id" });
   if(error) throw new Error(error.message||"Nachricht konnte nicht gespeichert werden");
+}
+// Eigener Standort des Fahrlehrers. Neue Schüler bekommen diesen Standort automatisch vorbelegt.
+async function fetchMyLocation(uid){
+  const { data, error } = await sb.from("profiles").select("default_location_id").eq("id",uid).maybeSingle();
+  if(error){ console.error(error); return ""; }
+  return (data&&data.default_location_id)||"";
+}
+async function saveMyLocation(uid,locId){
+  if(!uid) return;
+  const { data:sess } = await sb.auth.getSession();
+  const email = sess && sess.session && sess.session.user && sess.session.user.email;
+  const { error } = await sb.from("profiles").upsert({ id:uid, email, default_location_id:locId||null }, { onConflict:"id" });
+  if(error) throw new Error(error.message||"Standort konnte nicht gespeichert werden");
 }
 // Arbeitszeiten je Wochentag speichern, damit Schüler über den Buchungslink nur innerhalb
 // dieser Zeiten einen Termin vorschlagen können. Format: {mo:{von,bis},di:{...},...} pro Tag,
@@ -2485,6 +2502,7 @@ function App(){
   const [sortBy,setSortBy]=useState(()=>{ try{ return localStorage.getItem("v3_sort")||"name"; }catch(e){ return "name"; } });
   const [settingsTab,setSettingsTab]=useState("darstellung"); // Unterreiter der Einstellungen
   const [locEdit,setLocEdit]=useState(null); // null | {index|null, name, street, zip, city, phone, email}
+  const [myLocationId,setMyLocationId]=useState(""); // eigener Standort des Fahrlehrers (für neue Schüler)
   useEffect(()=>{
     if(settingsTab==="admin"&&!(isAdmin(session)||isSchoolAdmin)) setSettingsTab("darstellung");
   },[settingsTab,session,isSchoolAdmin]);
@@ -2541,6 +2559,11 @@ function App(){
   },[]);
 
   const uid = session && session.user ? session.user.id : null;
+
+  useEffect(()=>{
+    if(!uid){ setMyLocationId(""); return; }
+    fetchMyLocation(uid).then(id=>setMyLocationId(id||"")).catch(()=>{});
+  },[uid]);
 
   useEffect(()=>{
     if(view!=="videos" || !uid) return;
@@ -2993,7 +3016,7 @@ function App(){
 
   // Add a new student (cloud insert, optimistic)
   async function addStudent(){
-    const draft=newStudent();
+    const draft={...newStudent(), location_id:myLocationId||""};
     const created=await dbInsert(uid,draft);
     if(!created){ alert("Konnte nicht speichern. Internetverbindung prüfen."); return; }
     setStudents(prev=>{ const arr=[...(prev||[]),created]; saveCache(uid,arr); return arr; });
@@ -3163,6 +3186,7 @@ function App(){
   async function createStudentFromImport(d){
     const deToIso=(s)=>{ const m=(s||"").match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m?m[3]+"-"+m[2].padStart(2,"0")+"-"+m[1].padStart(2,"0"):""; };
     const draft=newStudent();
+    draft.location_id=myLocationId||"";
     draft.vorname=d.vorname||"";
     draft.name=d.name||"";
     draft.geb=deToIso(d.geburtstag);
@@ -5549,6 +5573,24 @@ function App(){
       </>}
 
       {settingsTab==="fahrlehrer"&&<>
+      {locations.length>0 && <>
+      <div className="eyebrow" style={{marginTop:0}}>Mein Standort</div>
+      <div className="card" style={{padding:"13px 14px",marginBottom:16}}>
+        <div className="field">
+          <label>Dein Standort / deine Filiale</label>
+          <select value={myLocationId} onChange={async e=>{
+            const val=e.target.value; setMyLocationId(val);
+            try{ await saveMyLocation(uid,val); }catch(err){ alert("Standort konnte nicht gespeichert werden:\n"+(err.message||err)); }
+          }}>
+            <option value="">– Kein Standort –</option>
+            {locations.map(loc=><option key={loc.id} value={loc.id}>{loc.name}</option>)}
+          </select>
+        </div>
+        <p style={{fontSize:11.5,color:"var(--muted)",margin:"10px 0 0",lineHeight:1.5}}>
+          Neue Schüler, die du anlegst, werden automatisch diesem Standort zugewiesen. Im Schülerprofil kannst du den Standort jederzeit ändern.
+        </p>
+      </div>
+      </>}
       {/* Monatsabo, nur sichtbar wenn zahlungspflichtig */}
       {mySubscription&&mySubscription.subscription_active&&<>
         <div className="eyebrow" style={{marginTop:0}}>Monatsabo</div>
@@ -7411,7 +7453,7 @@ function App(){
               const v=(document.getElementById("ob-vorname")?.value||"").trim();
               const n=(document.getElementById("ob-name2")?.value||"").trim();
               if(v||n){
-                const draft={...newStudent(),vorname:v,name:n};
+                const draft={...newStudent(),vorname:v,name:n,location_id:myLocationId||""};
                 const created=await dbInsert(uid,draft);
                 if(created){ setStudents(prev=>{ const arr=[...(prev||[]),created]; saveCache(uid,arr); return arr; }); }
               }
