@@ -275,6 +275,7 @@
   .rmap-rec{background:#E5484D;color:#fff;border-color:#E5484D}
   .rmap-list-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--line);
     border-radius:12px;background:var(--card);margin-bottom:8px}
+  .ls-lbl{font-family:var(--font-d);font-weight:700;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);display:block;margin-bottom:5px}
 </style>
 <script type="text/babel">
 const { useState, useEffect, useCallback, useRef } = React;
@@ -593,7 +594,7 @@ function arrowBtn(disabled){ return { width:30,height:30,borderRadius:8,border:"
 
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.26.0";
+const APP_VERSION = "1.27.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM","A1","A2","A","B","BE","B96","C1","C1E","C","CE","D1","D1E","D","DE","L","T"];
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
@@ -632,6 +633,14 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+  { v:"1.27.0", date:"Juli 2026", changes:[
+    "Neu: Der Reiter „Fahrstunden“ ist jetzt direkt über Ausbildung erreichbar und vereint alles pro Stunde an einem Ort: Thema, gefahrene Strecke, „Was lief gut“, „Was lief schlecht“, Bewertung und Notizen, als übersichtlicher Verlauf",
+    "Neu: Strecke direkt im Fahrstunden-Eintrag aufzeichnen. Jede Fahrstunde hat ihre eigene kleine Karte mit Live-GPS-Aufzeichnung, die Strecke wird direkt am Eintrag gespeichert",
+    "Die Karten-Übersicht zeigt zusätzlich alle Strecken aus dem Fahrstunden-Verlauf (gestrichelt) neben separat aufgezeichneten Strecken und Stecknadeln",
+  ]},
+  { v:"1.26.1", date:"Juli 2026", changes:[
+    "Behoben: Terminarten, die als „zählt nicht als Fahrstunde\" markiert sind (z.B. Privater Termin), wurden in der Tages- und Wochen-Auslastung (Tages-/Wochenlimit) trotzdem als belegte Minuten mitgezählt. Sie werden jetzt auch dort korrekt herausgerechnet, wie schon zuvor bei der UE-Übersicht",
+  ]},
   { v:"1.26.0", date:"Juli 2026", changes:[
     "Neu: Karte mit Live-Streckentracking pro Fahrschüler (unter Ausbildung, Karte). Die gefahrene Strecke wird per GPS live aufgezeichnet und mit Name, Länge und Dauer beim Schüler gespeichert",
     "Neu: Stecknadel-Funktion wie bei Google Maps. Tippe eine Markierung auf die Karte, z. B. für schwierige Kreuzungen oder Prüfungspunkte, und benenne sie",
@@ -2522,7 +2531,7 @@ function rmapPinSvg(color){
     +'<circle cx="13" cy="12" r="4.6" fill="#fff"/></svg>';
 }
 
-function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin, onDeletePin }){
+function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin, onDeletePin, focusRoute, extraRoutes }){
   const elRef=useRef(null);
   const mapRef=useRef(null);
   const savedLayerRef=useRef(null);   // gespeicherte Strecken + Nadeln
@@ -2588,6 +2597,12 @@ function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin
           +" · "+rmapFmtDur(r.dur||0)).addTo(grp);
       r.pts.forEach(p=>bounds.push(p));
     });
+    (extraRoutes||[]).forEach(r=>{
+      if(hidden.has(r.id) || !r.pts || r.pts.length<2) return;
+      L.polyline(r.pts,{ color:r.color||"#2E5E8C", weight:5, opacity:.8, dashArray:"1,9", lineCap:"round", lineJoin:"round" })
+        .bindPopup("<b>"+rmapEsc(r.name)+"</b><br>Aus Fahrstunde · "+rmapFmtDist(r.dist||rmapPathLen(r.pts))).addTo(grp);
+      r.pts.forEach(p=>bounds.push(p));
+    });
     (pins||[]).forEach(p=>{
       const icon=L.divIcon({ className:"rmap-pindot", html:rmapPinSvg(p.color||"#E5484D"),
         iconSize:[26,34], iconAnchor:[13,34], popupAnchor:[0,-30] });
@@ -2596,7 +2611,7 @@ function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin
       bounds.push([p.lat,p.lng]);
     });
     if(bounds.length && !recording){ try{ map.fitBounds(bounds,{padding:[40,40],maxZoom:16}); }catch(_){} }
-  },[routes,pins,hidden,ready]);
+  },[routes,pins,hidden,ready,extraRoutes]);
 
   function locate(){
     const map=mapRef.current; if(!map||!navigator.geolocation) return;
@@ -2659,6 +2674,14 @@ function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin
 
   // Beim Verlassen aufräumen
   useEffect(()=>()=>{ if(watchRef.current!=null) navigator.geolocation.clearWatch(watchRef.current); },[]);
+
+  // Eine bestimmte Strecke einrahmen (Sprung aus dem Fahrstunden-Verlauf)
+  useEffect(()=>{
+    if(!focusRoute) return;
+    setHidden(prev=>{ if(!prev.has(focusRoute.id)) return prev; const n=new Set(prev); n.delete(focusRoute.id); return n; });
+    const map=mapRef.current, r=[...(routes||[]),...(extraRoutes||[])].find(x=>x.id===focusRoute.id);
+    if(map&&r&&r.pts&&r.pts.length){ try{ map.fitBounds(r.pts,{padding:[50,50],maxZoom:16}); }catch(_){} }
+  },[focusRoute?focusRoute.ts:0,ready]);
 
   function toggleHidden(id){ setHidden(prev=>{ const n=new Set(prev); n.has(id)?n.delete(id):n.add(id); return n; }); }
   function togglePinMode(){ const v=!pinMode; setPinMode(v); pinModeRef.current=v; }
@@ -2732,6 +2755,106 @@ function RouteMap({ student, routes, pins, onSaveRoute, onDeleteRoute, onSavePin
             onClick={()=>{ if(confirm('Stecknadel „'+p.name+'“ löschen?')) onDeletePin(p.id); }}>×</button>
         </div>)}
     </div>}
+  </div>;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   LessonMap: kompakte Karte pro Fahrstunde (all-in-one).
+   Zeichnet EINE Strecke auf und speichert sie direkt am
+   Fahrstunden-Eintrag (l.route = {pts,dist,dur,recordedAt}).
+   ───────────────────────────────────────────────────────────── */
+function LessonMap({ route, onSave, onDelete }){
+  const elRef=useRef(null), mapRef=useRef(null), lineRef=useRef(null);
+  const liveMarkerRef=useRef(null), watchRef=useRef(null), ptsRef=useRef([]), startRef=useRef(0);
+  const [ready,setReady]=useState(!!window.L);
+  const [recording,setRecording]=useState(false);
+  const [stats,setStats]=useState({dist:0,dur:0});
+  const [err,setErr]=useState("");
+
+  useEffect(()=>{ if(window.L){setReady(true);return;} const t=setInterval(()=>{ if(window.L){setReady(true);clearInterval(t);} },200); return ()=>clearInterval(t); },[]);
+
+  useEffect(()=>{
+    if(!ready||!elRef.current||mapRef.current) return;
+    const L=window.L;
+    const map=L.map(elRef.current,{zoomControl:true,attributionControl:true}).setView([51.163,10.447],5);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap"}).addTo(map);
+    mapRef.current=map;
+    setTimeout(()=>{ try{map.invalidateSize();}catch(_){} },200);
+    return ()=>{ try{map.remove();}catch(_){} mapRef.current=null; };
+  },[ready]);
+
+  // Gespeicherte Strecke zeichnen
+  useEffect(()=>{
+    const L=window.L, map=mapRef.current; if(!L||!map) return;
+    if(lineRef.current){ try{map.removeLayer(lineRef.current);}catch(_){} lineRef.current=null; }
+    if(!recording && route && route.pts && route.pts.length>=2){
+      lineRef.current=L.polyline(route.pts,{color:"#FF9300",weight:6,opacity:.9,lineJoin:"round"}).addTo(map);
+      try{ map.fitBounds(route.pts,{padding:[30,30],maxZoom:16}); }catch(_){}
+    }
+  },[route,ready,recording]);
+
+  useEffect(()=>()=>{ if(watchRef.current!=null) navigator.geolocation.clearWatch(watchRef.current); },[]);
+
+  function startRec(){
+    const L=window.L, map=mapRef.current; if(!map) return;
+    if(!navigator.geolocation){ setErr("Dieses Gerät unterstützt keine Standortermittlung."); return; }
+    setErr(""); ptsRef.current=[]; startRef.current=Date.now(); setStats({dist:0,dur:0});
+    if(lineRef.current){ try{map.removeLayer(lineRef.current);}catch(_){} lineRef.current=null; }
+    lineRef.current=L.polyline([],{color:"#E5484D",weight:6,opacity:.9,lineJoin:"round"}).addTo(map);
+    setRecording(true);
+    watchRef.current=navigator.geolocation.watchPosition(pos=>{
+      const p=[pos.coords.latitude,pos.coords.longitude], arr=ptsRef.current;
+      if(arr.length===0 || rmapDist(arr[arr.length-1],p)>8){
+        arr.push(p);
+        if(lineRef.current) lineRef.current.setLatLngs(arr);
+        setStats({dist:rmapPathLen(arr),dur:(Date.now()-startRef.current)/1000});
+      }
+      if(!liveMarkerRef.current){
+        liveMarkerRef.current=L.marker(p,{icon:L.divIcon({className:"",html:'<div class="rmap-live"></div>',iconSize:[18,18],iconAnchor:[9,9]})}).addTo(map);
+      } else liveMarkerRef.current.setLatLng(p);
+      map.setView(p, Math.max(map.getZoom(),16), {animate:true});
+    }, e=>{ setErr(e.code===1?"Standortfreigabe abgelehnt. Bitte im Browser erlauben.":"Standortsignal verloren."); },
+    {enableHighAccuracy:true,maximumAge:1000,timeout:15000});
+  }
+
+  function stopRec(save){
+    if(watchRef.current!=null){ navigator.geolocation.clearWatch(watchRef.current); watchRef.current=null; }
+    const map=mapRef.current, pts=ptsRef.current.slice();
+    if(liveMarkerRef.current&&map){ try{map.removeLayer(liveMarkerRef.current);}catch(_){} liveMarkerRef.current=null; }
+    setRecording(false);
+    if(save && pts.length>=2){
+      onSave({ pts, dist:Math.round(rmapPathLen(pts)), dur:Math.round((Date.now()-startRef.current)/1000), recordedAt:new Date().toISOString() });
+    } else if(save){ setErr("Zu wenige Punkte aufgezeichnet."); if(lineRef.current&&map){ try{map.removeLayer(lineRef.current);}catch(_){} lineRef.current=null; } }
+    ptsRef.current=[];
+  }
+
+  if(!ready) return <div style={{padding:"22px 12px",textAlign:"center",color:"var(--muted)",fontSize:13,border:"1.5px solid var(--line)",borderRadius:12}}>Karte wird geladen…</div>;
+
+  return <div>
+    <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:8}}>
+      {!recording
+        ? <button className="btn btn-primary" style={{gap:7,padding:"9px 13px"}} onClick={startRec}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>
+            {route?"Neu aufzeichnen":"Strecke aufzeichnen"}
+          </button>
+        : <button className="btn" style={{gap:7,padding:"9px 13px",background:"#E5484D",color:"#fff"}} onClick={()=>stopRec(true)}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+            Stoppen &amp; speichern
+          </button>}
+      {recording && <button className="btn btn-ghost" style={{padding:"9px 12px"}} onClick={()=>stopRec(false)}>Verwerfen</button>}
+      {!recording && route && <button className="btn btn-ghost" style={{padding:"9px 12px",color:"#B3362A"}}
+        onClick={()=>{ if(confirm("Aufgezeichnete Strecke entfernen?")) onDelete(); }}>Entfernen</button>}
+    </div>
+    {recording && <div style={{display:"flex",gap:8,marginBottom:8}}>
+      <span className="rmap-badge rmap-rec"><b>●</b> Aufnahme</span>
+      <span className="rmap-badge">{rmapFmtDist(stats.dist)}</span>
+      <span className="rmap-badge">{rmapFmtDur(stats.dur)}</span>
+    </div>}
+    {!recording && route && <div style={{fontSize:12,color:"var(--muted)",marginBottom:8}}>
+      {rmapFmtDist(route.dist||0)} · {rmapFmtDur(route.dur||0)}{route.recordedAt?" · "+new Date(route.recordedAt).toLocaleDateString("de-DE"):""}
+    </div>}
+    {err && <div style={{fontSize:12,color:"#B3362A",background:"#FDECEA",borderRadius:10,padding:"8px 11px",marginBottom:8}}>{err}</div>}
+    <div className="rmap-wrap"><div ref={elRef} className="rmap" style={{height:"38vh",minHeight:240}}/></div>
   </div>;
 }
 
@@ -2813,6 +2936,7 @@ function App(){
   const [onboarding,setOnboarding]=useState(null); // null | {step:0|1|2}
   const [tabMenu,setTabMenu]=useState(null); // null | "ausbildung" | "mehr"
   const [openLesson,setOpenLesson]=useState(null);
+  const [focusRoute,setFocusRoute]=useState(null); // {id,ts} – Strecke, die die Karte einrahmen soll
   const [calWeek,setCalWeek]=useState(()=>startOfWeek(new Date())); // Montag der gezeigten Woche
   const [calMode,setCalMode]=useState("woche"); // "woche" | "tag"
   const [calDay,setCalDay]=useState(()=>{ const d=new Date(); d.setHours(0,0,0,0); return d; }); // gewählter Tag
@@ -3832,7 +3956,7 @@ function App(){
   // ── Fahrstunden-Tagebuch ──
   function addLesson(){
     const today=new Date().toISOString().slice(0,10);
-    const lesson={ id:uniqueId("ls"), date:today, ratings:{}, note:"" };
+    const lesson={ id:uniqueId("ls"), date:today, thema:"", gut:"", schlecht:"", route:null, ratings:{}, note:"" };
     const lessons=[lesson,...(active.lessons||[])];
     updateActive({lessons});
   }
@@ -3843,7 +3967,7 @@ function App(){
     const stu=students.find(x=>x.id===appt.student_id);
     if(!stu){ alert("Der Schüler dieses Termins ist nicht in deiner Liste."); return; }
     const date=ymd(appt.start_at);
-    const lesson={ id:uniqueId("ls"), date, ratings:{}, note:"" };
+    const lesson={ id:uniqueId("ls"), date, thema:"", gut:"", schlecht:"", route:null, ratings:{}, note:"" };
     const lessons=[lesson,...(stu.lessons||[])];
     writeStudent({...stu,lessons});
     setActiveId(stu.id);
@@ -4522,14 +4646,18 @@ function App(){
   function renderKarte(){
     const routes=Array.isArray(active.routes)?active.routes:[];
     const pins=Array.isArray(active.pins)?active.pins:[];
+    const lessonRoutes=(active.lessons||[])
+      .filter(l=>l.route&&Array.isArray(l.route.pts)&&l.route.pts.length>=2)
+      .map(l=>({ id:"L_"+l.id, name:(l.thema||("Fahrt "+(l.date?new Date(l.date).toLocaleDateString("de-DE"):""))),
+        date:l.date, pts:l.route.pts, dist:l.route.dist, dur:l.route.dur, color:"#2E5E8C" }));
     return <div className="pad">
       {studentHeader()}
       <h2 style={{fontFamily:"var(--font-d)",fontWeight:800,fontSize:22,margin:"0 2px 4px"}}>Karte</h2>
       <p style={{fontSize:12.5,color:"var(--muted)",margin:"0 2px 14px",lineHeight:1.5}}>
-        Gefahrene Strecken live aufzeichnen und Stecknadeln für {dispName(active)} speichern.
+        Übersicht aller Strecken und Stecknadeln von {dispName(active)}. Gestrichelt = Strecken aus dem Fahrstunden-Verlauf.
       </p>
       <RouteMap key={active.id}
-        student={active} routes={routes} pins={pins}
+        student={active} routes={routes} pins={pins} extraRoutes={lessonRoutes} focusRoute={focusRoute}
         onSaveRoute={r=>updateActive({ routes:[...routes,r] })}
         onDeleteRoute={id=>updateActive({ routes:routes.filter(x=>x.id!==id) })}
         onSavePin={p=>updateActive({ pins:[...pins,p] })}
@@ -4796,6 +4924,7 @@ function App(){
         const avgSmiley = avg==null?null:(avg>=2.5?SMILEYS[0]:avg>=1.75?SMILEYS[1]:SMILEYS[2]);
         const isOpen=openLesson===l.id;
         const rated=LESSON_FIELDS.filter(f=>l.ratings&&l.ratings[f.id]).length;
+        const lroute=l.route;
         return <div key={l.id} className="card" style={{marginBottom:10,overflow:"hidden"}}>
           <button onClick={()=>setOpenLesson(isOpen?null:l.id)}
             style={{width:"100%",display:"flex",alignItems:"center",gap:11,padding:"12px 14px",textAlign:"left",background:"var(--card)"}}>
@@ -4804,11 +4933,14 @@ function App(){
               {avgSmiley?avgSmiley.emoji:"📝"}
             </div>
             <div style={{flex:1,minWidth:0}}>
-              <div style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:15,lineHeight:1.1}}>
-                {lessons.length-idx}. Fahrstunde
+              <div style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:15,lineHeight:1.15,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                {l.thema?l.thema:(lessons.length-idx)+". Fahrstunde"}
               </div>
-              <div style={{fontSize:12,color:"var(--muted)",marginTop:2}}>
-                {l.date?fmtDLong(l.date):"kein Datum"}{rated>0?" · "+rated+"/5 bewertet":""}{l.note?" · 📝":""}
+              <div style={{fontSize:12,color:"var(--muted)",marginTop:2,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                {l.date?("Fahrt am "+new Date(l.date).toLocaleDateString("de-DE")):"kein Datum"}
+                {lroute?" · 🗺 "+rmapFmtDist(lroute.dist||0):""}
+                {rated>0?" · "+rated+"/5":""}
+                {(l.gut||l.schlecht||l.note)?" · 📝":""}
               </div>
             </div>
             <IcChev open={isOpen}/>
@@ -4823,6 +4955,21 @@ function App(){
                   background:"#FDECEA",color:"#B3362A",display:"inline-flex",alignItems:"center",justifyContent:"center"}}>
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               </button>
+            </div>
+
+            <div style={{marginBottom:12}}>
+              <label className="ls-lbl">Thema der Fahrstunde</label>
+              <input type="text" defaultValue={l.thema||""}
+                onBlur={e=>{ if(e.target.value!==(l.thema||"")) updateLesson(l.id,{thema:e.target.value}); }}
+                placeholder="z. B. Kreisverkehr, Autobahn auffahren, Einparken…"
+                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",fontSize:15,fontWeight:600}}/>
+            </div>
+
+            <div style={{marginBottom:12}}>
+              <label className="ls-lbl">Gefahrene Strecke</label>
+              <LessonMap route={l.route||null}
+                onSave={r=>updateLesson(l.id,{route:r})}
+                onDelete={()=>updateLesson(l.id,{route:null})}/>
             </div>
 
             {LESSON_FIELDS.map(f=>{
@@ -4843,14 +4990,31 @@ function App(){
               </div>;
             })}
 
-            <div style={{marginTop:12}}>
-              <label style={{fontFamily:"var(--font-d)",fontWeight:700,fontSize:10.5,letterSpacing:".08em",
-                textTransform:"uppercase",color:"var(--muted)",display:"block",marginBottom:5}}>Notiz zur Stunde</label>
-              <textarea rows={2} defaultValue={l.note||""}
-                onBlur={e=>{ if(e.target.value!==(l.note||"")) updateLesson(l.id,{note:e.target.value}); }}
-                placeholder="Was lief gut, woran arbeiten…"
-                style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",
-                  fontSize:14.5,background:"var(--field-bg)",resize:"vertical"}}/>
+            <div style={{marginTop:12,display:"grid",gap:10}}>
+              <div>
+                <label className="ls-lbl" style={{color:"var(--green)"}}>Was lief gut</label>
+                <textarea rows={2} defaultValue={l.gut||""}
+                  onBlur={e=>{ if(e.target.value!==(l.gut||"")) updateLesson(l.id,{gut:e.target.value}); }}
+                  placeholder="Was hat gut geklappt…"
+                  style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",
+                    fontSize:14.5,background:"var(--field-bg)",resize:"vertical"}}/>
+              </div>
+              <div>
+                <label className="ls-lbl" style={{color:"#B3362A"}}>Was lief schlecht</label>
+                <textarea rows={2} defaultValue={l.schlecht||""}
+                  onBlur={e=>{ if(e.target.value!==(l.schlecht||"")) updateLesson(l.id,{schlecht:e.target.value}); }}
+                  placeholder="Woran noch arbeiten…"
+                  style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",
+                    fontSize:14.5,background:"var(--field-bg)",resize:"vertical"}}/>
+              </div>
+              <div>
+                <label className="ls-lbl">Weitere Notizen</label>
+                <textarea rows={2} defaultValue={l.note||""}
+                  onBlur={e=>{ if(e.target.value!==(l.note||"")) updateLesson(l.id,{note:e.target.value}); }}
+                  placeholder="Sonstiges…"
+                  style={{width:"100%",border:"1.5px solid var(--line)",borderRadius:10,padding:"9px 11px",
+                    fontSize:14.5,background:"var(--field-bg)",resize:"vertical"}}/>
+              </div>
             </div>
           </div>}
         </div>;
@@ -5272,7 +5436,7 @@ function App(){
   }
   // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
   function confirmedMinutesOnDay(dateKey,exceptId){
-    return (appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&a.id!==exceptId&&ymd(a.start_at)===dateKey)
+    return (appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&artCounts(apptArt(a))&&a.id!==exceptId&&ymd(a.start_at)===dateKey)
       .reduce((sum,a)=>sum+apptMin(a),0);
   }
   // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
@@ -5286,7 +5450,7 @@ function App(){
     if(weekLimit>0){
       const d=new Date(dateKey+"T12:00:00");
       const ws=ymd(startOfWeek(d)); const we=ymd(addDays(startOfWeek(d),6));
-      const usedW=(appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&a.id!==exceptId&&ymd(a.start_at)>=ws&&ymd(a.start_at)<=we)
+      const usedW=(appts||[]).filter(a=>a.status==="confirmed"&&!isSonstige(a)&&!isUrlaub(a)&&artCounts(apptArt(a))&&a.id!==exceptId&&ymd(a.start_at)>=ws&&ymd(a.start_at)<=we)
         .reduce((sum,a)=>sum+apptMin(a),0);
       if(usedW+minutes>weekLimit){
         return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits "+usedW+" von "+weekLimit+" Minuten bestätigt. Dieser Termin ("+minutes+" Min) würde auf "+(usedW+minutes)+" Minuten führen.";
@@ -7394,7 +7558,7 @@ function App(){
 
           <div style={{flex:1,position:"relative"}}>
             {tabMenu==="ausbildung"&&<div className="tabpop">
-              {[["adk","ADK",<IcCard/>],["strecken","Strecken",<IcMap/>],["karte","Karte",<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>]].map(([id,lbl,ic])=>
+              {[["adk","ADK",<IcCard/>],["strecken","Strecken",<IcMap/>],["tagebuch","Fahrstunden",<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 12h6M9 16h4"/></svg>],["karte","Karte",<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z"/><circle cx="12" cy="9" r="2.5"/></svg>]].map(([id,lbl,ic])=>
                 <button key={id} className={"tabpop-item"+(view===id?" on":"")} onClick={()=>{setView(id);setTabMenu(null);}}>
                   <span className="tabpop-ic">{ic}</span>{lbl}
                 </button>)}
