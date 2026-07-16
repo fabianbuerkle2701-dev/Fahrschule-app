@@ -646,7 +646,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.33.0";
+const APP_VERSION = "1.35.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -688,6 +688,15 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.35.0", date: "Juli 2026", changes: [
+            "Neu im Fahrschülerbereich: Der Schüler sieht jetzt seine gefahrenen Fahrstunden (Datum, Thema, Länge) und eine Karte mit allen aufgezeichneten Strecken übereinander, damit er sieht, wo er schon überall war",
+            "Die internen Notizen bleiben privat: „Was lief gut/schlecht“, die Bewertung und die Stecknadeln des Fahrlehrers werden dem Schüler nicht angezeigt",
+            "Hinweis für Fabian: Dafür muss die Supabase-Funktion public_student_overview einmalig erweitert werden (liefert jetzt zusätzlich das Feld lessons, reduziert auf Datum/Thema/Strecke). Das passende SQL liegt der Lieferung als eigene Datei bei. Ohne diesen Schritt bleibt der neue Bereich beim Schüler einfach leer, es entsteht kein Fehler.",
+        ] },
+    { v: "1.34.0", date: "Juli 2026", changes: [
+            "Neu: Zahlungserinnerungen. Sobald bei einem Schüler ein offener Betrag steht, erscheint unter Fahrten & Kosten ein Knopf zum Senden per WhatsApp. Der Ton wird automatisch von einer freundlichen Erinnerung bis zu einer bestimmteren Mahnung gesteigert, je nachdem wie oft schon erinnert wurde",
+            "Gesendete Erinnerungen werden mit Datum und Stufe beim Schüler festgehalten, damit der Verlauf nachvollziehbar bleibt",
+        ] },
     { v: "1.33.0", date: "Juli 2026", changes: [
             "Neu: Echte Rechnungen mit fortlaufender Nummer. Unter Fahrten & Kosten, Rechnung erstellen, wählst du die noch offenen Fahrstunden und Posten aus, die App vergibt automatisch die nächste Rechnungsnummer und erstellt ein druckbares PDF (über die Drucken-Funktion des Browsers)",
             "Neu: Rechnungsdaten in den Einstellungen (Mehr, Einstellungen, Rechnungsdaten). Firmenname, Anschrift, Steuernummer/USt-IdNr., IBAN, Kleinunternehmerregelung nach § 19 UStG und ein freier Zusatztext, erscheinen automatisch auf jeder Rechnung",
@@ -2028,6 +2037,21 @@ async function publicMySlots(code, name, von, bis) {
 }
 // Fahrschüler-Bereich: ADK, Strecken und Terminverlauf, per Code + Name + PIN.
 // Braucht die Supabase-RPCs public_student_overview und public_student_set_pin (SQL liegt bei).
+async function publicStudentLessons(code, name, pin) {
+    // Eigene, entkoppelte Funktion: liefert die Fahrstunden reduziert auf date/thema/route.
+    // Fehlt die Funktion (SQL noch nicht ausgeführt), liefern wir still [] statt zu stören.
+    try {
+        const { data, error } = await sb.rpc("public_student_lessons", { code, p_name: name, p_pin: pin });
+        if (error) {
+            console.warn("public_student_lessons nicht verfügbar:", error.message);
+            return [];
+        }
+        return Array.isArray(data) ? data : [];
+    }
+    catch (e) {
+        return [];
+    }
+}
 async function publicStudentOverview(code, name, pin) {
     const { data, error } = await sb.rpc("public_student_overview", { code, p_name: name, p_pin: pin });
     if (error) {
@@ -5874,6 +5898,41 @@ function App() {
         setInvoicePreview(inv);
         doPrint("invoice");
     }
+    // ── Zahlungserinnerungen ──
+    // Stufe 1: freundliche Erinnerung · Stufe 2: Zahlungserinnerung · Stufe 3+: bestimmtere Mahnung.
+    // Kein Rechtstext, keine Formulierung mit rechtlichen Schritten – bewusst schlicht gehalten.
+    function reminderText(stage, stu, open, lastInvoice) {
+        const name = (stu && stu.vorname) ? stu.vorname.trim() : "";
+        const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
+        const iv = (school && school.invoice_settings) || {};
+        const betragZeile = "Der offene Betrag liegt bei " + eurFmt(open) + (lastInvoice ? (" (Rechnung " + lastInvoice.number + ")") : "") + ".";
+        const ibanZeile = iv.iban ? ("\n\nIBAN: " + iv.iban) : "";
+        if (stage <= 1) {
+            return greet + "nur eine kurze Erinnerung: " + betragZeile + " Du kannst gerne bei der nächsten Fahrstunde vorbeikommen oder überweisen. Danke dir!" + ibanZeile;
+        }
+        if (stage === 2) {
+            return greet + "ich wollte nochmal an den offenen Betrag erinnern. " + betragZeile + " Bitte gleiche ihn zeitnah aus. Bei Fragen melde dich gerne bei mir." + ibanZeile;
+        }
+        return greet + "der offene Betrag ist leider immer noch nicht ausgeglichen. " + betragZeile + " Bitte melde dich zeitnah bei mir, damit wir das klären können." + ibanZeile;
+    }
+    function sendReminder() {
+        if (!active)
+            return;
+        const price = Number(pricePerHour) || 0;
+        const open = sumCharges(active, price) - sumPayments(active);
+        if (open <= 0.005) {
+            alert("Kein offener Betrag bei " + dispName(active) + ".");
+            return;
+        }
+        const stage = (active.reminders || []).length + 1;
+        const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
+        const text = reminderText(stage, active, open, lastInvoice);
+        const num = active.tel ? waNumber(active.tel) : "";
+        const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
+        const reminders = [...(active.reminders || []), { date: new Date().toISOString().slice(0, 10), stage, amount: open }];
+        updateActive({ reminders });
+        window.open(url, "_blank");
+    }
     function kostenSection() {
         const price = Number(pricePerHour) || 0; // Preis pro UE
         const mins = lessonMinutes(active);
@@ -5886,6 +5945,7 @@ function App() {
         const pays = active.payments || [];
         const lessons = active.drivenLessons || [];
         const invoices = active.invoices || [];
+        const reminders = active.reminders || [];
         function addItem() {
             const label = prompt("Bezeichnung des Postens (z.B. Grundgebühr, Lernmaterial):");
             if (label === null)
@@ -5945,7 +6005,17 @@ function App() {
                     "Gesamt ",
                     eurFmt(charges),
                     " \u00B7 bezahlt ",
-                    eurFmt(paid))),
+                    eurFmt(paid)),
+                open > 0.005 && React.createElement("button", { className: "btn btn-primary", style: { marginTop: 12, gap: 7 }, onClick: sendReminder },
+                    React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "currentColor" },
+                        React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z" })),
+                    reminders.length === 0 ? "Zahlungserinnerung senden" : (reminders.length + ". Erinnerung senden")),
+                reminders.length > 0 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8 } },
+                    "Zuletzt erinnert am ",
+                    new Date(reminders[reminders.length - 1].date).toLocaleDateString("de-DE"),
+                    " (Stufe ",
+                    reminders[reminders.length - 1].stage,
+                    ")")),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Gefahrene Fahrstunden"),
             React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 10 } },
                 lessons.length === 0
@@ -9634,6 +9704,56 @@ function VideoLibrary({ code }) {
         })));
 }
 // ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
+// Reine Ansichtskarte für den Schülerbereich: zeigt alle aufgezeichneten Strecken
+// übereinander. Kein Aufzeichnen, keine Stecknadeln, keine Bearbeitung.
+function StudentRouteMap({ lessons, color }) {
+    const elRef = React.useRef(null), mapRef = React.useRef(null);
+    const [ready, setReady] = React.useState(!!window.L);
+    const routes = (lessons || []).filter(l => l && l.route && Array.isArray(l.route.pts) && l.route.pts.length >= 2);
+    React.useEffect(() => { if (window.L) {
+        setReady(true);
+        return;
+    } rmapEnsureLeaflet(); const t = setInterval(() => { if (window.L) {
+        setReady(true);
+        clearInterval(t);
+    } }, 200); return () => clearInterval(t); }, []);
+    React.useEffect(() => {
+        if (!ready || !elRef.current || mapRef.current)
+            return;
+        const L = window.L;
+        const map = L.map(elRef.current, { zoomControl: true, attributionControl: true }).setView([51.163, 10.447], 5);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+        mapRef.current = map;
+        setTimeout(() => { try {
+            map.invalidateSize();
+        }
+        catch (e) { } }, 200);
+        return () => { try {
+            map.remove();
+        }
+        catch (e) { } mapRef.current = null; };
+    }, [ready]);
+    React.useEffect(() => {
+        const L = window.L, map = mapRef.current;
+        if (!L || !map)
+            return;
+        const bounds = [];
+        routes.forEach(l => {
+            L.polyline(l.route.pts, { color: color || "#FF9300", weight: 5, opacity: .8, lineJoin: "round" }).addTo(map);
+            l.route.pts.forEach(p => bounds.push(p));
+        });
+        if (bounds.length) {
+            try {
+                map.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+            }
+            catch (e) { }
+        }
+    }, [ready, lessons]);
+    if (!ready)
+        return React.createElement("div", { style: { padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1.5px solid var(--line)", borderRadius: 12 } }, "Karte wird geladen\u2026");
+    return React.createElement("div", { style: { border: "1.5px solid var(--line)", borderRadius: 14, overflow: "hidden" } },
+        React.createElement("div", { ref: elRef, style: { width: "100%", height: "44vh", minHeight: 260, background: "#e8e4da" } }));
+}
 function StudentArea({ code, info }) {
     const LS_NAME = "v3_sa_name_" + code, LS_PIN = "v3_sa_pin_" + code;
     const [name, setName] = React.useState(() => { try {
@@ -9676,6 +9796,7 @@ function StudentArea({ code, info }) {
             }
             setData(d);
             setName(n);
+            publicStudentLessons(code, n, p).then(ls => setData(cur => cur ? { ...cur, lessons: ls } : cur));
             try {
                 localStorage.setItem(LS_NAME, n);
                 localStorage.setItem(LS_PIN, p);
@@ -9711,7 +9832,7 @@ function StudentArea({ code, info }) {
             // Überblick neu laden, damit der aktualisierte Status sofort erscheint
             const d = await publicStudentOverview(code, name.trim(), pin.trim());
             if (d)
-                setData(d);
+                setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
         }
         catch (e) {
             alert("Das hat leider nicht geklappt. Bitte später erneut versuchen.");
@@ -9769,7 +9890,7 @@ function StudentArea({ code, info }) {
     if (!data) {
         return React.createElement("div", { className: "card", style: { padding: "20px 18px" } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 6 } }, "Mein Fortschritt"),
-            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, marginBottom: 16 } }, "Melde dich mit deinem Namen und deinem pers\u00F6nlichen PIN an. Den PIN bekommst du von deinem Fahrlehrer. Danach siehst du deinen Ausbildungsstand, deine Strecken und deine Termine."),
+            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, marginBottom: 16 } }, "Melde dich mit deinem Namen und deinem pers\u00F6nlichen PIN an. Den PIN bekommst du von deinem Fahrlehrer. Danach siehst du deinen Ausbildungsstand, deine Strecken, deine gefahrenen Fahrstunden auf einer Karte und deine Termine."),
             React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
                 React.createElement("div", { style: { flex: 1 } },
                     React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 6 } }, "Vorname"),
@@ -9807,6 +9928,11 @@ function StudentArea({ code, info }) {
     const strecken = Array.isArray(data.strecken) ? data.strecken : [];
     const stu = data.student || {};
     const appts = Array.isArray(data.appointments) ? data.appointments : [];
+    const myLessons = (Array.isArray(data.lessons) ? data.lessons : [])
+        .slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    const lessonsWithRoute = myLessons.filter(l => l && Array.isArray(l.pts) && l.pts.length >= 2)
+        .map(l => ({ route: { pts: l.pts, dist: Number(l.dist) || 0, dur: Number(l.dur) || 0 } }));
+    const gesamtKm = lessonsWithRoute.reduce((s, l) => s + (l.route.dist || 0), 0);
     const adkPct = adk.length ? calcLern(stu.items || {}, adk, stu) : 0;
     const strPct = strecken.length ? calcBack(stu, strecken) : 0;
     const now = new Date();
@@ -9871,6 +9997,23 @@ function StudentArea({ code, info }) {
                     React.createElement("div", { style: { height: 8, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
                         React.createElement("div", { style: { height: "100%", width: p + "%", background: sec.color || "var(--orange)", borderRadius: 99 } })));
             })),
+        myLessons.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 4 } }, "Meine Fahrstunden"),
+            lessonsWithRoute.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } },
+                lessonsWithRoute.length,
+                lessonsWithRoute.length === 1 ? " aufgezeichnete Strecke \u00B7 insgesamt " : " aufgezeichnete Strecken \u00B7 insgesamt ",
+                rmapFmtDist(gesamtKm)),
+            lessonsWithRoute.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
+                React.createElement(StudentRouteMap, { lessons: lessonsWithRoute, color: (info && info.color) || "#FF9300" })),
+            myLessons.map((l, i) => React.createElement("div", { key: i, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderBottom: (i < myLessons.length - 1 ? "1px solid var(--line)" : "none") } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, l.thema ? l.thema : "Fahrstunde"),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                        l.date ? new Date(l.date).toLocaleDateString("de-DE") : "",
+                        (Number(l.dist) > 0) ? (" \u00B7 " + rmapFmtDist(Number(l.dist))) : "",
+                        (Number(l.dur) > 0) ? (" \u00B7 " + rmapFmtDur(Number(l.dur))) : "")),
+                (Array.isArray(l.pts) && l.pts.length >= 2) && React.createElement("span", { title: "Strecke aufgezeichnet", style: { color: (info && info.color) || "var(--orange-deep)", fontSize: 16 } }, "\uD83D\uDDFA"))),
+            lessonsWithRoute.length === 0 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 4 } }, "F\u00FCr diese Fahrstunden wurde noch keine Strecke aufgezeichnet.")),
         React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 10 } }, "Meine Termine"),
             kommend.length === 0 && vergangen.length === 0 &&
