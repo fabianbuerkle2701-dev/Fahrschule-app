@@ -646,7 +646,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.35.0";
+const APP_VERSION = "1.36.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -688,6 +688,11 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.36.0", date: "Juli 2026", changes: [
+            "Einstellungen komplett aufgeräumt: Die Tabs heißen jetzt Darstellung, Mein Bereich, Fahrschule und Konto. Mein Bereich ist logisch sortiert (Profil, Arbeitszeiten, Buchungslink, Limits, Schülerliste, Ausbildung, Monatsabo, Sicherung), der Fahrschule-Tab ist in Gruppen gegliedert (Organisation, Finanzen)",
+            "Behoben: Die Rechnungsdaten wurden fälschlich auf allen Einstellungs-Tabs angezeigt, auch für normale Fahrlehrer. Sie stehen jetzt korrekt nur im Fahrschule-Tab für Admins",
+            "Rechnungen deutlich vereinfacht: Fahrstunden erscheinen jetzt als eine zusammengefasste Position (z.B. „12 Fahrstunden à 45,00 €“) statt als lange Einzelliste, und die Rechnung hat ein schlankeres zweispaltiges Layout",
+        ] },
     { v: "1.35.0", date: "Juli 2026", changes: [
             "Neu im Fahrschülerbereich: Der Schüler sieht jetzt seine gefahrenen Fahrstunden (Datum, Thema, Länge) und eine Karte mit allen aufgezeichneten Strecken übereinander, damit er sieht, wo er schon überall war",
             "Die internen Notizen bleiben privat: „Was lief gut/schlecht“, die Bewertung und die Stecknadeln des Fahrlehrers werden dem Schüler nicht angezeigt",
@@ -3787,7 +3792,7 @@ function App() {
     // Stadt-Streckenvorlagen: Dialog öffnen (lädt bestätigte Vorlagen der Stadt + eigene Vorschläge)
     async function openCityTplModal() {
         if (!myCity) {
-            showFlash("Bitte zuerst unter Mehr › Einstellungen › Fahrlehrerbereich einen Standort mit Stadt wählen");
+            showFlash("Bitte zuerst unter Mehr › Einstellungen › Mein Bereich einen Standort mit Stadt wählen");
             return;
         }
         setCityTplModal({ busy: true, error: "", approved: [], mine: [] });
@@ -3812,7 +3817,7 @@ function App() {
     // Eigene aktuelle Strecken als Vorschlag für die Stadt einreichen
     async function proposeCurrentStrecken() {
         if (!myCity) {
-            showFlash("Bitte zuerst unter Mehr › Einstellungen › Fahrlehrerbereich einen Standort mit Stadt wählen");
+            showFlash("Bitte zuerst unter Mehr › Einstellungen › Mein Bereich einen Standort mit Stadt wählen");
             return;
         }
         const strecken = tplFor(vorlageKlasse).strecken;
@@ -5853,11 +5858,24 @@ function App() {
             return;
         const price = Number(pricePerHour) || 0;
         const rows = [];
-        (active.drivenLessons || []).forEach(l => { if (!l.invoiced) {
-            rows.push({ key: "lesson:" + l.id, id: l.id, kind: "lesson",
-                label: "Fahrstunde (" + l.minutes + " Min \u00B7 " + ueFmt(l.minutes / 45) + " UE)",
-                date: l.date || "", amount: Math.round(lessonCost(l, price) * 100) / 100 });
-        } });
+        // Offene Fahrstunden nach Einzelpreis gruppieren, damit die Rechnung EINE Position
+        // "X Fahrstunden" ergibt statt zwanzig Einzelzeilen.
+        const openLessons = (active.drivenLessons || []).filter(l => !l.invoiced);
+        const byPrice = {};
+        openLessons.forEach(l => {
+            const einzel = Math.round(lessonCost(l, price) * 100) / 100;
+            const k = String(einzel);
+            if (!byPrice[k])
+                byPrice[k] = { einzel, ids: [], anzahl: 0 };
+            byPrice[k].ids.push(l.id);
+            byPrice[k].anzahl += 1;
+        });
+        Object.keys(byPrice).forEach(k => {
+            const g = byPrice[k];
+            rows.push({ key: "lessons:" + k, kind: "lessongroup", ids: g.ids,
+                label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
+                date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
+        });
         (active.costItems || []).forEach((it, idx) => { if (!it.invoiced) {
             rows.push({ key: "cost:" + idx, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
         } });
@@ -5884,7 +5902,8 @@ function App() {
         const number = nextInvoiceNumber();
         const inv = { id: uniqueId("inv"), number, date: new Date().toISOString().slice(0, 10),
             items: chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" })), total, note: d.note || "" };
-        const chosenLessonIds = chosen.filter(r => r.kind === "lesson").map(r => r.id);
+        const chosenLessonIds = [];
+        chosen.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => chosenLessonIds.push(id)));
         const chosenCostIdx = chosen.filter(r => r.kind === "cost").map(r => r.idx);
         const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: number } : l);
         const costItems = (active.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: number } : it);
@@ -7152,8 +7171,8 @@ function App() {
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 14px" } }, "Einstellungen"),
             React.createElement("div", { className: "seg", style: { marginBottom: 16, overflowX: "auto", flexWrap: "nowrap" } },
                 React.createElement("button", { className: settingsTab === "darstellung" ? "on" : "", onClick: () => setSettingsTab("darstellung") }, "Darstellung"),
-                React.createElement("button", { className: settingsTab === "fahrlehrer" ? "on" : "", onClick: () => setSettingsTab("fahrlehrer") }, "Fahrlehrerbereich"),
-                (isAdmin(session) || isSchoolAdmin) && React.createElement("button", { className: settingsTab === "admin" ? "on" : "", onClick: () => setSettingsTab("admin") }, "Adminbereich"),
+                React.createElement("button", { className: settingsTab === "fahrlehrer" ? "on" : "", onClick: () => setSettingsTab("fahrlehrer") }, "Mein Bereich"),
+                (isAdmin(session) || isSchoolAdmin) && React.createElement("button", { className: settingsTab === "admin" ? "on" : "", onClick: () => setSettingsTab("admin") }, "Fahrschule"),
                 React.createElement("button", { className: settingsTab === "konto" ? "on" : "", onClick: () => setSettingsTab("konto") }, "Konto")),
             settingsTab === "darstellung" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Darstellung"),
@@ -7196,33 +7215,6 @@ function App() {
                                 locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 0", lineHeight: 1.5 } }, "Neue Sch\u00FCler, die du anlegst, werden automatisch diesem Standort zugewiesen. Im Sch\u00FClerprofil kannst du den Standort jederzeit \u00E4ndern."),
                         React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12, fontSize: 13 }, disabled: assignLocBusy || !myLocationId, onClick: assignMyLocationToStudents }, assignLocBusy ? "Wird zugewiesen…" : "Alle Schüler ohne Standort auf meinen setzen"))),
-                mySubscription && mySubscription.subscription_active && React.createElement(React.Fragment, null,
-                    React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Monatsabo"),
-                    React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 } },
-                            React.createElement("span", { style: { fontSize: 14, fontWeight: 700 } }, "Monatsbeitrag"),
-                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €" : "–")),
-                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, mySubscription.subscription_last_paid
-                            ? "Zuletzt bezahlt am " + new Date(mySubscription.subscription_last_paid).toLocaleDateString("de-DE") + "."
-                            : "Noch keine Zahlung hinterlegt."),
-                        paypalLink && (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
-                            ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
-                            : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
-                                "Bitte den Betrag manuell per PayPal an ",
-                                React.createElement("b", null, paypalLink),
-                                " senden.")),
-                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
-                                if (!confirm("Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde."))
-                                    return;
-                                try {
-                                    const d = await markOwnPaymentDone(uid);
-                                    setMySubscription(s => ({ ...s, subscription_last_paid: d }));
-                                    showFlash("✓ Als bezahlt markiert");
-                                }
-                                catch (e) {
-                                    alert("Fehler:\n" + e.message);
-                                }
-                            } }, "Ich habe bezahlt"))),
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Mein Name"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { className: "field" },
@@ -7291,7 +7283,57 @@ function App() {
                         weekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                             "Entspricht ",
                             (weekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }),
-                            " UE pro Woche.")))),
+                            " UE pro Woche."))),
+                React.createElement("div", { className: "eyebrow" }, "Sch\u00FClerliste"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, marginBottom: 9 } }, "Sortierung"),
+                    React.createElement("div", { className: "seg", style: { marginBottom: 0 } }, [["name", "Name"], ["fortschritt", "Fortschritt"], ["aktivitaet", "Aktivität"]].map(([k, l]) => React.createElement("button", { key: k, className: sortBy === k ? "on" : "", onClick: () => setSortBy(k) }, l)))),
+                React.createElement("div", { className: "eyebrow" }, "Ausbildung"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: () => { setVorlageKind("adk"); setOpenSection(null); setView("vorlage"); } },
+                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M12 20h9" }),
+                            React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })),
+                        "ADK & Strecken bearbeiten"),
+                    React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Passe die Lerninhalte und Strecken an deine Methodik an. Gilt f\u00FCr alle deine Sch\u00FCler."),
+                mySubscription && mySubscription.subscription_active && React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Monatsabo"),
+                    React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 } },
+                            React.createElement("span", { style: { fontSize: 14, fontWeight: 700 } }, "Monatsbeitrag"),
+                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €" : "–")),
+                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, mySubscription.subscription_last_paid
+                            ? "Zuletzt bezahlt am " + new Date(mySubscription.subscription_last_paid).toLocaleDateString("de-DE") + "."
+                            : "Noch keine Zahlung hinterlegt."),
+                        paypalLink && (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
+                            ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
+                            : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
+                                "Bitte den Betrag manuell per PayPal an ",
+                                React.createElement("b", null, paypalLink),
+                                " senden.")),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
+                                if (!confirm("Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde."))
+                                    return;
+                                try {
+                                    const d = await markOwnPaymentDone(uid);
+                                    setMySubscription(s => ({ ...s, subscription_last_paid: d }));
+                                    showFlash("✓ Als bezahlt markiert");
+                                }
+                                catch (e) {
+                                    alert("Fehler:\n" + e.message);
+                                }
+                            } }, "Ich habe bezahlt"))),
+                React.createElement("div", { className: "eyebrow" }, "Daten & Sicherung"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: backupDownload },
+                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }),
+                            React.createElement("polyline", { points: "7 10 12 15 17 10" }),
+                            React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })),
+                        "Backup herunterladen"),
+                    React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Speichert alle deine Sch\u00FClerdaten als Sicherungsdatei auf dein Ger\u00E4t.")),
             settingsTab === "admin" && React.createElement(React.Fragment, null,
                 canEditSchool && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
                     React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Einladungscode f\u00FCr neue Fahrlehrer"),
@@ -7357,6 +7399,7 @@ function App() {
                             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, (school && school.name) || "Fahrschule"),
                             React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, (school && school.subtitle) || ""))),
                     React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Fahrschul-Einstellungen k\u00F6nnen nur von einem Fahrschul-Admin ge\u00E4ndert werden. Wende dich an den Inhaber deiner Fahrschule, wenn hier etwas angepasst werden soll."))),
+                React.createElement("div", { className: "eyebrow" }, "Organisation"),
                 React.createElement(Collapsible, { title: "Standorte", subtitle: locations.length + (locations.length === 1 ? " Standort" : " Standorte") }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     locations.length === 0 && !locEdit &&
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12 } }, "Noch keine Standorte angelegt. Lege f\u00FCr jede Filiale einen Standort an, dem du dann Sch\u00FCler zuweisen kannst."),
@@ -7548,6 +7591,7 @@ function App() {
                             "Offene Betr\u00E4ge ansehen"),
                         React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "\u00DCbersicht aller Sch\u00FCler mit offenen Betr\u00E4gen, \u00FCber alle Fahrlehrer hinweg, sortiert nach H\u00F6he des offenen Betrags.")),
+                React.createElement("div", { className: "eyebrow" }, "Finanzen"),
                 React.createElement(Collapsible, { title: "Kosten", subtitle: "Preis pro UE, Pakete" }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Preis pro UE (45 Minuten)"),
@@ -7585,7 +7629,7 @@ function App() {
                         React.createElement("b", null, "Pakete:"),
                         " ",
                         packages.map(p => p.name + " (" + eurFmt(p.amount) + ")").join(", ")),
-                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Preise legt ein Fahrschul-Admin fest. Du kannst sie bei jedem Sch\u00FCler verwenden, aber nicht \u00E4ndern.")))),
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Preise legt ein Fahrschul-Admin fest. Du kannst sie bei jedem Sch\u00FCler verwenden, aber nicht \u00E4ndern."))),
                 React.createElement(Collapsible, { title: "Rechnungsdaten", subtitle: "F\u00FCr echte Rechnungen mit fortlaufender Nummer" }, (() => {
                     const inv = (school && school.invoice_settings) || {};
                     const iv = (key) => inv[key] || "";
@@ -7624,31 +7668,7 @@ function App() {
                                     saveInvoiceSettings({ hinweis: e.target.value }); } })),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Diese Angaben erscheinen auf jeder Rechnung. Bitte pr\u00FCfe mit deinem Steuerberater, ob f\u00FCr dich Kleinunternehmerregelung oder Regelbesteuerung gilt und ob alle Pflichtangaben vollst\u00E4ndig sind.")) : React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                         React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Rechnungsdaten legt ein Fahrschul-Admin fest."));
-                })()),
-            settingsTab === "fahrlehrer" && React.createElement(React.Fragment, null,
-                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Sch\u00FClerliste"),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, marginBottom: 9 } }, "Sortierung"),
-                    React.createElement("div", { className: "seg", style: { marginBottom: 0 } }, [["name", "Name"], ["fortschritt", "Fortschritt"], ["aktivitaet", "Aktivität"]].map(([k, l]) => React.createElement("button", { key: k, className: sortBy === k ? "on" : "", onClick: () => setSortBy(k) }, l)))),
-                React.createElement("div", { className: "eyebrow" }, "Ausbildung"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: () => { setVorlageKind("adk"); setOpenSection(null); setView("vorlage"); } },
-                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
-                            React.createElement("path", { d: "M12 20h9" }),
-                            React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })),
-                        "ADK & Strecken bearbeiten"),
-                    React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Passe die Lerninhalte und Strecken an deine Methodik an. Gilt f\u00FCr alle deine Sch\u00FCler."),
-                React.createElement("div", { className: "eyebrow" }, "Daten & Sicherung"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: backupDownload },
-                    React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
-                            React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }),
-                            React.createElement("polyline", { points: "7 10 12 15 17 10" }),
-                            React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })),
-                        "Backup herunterladen"),
-                    React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Speichert alle deine Sch\u00FClerdaten als Sicherungsdatei auf dein Ger\u00E4t.")),
+                })())),
             settingsTab === "konto" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Konto"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
@@ -7958,7 +7978,7 @@ function App() {
                     "Freigegebene Vorlagen f\u00FCr ",
                     React.createElement("b", null, myCity),
                     " \u00FCbernehmen, oder deine eigenen Strecken als Vorlage f\u00FCr deine Stadt vorschlagen.")
-                    : React.createElement("span", null, "W\u00E4hle im Fahrlehrerbereich einen Standort mit Stadt, dann kannst du hier freigegebene Vorlagen deiner Stadt \u00FCbernehmen und eigene vorschlagen.")),
+                    : React.createElement("span", null, "W\u00E4hle unter Mein Bereich einen Standort mit Stadt, dann kannst du hier freigegebene Vorlagen deiner Stadt \u00FCbernehmen und eigene vorschlagen.")),
                 React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "center" }, onClick: openCityTplModal }, "Vorlagen aus meiner Stadt ansehen"),
                     (isAdmin(session) || isSchoolAdmin) && React.createElement("button", { className: "btn btn-primary btn-block", style: { justifyContent: "center" }, onClick: proposeCurrentStrecken }, "Diese Strecken vorschlagen"))),
@@ -8241,11 +8261,9 @@ function App() {
                 React.createElement("thead", null,
                     React.createElement("tr", null,
                         React.createElement("th", null, "Leistung"),
-                        React.createElement("th", null, "Datum"),
                         React.createElement("th", { className: "r" }, "Betrag"))),
                 React.createElement("tbody", null, (inv.items || []).map((it, idx) => React.createElement("tr", { key: idx },
                     React.createElement("td", null, it.label),
-                    React.createElement("td", null, it.date ? new Date(it.date).toLocaleDateString("de-DE") : ""),
                     React.createElement("td", { className: "r" }, eurFmt(it.amount)))))),
             React.createElement("div", { className: "ps-inv-total" },
                 React.createElement("span", null, "Gesamtbetrag"),
