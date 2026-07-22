@@ -761,7 +761,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.50.3";
+const APP_VERSION = "1.52.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -803,6 +803,17 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.52.0", date: "Juli 2026", changes: [
+            "Neu: Personalunterlagen. Ein Fahrschul-Admin kann jetzt Dateien für einzelne Fahrlehrer hochladen (Lohnabrechnungen, Verträge, Zertifikate, …), sortiert nach Kategorie. Nur der betroffene Fahrlehrer und Fahrschul-Admins sehen sie (Fahrschule → Admin → Personalunterlagen; beim Fahrlehrer unter Mein Bereich → Meine Unterlagen)",
+            "Neu: Theoriepilot-Beiträge können jetzt zusätzlich zum Text eine Datei enthalten, z.B. eine exportierte Kahoot-Datei oder ein Arbeitsblatt",
+            "Neu: App-Moderator-Rolle. Ein Moderator kann Theoriepilot- und Streckenvorlagen-Beiträge freigeben und alle Fahrschulen einsehen/bearbeiten, aber keine Fahrschule löschen und die Abo-Pflicht nicht umgehen. Nur der App-Admin kann die Rolle vergeben (Fahrschulen verwalten → Fahrlehrer-Liste)",
+            "Wichtig: Braucht drei Datenbank-Ergänzungen (neue Spalte profiles.app_moderator, zwei neue Spalten + privater Speicher bei theory_resources/Datei-Uploads, neue Tabelle staff_files + privater Speicher). SQL liegt der Lieferung bei",
+        ] },
+    { v: "1.51.0", date: "Juli 2026", changes: [
+            "Neu: Theoriepilot (unter Ausbildung). Eine Sammlung von Methoden, Medien und Lernstandskontrollen zu allen 12 gesetzlichen Grundstoff-Themen sowie den klassenspezifischen Zusatzstoff-Themen",
+            "Jeder Fahrlehrer kann eigene Beiträge einreichen. Sie sind zunächst nur für einen selbst sichtbar (\"wartet auf Freigabe\") und erscheinen erst für alle anderen Fahrlehrer, nachdem ein App-Admin sie freigegeben hat (Freigabe unter Fahrschule → Admin → Theoriepilot-Beiträge prüfen)",
+            "Wichtig: Braucht eine neue Supabase-Tabelle (theory_resources). SQL zum einmaligen Ausführen liegt der Lieferung bei",
+        ] },
     { v: "1.50.3", date: "Juli 2026", changes: [
             "Bugfix: Das Öffnen einer Hilfe-Sprechblase (Fragezeichen) blockierte danach die ganze Seite, kein anderer Knopf ließ sich mehr antippen. Die Sprechblase schließt sich jetzt beim Antippen woanders, ohne den Rest der Seite zu blockieren",
             "Bugfix: Am unteren Bildschirmrand konnten Inhalte (z.B. die Schnellaktionen auf der Startseite) knapp hinter der unteren Leiste verschwinden und waren nur beim Scrollen kurz sichtbar. Mehr Sicherheitsabstand nach unten ergänzt",
@@ -1644,6 +1655,106 @@ async function saveTemplate(uid, tpl) {
 }
 /* ════════ Streckenvorlagen für Städte (Vorschlag → Admin-Prüfung → Übernahme) ════════ */
 // Ein Fahrschul-Admin schlägt eine Streckenvorlage für seine Stadt vor.
+// ── Theoriepilot: Methoden-/Medien-/Lernstandskontrolle-Sammlung für den Theorieunterricht ──
+// Die 12 Grundstoff-Themen sind gesetzlich fest (Anlage 1 FahrschAusbO) und für alle Klassen
+// gleich. Die klassenspezifischen Zusatzstoff-Themen (Anlage 2.x) unterscheiden sich je Klasse;
+// bestätigt ist hier nur Klasse B, andere Klassen bewusst als befüllbare Platzhalter, statt
+// erfundene Titel zu zeigen.
+const GRUNDSTOFF_THEMEN = [
+    "Persönliche Voraussetzungen", "Risikofaktor Mensch", "Rechtliche Rahmenbedingungen",
+    "Straßenverkehrssystem und seine Nutzung", "Vorfahrt- und Verkehrsregelung",
+    "Verkehrszeichen und Verkehrseinrichtungen, Bahnübergänge", "Andere Verkehrsteilnehmer im Straßenverkehr",
+    "Geschwindigkeit, Abstand und umweltschonende Fahrweise", "Verkehrsverhalten bei Fahrmanövern, Verkehrsbeobachtung",
+    "Ruhender Verkehr", "Besondere Verkehrssituationen, Folgen von Fehlverhalten", "Lebenslanges Lernen",
+];
+const ZUSATZSTOFF_THEMEN = {
+    B: ["Technische Bedingungen, Personen- und Güterbeförderung, umweltbewusster Umgang", "Fahren mit Solokraftfahrzeugen und Zügen"],
+};
+function zusatzstoffFor(klasse) {
+    return ZUSATZSTOFF_THEMEN[klasse] || ["Zusatzstoff 1 (bitte ergänzen)", "Zusatzstoff 2 (bitte ergänzen)"];
+}
+const THEORY_KINDS = [
+    { id: "methode", label: "Methoden" },
+    { id: "medium", label: "Medien" },
+    { id: "kontrolle", label: "Lernstandskontrolle" },
+];
+async function proposeTheoryResource(uid, name, klasse, topicKey, kind, title, content, file) {
+    let filePath = null, fileName = null;
+    if (file) {
+        const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+        filePath = uid + "/" + uniqueId("tf") + "-" + safeName;
+        const { error: upErr } = await sb.storage.from("theory-files").upload(filePath, file, { upsert: false, contentType: file.type || undefined });
+        if (upErr) {
+            console.error(upErr);
+            throw new Error(upErr.message);
+        }
+        fileName = file.name;
+    }
+    const { error } = await sb.from("theory_resources").insert({
+        klasse, topic_key: topicKey, kind, title: (title || "").trim(), content: (content || "").trim(),
+        file_path: filePath, file_name: fileName, status: "pending", proposed_by: uid, proposed_by_name: name || null,
+    });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+function theoryFilePublicUrl(path) {
+    const { data } = sb.storage.from("theory-files").getPublicUrl(path);
+    return data && data.publicUrl;
+}
+// Bestätigte Beiträge zu einem Thema (alle Arten, wird clientseitig nach kind aufgeteilt)
+async function fetchApprovedTheoryResources(klasse, topicKey) {
+    const { data, error } = await sb.from("theory_resources").select("*")
+        .eq("status", "approved").eq("klasse", klasse).eq("topic_key", topicKey).order("created_at", { ascending: false });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+// Eigene Beiträge zu einem Thema (auch offene/abgelehnte, damit man den Status sieht)
+async function fetchMyTheoryResources(uid, klasse, topicKey) {
+    const { data, error } = await sb.from("theory_resources").select("*")
+        .eq("proposed_by", uid).eq("klasse", klasse).eq("topic_key", topicKey).order("created_at", { ascending: false });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+async function withdrawTheoryResource(id) {
+    const { error } = await sb.from("theory_resources").delete().eq("id", id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+// Admin: offene Beiträge laden, freigeben, ablehnen (gleiches Muster wie bei Streckenvorlagen)
+async function adminFetchPendingTheoryResources() {
+    const { data, error } = await sb.from("theory_resources").select("*")
+        .eq("status", "pending").order("created_at", { ascending: true });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data || [];
+}
+async function adminApproveTheoryResource(id) {
+    const { error } = await sb.from("theory_resources")
+        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+async function adminRejectTheoryResource(id) {
+    const { error } = await sb.from("theory_resources").delete().eq("id", id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
 async function proposeRouteTemplate(uid, city, title, strecken, name) {
     const { error } = await sb.from("route_templates").insert({
         city: (city || "").trim(), title: (title || "").trim(), strecken: strecken || [],
@@ -1764,6 +1875,24 @@ async function fetchMyRights(uid) {
         return false;
     }
     return !!(data && data.school_admin);
+}
+// App-Moderator: erweiterte Rechte über die eigene Fahrschule hinaus (Beiträge freigeben,
+// alle Fahrschulen einsehen/bearbeiten), aber KEIN Fahrschule löschen und KEINE Abo-Befreiung –
+// das bleibt exklusiv dem zentralen App-Admin vorbehalten (siehe isAdmin/ADMIN_UID).
+async function fetchIsModerator(uid) {
+    const { data, error } = await sb.from("profiles").select("app_moderator").eq("id", uid).maybeSingle();
+    if (error) {
+        console.error(error);
+        return false;
+    }
+    return !!(data && data.app_moderator);
+}
+async function adminSetTeacherModerator(uid, value) {
+    const { error } = await sb.from("profiles").update({ app_moderator: !!value }).eq("id", uid);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
 }
 // Letzten Zugriff des Fahrlehrers speichern (Datum und Uhrzeit)
 async function touchLastSeen(uid) {
@@ -2071,7 +2200,12 @@ async function fetchSchoolOffenePosten(schoolId) {
 }
 // Fahrlehrer einer Fahrschule laden (E-Mail aus Auth, Schülerzahl aus students)
 async function adminFetchTeachers(schoolId) {
-    const { data: profs, error } = await sb.from("profiles").select("id,email,school_id,school_admin,last_seen").eq("school_id", schoolId);
+    let profs, error;
+    ({ data: profs, error } = await sb.from("profiles").select("id,email,school_id,school_admin,app_moderator,last_seen").eq("school_id", schoolId));
+    if (error) {
+        // Spalte app_moderator evtl. noch nicht angelegt (SQL-Schritt fehlt) – ohne sie erneut versuchen
+        ({ data: profs, error } = await sb.from("profiles").select("id,email,school_id,school_admin,last_seen").eq("school_id", schoolId));
+    }
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -2083,7 +2217,7 @@ async function adminFetchTeachers(schoolId) {
         const { data: studs } = await sb.from("students").select("owner").in("owner", ids);
         (studs || []).forEach(s => { counts[s.owner] = (counts[s.owner] || 0) + 1; });
     }
-    return (profs || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", students: counts[p.id] || 0, school_admin: !!p.school_admin, last_seen: p.last_seen || null }));
+    return (profs || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", students: counts[p.id] || 0, school_admin: !!p.school_admin, app_moderator: !!p.app_moderator, last_seen: p.last_seen || null }));
 }
 // Fahrschul-Admin-Recht setzen oder entziehen
 async function adminSetTeacherAdmin(uid, value) {
@@ -2143,6 +2277,67 @@ async function dbDeleteAppt(id) {
         console.error(error);
         throw new Error(error.message);
     }
+}
+/* ════════ Personalunterlagen (Fahrschul-Admin lädt Dateien für einzelne Fahrlehrer hoch) ════════
+   Anders als die Video-Bibliothek liegt das im PRIVATEN Storage-Bucket "staff-files" (nicht
+   öffentlich) und wird per zeitlich begrenztem Signed-Link geöffnet, da hier auch sensible
+   Unterlagen wie Lohnabrechnungen liegen können. */
+const STAFF_CATEGORIES = [
+    { id: "vertrag", label: "Anstellungsvertrag" },
+    { id: "abrechnung", label: "Abrechnungen" },
+    { id: "dokument", label: "Dokumente" },
+    { id: "krankenkasse", label: "Krankenkasse" },
+    { id: "arbeitsamt", label: "Arbeitsamt" },
+    { id: "fortbildung", label: "Fortbildungen" },
+    { id: "zertifikat", label: "Zertifikate" },
+    { id: "sonstiges", label: "Sonstiges" },
+];
+async function fetchStaffFiles(instructorUid) {
+    const { data, error } = await sb.from("staff_files").select("*").eq("instructor_uid", instructorUid).order("created_at", { ascending: false });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+async function uploadStaffFile(schoolId, instructorUid, uploadedBy, file, category) {
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = instructorUid + "/" + uniqueId("sf") + "-" + safeName;
+    const { error: upErr } = await sb.storage.from("staff-files").upload(path, file, { upsert: false, contentType: file.type || undefined });
+    if (upErr) {
+        console.error(upErr);
+        throw new Error(upErr.message);
+    }
+    const row = { school_id: schoolId, instructor_uid: instructorUid, uploaded_by: uploadedBy,
+        category: category || "sonstiges", filename: file.name, storage_path: path, size_bytes: file.size || null };
+    const { data, error } = await sb.from("staff_files").insert(row).select().single();
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data;
+}
+async function deleteStaffFile(f) {
+    try {
+        await sb.storage.from("staff-files").remove([f.storage_path]);
+    }
+    catch (e) {
+        console.error(e);
+    }
+    const { error } = await sb.from("staff_files").delete().eq("id", f.id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+// Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
+async function staffFileSignedUrl(path) {
+    const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 300);
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data && data.signedUrl;
 }
 /* ════════ Video-Bibliothek ════════ */
 async function fetchVideos(uid, schoolId) {
@@ -3397,6 +3592,8 @@ function App() {
     const [adminTplSuggestion, setAdminTplSuggestion] = useState(null); // {adk,strecken,...} | null, Vorschlag vom Fahrschul-Admin
     const [school, setSchool] = useState(null); // {id,name,subtitle,color,logo}
     const [isSchoolAdmin, setIsSchoolAdmin] = useState(false); // darf Fahrschul-Einstellungen ändern
+    const [isModerator, setIsModerator] = useState(false); // App-Moderator: darf Beiträge freigeben, alle Fahrschulen einsehen/bearbeiten
+    const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
     const [calShare, setCalShare] = useState(null); // null | {code} für den Fahrzeug-Kalender (Link + Ansicht)
     const [appts, setAppts] = useState([]); // Termine
     // App-weite Streckenaufzeichnung (Hooks hier oben, damit vor den frühen returns)
@@ -3556,6 +3753,18 @@ function App() {
     const [cityTplModal, setCityTplModal] = useState(null); // null | {busy,error,approved:[],mine:[]} Übernahme-/Vorschlag-Dialog
     const [proposeForm, setProposeForm] = useState(null); // null | {title,busy,error} In-App-Dialog zum Einreichen einer Streckenvorlage
     const [routeQueue, setRouteQueue] = useState(null); // null | Liste offener Streckenvorschläge (Admin)
+    const [theoryQueue, setTheoryQueue] = useState(null); // null | Liste offener Theoriepilot-Beiträge (Admin)
+    const [theoryKlasse, setTheoryKlasse] = useState(DEFAULT_KLASSE); // welche Klasse für den Zusatzstoff-Bereich
+    const [theoryTopic, setTheoryTopic] = useState(null); // {klasse,topicKey,title} | null – offenes Thema im Theoriepilot
+    const [theoryKind, setTheoryKind] = useState("methode"); // "methode" | "medium" | "kontrolle"
+    const [theoryData, setTheoryData] = useState({}); // Cache: "klasse|topicKey|kind" -> {loading,error,approved:[],mine:[]}
+    const [theoryForm, setTheoryForm] = useState(null); // null | {title,content,busy,error} – neuer Beitrag
+    const [staffTeachers, setStaffTeachers] = useState(null); // null | Liste der Fahrlehrer dieser Fahrschule (Admin-Auswahl)
+    const [staffInstructor, setStaffInstructor] = useState(null); // uid | null – für welchen Fahrlehrer die Admin-Ansicht gerade Dateien zeigt
+    const [staffCategory, setStaffCategory] = useState("vertrag"); // ausgewählte Kategorie in der Admin-Ansicht
+    const [staffFiles, setStaffFiles] = useState(null); // null | Dateien des ausgewählten Fahrlehrers (Admin-Ansicht)
+    const [staffUploading, setStaffUploading] = useState(false);
+    const [myStaffFiles, setMyStaffFiles] = useState(null); // null | eigene Unterlagen (Fahrlehrer-Ansicht)
     useEffect(() => {
         if (settingsTab === "admin" && !(isAdmin(session) || isSchoolAdmin))
             setSettingsTab("darstellung");
@@ -3853,6 +4062,7 @@ function App() {
             setSchool(sc);
             saveSchoolCache(uid, sc);
             applySchoolColor(sc.color);
+            fetchIsModerator(uid).then(setIsModerator).catch(() => { });
             fetchMyRights(uid).then(r => {
                 setIsSchoolAdmin(r);
                 // Einmalige Übernahme alter, lokal gespeicherter Preise in die Fahrschule (nur Admin)
@@ -4016,6 +4226,99 @@ function App() {
         writeTemplate({ ...tpl, byKlasse: { ...((tpl && tpl.byKlasse) || {}), [k]: { ...cur, ...patch } } });
     }
     // Stadt-Streckenvorlagen: Dialog öffnen (lädt bestätigte Vorlagen der Stadt + eigene Vorschläge)
+    // ── Theoriepilot ──
+    function theoryKey(klasse, topicKey, kind) { return klasse + "|" + topicKey + "|" + kind; }
+    async function loadTheoryData(klasse, topicKey, kind) {
+        const key = theoryKey(klasse, topicKey, kind);
+        setTheoryData(d => ({ ...d, [key]: { ...(d[key] || {}), loading: true, error: "" } }));
+        try {
+            const [approved, mine] = await Promise.all([
+                fetchApprovedTheoryResources(klasse, topicKey + ":" + kind),
+                fetchMyTheoryResources(uid, klasse, topicKey + ":" + kind),
+            ]);
+            setTheoryData(d => ({ ...d, [key]: { loading: false, error: "", approved, mine } }));
+        }
+        catch (e) {
+            setTheoryData(d => ({ ...d, [key]: { loading: false, error: "Laden fehlgeschlagen.", approved: [], mine: [] } }));
+        }
+    }
+    function openTheoryTopic(klasse, topicKey, title) {
+        setTheoryTopic({ klasse, topicKey, title });
+        setTheoryKind("methode");
+        setView("theoriepilot-topic");
+        loadTheoryData(klasse, topicKey, "methode");
+    }
+    async function submitTheoryForm() {
+        const f = theoryForm, t = theoryTopic;
+        if (!f || !t)
+            return;
+        if (!(f.title || "").trim()) {
+            setTheoryForm({ ...f, error: "Bitte einen Titel eingeben." });
+            return;
+        }
+        setTheoryForm({ ...f, busy: true, error: "" });
+        try {
+            await proposeTheoryResource(uid, teacherName, t.klasse, t.topicKey + ":" + theoryKind, theoryKind, f.title, f.content, f.file);
+            setTheoryForm(null);
+            showFlash("✓ Beitrag eingereicht, wartet auf Freigabe");
+            loadTheoryData(t.klasse, t.topicKey, theoryKind);
+        }
+        catch (e) {
+            setTheoryForm({ ...f, busy: false, error: e.message || "Senden fehlgeschlagen." });
+        }
+    }
+    // ── Personalunterlagen ──
+    function openStaffTeachers() {
+        if (!school || !school.id)
+            return;
+        setStaffTeachers(null);
+        adminFetchTeachers(school.id).then(list => setStaffTeachers(list)).catch(e => { alert("Fahrlehrer konnten nicht geladen werden:\n" + (e.message || e)); setStaffTeachers([]); });
+    }
+    function openStaffInstructor(instrUid) {
+        setStaffInstructor(instrUid);
+        setStaffCategory("vertrag");
+        setStaffFiles(null);
+        fetchStaffFiles(instrUid).then(list => setStaffFiles(list));
+    }
+    async function handleStaffUpload(file) {
+        if (!file || !staffInstructor || !school)
+            return;
+        setStaffUploading(true);
+        try {
+            await uploadStaffFile(school.id, staffInstructor, uid, file, staffCategory);
+            const list = await fetchStaffFiles(staffInstructor);
+            setStaffFiles(list);
+            showFlash("✓ Hochgeladen");
+        }
+        catch (e) {
+            alert("Hochladen fehlgeschlagen:\n" + (e.message || e));
+        }
+        finally {
+            setStaffUploading(false);
+        }
+    }
+    async function handleStaffDelete(f) {
+        if (!confirm("Datei \"" + f.filename + "\" endgültig löschen?"))
+            return;
+        try {
+            await deleteStaffFile(f);
+            setStaffFiles(list => (list || []).filter(x => x.id !== f.id));
+        }
+        catch (e) {
+            alert("Löschen fehlgeschlagen:\n" + (e.message || e));
+        }
+    }
+    async function openStaffFile(f) {
+        const url = await staffFileSignedUrl(f.storage_path);
+        if (url)
+            window.open(url, "_blank");
+        else
+            alert("Datei konnte nicht geöffnet werden.");
+    }
+    function loadMyStaffFiles() {
+        setMyStaffFiles(null);
+        fetchStaffFiles(uid).then(list => setMyStaffFiles(list));
+    }
     async function openCityTplModal() {
         if (!myCity) {
             showFlash("Bitte zuerst unter Mehr › Einstellungen › Mein Bereich einen Standort mit Stadt wählen");
@@ -5850,6 +6153,79 @@ function App() {
                             fontSize: 14.5, background: "var(--field-bg)", resize: "vertical" } }))));
     }
     /* ── Karte: Live-Tracking & Stecknadeln ── */
+    function renderTheoriepilot() {
+        function topicRow(klasse, topicKey, title, showBorder) {
+            return React.createElement("button", { key: topicKey, onClick: () => openTheoryTopic(klasse, topicKey, title), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 2px", textAlign: "left",
+                    borderBottom: showBorder ? "1px solid var(--line)" : "none" } },
+                React.createElement("span", { style: { flex: 1, fontSize: 14.5, fontWeight: 500 } }, title),
+                React.createElement("span", { style: { color: "var(--muted)", fontSize: 18 } }, "\u203A"));
+        }
+        return React.createElement("div", { className: "pad" },
+            React.createElement("div", { style: { margin: "6px 2px 18px" } },
+                React.createElement("div", { className: "home-eyebrow" }, "Theoriepilot"),
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 23, marginTop: 5 } }, "Theorieunterricht"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 } }, "Methoden, Medien und Lernstandskontrollen zu jedem Thema, von Fahrlehrern geteilt und von einem App-Admin freigegeben.")),
+            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Grundstoff \u00B7 alle Klassen (12 Themen)"),
+            React.createElement("div", { className: "card", style: { padding: "4px 14px", marginBottom: 18 } },
+                GRUNDSTOFF_THEMEN.map((title, i) => topicRow("ALL", "grundstoff-" + (i + 1), (i + 1) + ". " + title, i < GRUNDSTOFF_THEMEN.length - 1))),
+            React.createElement("div", { className: "eyebrow" }, "Zusatzstoff \u00B7 klassenspezifisch"),
+            React.createElement("div", { className: "field", style: { margin: "0 2px 12px" } },
+                React.createElement("label", null, "F\u00FChrerscheinklasse"),
+                React.createElement("select", { value: theoryKlasse, onChange: e => setTheoryKlasse(e.target.value) },
+                    klassen.map(k => React.createElement("option", { key: k, value: k }, k)))),
+            React.createElement("div", { className: "card", style: { padding: "4px 14px" } },
+                zusatzstoffFor(theoryKlasse).map((title, i, arr) => topicRow(theoryKlasse, "zusatz-" + (i + 1), (i + 1) + ". " + title, i < arr.length - 1))),
+            !ZUSATZSTOFF_THEMEN[theoryKlasse] && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 4px 0", lineHeight: 1.5 } }, "F\u00FCr Klasse " + theoryKlasse + " sind die genauen Zusatzstoff-Titel noch nicht hinterlegt. Du kannst die Platzhalter trotzdem schon mit Inhalten f\u00FCllen."));
+    }
+    function renderTheoriepilotTopic() {
+        const t = theoryTopic;
+        if (!t) {
+            return React.createElement("div", { className: "pad" },
+                React.createElement("button", { className: "btn btn-ghost", onClick: () => setView("theoriepilot") }, "\u2039 Zur\u00FCck zum Theoriepilot"));
+        }
+        const key = theoryKey(t.klasse, t.topicKey, theoryKind);
+        const d = theoryData[key] || {};
+        const approved = d.approved || [];
+        const mine = (d.mine || []).filter(m => m.status !== "approved");
+        return React.createElement("div", { className: "pad" },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, margin: "6px 2px 14px" } },
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px", fontSize: 13, flexShrink: 0 }, onClick: () => setView("theoriepilot") }, "\u2039"),
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, lineHeight: 1.2 } }, t.title)),
+            React.createElement("div", { className: "seg" }, THEORY_KINDS.map(k => React.createElement("button", { key: k.id, className: theoryKind === k.id ? "on" : "", onClick: () => {
+                        setTheoryKind(k.id);
+                        const k2 = theoryKey(t.klasse, t.topicKey, k.id);
+                        if (!theoryData[k2])
+                            loadTheoryData(t.klasse, t.topicKey, k.id);
+                    } }, k.label))),
+            React.createElement("button", { className: "btn btn-primary btn-block", style: { margin: "14px 0" }, onClick: () => setTheoryForm({ title: "", content: "", file: null, busy: false, error: "" }) }, "+ Beitrag teilen"),
+            d.loading && React.createElement("div", { style: { padding: "20px 0", textAlign: "center", color: "var(--muted)", fontSize: 13 } }, "L\u00E4dt\u2026"),
+            d.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, d.error),
+            !d.loading && approved.length === 0 && mine.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Beitr\u00E4ge zu diesem Thema. Sei der Erste!"),
+            approved.length > 0 && React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 12 } }, approved.map((r, i) => React.createElement("div", { key: r.id, style: { padding: "11px 0", borderTop: (i > 0 ? "1px solid var(--line)" : "none") } },
+                React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, r.title),
+                r.content && React.createElement("div", { style: { fontSize: 13, color: "var(--ink-2)", marginTop: 3, lineHeight: 1.5, whiteSpace: "pre-wrap" } }, r.content),
+                r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } },
+                    React.createElement("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }),
+                        React.createElement("polyline", { points: "7 10 12 15 17 10" }),
+                        React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })),
+                    r.file_name || "Datei \u00F6ffnen"),
+                React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 5 } }, r.proposed_by_name ? "von " + r.proposed_by_name : "")))),
+            mine.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
+                React.createElement("div", { className: "home-eyebrow", style: { margin: "0 2px 8px" } }, "Deine eigenen Beitr\u00E4ge"),
+                React.createElement("div", { className: "card", style: { padding: "6px 14px" } }, mine.map((r, i) => React.createElement("div", { key: r.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: (i > 0 ? "1px solid var(--line)" : "none") } },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, r.title),
+                        React.createElement("div", { style: { fontSize: 11.5, color: r.status === "pending" ? "var(--amber)" : "#B3362A", fontWeight: 700, marginTop: 2, textTransform: "uppercase" } }, r.status === "pending" ? "Wartet auf Freigabe" : "Abgelehnt")),
+                    React.createElement("button", { onClick: async () => { if (!confirm("Beitrag \"" + r.title + "\" zur\u00FCckziehen?"))
+                                return; try {
+                                await withdrawTheoryResource(r.id);
+                                loadTheoryData(t.klasse, t.topicKey, theoryKind);
+                            }
+                            catch (e) {
+                                alert("Fehler:\n" + (e.message || e));
+                            } }, "aria-label": "Zur\u00FCckziehen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "\u00D7"))))));
+    }
     function renderADK() {
         const allFull = tplFor(active.klasse).adk.every(adkSectionFull);
         return React.createElement("div", { className: "pad" },
@@ -7360,6 +7736,18 @@ function App() {
             alert("Konnte das Recht nicht ändern:\n" + e.message);
         }
     }
+    // App-Moderator zuweisen/entziehen – nur der echte App-Admin darf das (siehe UI-Gate unten)
+    async function toggleTeacherModerator(uid, current) {
+        try {
+            await adminSetTeacherModerator(uid, !current);
+            setAdminTeachers(prev => prev ? { ...prev, list: (prev.list || []).map(t => t.id === uid ? { ...t, app_moderator: !current } : t) } : prev);
+            if (uid === session.user.id)
+                setIsModerator(!current);
+        }
+        catch (e) {
+            alert("Konnte die Moderator-Rolle nicht ändern:\n" + e.message);
+        }
+    }
     // Schülerliste eines Fahrlehrers öffnen (nur ansehen)
     async function openTeacherStudents(teacher) {
         setAdminTeacherStudents({ teacher, list: null });
@@ -7451,7 +7839,7 @@ function App() {
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, margin: "2px 2px 14px" } },
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setView("einstellungen") }, "\u2039 Zur\u00FCck"),
                 React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, "Admin \u00B7 Fahrschulen")),
-            isAdmin(session) && React.createElement(React.Fragment, null,
+            canModerateApp && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Streckenvorlagen pr\u00FCfen"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, routeQueue === null
                     ? React.createElement("button", { className: "btn btn-ghost", onClick: async () => { try {
@@ -7493,6 +7881,44 @@ function App() {
                                             alert("Fehler:\n" + (e.message || e));
                                         } } }, "Ablehnen")));
                         }))),
+                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Theoriepilot-Beitr\u00E4ge pr\u00FCfen"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, theoryQueue === null
+                    ? React.createElement("button", { className: "btn btn-ghost", onClick: async () => { try {
+                            const q = await adminFetchPendingTheoryResources();
+                            setTheoryQueue(q);
+                        }
+                        catch (e) {
+                            alert("Fehler:\n" + (e.message || e));
+                        } } }, "Beitr\u00E4ge laden")
+                    : theoryQueue.length === 0
+                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Keine offenen Beitr\u00E4ge.")
+                        : theoryQueue.map(r => React.createElement("div", { key: r.id, style: { padding: "11px 0", borderTop: "1px solid var(--line)" } },
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, r.title),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", margin: "2px 0 6px" } },
+                                "Klasse ",
+                                r.klasse,
+                                " \u00B7 ",
+                                r.topic_key,
+                                r.proposed_by_name ? " \u00B7 von " + r.proposed_by_name : ""),
+                            r.content && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" } }, r.content),
+                            r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginBottom: 10, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "\uD83D\uDCCE " + (r.file_name || "Anhang ansehen")),
+                            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                React.createElement("button", { className: "btn btn-primary", style: { fontSize: 13 }, onClick: async () => { try {
+                                        await adminApproveTheoryResource(r.id);
+                                        setTheoryQueue(q => q.filter(x => x.id !== r.id));
+                                        showFlash("✓ Freigegeben");
+                                    }
+                                    catch (e) {
+                                        alert("Fehler:\n" + (e.message || e));
+                                    } } }, "Freigeben"),
+                                React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 13, color: "#B3362A" }, onClick: async () => { if (!confirm("Beitrag \"" + r.title + "\" ablehnen und löschen?"))
+                                        return; try {
+                                        await adminRejectTheoryResource(r.id);
+                                        setTheoryQueue(q => q.filter(x => x.id !== r.id));
+                                    }
+                                    catch (e) {
+                                        alert("Fehler:\n" + (e.message || e));
+                                    } } }, "Ablehnen"))))),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Zahlungsempf\u00E4nger (Monatsabo)"),
             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
@@ -7565,7 +7991,7 @@ function App() {
                         React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
                             React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px", fontSize: 13 }, onClick: () => openTeachers(sc) }, "Fahrlehrer"),
                             React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px", fontSize: 13 }, onClick: () => setAdminEdit({ id: sc.id, name: sc.name, subtitle: sc.subtitle || "", color: sc.color || "#FF9300", logo: sc.logo || "" }) }, "Bearbeiten")),
-                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { padding: "8px", fontSize: 13, color: "#B3362A" }, onClick: () => adminDoDelete(sc) }, "Fahrschule l\u00F6schen")))));
+                        isAdmin(session) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { padding: "8px", fontSize: 13, color: "#B3362A" }, onClick: () => adminDoDelete(sc) }, "Fahrschule l\u00F6schen")))));
     }
     function renderEinstellungen() {
         const myStudents = students.filter(s => s._isMine).length;
@@ -7746,6 +8172,21 @@ function App() {
                                     alert("Fehler:\n" + e.message);
                                 }
                             } }, "Ich habe bezahlt"))),
+                React.createElement("div", { className: "eyebrow" }, "Meine Unterlagen"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 20 } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Dateien, die dir ein Fahrschul-Admin hier hinterlegt hat, z.B. Lohnabrechnungen oder deinen Vertrag."),
+                    myStaffFiles === null
+                        ? React.createElement("button", { className: "btn btn-ghost", onClick: loadMyStaffFiles }, "Unterlagen laden")
+                        : myStaffFiles.length === 0
+                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Unterlagen f\u00FCr dich hinterlegt.")
+                            : STAFF_CATEGORIES.map(c => { const files = myStaffFiles.filter(f => f.category === c.id); if (!files.length)
+                                return null; return React.createElement("div", { key: c.id, style: { marginBottom: 14 } },
+                                React.createElement("div", { className: "home-eyebrow", style: { marginBottom: 6 } }, c.label),
+                                files.map(f => React.createElement("button", { key: f.id, onClick: () => openStaffFile(f), style: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", padding: "7px 0", background: "none", border: "none", fontSize: 13.5, fontWeight: 600, color: "var(--orange-deep)" } },
+                                    React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", style: { flexShrink: 0 } },
+                                        React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                                        React.createElement("path", { d: "M14 2v6h6" })),
+                                    React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)))); })),
                 React.createElement("div", { className: "eyebrow" }, "Daten & Sicherung"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: backupDownload },
                     React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -8105,7 +8546,30 @@ function App() {
                                     saveInvoiceSettings({ hinweis: e.target.value }); } })),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Diese Angaben erscheinen auf jeder Rechnung. Bitte pr\u00FCfe mit deinem Steuerberater, ob f\u00FCr dich Kleinunternehmerregelung oder Regelbesteuerung gilt und ob alle Pflichtangaben vollst\u00E4ndig sind.")) : React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                         React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Rechnungsdaten legt ein Fahrschul-Admin fest."));
-                })())),
+                })()),
+                React.createElement(Collapsible, { title: "Personalunterlagen", subtitle: "Dateien f\u00FCr einzelne Fahrlehrer" }, !canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Personalunterlagen verwaltet ein Fahrschul-Admin.")) : React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Lade Lohnabrechnungen, Vertr\u00E4ge oder andere Unterlagen f\u00FCr einen bestimmten Fahrlehrer hoch. Nur er selbst und Fahrschul-Admins k\u00F6nnen sie sehen."),
+                    staffTeachers === null
+                        ? React.createElement("button", { className: "btn btn-ghost", onClick: openStaffTeachers }, "Fahrlehrer laden")
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: staffInstructor ? 16 : 0 } }, staffTeachers.map(t => React.createElement("button", { key: t.id, className: "btn " + (staffInstructor === t.id ? "btn-primary" : "btn-ghost"), style: { padding: "8px 12px", fontSize: 13 }, onClick: () => openStaffInstructor(t.id) }, t.email))),
+                            staffInstructor && React.createElement("div", null,
+                                React.createElement("div", { className: "seg", style: { marginTop: 0 } }, STAFF_CATEGORIES.map(c => React.createElement("button", { key: c.id, className: staffCategory === c.id ? "on" : "", onClick: () => setStaffCategory(c.id) }, c.label))),
+                                React.createElement("label", { className: "btn btn-primary btn-block", style: { justifyContent: "center", margin: "12px 0", cursor: staffUploading ? "default" : "pointer", opacity: staffUploading ? .6 : 1 } },
+                                    staffUploading ? "L\u00E4dt hoch\u2026" : "+ Datei hochladen",
+                                    React.createElement("input", { type: "file", style: { display: "none" }, disabled: staffUploading, onChange: e => { const file = e.target.files && e.target.files[0]; e.target.value = ""; if (file)
+                                            handleStaffUpload(file); } })),
+                                staffFiles === null
+                                    ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "L\u00E4dt\u2026")
+                                    : (() => {
+                                        const list = staffFiles.filter(f => f.category === staffCategory);
+                                        return list.length === 0
+                                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Dateien in dieser Kategorie.")
+                                            : list.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)" } },
+                                                React.createElement("button", { onClick: () => openStaffFile(f), style: { flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", fontSize: 13.5, fontWeight: 600, color: "var(--orange-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename),
+                                                React.createElement("button", { onClick: () => handleStaffDelete(f), "aria-label": "L\u00F6schen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "\u00D7")));
+                                    })()))))),
             settingsTab === "konto" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Konto"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
@@ -8120,7 +8584,7 @@ function App() {
                                 await sb.auth.signOut();
                             }
                         } }, "Abmelden")),
-                isAdmin(session) && React.createElement("div", null,
+                canModerateApp && React.createElement("div", null,
                     React.createElement("div", { className: "eyebrow" }, "Administration"),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: () => { setView("admin"); } },
                         React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -8128,7 +8592,7 @@ function App() {
                                 React.createElement("path", { d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" })),
                             "Fahrschulen verwalten"),
                         React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
-                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Nur f\u00FCr dich sichtbar. Alle Fahrschulen ansehen, bearbeiten und l\u00F6schen.")),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, isAdmin(session) ? "Nur f\u00FCr dich sichtbar. Alle Fahrschulen ansehen, bearbeiten und l\u00F6schen." : "Als App-Moderator: alle Fahrschulen ansehen und bearbeiten.")),
                 React.createElement("div", { className: "eyebrow" }, "Info"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 } },
                     React.createElement("div", null,
@@ -8967,7 +9431,7 @@ function App() {
                                 ")")))))));
     }
     // Gruppierte Reiter
-    const ausbildungViews = ["adk", "strecken", "tagebuch"];
+    const ausbildungViews = ["adk", "strecken", "tagebuch", "theoriepilot", "theoriepilot-topic"];
     const mehrViews = ["daten", "einstellungen", "videos"];
     const ausbildungActive = ausbildungViews.indexOf(view) >= 0;
     const mehrActive = mehrViews.indexOf(view) >= 0;
@@ -8993,7 +9457,9 @@ function App() {
                 tabMenu === "sb-ausbildung" && React.createElement("div", { className: "sb-sub" }, [["adk", "ADK", React.createElement(IcCard, null)], ["strecken", "Strecken", React.createElement(IcMap, null)], ["tagebuch", "Fahrstunden", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" }),
                         React.createElement("rect", { x: "9", y: "3", width: "6", height: "4", rx: "1" }),
-                        React.createElement("path", { d: "M9 12h6M9 16h4" }))]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                        React.createElement("path", { d: "M9 12h6M9 16h4" }))], ["theoriepilot", "Theoriepilot", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M22 10 12 5 2 10l10 5 10-5Z" }),
+                        React.createElement("path", { d: "M6 12v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5" }))]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + ((view === id || (id === "theoriepilot" && view === "theoriepilot-topic")) ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl))),
                 React.createElement("button", { className: "sb-item" + (view === "uebersicht" ? " on" : ""), onClick: () => { setView("uebersicht"); setTabMenu(null); } },
@@ -9043,15 +9509,17 @@ function App() {
                 view === "einstellungen" && renderEinstellungen(),
                 view === "videos" && renderVideos(),
                 view === "kalender" && renderKalender(),
-                view === "admin" && isAdmin(session) && renderAdmin(),
+                view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "admin" && view !== "datenschutz" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
                 view === "adk" && active && renderADK(),
                 view === "strecken" && active && renderStrecken(),
                 view === "tagebuch" && active && renderTagebuch(),
+                view === "theoriepilot" && renderTheoriepilot(),
+                view === "theoriepilot-topic" && renderTheoriepilotTopic(),
                 view === "uebersicht" && active && renderUebersicht(),
                 view === "daten" && active && renderDaten(),
                 tabMenu && React.createElement("div", { onClick: () => setTabMenu(null), style: { position: "fixed", inset: 0, zIndex: 46 } }),
@@ -9090,7 +9558,9 @@ function App() {
                         tabMenu === "ausbildung" && React.createElement("div", { className: "tabpop" }, [["adk", "ADK", React.createElement(IcCard, null)], ["strecken", "Strecken", React.createElement(IcMap, null)], ["tagebuch", "Fahrstunden", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                                     React.createElement("path", { d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" }),
                                     React.createElement("rect", { x: "9", y: "3", width: "6", height: "4", rx: "1" }),
-                                    React.createElement("path", { d: "M9 12h6M9 16h4" }))]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                                    React.createElement("path", { d: "M9 12h6M9 16h4" }))], ["theoriepilot", "Theoriepilot", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                    React.createElement("path", { d: "M22 10 12 5 2 10l10 5 10-5Z" }),
+                                    React.createElement("path", { d: "M6 12v5c0 1.66 2.69 3 6 3s6-1.34 6-3v-5" }))]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + ((view === id || (id === "theoriepilot" && view === "theoriepilot-topic")) ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                             React.createElement("span", { className: "tabpop-ic" }, ic),
                             lbl))),
                         React.createElement("button", { className: "tab" + (ausbildungActive ? " on" : ""), style: { width: "100%" }, onClick: () => setTabMenu(tabMenu === "ausbildung" ? null : "ausbildung") },
@@ -9830,14 +10300,17 @@ function App() {
                             React.createElement("div", { style: { flex: 1, minWidth: 0, cursor: "pointer" }, onClick: () => openTeacherStudents(t) },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
                                     t.email,
-                                    t.school_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase", letterSpacing: ".04em" } }, "Admin")),
+                                    t.school_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase", letterSpacing: ".04em" } }, "Admin"),
+                                    t.app_moderator && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--blue)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase", letterSpacing: ".04em" } }, "Moderator")),
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--orange-deep)", fontWeight: 600 } },
                                     t.students,
                                     " ",
                                     t.students === 1 ? "Schüler ansehen ›" : "Schüler ansehen ›",
                                     t.id === session.user.id ? " · du" : ""),
                                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 1 } }, t.last_seen ? "Zuletzt aktiv: " + new Date(t.last_seen).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) + " Uhr" : "Noch nie aktiv")),
-                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, flexShrink: 0, color: t.school_admin ? "var(--muted)" : "var(--orange-deep)" }, onClick: () => toggleTeacherAdmin(t.id, t.school_admin) }, t.school_admin ? "Admin entziehen" : "Zu Admin machen"),
+                            React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 } },
+                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.school_admin ? "var(--muted)" : "var(--orange-deep)" }, onClick: () => toggleTeacherAdmin(t.id, t.school_admin) }, t.school_admin ? "Admin entziehen" : "Zu Admin machen"),
+                                isAdmin(session) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.app_moderator ? "var(--muted)" : "var(--blue)" }, onClick: () => toggleTeacherModerator(t.id, t.app_moderator) }, t.app_moderator ? "Moderator entziehen" : "Zu Moderator machen")),
                             t.id !== session.user.id && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, onClick: () => detachTeacher(t.id, t.email) }, "Stilllegen")))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAdminTeachers(null) }, "Schlie\u00DFen"))),
         calShare && React.createElement("div", { style: { position: "fixed", inset: 0, background: "var(--paper)", zIndex: 150, overflowY: "auto" } },
@@ -10225,6 +10698,28 @@ function App() {
                 React.createElement(SignaturePad, { label: "Fahrschüler · " + (active ? dispName(active) : "–"), existing: stuSig, onSave: url => setStuSig(url), onClear: () => setStuSig(null) }),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => { setShowNachweisModal(false); doPrint("nachweis"); } }, "PDF erstellen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setShowNachweisModal(false) }, "Abbrechen"))),
+        theoryForm && React.createElement("div", { onClick: () => !theoryForm.busy && setTheoryForm(null), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1245, display: "flex",
+                alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 480,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 4 } },
+                    "Beitrag teilen \u00B7 ",
+                    THEORY_KINDS.find(k => k.id === theoryKind) ? THEORY_KINDS.find(k => k.id === theoryKind).label : ""),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, "Dein Beitrag ist erst f\u00FCr andere Fahrlehrer sichtbar, nachdem ihn ein App-Admin freigegeben hat."),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", null, "Titel"),
+                    React.createElement("input", { type: "text", value: theoryForm.title, onChange: e => setTheoryForm({ ...theoryForm, title: e.target.value }), placeholder: "z. B. Kreisverkehr-Modell aus Pappe" })),
+                React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                    React.createElement("label", null, "Beschreibung, Link oder Anleitung"),
+                    React.createElement("textarea", { rows: 4, value: theoryForm.content, onChange: e => setTheoryForm({ ...theoryForm, content: e.target.value }), placeholder: "Kurz erkl\u00E4ren, wie es funktioniert, oder einen Link einf\u00FCgen\u2026" })),
+                React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                    React.createElement("label", null, "Datei anh\u00E4ngen (optional)"),
+                    React.createElement("input", { type: "file", onChange: e => setTheoryForm({ ...theoryForm, file: (e.target.files && e.target.files[0]) || null }) }),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "Z. B. ein Arbeitsblatt, eine exportierte Kahoot-Datei oder ein Bild. Ein Kahoot-Link funktioniert auch einfach als Text oben.")),
+                theoryForm.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, theoryForm.error),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: theoryForm.busy, onClick: submitTheoryForm }, theoryForm.busy ? "Wird gesendet\u2026" : "Einreichen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: theoryForm.busy, onClick: () => setTheoryForm(null) }, "Abbrechen"))),
         invoiceDraft && React.createElement("div", { onClick: () => setInvoiceDraft(null), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1245, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
