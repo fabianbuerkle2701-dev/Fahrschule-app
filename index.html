@@ -761,7 +761,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.52.0";
+const APP_VERSION = "1.53.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -803,6 +803,15 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.53.1", date: "Juli 2026", changes: [
+            "Bugfix: Dateien bei Personalunterlagen ließen sich nicht öffnen, ein Tap tat scheinbar nichts. Der Link wurde erst nach einer kurzen Wartezeit erzeugt, das hat Safari auf dem iPhone stillschweigend als Popup blockiert. Die Links werden jetzt direkt beim Laden der Liste vorbereitet, ein Tap öffnet die Datei sofort",
+            "Personalunterlagen überarbeitet: Fahrlehrer erscheinen jetzt als richtige Liste mit Namen (falls hinterlegt) statt als E-Mail-Adressen in überlaufenden Knöpfen. Die Kategorie-Auswahl ist jetzt ein normales Dropdown statt einer abgeschnittenen Knopfreihe",
+        ] },
+    { v: "1.53.0", date: "Juli 2026", changes: [
+            "Einstellungen komplett neu strukturiert: In Mein Bereich stehen jetzt nur noch 4 zugeklappte Menüs (Profil, Arbeit & Ausbildung, Meine Unterlagen, Konto & Daten) statt 10 einzelner Abschnitte. In Fahrschule sind es 4 statt 11 (Meine Fahrschule, Organisation, Fuhrpark & Auswertung, Finanzen)",
+            "Alle Bereiche sind jetzt standardmäßig zugeklappt, nichts liegt mehr offen auf der Seite",
+            "Bugfix: Die Zahlungsempfänger- und Konten-Verwaltung (Fahrschulen verwalten) waren versehentlich auch für App-Moderatoren sichtbar geworden, das ist jetzt wieder exklusiv dem App-Admin vorbehalten",
+        ] },
     { v: "1.52.0", date: "Juli 2026", changes: [
             "Neu: Personalunterlagen. Ein Fahrschul-Admin kann jetzt Dateien für einzelne Fahrlehrer hochladen (Lohnabrechnungen, Verträge, Zertifikate, …), sortiert nach Kategorie. Nur der betroffene Fahrlehrer und Fahrschul-Admins sehen sie (Fahrschule → Admin → Personalunterlagen; beim Fahrlehrer unter Mein Bereich → Meine Unterlagen)",
             "Neu: Theoriepilot-Beiträge können jetzt zusätzlich zum Text eine Datei enthalten, z.B. eine exportierte Kahoot-Datei oder ein Arbeitsblatt",
@@ -2201,10 +2210,10 @@ async function fetchSchoolOffenePosten(schoolId) {
 // Fahrlehrer einer Fahrschule laden (E-Mail aus Auth, Schülerzahl aus students)
 async function adminFetchTeachers(schoolId) {
     let profs, error;
-    ({ data: profs, error } = await sb.from("profiles").select("id,email,school_id,school_admin,app_moderator,last_seen").eq("school_id", schoolId));
+    ({ data: profs, error } = await sb.from("profiles").select("id,email,display_name,school_id,school_admin,app_moderator,last_seen").eq("school_id", schoolId));
     if (error) {
         // Spalte app_moderator evtl. noch nicht angelegt (SQL-Schritt fehlt) – ohne sie erneut versuchen
-        ({ data: profs, error } = await sb.from("profiles").select("id,email,school_id,school_admin,last_seen").eq("school_id", schoolId));
+        ({ data: profs, error } = await sb.from("profiles").select("id,email,display_name,school_id,school_admin,last_seen").eq("school_id", schoolId));
     }
     if (error) {
         console.error(error);
@@ -2217,7 +2226,7 @@ async function adminFetchTeachers(schoolId) {
         const { data: studs } = await sb.from("students").select("owner").in("owner", ids);
         (studs || []).forEach(s => { counts[s.owner] = (counts[s.owner] || 0) + 1; });
     }
-    return (profs || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", students: counts[p.id] || 0, school_admin: !!p.school_admin, app_moderator: !!p.app_moderator, last_seen: p.last_seen || null }));
+    return (profs || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", display_name: p.display_name || "", students: counts[p.id] || 0, school_admin: !!p.school_admin, app_moderator: !!p.app_moderator, last_seen: p.last_seen || null }));
 }
 // Fahrschul-Admin-Recht setzen oder entziehen
 async function adminSetTeacherAdmin(uid, value) {
@@ -2298,7 +2307,12 @@ async function fetchStaffFiles(instructorUid) {
         console.error(error);
         return [];
     }
-    return data || [];
+    const list = data || [];
+    // Signed Links direkt beim Laden vorbereiten (statt erst beim Antippen), damit "Öffnen" ein
+    // ganz normaler, sofortiger Linkklick ist. Ein Klick nach einer Wartezeit auf den Server wird
+    // von Safari auf dem iPhone sonst stillschweigend als Popup blockiert.
+    await Promise.all(list.map(async (f) => { f.signedUrl = await staffFileSignedUrl(f.storage_path); }));
+    return list;
 }
 async function uploadStaffFile(schoolId, instructorUid, uploadedBy, file, category) {
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -2332,7 +2346,7 @@ async function deleteStaffFile(f) {
 }
 // Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
 async function staffFileSignedUrl(path) {
-    const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 300);
+    const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 3600);
     if (error) {
         console.error(error);
         return null;
@@ -4307,13 +4321,6 @@ function App() {
         catch (e) {
             alert("Löschen fehlgeschlagen:\n" + (e.message || e));
         }
-    }
-    async function openStaffFile(f) {
-        const url = await staffFileSignedUrl(f.storage_path);
-        if (url)
-            window.open(url, "_blank");
-        else
-            alert("Datei konnte nicht geöffnet werden.");
     }
     function loadMyStaffFiles() {
         setMyStaffFiles(null);
@@ -7919,6 +7926,7 @@ function App() {
                                     catch (e) {
                                         alert("Fehler:\n" + (e.message || e));
                                     } } }, "Ablehnen"))))),
+            isAdmin(session) && React.createElement(React.Fragment, null,
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Zahlungsempf\u00E4nger (Monatsabo)"),
             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
@@ -7960,7 +7968,7 @@ function App() {
                                 acc.subscription_active ? "aktiv" : "aus"),
                             React.createElement("button", { onClick: () => editSubscriptionAmount(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px" } }, acc.subscription_amount != null ? Number(acc.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Betrag festlegen"),
                             acc.subscription_active && React.createElement("button", { onClick: () => markPaidToday(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px", textDecoration: "underline" } }, "Als bezahlt markieren"),
-                            acc.subscription_active && React.createElement("span", { style: { fontSize: 11, color: "var(--muted)", marginLeft: "auto" } }, acc.subscription_last_paid ? "Zuletzt bezahlt: " + new Date(acc.subscription_last_paid).toLocaleDateString("de-DE") : "Noch nicht bezahlt"))))),
+                            acc.subscription_active && React.createElement("span", { style: { fontSize: 11, color: "var(--muted)", marginLeft: "auto" } }, acc.subscription_last_paid ? "Zuletzt bezahlt: " + new Date(acc.subscription_last_paid).toLocaleDateString("de-DE") : "Noch nicht bezahlt"))))),),
             React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
             adminSchools === null
                 ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
@@ -8036,14 +8044,13 @@ function App() {
                             "%"),
                         React.createElement("button", { className: "btn btn-ghost", style: { width: 38, height: 38, padding: 0, fontSize: 18 }, onClick: () => setFontScale(Math.min(1.4, Math.round((fontScale + 0.1) * 10) / 10)) }, "A+"))))),
             settingsTab === "fahrlehrer" && React.createElement(React.Fragment, null,
-                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Benachrichtigungen"),
-                React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 16 } }, settingRow("Geburtstage", "Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat", React.createElement("button", { onClick: () => { const next = !birthdayNotify; setBirthdayNotify(next); try {
-                        localStorage.setItem("v3_birthday", next ? "1" : "0");
-                    }
-                    catch (e) { } }, "aria-label": "Geburtstags-Hinweis umschalten", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
-                        background: birthdayNotify ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
-                    React.createElement("span", { style: { position: "absolute", top: 3, left: birthdayNotify ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
-                            background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } })))),
+                React.createElement(Collapsible, { title: "Profil", subtitle: teacherName || "Name, Standort, Benachrichtigungen" },
+                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Mein Name"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Anzeigename (z.B. Fabian B\u00FCrkle)"),
+                        React.createElement("input", { type: "text", value: teacherName, placeholder: "Vor- und Nachname", onChange: e => setTeacherName(e.target.value) }),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgef\u00FCllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer."))),
                 locations.length > 0 && React.createElement(React.Fragment, null,
                     React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Mein Standort"),
                     React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
@@ -8063,12 +8070,16 @@ function App() {
                                 locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 0", lineHeight: 1.5 } }, "Neue Sch\u00FCler, die du anlegst, werden automatisch diesem Standort zugewiesen. Im Sch\u00FClerprofil kannst du den Standort jederzeit \u00E4ndern."),
                         React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12, fontSize: 13 }, disabled: assignLocBusy || !myLocationId, onClick: assignMyLocationToStudents }, assignLocBusy ? "Wird zugewiesen…" : "Alle Schüler ohne Standort auf meinen setzen"))),
-                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Mein Name"),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
-                    React.createElement("div", { className: "field" },
-                        React.createElement("label", null, "Anzeigename (z.B. Fabian B\u00FCrkle)"),
-                        React.createElement("input", { type: "text", value: teacherName, placeholder: "Vor- und Nachname", onChange: e => setTeacherName(e.target.value) }),
-                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgef\u00FCllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer."))),
+                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Benachrichtigungen"),
+                React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 16 } }, settingRow("Geburtstage", "Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat", React.createElement("button", { onClick: () => { const next = !birthdayNotify; setBirthdayNotify(next); try {
+                        localStorage.setItem("v3_birthday", next ? "1" : "0");
+                    }
+                    catch (e) { } }, "aria-label": "Geburtstags-Hinweis umschalten", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
+                        background: birthdayNotify ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
+                    React.createElement("span", { style: { position: "absolute", top: 3, left: birthdayNotify ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
+                            background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } })))),
+                ),
+                React.createElement(Collapsible, { title: "Arbeit & Ausbildung", subtitle: "Arbeitszeiten, Limit, Buchungslink, ADK & Strecken" },
                 React.createElement("div", { className: "eyebrow" }, "Meine Arbeitszeiten"),
                 React.createElement("div", { className: "card", style: { padding: 0, overflow: "hidden" } },
                     React.createElement("button", { onClick: () => setWorkHoursOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 14px", background: "transparent" } },
@@ -8102,19 +8113,6 @@ function App() {
                                         !blocked && (day.von || day.bis) && React.createElement("button", { onClick: () => writeWorkHours({ ...workHours, [k]: { ...day, von: "", bis: "" } }), style: { color: "var(--muted)", fontSize: 12, flexShrink: 0, padding: "4px 2px" } }, "Leeren")),
                                     blocked && React.createElement("div", { style: { fontSize: 11.5, color: "#B3362A", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar"));
                             }))),
-                React.createElement("div", { className: "eyebrow" }, "Nachricht beim Buchungslink"),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
-                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
-                        "Dieser Text wird verschickt, wenn du den Buchungslink an einen Sch\u00FCler sendest. L\u00E4sst du das Feld leer, wird die eingebaute Standard-Nachricht verwendet. Schreib ",
-                        "{LINK}",
-                        " an die Stelle, wo der Link erscheinen soll, sonst wird er automatisch ans Ende angeh\u00E4ngt."),
-                    bookingMessageError && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", background: "#FDECEA", borderRadius: 10, padding: "10px 12px", marginBottom: 10 } }, bookingMessageError),
-                    bookingMessage === null
-                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 2px" } }, "L\u00E4dt\u2026")
-                        : React.createElement(React.Fragment, null,
-                            React.createElement("textarea", { value: bookingMessage, onChange: e => writeBookingMessage(e.target.value), placeholder: "Hier kannst du einen Fahrstunden-Termin vorschlagen:\n{LINK}\n\nSo geht's: ...", rows: 6, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", resize: "vertical" } }),
-                            bookingMessage.trim() && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 9, fontSize: 12.5, padding: "8px 12px" }, onClick: () => { if (confirm("Eigenen Text löschen und zur Standard-Nachricht zurückkehren?"))
-                                    writeBookingMessage(""); } }, "Zur\u00FCcksetzen auf Standard"))),
                 React.createElement("div", { className: "eyebrow" }, "Mein Ausbildungslimit"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Lege fest, wie viele Minuten praktische Ausbildung du pro Tag und pro Woche h\u00F6chstens leisten darfst. Termine, die dein Limit \u00FCberschreiten w\u00FCrden, lassen sich nicht best\u00E4tigen. 0 bedeutet kein Limit. Es z\u00E4hlen nur best\u00E4tigte Termine."),
@@ -8132,6 +8130,19 @@ function App() {
                             "Entspricht ",
                             (weekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }),
                             " UE pro Woche."))),
+                React.createElement("div", { className: "eyebrow" }, "Nachricht beim Buchungslink"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
+                        "Dieser Text wird verschickt, wenn du den Buchungslink an einen Sch\u00FCler sendest. L\u00E4sst du das Feld leer, wird die eingebaute Standard-Nachricht verwendet. Schreib ",
+                        "{LINK}",
+                        " an die Stelle, wo der Link erscheinen soll, sonst wird er automatisch ans Ende angeh\u00E4ngt."),
+                    bookingMessageError && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", background: "#FDECEA", borderRadius: 10, padding: "10px 12px", marginBottom: 10 } }, bookingMessageError),
+                    bookingMessage === null
+                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 2px" } }, "L\u00E4dt\u2026")
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("textarea", { value: bookingMessage, onChange: e => writeBookingMessage(e.target.value), placeholder: "Hier kannst du einen Fahrstunden-Termin vorschlagen:\n{LINK}\n\nSo geht's: ...", rows: 6, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 14, fontFamily: "inherit", resize: "vertical" } }),
+                            bookingMessage.trim() && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 9, fontSize: 12.5, padding: "8px 12px" }, onClick: () => { if (confirm("Eigenen Text löschen und zur Standard-Nachricht zurückkehren?"))
+                                    writeBookingMessage(""); } }, "Zur\u00FCcksetzen auf Standard"))),
                 React.createElement("div", { className: "eyebrow" }, "Sch\u00FClerliste"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, marginBottom: 9 } }, "Sortierung"),
@@ -8145,6 +8156,25 @@ function App() {
                         "ADK & Strecken bearbeiten"),
                     React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Passe die Lerninhalte und Strecken an deine Methodik an. Gilt f\u00FCr alle deine Sch\u00FCler."),
+                ),
+                React.createElement(Collapsible, { title: "Meine Unterlagen", subtitle: "Vom Fahrschul-Admin hinterlegte Dateien" },
+                React.createElement("div", { className: "eyebrow" }, "Meine Unterlagen"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 20 } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Dateien, die dir ein Fahrschul-Admin hier hinterlegt hat, z.B. Lohnabrechnungen oder deinen Vertrag."),
+                    myStaffFiles === null
+                        ? React.createElement("button", { className: "btn btn-ghost", onClick: loadMyStaffFiles }, "Unterlagen laden")
+                        : myStaffFiles.length === 0
+                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Unterlagen f\u00FCr dich hinterlegt.")
+                            : STAFF_CATEGORIES.map(c => { const files = myStaffFiles.filter(f => f.category === c.id); if (!files.length)
+                                return null; return React.createElement("div", { key: c.id, style: { marginBottom: 14 } },
+                                React.createElement("div", { className: "home-eyebrow", style: { marginBottom: 6 } }, c.label),
+                                files.map(f => React.createElement("a", { key: f.id, href: f.signedUrl || undefined, target: "_blank", rel: "noopener noreferrer", style: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", padding: "7px 0", textDecoration: "none", fontSize: 13.5, fontWeight: 600, color: f.signedUrl ? "var(--orange-deep)" : "var(--muted)" } },
+                                    React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", style: { flexShrink: 0 } },
+                                        React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                                        React.createElement("path", { d: "M14 2v6h6" })),
+                                    React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)))); })),
+                ),
+                React.createElement(Collapsible, { title: "Konto & Daten", subtitle: "Abo, Sicherung, Export" },
                 mySubscription && mySubscription.subscription_active && React.createElement(React.Fragment, null,
                     React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Monatsabo"),
                     React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
@@ -8172,21 +8202,6 @@ function App() {
                                     alert("Fehler:\n" + e.message);
                                 }
                             } }, "Ich habe bezahlt"))),
-                React.createElement("div", { className: "eyebrow" }, "Meine Unterlagen"),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 20 } },
-                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Dateien, die dir ein Fahrschul-Admin hier hinterlegt hat, z.B. Lohnabrechnungen oder deinen Vertrag."),
-                    myStaffFiles === null
-                        ? React.createElement("button", { className: "btn btn-ghost", onClick: loadMyStaffFiles }, "Unterlagen laden")
-                        : myStaffFiles.length === 0
-                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Unterlagen f\u00FCr dich hinterlegt.")
-                            : STAFF_CATEGORIES.map(c => { const files = myStaffFiles.filter(f => f.category === c.id); if (!files.length)
-                                return null; return React.createElement("div", { key: c.id, style: { marginBottom: 14 } },
-                                React.createElement("div", { className: "home-eyebrow", style: { marginBottom: 6 } }, c.label),
-                                files.map(f => React.createElement("button", { key: f.id, onClick: () => openStaffFile(f), style: { display: "flex", alignItems: "center", gap: 8, width: "100%", textAlign: "left", padding: "7px 0", background: "none", border: "none", fontSize: 13.5, fontWeight: 600, color: "var(--orange-deep)" } },
-                                    React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", style: { flexShrink: 0 } },
-                                        React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
-                                        React.createElement("path", { d: "M14 2v6h6" })),
-                                    React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)))); })),
                 React.createElement("div", { className: "eyebrow" }, "Daten & Sicherung"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: backupDownload },
                     React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -8205,38 +8220,9 @@ function App() {
                             React.createElement("path", { d: "M9 13h6M9 17h4" })),
                         "Fahrtenbuch als CSV exportieren"),
                     React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Alle gefahrenen Fahrstunden mit Datum, Sch\u00FCler und UE, zum \u00D6ffnen in Excel oder zum Import in eine andere Verwaltungssoftware.")),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Alle gefahrenen Fahrstunden mit Datum, Sch\u00FCler und UE, zum \u00D6ffnen in Excel oder zum Import in eine andere Verwaltungssoftware."),
+                )),
             settingsTab === "admin" && React.createElement(React.Fragment, null,
-                canEditSchool && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
-                    React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Einladungscode f\u00FCr neue Fahrlehrer"),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("div", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 20, letterSpacing: ".08em", padding: "11px 13px", background: "var(--field-bg)", borderRadius: 11, border: "1.5px solid var(--line)" } }, (school && school.invite_code) || "–"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "11px 13px", fontSize: 13 }, onClick: async () => {
-                                if (!school || !school.invite_code)
-                                    return;
-                                try {
-                                    await navigator.clipboard.writeText(school.invite_code);
-                                    showFlash("✓ Code kopiert");
-                                }
-                                catch (e) {
-                                    prompt("Code zum Kopieren:", school.invite_code);
-                                }
-                            } }, "Kopieren")),
-                    React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 9, fontSize: 12.5, padding: "8px 12px" }, onClick: async () => {
-                            if (!school)
-                                return;
-                            if (!confirm("Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr."))
-                                return;
-                            try {
-                                const fresh = await regenerateInviteCode(school.id);
-                                writeSchool({ ...school, invite_code: fresh });
-                                showFlash("✓ Neuer Code erzeugt");
-                            }
-                            catch (e) {
-                                alert("Code konnte nicht erzeugt werden:\n" + (e.message || e));
-                            }
-                        } }, "Neuen Code erzeugen"),
-                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet.")),
                 React.createElement(Collapsible, { title: "Meine Fahrschule", subtitle: "Name, Logo, Farbe" }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                         React.createElement("label", null, "Name der Fahrschule"),
@@ -8271,7 +8257,37 @@ function App() {
                             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, (school && school.name) || "Fahrschule"),
                             React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, (school && school.subtitle) || ""))),
                     React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Fahrschul-Einstellungen k\u00F6nnen nur von einem Fahrschul-Admin ge\u00E4ndert werden. Wende dich an den Inhaber deiner Fahrschule, wenn hier etwas angepasst werden soll."))),
-                React.createElement("div", { className: "eyebrow" }, "Organisation"),
+                React.createElement(Collapsible, { title: "Organisation", subtitle: "Standorte, Fahrzeuge, Klassen, Arten, Einladung" },
+                canEditSchool && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
+                    React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Einladungscode f\u00FCr neue Fahrlehrer"),
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                        React.createElement("div", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 20, letterSpacing: ".08em", padding: "11px 13px", background: "var(--field-bg)", borderRadius: 11, border: "1.5px solid var(--line)" } }, (school && school.invite_code) || "–"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "11px 13px", fontSize: 13 }, onClick: async () => {
+                                if (!school || !school.invite_code)
+                                    return;
+                                try {
+                                    await navigator.clipboard.writeText(school.invite_code);
+                                    showFlash("✓ Code kopiert");
+                                }
+                                catch (e) {
+                                    prompt("Code zum Kopieren:", school.invite_code);
+                                }
+                            } }, "Kopieren")),
+                    React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 9, fontSize: 12.5, padding: "8px 12px" }, onClick: async () => {
+                            if (!school)
+                                return;
+                            if (!confirm("Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr."))
+                                return;
+                            try {
+                                const fresh = await regenerateInviteCode(school.id);
+                                writeSchool({ ...school, invite_code: fresh });
+                                showFlash("✓ Neuer Code erzeugt");
+                            }
+                            catch (e) {
+                                alert("Code konnte nicht erzeugt werden:\n" + (e.message || e));
+                            }
+                        } }, "Neuen Code erzeugen"),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet.")),
                 React.createElement(Collapsible, { title: "Standorte", subtitle: locations.length + (locations.length === 1 ? " Standort" : " Standorte") }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     locations.length === 0 && !locEdit &&
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12 } }, "Noch keine Standorte angelegt. Lege f\u00FCr jede Filiale einen Standort an, dem du dann Sch\u00FCler zuweisen kannst."),
@@ -8434,6 +8450,8 @@ function App() {
                             React.createElement("div", { style: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)" } }, a.code),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, a.label.includes("·") ? a.label.split("·")[1].trim() : a.label)))),
                     React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } }, "Die Arten-Liste pflegt ein Fahrschul-Admin. Du kannst die Arten ausw\u00E4hlen, aber nicht \u00E4ndern."))),
+                ),
+                React.createElement(Collapsible, { title: "Fuhrpark & Auswertung", subtitle: "Kalender, Leistungen, offene Beträge" },
                 React.createElement("div", { className: "eyebrow" }, "Fahrzeug-Kalender"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: openCalendar },
                     React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -8463,7 +8481,8 @@ function App() {
                             "Offene Betr\u00E4ge ansehen"),
                         React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "\u00DCbersicht aller Sch\u00FCler mit offenen Betr\u00E4gen, \u00FCber alle Fahrlehrer hinweg, sortiert nach H\u00F6he des offenen Betrags.")),
-                React.createElement("div", { className: "eyebrow" }, "Finanzen"),
+                ),
+                React.createElement(Collapsible, { title: "Finanzen", subtitle: "Kosten, Rechnungsdaten, Personalunterlagen" },
                 React.createElement(Collapsible, { title: "Kosten", subtitle: "Preis pro UE, Pakete" }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Preis pro UE (45 Minuten)"),
@@ -8553,9 +8572,18 @@ function App() {
                     staffTeachers === null
                         ? React.createElement("button", { className: "btn btn-ghost", onClick: openStaffTeachers }, "Fahrlehrer laden")
                         : React.createElement(React.Fragment, null,
-                            React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: staffInstructor ? 16 : 0 } }, staffTeachers.map(t => React.createElement("button", { key: t.id, className: "btn " + (staffInstructor === t.id ? "btn-primary" : "btn-ghost"), style: { padding: "8px 12px", fontSize: 13 }, onClick: () => openStaffInstructor(t.id) }, t.email))),
-                            staffInstructor && React.createElement("div", null,
-                                React.createElement("div", { className: "seg", style: { marginTop: 0 } }, STAFF_CATEGORIES.map(c => React.createElement("button", { key: c.id, className: staffCategory === c.id ? "on" : "", onClick: () => setStaffCategory(c.id) }, c.label))),
+                            React.createElement("div", { style: { marginBottom: staffInstructor ? 14 : 0 } }, staffTeachers.map((t, i) => React.createElement("button", { key: t.id, onClick: () => openStaffInstructor(t.id), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+                                    padding: "10px 11px", borderRadius: 11, textAlign: "left", marginTop: i === 0 ? 0 : 4,
+                                    background: staffInstructor === t.id ? "var(--orange-soft)" : "transparent" } },
+                                React.createElement("div", { style: { minWidth: 0 } },
+                                    React.createElement("div", { style: { fontSize: 14, fontWeight: 700, color: staffInstructor === t.id ? "var(--orange-deep)" : "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, t.display_name || t.email),
+                                    t.display_name && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, t.email)),
+                                React.createElement("span", { style: { color: staffInstructor === t.id ? "var(--orange-deep)" : "var(--muted)", fontSize: 18, flexShrink: 0 } }, "\u203A")))),
+                            staffInstructor && React.createElement("div", { style: { borderTop: "1px solid var(--line)", paddingTop: 14 } },
+                                React.createElement("div", { className: "field", style: { marginBottom: 0 } },
+                                    React.createElement("label", null, "Kategorie"),
+                                    React.createElement("select", { value: staffCategory, onChange: e => setStaffCategory(e.target.value) },
+                                        STAFF_CATEGORIES.map(c => React.createElement("option", { key: c.id, value: c.id }, c.label)))),
                                 React.createElement("label", { className: "btn btn-primary btn-block", style: { justifyContent: "center", margin: "12px 0", cursor: staffUploading ? "default" : "pointer", opacity: staffUploading ? .6 : 1 } },
                                     staffUploading ? "L\u00E4dt hoch\u2026" : "+ Datei hochladen",
                                     React.createElement("input", { type: "file", style: { display: "none" }, disabled: staffUploading, onChange: e => { const file = e.target.files && e.target.files[0]; e.target.value = ""; if (file)
@@ -8567,9 +8595,10 @@ function App() {
                                         return list.length === 0
                                             ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Dateien in dieser Kategorie.")
                                             : list.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)" } },
-                                                React.createElement("button", { onClick: () => openStaffFile(f), style: { flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", fontSize: 13.5, fontWeight: 600, color: "var(--orange-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename),
+                                                React.createElement("a", { href: f.signedUrl || undefined, target: "_blank", rel: "noopener noreferrer", style: { flex: 1, minWidth: 0, textAlign: "left", textDecoration: "none", fontSize: 13.5, fontWeight: 600, color: f.signedUrl ? "var(--orange-deep)" : "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename),
                                                 React.createElement("button", { onClick: () => handleStaffDelete(f), "aria-label": "L\u00F6schen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "\u00D7")));
-                                    })()))))),
+                                    })())))),
+                )),
             settingsTab === "konto" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Konto"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
