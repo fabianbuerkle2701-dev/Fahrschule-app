@@ -2957,7 +2957,7 @@ function downloadApptIcs(a, summary) {
 }
 // ── Eigenes Toast/Bestätigen-System statt window.showToast()/window.confirm() ──
 // Modul-weite Registrierung: welche gemountete <ToastConfirmHost> gerade aktiv ist.
-let _toastSetter = null, _confirmSetter = null;
+let _toastSetter = null, _confirmSetter = null, _promptSetter = null;
 function showToast(msg, tone) { if (_toastSetter)
     _toastSetter({ msg, tone: tone || "info", key: uniqueId("toast") }); }
 function askConfirm(opts) {
@@ -2966,19 +2966,32 @@ function askConfirm(opts) {
     else
         resolve(true); });
 }
+// Ersatz für den nativen Text-Eingabedialog: opts = {title, message, defaultValue, placeholder, numeric, confirmLabel}.
+// Löst mit dem eingegebenen Text auf, oder null bei Abbrechen (wie beim nativen Dialog).
+function askPrompt(opts) {
+    return new Promise(resolve => { if (_promptSetter)
+        _promptSetter({ ...opts, resolve });
+    else
+        resolve(null); });
+}
 function ToastConfirmHost() {
     const [toast, setToast] = useState(null);
     const [confirmState, setConfirmState] = useState(null);
+    const [promptState, setPromptState] = useState(null);
+    const [promptVal, setPromptVal] = useState("");
     const timerRef = useRef(null);
     useEffect(() => {
         _toastSetter = (t) => { setToast(t); if (timerRef.current)
             clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setToast(null), 3400); };
         _confirmSetter = setConfirmState;
-        return () => { _toastSetter = null; _confirmSetter = null; if (timerRef.current)
+        _promptSetter = (p) => { setPromptVal(p.defaultValue != null ? String(p.defaultValue) : ""); setPromptState(p); };
+        return () => { _toastSetter = null; _confirmSetter = null; _promptSetter = null; if (timerRef.current)
             clearTimeout(timerRef.current); };
     }, []);
     function resolve(val) { if (confirmState)
         confirmState.resolve(val); setConfirmState(null); }
+    function resolvePrompt(val) { if (promptState)
+        promptState.resolve(val); setPromptState(null); }
     return React.createElement(React.Fragment, null,
         toast && React.createElement("div", { key: toast.key, style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 400,
                 background: toast.tone === "error" ? "#B3362A" : "#181512", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
@@ -2989,7 +3002,19 @@ function ToastConfirmHost() {
                 confirmState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, confirmState.title),
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 18, whiteSpace: "pre-line" } }, confirmState.message),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: confirmState.danger ? { background: "#B3362A", color: "#fff" } : null, onClick: () => resolve(true) }, confirmState.confirmLabel || "Ja"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"))));
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"))),
+        promptState && React.createElement("div", { onClick: () => resolvePrompt(null), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 400, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                promptState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, promptState.title),
+                promptState.message && React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14, whiteSpace: "pre-line" } }, promptState.message),
+                React.createElement("input", { type: promptState.numeric ? "number" : "text", inputMode: promptState.numeric ? "decimal" : undefined, value: promptVal, placeholder: promptState.placeholder || "", autoFocus: true,
+                        onChange: e => setPromptVal(e.target.value), onKeyDown: e => { if (e.key === "Enter")
+                            resolvePrompt(promptVal);
+                        else if (e.key === "Escape")
+                            resolvePrompt(null); }, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--field-bg)", color: "var(--ink)", marginBottom: 18 } }),
+                React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => resolvePrompt(promptVal) }, promptState.confirmLabel || "OK"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolvePrompt(null) }, "Abbrechen"))));
 }
 function weekdayShort(d) { return new Date(d).toLocaleDateString("de-DE", { weekday: "short" }); }
 function dayMonth(d) { return new Date(d).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }); }
@@ -3793,10 +3818,10 @@ function LessonMap({ route, pins, recActive, recTick, recPts, otherRecording, on
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
         pinLayerRef.current = L.layerGroup().addTo(map);
         mapRef.current = map;
-        map.on("click", e => {
+        map.on("click", async e => {
             if (!pinModeRef.current)
                 return;
-            const name = prompt("Name der Stecknadel (z. B. „Schwierige Kreuzung“):", "");
+            const name = await askPrompt({ message: "Name der Stecknadel (z. B. „Schwierige Kreuzung“):", defaultValue: "" });
             if (name === null)
                 return;
             savePinRef.current({ id: "pin_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5),
@@ -6195,7 +6220,7 @@ function App() {
             showFlash("✓ Link kopiert");
         }
         catch (e) {
-            prompt("Link zum Kopieren:", url);
+            await askPrompt({ message: "Link zum Kopieren:", defaultValue: url });
         }
     }
     // Fahrschüler-Zugang teilen: Buchungslink + Name + persönlicher PIN
@@ -6249,7 +6274,7 @@ function App() {
             showFlash("✓ Zugangs-Text kopiert");
         }
         catch (e) {
-            prompt("Text zum Kopieren:", text);
+            await askPrompt({ message: "Text zum Kopieren:", defaultValue: text });
         }
     }
     // Häkchen-Anzahl für einen ganzen ADK-Abschnitt: setzt bei jedem Punkt die Anzahl
@@ -7251,11 +7276,11 @@ function App() {
         const invoices = active.invoices || [];
         const reminders = active.reminders || [];
         const contracts = active.contracts || [];
-        function addItem() {
-            const label = prompt("Bezeichnung des Postens (z.B. Grundgebühr, Lernmaterial):");
+        async function addItem() {
+            const label = await askPrompt({ message: "Bezeichnung des Postens (z.B. Grundgebühr, Lernmaterial):" });
             if (label === null)
                 return;
-            const amtStr = prompt("Betrag in Euro:");
+            const amtStr = await askPrompt({ message: "Betrag in Euro:" });
             if (amtStr === null)
                 return;
             const amount = parseFloat((amtStr || "").replace(",", "."));
@@ -7275,8 +7300,8 @@ function App() {
         function removeLesson(id) {
             updateActive({ drivenLessons: lessons.filter(l => l.id !== id) });
         }
-        function addPayment() {
-            const amtStr = prompt("Betrag der Zahlung in Euro:");
+        async function addPayment() {
+            const amtStr = await askPrompt({ message: "Betrag der Zahlung in Euro:" });
             if (amtStr === null)
                 return;
             const amount = parseFloat((amtStr || "").replace(",", "."));
@@ -7285,7 +7310,7 @@ function App() {
                 return;
             }
             const today = new Date().toISOString().slice(0, 10);
-            const dateStr = prompt("Datum der Zahlung (TT.MM.JJJJ):", new Date().toLocaleDateString("de-DE"));
+            const dateStr = await askPrompt({ message: "Datum der Zahlung (TT.MM.JJJJ):", defaultValue: new Date().toLocaleDateString("de-DE") });
             if (dateStr === null)
                 return;
             let iso = today;
@@ -7293,7 +7318,7 @@ function App() {
             if (m) {
                 iso = m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0");
             }
-            const method = prompt("Zahlungsart (z.B. Bar, Überweisung, PayPal) – optional:", "Bar");
+            const method = await askPrompt({ message: "Zahlungsart (z.B. Bar, Überweisung, PayPal) – optional:", defaultValue: "Bar" });
             updateActive({ payments: [...pays, { date: iso, amount, method: (method || "").trim() }] });
         }
         function removePayment(idx) {
@@ -8138,7 +8163,7 @@ function App() {
     }
     // Monatsbeitrag eines Fahrlehrers ändern
     async function editSubscriptionAmount(acc) {
-        const input = prompt('Monatsbeitrag für ' + acc.email + ' in Euro (leer lassen = kein fester Betrag):', acc.subscription_amount != null ? String(acc.subscription_amount) : "");
+        const input = await askPrompt({ message: 'Monatsbeitrag für ' + acc.email + ' in Euro (leer lassen = kein fester Betrag):', defaultValue: acc.subscription_amount != null ? String(acc.subscription_amount) : "" });
         if (input === null)
             return;
         const val = input.trim() === "" ? null : Number(input.replace(",", "."));
@@ -8169,7 +8194,7 @@ function App() {
     }
     // Neue Fahrschule direkt im Admin-Bereich anlegen
     async function adminAddSchool() {
-        const name = prompt("Name der neuen Fahrschule:");
+        const name = await askPrompt({ message: "Name der neuen Fahrschule:" });
         if (name === null)
             return;
         if (!name.trim()) {
@@ -8809,7 +8834,7 @@ function App() {
                                     showFlash("✓ Code kopiert");
                                 }
                                 catch (e) {
-                                    prompt("Code zum Kopieren:", school.invite_code);
+                                    await askPrompt({ message: "Code zum Kopieren:", defaultValue: school.invite_code });
                                 }
                             } }, "Kopieren")),
                     React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 9, flexWrap: "wrap" } },
@@ -8929,14 +8954,14 @@ function App() {
                                         v.name || "Fahrzeug",
                                         v.inactive ? " (inaktiv)" : ""),
                                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, [v.plate, v.type].filter(Boolean).join(" · "))),
-                                React.createElement("button", { onClick: () => {
-                                        const newName = prompt("Bezeichnung des Fahrzeugs (z.B. VW Golf):", v.name || "");
+                                React.createElement("button", { onClick: async () => {
+                                        const newName = await askPrompt({ message: "Bezeichnung des Fahrzeugs (z.B. VW Golf):", defaultValue: v.name || "" });
                                         if (newName === null)
                                             return;
-                                        const newPlate = prompt("Kennzeichen (optional):", v.plate || "");
+                                        const newPlate = await askPrompt({ message: "Kennzeichen (optional):", defaultValue: v.plate || "" });
                                         if (newPlate === null)
                                             return;
-                                        const newType = prompt("Typ (Automatik oder Schaltwagen):", v.type || "Automatik");
+                                        const newType = await askPrompt({ message: "Typ (Automatik oder Schaltwagen):", defaultValue: v.type || "Automatik" });
                                         if (newType === null)
                                             return;
                                         saveVehicles(vehicles.map((x, i) => i === idx ? { ...x, name: newName.trim() || x.name, plate: newPlate.trim(), type: newType.trim() } : x));
@@ -8948,14 +8973,14 @@ function App() {
                                 React.createElement("button", { onClick: () => saveVehicles(vehicles.map((x, i) => i === idx ? { ...x, calHidden: !x.calHidden } : x)), style: { padding: "6px 11px", borderRadius: 99, fontSize: 12, fontWeight: 700, fontFamily: "var(--font-d)",
                                         border: "1.5px solid " + (v.calHidden ? "var(--line)" : "var(--orange)"),
                                         background: v.calHidden ? "var(--card)" : "var(--orange-soft)", color: v.calHidden ? "var(--muted)" : "var(--orange-deep)" } }, v.calHidden ? "Kalender: aus" : "Kalender: an"))))),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => {
-                            const name = prompt("Bezeichnung des Fahrzeugs (z.B. VW Golf):");
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => {
+                            const name = await askPrompt({ message: "Bezeichnung des Fahrzeugs (z.B. VW Golf):" });
                             if (name === null || !name.trim())
                                 return;
-                            const plate = prompt("Kennzeichen (optional):");
+                            const plate = await askPrompt({ message: "Kennzeichen (optional):" });
                             if (plate === null)
                                 return;
-                            const type = prompt("Typ (Automatik oder Schaltwagen):", "Automatik");
+                            const type = await askPrompt({ message: "Typ (Automatik oder Schaltwagen):", defaultValue: "Automatik" });
                             if (type === null)
                                 return;
                             saveVehicles([...vehicles, { id: "veh_" + Date.now().toString(36), name: name.trim(), plate: plate.trim(), type: type.trim() }]);
@@ -8972,8 +8997,8 @@ function App() {
                             borderRadius: 99, border: "1.5px solid var(--line)", background: "var(--field-bg)" } },
                         React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-d)" } }, k),
                         React.createElement("button", { onClick: () => saveKlassen(klassen.filter((_, i) => i !== idx)), "aria-label": "Klasse " + k + " entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 16, padding: "2px 4px", lineHeight: 1 } }, "\u00D7")))),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => {
-                            const k = prompt("Neue Klasse hinzufügen (z.B. B197):");
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => {
+                            const k = await askPrompt({ message: "Neue Klasse hinzufügen (z.B. B197):" });
                             if (k === null || !k.trim())
                                 return;
                             const norm = k.trim().toUpperCase();
@@ -8994,8 +9019,8 @@ function App() {
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)" } }, a.code),
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, a.label.includes("·") ? a.label.split("·")[1].trim() : a.label)),
-                            React.createElement("button", { onClick: () => {
-                                    const newLabelText = prompt("Bezeichnung für " + a.code + ":", a.label.includes("·") ? a.label.split("·")[1].trim() : a.label);
+                            React.createElement("button", { onClick: async () => {
+                                    const newLabelText = await askPrompt({ message: "Bezeichnung für " + a.code + ":", defaultValue: a.label.includes("·") ? a.label.split("·")[1].trim() : a.label });
                                     if (newLabelText === null || !newLabelText.trim())
                                         return;
                                     saveArten(arten.map((x, i) => i === idx ? { ...x, label: a.code + " · " + newLabelText.trim() } : x));
@@ -9005,8 +9030,8 @@ function App() {
                         React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 7, marginTop: 7, marginLeft: 40, fontSize: 12.5, color: "var(--muted)", cursor: "pointer" } },
                             React.createElement("input", { type: "checkbox", checked: a.countsAsLesson !== false, onChange: e => saveArten(arten.map((x, i) => i === idx ? { ...x, countsAsLesson: e.target.checked } : x)) }),
                             "Z\u00E4hlt zu den Fahrstunden"))),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "var(--orange-deep)" }, onClick: () => {
-                            const code = prompt("Kürzel der neuen Art (z.B. SGF):");
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "var(--orange-deep)" }, onClick: async () => {
+                            const code = await askPrompt({ message: "Kürzel der neuen Art (z.B. SGF):" });
                             if (code === null || !code.trim())
                                 return;
                             const norm = code.trim().toUpperCase();
@@ -9014,7 +9039,7 @@ function App() {
                                 showToast("Dieses Kürzel gibt es schon.");
                                 return;
                             }
-                            const label = prompt("Bezeichnung für " + norm + ":");
+                            const label = await askPrompt({ message: "Bezeichnung für " + norm + ":" });
                             if (label === null || !label.trim())
                                 return;
                             saveArten([...arten, { code: norm, label: norm + " · " + label.trim(), color: "#FF9300" }]);
@@ -9077,11 +9102,11 @@ function App() {
                                     " UE enthalten")),
                             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, eurFmt(p.amount)),
                             React.createElement("button", { onClick: () => savePackages(packages.filter((_, i) => i !== idx)), "aria-label": "Paket entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "\u00D7")))),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => {
-                            const name = prompt("Name des Pakets (z.B. Starterpaket, Select, Prime):");
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => {
+                            const name = await askPrompt({ message: "Name des Pakets (z.B. Starterpaket, Select, Prime):" });
                             if (name === null)
                                 return;
-                            const amtStr = prompt("Preis dieses Pakets in Euro (Festpreis):");
+                            const amtStr = await askPrompt({ message: "Preis dieses Pakets in Euro (Festpreis):" });
                             if (amtStr === null)
                                 return;
                             const amount = parseFloat((amtStr || "").replace(",", "."));
@@ -9089,7 +9114,7 @@ function App() {
                                 showToast("Bitte einen gültigen Betrag eingeben.");
                                 return;
                             }
-                            const ueStr = prompt("Wie viele UE (45-Minuten-Einheiten) sind im Preis enthalten? Leer lassen, wenn das Paket nur eine Grundgebühr ohne enthaltene Fahrstunden ist.");
+                            const ueStr = await askPrompt({ message: "Wie viele UE (45-Minuten-Einheiten) sind im Preis enthalten? Leer lassen, wenn das Paket nur eine Grundgebühr ohne enthaltene Fahrstunden ist." });
                             const includedUE = ueStr === null || ueStr.trim() === "" ? 0 : parseFloat(ueStr.replace(",", "."));
                             savePackages([...packages, { name: name.trim() || "Paket", amount, includedUE: isNaN(includedUE) ? 0 : includedUE }]);
                         } }, "+ Paket hinzuf\u00FCgen"),
