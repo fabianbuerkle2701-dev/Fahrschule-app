@@ -3295,6 +3295,81 @@ function Ring({ pct, size = 50 }) {
             pct,
             "%"));
 }
+// WMO-Wettercodes (Open-Meteo) grob zusammengefasst: [Emoji, Label]
+const WEATHER_CODE_MAP = {
+    0: ["☀️", "Klar"], 1: ["🌤️", "Überwiegend klar"], 2: ["⛅", "Teils bewölkt"], 3: ["☁️", "Bedeckt"],
+    45: ["🌫️", "Nebel"], 48: ["🌫️", "Nebel"],
+    51: ["🌦️", "Nieselregen"], 53: ["🌦️", "Nieselregen"], 55: ["🌧️", "Nieselregen"],
+    56: ["🧊", "Gefrierender Nieselregen"], 57: ["🧊", "Gefrierender Nieselregen"],
+    61: ["🌧️", "Regen"], 63: ["🌧️", "Regen"], 65: ["🌧️", "Starker Regen"],
+    66: ["🧊", "Gefrierender Regen"], 67: ["🧊", "Gefrierender Regen"],
+    71: ["🌨️", "Schneefall"], 73: ["🌨️", "Schneefall"], 75: ["❄️", "Starker Schneefall"], 77: ["❄️", "Schneegriesel"],
+    80: ["🌦️", "Regenschauer"], 81: ["🌧️", "Regenschauer"], 82: ["⛈️", "Heftige Regenschauer"],
+    85: ["🌨️", "Schneeschauer"], 86: ["❄️", "Schneeschauer"],
+    95: ["⛈️", "Gewitter"], 96: ["⛈️", "Gewitter mit Hagel"], 99: ["⛈️", "Gewitter mit Hagel"],
+};
+// Wetter-Kachel für die Startseite: hilft bei der Einschätzung der Straßenverhältnisse
+// für die heutigen Fahrstunden (z.B. Glätte, Starkregen). Rein informativ, blendet sich
+// selbst aus, wenn kein Ort hinterlegt ist oder die Abfrage fehlschlägt.
+function WeatherWidget({ city }) {
+    const [w, setW] = useState(null); // null=lädt/aus, {temp,tempMin,code,rain} | "error"
+    useEffect(() => {
+        if (!city) {
+            setW(null);
+            return;
+        }
+        let cancelled = false;
+        const cacheKey = "v3_weather_" + city.toLowerCase() + "_" + ymd(new Date());
+        try {
+            const cached = localStorage.getItem(cacheKey);
+            if (cached) {
+                setW(JSON.parse(cached));
+                return;
+            }
+        }
+        catch (e) { }
+        (async () => {
+            try {
+                const geo = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=1&language=de&format=json&name=" + encodeURIComponent(city)).then(r => r.json());
+                const loc = geo && geo.results && geo.results[0];
+                if (!loc)
+                    throw new Error("Ort nicht gefunden");
+                const fc = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude + "&longitude=" + loc.longitude
+                    + "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=1").then(r => r.json());
+                const d = fc && fc.daily;
+                if (!d || !Array.isArray(d.weathercode) || !d.weathercode.length)
+                    throw new Error("Keine Vorhersage");
+                const data = { temp: Math.round(d.temperature_2m_max[0]), tempMin: Math.round(d.temperature_2m_min[0]), code: d.weathercode[0], rain: d.precipitation_probability_max ? d.precipitation_probability_max[0] : null };
+                if (!cancelled) {
+                    setW(data);
+                    try {
+                        localStorage.setItem(cacheKey, JSON.stringify(data));
+                    }
+                    catch (e) { }
+                }
+            }
+            catch (e) {
+                if (!cancelled)
+                    setW("error");
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [city]);
+    if (!city || !w || w === "error")
+        return null;
+    const info = WEATHER_CODE_MAP[w.code] || ["🌤️", ""];
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginTop: 7, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
+        React.createElement("span", { style: { fontSize: 15 } }, info[0]),
+        React.createElement("span", null,
+            info[1],
+            ", ",
+            w.tempMin,
+            "–",
+            w.temp,
+            "° in ",
+            city,
+            (w.rain != null && w.rain >= 30) ? (" · " + w.rain + "% Regen") : ""));
+}
 /* ════════ Splash & Auth ════════ */
 function Splash({ text }) {
     return React.createElement("div", { style: { minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center",
@@ -6337,7 +6412,8 @@ function App() {
                     gruss,
                     vorname ? (", " + vorname) : "",
                     "!"),
-                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine)),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine),
+                React.createElement(WeatherWidget, { city: myCity })),
             // 2) Live-Aufzeichnung (nur wenn aktiv)
             recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),
