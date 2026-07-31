@@ -881,7 +881,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.58.0";
+const APP_VERSION = "1.58.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -923,6 +923,10 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.58.1", date: "Juli 2026", changes: [
+            "Behoben: Ein gel\u00F6schter Termin kam kurz wieder in die Liste zur\u00FCck und war erst nach dem zweiten L\u00F6schen dauerhaft weg. Ursache war ein automatisches Neuladen der Termine, das direkt nach dem Best\u00E4tigungsdialog startete und dabei den noch nicht fertig gel\u00F6schten Termin erneut geholt hat. Gel\u00F6schte Termine werden jetzt gemerkt und bleiben verschwunden, und w\u00E4hrend eines Speicher- oder L\u00F6schvorgangs wird gar nicht mehr neu geladen. Schl\u00E4gt das L\u00F6schen wirklich fehl, taucht der Termin wieder auf und du bekommst eine Meldung",
+            "Behoben: Beim manuellen Anlegen eines Termins blieb das Fenster nach dem Tippen auf \u201ETermin anlegen\u201C offen, solange gespeichert wurde. Wer nochmal getippt hat, hat den Termin mehrfach angelegt. Der Button zeigt jetzt \u201EWird gespeichert \u2026\u201C, ist w\u00E4hrenddessen gesperrt, und ein zweiter Tap wird ignoriert. Das Fenster schlie\u00DFt sich erst, wenn der Termin wirklich gespeichert ist. Geht etwas schief, bleibt es mit deinen Eingaben offen",
+        ] },
     { v: "1.58.0", date: "Juli 2026", changes: [
             "Neu: Eigene Ausbildungsdiagrammkarte f\u00FCr die Klasse BE. Sch\u00FCler mit F\u00FChrerscheinklasse BE bekommen jetzt automatisch die offizielle BVF-Karte f\u00FCr Klasse BE als Standard-Vorlage: Kennenlernen des Anh\u00E4ngers und Zusammenstellen der Kombination, Verbinden und Trennen, Fahrzeugbedienung und -beherrschung, Grundfahraufgabe R\u00FCckw\u00E4rtsfahren um eine Ecke nach links, R\u00FCckw\u00E4rtsfahren und Einparken, Wichtige Fahraufgaben sowie die Sonderfahrten auf Bundes- oder Landstra\u00DFen, Autobahnen und bei D\u00E4mmerung oder Dunkelheit. Die Strecken \u00FCbernimmt BE weiter von Klasse B, bis eigene angelegt werden. Wie bei allen Klassen gilt: Erst wenn du im Vorlagen-Editor etwas an BE \u00E4nderst, wird daraus eine gespeicherte eigene Vorlage",
         ] },
@@ -3760,6 +3764,22 @@ function App() {
     const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
     const [calShare, setCalShare] = useState(null); // null | {code} für den Fahrzeug-Kalender (Link + Ansicht)
     const [appts, setAppts] = useState([]); // Termine
+    // Schutz gegen Geister-Termine und Doppel-Anlagen:
+    // apptWritesRef zählt laufende Schreibvorgänge (anlegen/ändern/löschen). Solange sie > 0 sind,
+    // wird kein Neuladen aus der Datenbank ausgeführt, damit ein noch nicht abgeschlossenes Löschen
+    // den Termin nicht kurz wieder zurückholt (das passierte, weil iOS beim Schließen eines
+    // Bestätigungsdialogs ein focus-Event auslöst und damit sofort neu geladen wurde).
+    // apptDeletedRef merkt sich gelöschte IDs und filtert sie aus jedem Neuladen heraus,
+    // bis die Datenbank sie wirklich los ist.
+    // apptSavingRef verhindert, dass ein zweiter Tap auf "Termin anlegen" denselben Termin nochmal speichert.
+    const apptWritesRef = useRef(0);
+    const apptDeletedRef = useRef(new Set());
+    const apptSavingRef = useRef(false);
+    // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
+    function applyFetchedAppts(list) {
+        const gone = apptDeletedRef.current;
+        setAppts((list || []).filter(a => !gone.has(a.id)));
+    }
     // App-weite Streckenaufzeichnung (Hooks hier oben, damit vor den frühen returns)
     const recWatchRef = useRef(null);
     const recPtsRef = useRef([]);
@@ -4264,7 +4284,7 @@ function App() {
             setActiveId(a => (list.find(s => s.id === a) ? a : (list[0] ? list[0].id : null)));
             setTpl(tplData);
             saveTplCache(uid, tplData);
-            setAppts(apptData || []);
+            applyFetchedAppts(apptData || []);
             setBookingCode(code || null);
             // Vorlage des Fahrschul-Admins vorsorglich laden, als möglicher Ausgangspunkt für Klassen,
             // die man selbst noch nicht angelegt hat. Der Abgleich, ob eine Klasse wirklich leer ist,
@@ -4300,8 +4320,12 @@ function App() {
         if (!uid)
             return;
         function refresh() {
+            // Kein Neuladen, solange ein Termin gerade angelegt, geändert oder gelöscht wird.
+            // Sonst käme ein eben gelöschter Termin für einen Moment zurück in die Liste.
+            if (apptWritesRef.current > 0)
+                return;
             if (document.visibilityState === "visible") {
-                fetchAppointments(uid).then(list => setAppts(list || [])).catch(() => { });
+                fetchAppointments(uid).then(list => applyFetchedAppts(list)).catch(() => { });
             }
         }
         document.addEventListener("visibilitychange", refresh);
@@ -5507,6 +5531,7 @@ function App() {
     // ── Termine ──
     async function addAppt(appt) {
         setSaved(false);
+        apptWritesRef.current++;
         try {
             const created = await dbInsertAppt(uid, appt);
             setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
@@ -5516,6 +5541,9 @@ function App() {
         catch (e) {
             alert("Termin konnte nicht gespeichert werden:\n" + e.message);
             setSaved(true);
+        }
+        finally {
+            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
         }
     }
     // ── Terminvorschlag an Schüler senden (per WhatsApp, mit Buchungslink zum Bestätigen) ──
@@ -5635,6 +5663,7 @@ function App() {
     }
     async function updateAppt(id, patch) {
         setSaved(false);
+        apptWritesRef.current++;
         setAppts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
         try {
             await dbUpdateAppt(id, patch);
@@ -5644,30 +5673,52 @@ function App() {
             alert("Änderung fehlgeschlagen:\n" + e.message);
             setSaved(true);
         }
+        finally {
+            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+        }
     }
     async function removeAppt(id, opts) {
         const backup = (appts || []).find(a => a.id === id);
         setSaved(false);
+        // ID vormerken, damit ein Neuladen im Hintergrund den Termin nicht kurz wieder anzeigt
+        apptDeletedRef.current.add(id);
+        apptWritesRef.current++;
         setAppts(prev => prev.filter(a => a.id !== id));
         try {
             await dbDeleteAppt(id);
             setSaved(true);
         }
         catch (e) {
+            // Löschen fehlgeschlagen: Vormerkung zurücknehmen und Termin wieder anzeigen,
+            // damit die Liste zur Datenbank passt und nichts stillschweigend verschwindet
+            apptDeletedRef.current.delete(id);
+            if (backup)
+                setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
             alert("Löschen fehlgeschlagen:\n" + e.message);
             setSaved(true);
+        }
+        finally {
+            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
         }
         if (backup && !(opts && opts.noUndo)) {
             const label = (opts && opts.label) || "Termin gelöscht";
             showUndo(label, async () => {
-                const created = await dbInsertAppt(uid, {
-                    start_at: backup.start_at, end_at: backup.end_at, student_id: backup.student_id,
-                    title: backup.title, note: backup.note, status: backup.status
-                });
-                if (created)
-                    setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
-                else
-                    alert("Wiederherstellen fehlgeschlagen.");
+                apptWritesRef.current++;
+                try {
+                    const created = await dbInsertAppt(uid, {
+                        start_at: backup.start_at, end_at: backup.end_at, student_id: backup.student_id,
+                        title: backup.title, note: backup.note, status: backup.status
+                    });
+                    if (created) {
+                        apptDeletedRef.current.delete(id);
+                        setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
+                    }
+                    else
+                        alert("Wiederherstellen fehlgeschlagen.");
+                }
+                finally {
+                    apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+                }
             });
         }
     }
@@ -7495,6 +7546,10 @@ function App() {
         const f = apptForm;
         if (!f)
             return;
+        // Doppeltap-Schutz: Bei langsamer Verbindung dauert das Speichern einen Moment.
+        // Ohne diesen Riegel konnte derselbe Termin durch mehrfaches Tippen vielfach angelegt werden.
+        if (apptSavingRef.current)
+            return;
         if (!f.date || !f.start) {
             alert("Bitte Datum und Startzeit angeben.");
             return;
@@ -7534,13 +7589,25 @@ function App() {
             status: "confirmed",
             art: f.art || "ÜST"
         };
-        if (f.id) {
-            await updateAppt(f.id, payload);
+        apptSavingRef.current = true;
+        setApptForm({ ...f, busy: true });
+        try {
+            if (f.id) {
+                await updateAppt(f.id, payload);
+            }
+            else {
+                await addAppt(payload);
+            }
+            setApptForm(null);
         }
-        else {
-            await addAppt(payload);
+        catch (e) {
+            // Fenster offen lassen, damit die Eingaben nicht verloren gehen
+            setApptForm({ ...f, busy: false });
+            alert("Termin konnte nicht gespeichert werden:\n" + ((e && e.message) || e));
         }
-        setApptForm(null);
+        finally {
+            apptSavingRef.current = false;
+        }
     }
     function renderKalender() {
         // Sonntag ist grundsätzlich frei und wird in der Wochenansicht nicht angezeigt (Montag bis Samstag)
@@ -10982,7 +11049,7 @@ function App() {
                         React.createElement("path", { d: "M9 12h6M9 16h4" })),
                     "Fahrstunde anlegen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptChoice(null) }, "Abbrechen"))),
-        apptForm && React.createElement("div", { onClick: () => setApptForm(null), style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex",
+        apptForm && React.createElement("div", { onClick: () => { if (!apptForm.busy) setApptForm(null); }, style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))",
@@ -11032,7 +11099,7 @@ function App() {
                     React.createElement("div", { style: { flex: 1 } },
                         React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, "Sonstige T\u00E4tigkeit"),
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 } }, "Z\u00E4hlt nicht zum Ausbildungslimit. F\u00FCr alles, was keine praktische Ausbildung ist."))),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: saveApptForm }, apptForm.id ? "Speichern" : "Termin anlegen"),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: apptForm.busy ? 0.6 : 1 }, disabled: !!apptForm.busy, onClick: saveApptForm }, apptForm.busy ? "Wird gespeichert\u2026" : (apptForm.id ? "Speichern" : "Termin anlegen")),
                 apptForm.student_id && (() => {
                     const existing = apptForm.id ? (students.find(s => s.id === apptForm.student_id) || {}).drivenLessons || [] : [];
                     const already = apptForm.id && existing.some(l => l.leistung && l.apptId === apptForm.id);
@@ -11073,7 +11140,7 @@ function App() {
                         removeAppt(apptForm.id);
                         setApptForm(null);
                     } } }, "Termin l\u00F6schen"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptForm(null) }, "Abbrechen"))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!apptForm.busy, onClick: () => { if (!apptForm.busy) setApptForm(null); } }, "Abbrechen"))),
         showNachweisModal && React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 20, borderTopRightRadius: 20,
