@@ -68,7 +68,7 @@ Das JSON hat genau diese Felder (fehlende Werte als leerer String "" bzw. 0 bei 
 Wichtig: Bei "Schüler: Vorname Nachname" zerlege den Namen korrekt in vorname und name. Telefonnummern exakt übernehmen. Gib nur das JSON zurück.`;
 
   const payload = {
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-5",
     max_tokens: 1024,
     messages: [
       {

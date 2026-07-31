@@ -86,7 +86,7 @@ Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 - Wenn unklar, ob Frage oder Aktion, und es klingt nach einer Information: nimm "antwort".`;
 
   const payload = {
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-5",
     max_tokens: 700,
     system,
     messages: [{ role: "user", content: message }],

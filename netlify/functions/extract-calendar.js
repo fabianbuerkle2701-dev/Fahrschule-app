@@ -70,7 +70,7 @@ Regeln:
 - Wenn gar kein Termin erkennbar ist, gib eine leere Liste zurück und erkläre es in note.`;
 
   const payload = {
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-5",
     max_tokens: 2000,
     system,
     messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Lies bitte alle Termine aus diesem Kalender aus." }] }],

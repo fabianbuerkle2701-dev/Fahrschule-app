@@ -55,7 +55,7 @@ Regeln:
 - Erfinde keine Werte für Abschnitte, die auf dem Bild gar nicht vorkommen.`;
 
   const payload = {
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-5",
     max_tokens: 1500,
     system,
     messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Lies bitte den Fortschritt pro Abschnitt aus dieser ADK-Karte aus." }] }],
