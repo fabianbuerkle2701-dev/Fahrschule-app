@@ -1732,8 +1732,13 @@ async function dbUpdate(s) {
 }
 async function dbDelete(id) {
     const { error } = await sb.from("students").delete().eq("id", id);
-    if (error)
+    if (error) {
         console.error(error);
+        // Wichtig: den Fehler weiterreichen statt nur zu loggen. Ein DB-Trigger blockt das Löschen
+        // von Schülern mit vorhandenen Rechnungen (Audit-Trail-Schutz) – ohne throw würde die App
+        // den Schüler trotzdem optimistisch aus der UI entfernen, obwohl die Zeile in der DB bleibt.
+        throw new Error(error.message || "Löschen fehlgeschlagen");
+    }
 }
 async function dbShare(id, shared) {
     const { error } = await sb.from("students").update({ shared_with: shared }).eq("id", id);
@@ -2370,6 +2375,19 @@ async function fetchSchoolLeistungen(schoolId) {
         throw new Error(error.message || "Leistungen konnten nicht geladen werden");
     }
     return data || [];
+}
+// Nächste Beleg-/Rechnungs-/Vertragsnummer atomar vom Server holen (siehe Migration
+// document_counters_and_delete_guard). Ersetzt die frühere client-seitige Berechnung
+// "höchste Nummer unter den für diesen Fahrlehrer sichtbaren Schülern", die bei mehreren
+// Fahrlehrern unter derselben Fahrschule zu doppelt vergebenen Nummern führen konnte –
+// ein Compliance-Problem, da Rechnungsnummern fortlaufend und lückenlos sein müssen (§14 UStG).
+async function nextDocumentNumber(schoolId, kind) {
+    const { data, error } = await sb.rpc("next_document_number", { p_school_id: schoolId, p_kind: kind });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Belegnummer konnte nicht vergeben werden");
+    }
+    return data;
 }
 // Abrechnungsdaten aller Schüler einer Fahrschule laden (für das Offene-Posten-Dashboard).
 // Die offenen Beträge berechnet die App danach selbst, mit derselben Logik wie in der Schüleransicht.
@@ -5028,6 +5046,47 @@ function App() {
         }
         setLessonForm(null);
     }
+    // Freien Posten (z.B. Prüfungsgebühr, Lehrmittel) beim aktiven Schüler speichern.
+    // Bugfix: war zuvor als lokale Funktion in kostenSection() definiert, während das zugehörige
+    // itemForm-Modal (wie alle anderen Formular-Modals) ganz oben im App-Render hängt – außerhalb
+    // dieses Gültigkeitsbereichs. Jeder Klick auf "Hinzufügen" endete dadurch in einem
+    // "saveItemForm is not defined"-Absturz der ganzen App (React-ErrorBoundary).
+    function saveItemForm() {
+        const f = itemForm;
+        if (!f)
+            return;
+        if (!f.label.trim()) {
+            setItemForm({ ...f, error: "Bitte eine Bezeichnung eingeben." });
+            return;
+        }
+        const amount = parseFloat((f.amount || "").replace(",", "."));
+        if (isNaN(amount)) {
+            setItemForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
+            return;
+        }
+        const stu = students.find(s => s.id === activeId) || active;
+        if (!stu)
+            return;
+        writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: f.label.trim(), amount }] });
+        setItemForm(null);
+    }
+    // Zahlung beim aktiven Schüler speichern. Gleicher Bugfix wie saveItemForm oben: das paymentForm-
+    // Modal ist ebenfalls App-weit gerendert und konnte die lokale Version in kostenSection() nicht sehen.
+    function savePaymentForm() {
+        const f = paymentForm;
+        if (!f)
+            return;
+        const amount = parseFloat((f.amount || "").replace(",", "."));
+        if (isNaN(amount)) {
+            setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
+            return;
+        }
+        const stu = students.find(s => s.id === activeId) || active;
+        if (!stu)
+            return;
+        writeStudent({ ...stu, payments: [...(stu.payments || []), { date: f.date, amount, method: (f.method || "").trim() }] });
+        setPaymentForm(null);
+    }
     // Nächster anstehender Termin je Schüler, aus den echten Buchungen.
     // WICHTIG: dieser Hook muss VOR allen bedingten "return"-Statements stehen (React error #310),
     // deshalb steht er hier ganz oben bei den anderen Hooks statt weiter unten bei seiner Nutzung.
@@ -5590,9 +5649,25 @@ function App() {
     async function removeStudent(s) {
         if (!await askConfirm({ message: dispName(s) + " wirklich löschen?" }))
             return;
+        // Schüler mit Rechnungen dürfen aus Revisionssicherheitsgründen nicht gelöscht werden
+        // (die Datenbank blockt das serverseitig, siehe trg_prevent_delete_students_with_invoices) –
+        // stattdessen archivieren, damit die Rechnungshistorie erhalten bleibt.
+        if ((s.invoices || []).length > 0) {
+            writeStudent({ ...s, archived: true });
+            showToast(dispName(s) + " hat bereits Rechnungen und wurde stattdessen archiviert. Die Rechnungshistorie bleibt erhalten.");
+            return;
+        }
         // Daten merken, um sie bei Bedarf wiederherstellen zu können
         const backup = { ...s };
-        await dbDelete(s.id);
+        try {
+            await dbDelete(s.id);
+        }
+        catch (e) {
+            // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
+            writeStudent({ ...s, archived: true });
+            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message);
+            return;
+        }
         setStudents(prev => {
             const arr = (prev || []).filter(x => x.id !== s.id);
             saveCache(uid, arr);
@@ -7134,23 +7209,6 @@ function App() {
             }));
     }
     // ── Rechnungen ──
-    // Fortlaufende Nummer: höchste bisher vergebene Nummer über die eigenen (sichtbaren) Schüler hinweg, plus 1.
-    // Hinweis: bezieht sich auf die Schüler, die dieser Account sieht (eigene + geteilte). Bei mehreren
-    // Fahrlehrern, die unter derselben Fahrschule abrechnen, bräuchte eine wirklich gemeinsame Nummernfolge
-    // eine zentrale Zählung statt dieser clientseitigen Ableitung.
-    function nextInvoiceNumber() {
-        const year = new Date().getFullYear();
-        let maxSeq = 0;
-        (students || []).forEach(s => (s.invoices || []).forEach(inv => {
-            const m = String(inv.number || "").match(/-(\d+)$/);
-            if (m) {
-                const n = parseInt(m[1], 10);
-                if (n > maxSeq)
-                    maxSeq = n;
-            }
-        }));
-        return "RE-" + year + "-" + String(maxSeq + 1).padStart(4, "0");
-    }
     // Sammelt alle noch nicht abgerechneten Posten (Fahrstunden + freie Posten) des aktuellen Schülers
     function openInvoiceDraft() {
         if (!active)
@@ -7193,17 +7251,29 @@ function App() {
         setInvoiceDraft(d => { if (!d)
             return d; const sel = d.selected.indexOf(key) >= 0 ? d.selected.filter(k => k !== key) : [...d.selected, key]; return { ...d, selected: sel }; });
     }
-    function confirmInvoice() {
+    // Vergibt die Rechnungsnummer atomar über die Datenbank (next_document_number-RPC), damit sie
+    // schulweit über alle Fahrlehrer hinweg fortlaufend und lückenlos bleibt (§14 UStG) statt nur
+    // unter den für diesen Fahrlehrer sichtbaren Schülern eindeutig zu sein.
+    async function confirmInvoice() {
         const d = invoiceDraft;
-        if (!d || !active)
+        if (!d || !active || !school)
             return;
         const chosen = d.rows.filter(r => d.selected.indexOf(r.key) >= 0);
         if (chosen.length === 0) {
             showToast("Bitte mindestens einen Posten auswählen.");
             return;
         }
+        setInvoiceDraft(prev => prev && ({ ...prev, busy: true }));
+        let number;
+        try {
+            number = await nextDocumentNumber(school.id, "invoice");
+        }
+        catch (e) {
+            setInvoiceDraft(prev => prev && ({ ...prev, busy: false }));
+            showToast("Rechnung konnte nicht erstellt werden:\n" + e.message);
+            return;
+        }
         const total = Math.round(chosen.reduce((s, r) => s + r.amount, 0) * 100) / 100;
-        const number = nextInvoiceNumber();
         const inv = { id: uniqueId("inv"), number, date: new Date().toISOString().slice(0, 10),
             items: chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" })), total, note: d.note || "" };
         const chosenLessonIds = [];
@@ -7222,24 +7292,11 @@ function App() {
         doPrint("invoice");
     }
     // ── Zahlungsbeleg / Quittung ──
-    function nextReceiptNumber() {
-        const year = new Date().getFullYear();
-        let maxSeq = 0;
-        (students || []).forEach(s => (s.payments || []).forEach(p => {
-            const m = String(p.receiptNumber || "").match(/-(\d+)$/);
-            if (m) {
-                const n = parseInt(m[1], 10);
-                if (n > maxSeq)
-                    maxSeq = n;
-            }
-        }));
-        return "Q-" + year + "-" + String(maxSeq + 1).padStart(4, "0");
-    }
-    // Beleg für eine bestehende Zahlung drucken. Vergibt beim ersten Mal eine Belegnummer und
-    // merkt sie sich dauerhaft an der Zahlung, damit derselbe Beleg beim erneuten Drucken die
-    // gleiche Nummer trägt statt jedes Mal eine neue.
-    function printReceipt(idx) {
-        if (!active)
+    // Beleg für eine bestehende Zahlung drucken. Vergibt beim ersten Mal eine (atomar über die
+    // Datenbank gezogene) Belegnummer und merkt sie sich dauerhaft an der Zahlung, damit derselbe
+    // Beleg beim erneuten Drucken die gleiche Nummer trägt statt jedes Mal eine neue.
+    async function printReceipt(idx) {
+        if (!active || !school)
             return;
         const list = active.payments || [];
         const p = list[idx];
@@ -7250,37 +7307,40 @@ function App() {
             doPrint("receipt");
             return;
         }
-        const withNumber = { ...p, receiptNumber: nextReceiptNumber() };
+        let number;
+        try {
+            number = await nextDocumentNumber(school.id, "receipt");
+        }
+        catch (e) {
+            showToast("Beleg konnte nicht erstellt werden:\n" + e.message);
+            return;
+        }
+        const withNumber = { ...p, receiptNumber: number };
         const payments = list.map((x, i) => i === idx ? withNumber : x);
         updateActive({ payments });
         setReceiptPreview(withNumber);
         doPrint("receipt");
     }
     // ── Ausbildungsvertrag ──
-    function nextContractNumber() {
-        const year = new Date().getFullYear();
-        let maxSeq = 0;
-        (students || []).forEach(s => (s.contracts || []).forEach(c => {
-            const m = String(c.number || "").match(/-(\d+)$/);
-            if (m) {
-                const n = parseInt(m[1], 10);
-                if (n > maxSeq)
-                    maxSeq = n;
-            }
-        }));
-        return "V-" + year + "-" + String(maxSeq + 1).padStart(4, "0");
-    }
     // Erstellt einen neuen Ausbildungsvertrag für den aktuellen Schüler, als Schnappschuss der
     // aktuellen Konditionen (Klasse, Preis, ggf. zuletzt übernommenes Paket). Frühere Verträge
     // bleiben unverändert in active.contracts erhalten und lassen sich weiterhin ansehen/drucken.
     async function createContract() {
-        if (!active)
+        if (!active || !school)
             return;
         if (!await askConfirm({ message: "Ausbildungsvertrag f\u00FCr " + dispName(active) + " erstellen?" }))
             return;
+        let number;
+        try {
+            number = await nextDocumentNumber(school.id, "contract");
+        }
+        catch (e) {
+            showToast("Vertrag konnte nicht erstellt werden:\n" + e.message);
+            return;
+        }
         const price = Number(pricePerHour) || 0;
         const lastPkg = (active.packages && active.packages.length) ? active.packages[active.packages.length - 1] : null;
-        const c = { id: uniqueId("vtr"), number: nextContractNumber(), date: new Date().toISOString().slice(0, 10),
+        const c = { id: uniqueId("vtr"), number, date: new Date().toISOString().slice(0, 10),
             klasse: active.klasse || DEFAULT_KLASSE, priceUE: price,
             packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
         updateActive({ contracts: [...(active.contracts || []), c] });
@@ -7346,20 +7406,6 @@ function App() {
         function addItem() {
             setItemForm({ label: "", amount: "", error: "" });
         }
-        function saveItemForm() {
-            const f = itemForm;
-            if (!f.label.trim()) {
-                setItemForm({ ...f, error: "Bitte eine Bezeichnung eingeben." });
-                return;
-            }
-            const amount = parseFloat((f.amount || "").replace(",", "."));
-            if (isNaN(amount)) {
-                setItemForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
-                return;
-            }
-            updateActive({ costItems: [...items, { label: f.label.trim(), amount }] });
-            setItemForm(null);
-        }
         function removeItem(idx) {
             updateActive({ costItems: items.filter((_, i) => i !== idx) });
         }
@@ -7372,16 +7418,6 @@ function App() {
         }
         function addPayment() {
             setPaymentForm({ amount: "", date: new Date().toISOString().slice(0, 10), method: "Bar", error: "" });
-        }
-        function savePaymentForm() {
-            const f = paymentForm;
-            const amount = parseFloat((f.amount || "").replace(",", "."));
-            if (isNaN(amount)) {
-                setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
-                return;
-            }
-            updateActive({ payments: [...pays, { date: f.date, amount, method: (f.method || "").trim() }] });
-            setPaymentForm(null);
         }
         function removePayment(idx) {
             updateActive({ payments: pays.filter((_, i) => i !== idx) });
@@ -11629,8 +11665,8 @@ function App() {
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "12px 0", fontWeight: 800, fontFamily: "var(--font-d)", fontSize: 16, borderBottom: "2px solid var(--line)", marginBottom: 14 } },
                     React.createElement("span", null, "Summe"),
                     React.createElement("span", null, eurFmt(invoiceDraft.rows.filter(r => invoiceDraft.selected.indexOf(r.key) >= 0).reduce((s, r) => s + r.amount, 0)))),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, onClick: confirmInvoice }, "Rechnung " + nextInvoiceNumber() + " erstellen"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setInvoiceDraft(null) }, "Abbrechen"))),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: !!invoiceDraft.busy, onClick: confirmInvoice }, invoiceDraft.busy ? "Wird erstellt…" : "Rechnung erstellen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!invoiceDraft.busy, onClick: () => setInvoiceDraft(null) }, "Abbrechen"))),
         printChoice && React.createElement("div", { onClick: () => setPrintChoice(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
