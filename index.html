@@ -3359,6 +3359,11 @@ const IcEuro = () => React.createElement(I, null,
     React.createElement("path", { d: "M4 10h12" }),
     React.createElement("path", { d: "M4 14h9" }),
     React.createElement("path", { d: "M19 6a7.5 7.5 0 1 0 0 12" }));
+const IcCarIcon = () => React.createElement(I, null,
+    React.createElement("path", { d: "M5 17h14" }),
+    React.createElement("path", { d: "M5 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0z" }),
+    React.createElement("path", { d: "M23 17a2 2 0 1 1-4 0 2 2 0 0 1 4 0z" }),
+    React.createElement("path", { d: "M1 17v-4l2-5a2 2 0 0 1 2-1.5h10a2 2 0 0 1 2 1.5l2 5v4" }));
 const IcCalendar = () => React.createElement(I, null,
     React.createElement("rect", { x: "3", y: "4", width: "18", height: "18", rx: "2", ry: "2" }),
     React.createElement("line", { x1: "16", y1: "2", x2: "16", y2: "6" }),
@@ -3807,6 +3812,14 @@ function licenseStepDone(stu, key) {
     const steps = stu.licenseSteps || {};
     return !!(steps[key] && steps[key].done);
 }
+const VEHICLE_COST_CATEGORIES = ["Kraftstoff", "Werkstatt/Reparatur", "TÜV/HU", "Versicherung", "Leasing/Finanzierung", "Sonstiges"];
+// Tage bis zur nächsten HU (negativ = überfällig). null, wenn kein Termin hinterlegt.
+function tuvDaysLeft(v) {
+    if (!v.tuvDate)
+        return null;
+    const ms = new Date(v.tuvDate + "T00:00:00").getTime() - new Date(new Date().toISOString().slice(0, 10) + "T00:00:00").getTime();
+    return Math.round(ms / 86400000);
+}
 // Auf- und zuklappbarer Bereich. Bewusst AUSSERHALB von App definiert (nicht als innere
 // Funktion), damit React sie zwischen Neu-Renderings als dieselbe Komponente wiedererkennt
 // und ihren offen/zu-Zustand behält. Wäre sie innerhalb von App definiert, würde React sie bei
@@ -4208,6 +4221,7 @@ function App() {
     const [settingsTab, setSettingsTab] = useState("darstellung"); // Unterreiter der Einstellungen
     const [locEdit, setLocEdit] = useState(null); // null | {index|null, name, street, zip, city, phone, email}
     const [vehicleEdit, setVehicleEdit] = useState(null); // null | {index|null, name, plate, type} – ein Formular statt 3 Eingabe-Dialogen nacheinander
+    const [vehicleCostForm, setVehicleCostForm] = useState(null); // null | {vehId, date, category, amount, note, error}
     const [packageEdit, setPackageEdit] = useState(null); // null | {name, amount, ue, error} – Paket hinzufügen
     const [artEdit, setArtEdit] = useState(null); // null | {code, label, error} – Terminart hinzufügen
     const [myLocationId, setMyLocationId] = useState(""); // eigener Standort des Fahrlehrers (für neue Schüler)
@@ -7673,6 +7687,115 @@ function App() {
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
                 "Rein informell für deinen Überblick – ersetzt keine offiziellen Unterlagen der Führerscheinstelle."));
     }
+    /* ── Fahrzeuge: Kosten, Kilometerstand, TÜV/HU-Termine ── */
+    function renderFahrzeuge() {
+        // Lokal berechnet statt aus renderEinstellungen() importiert: eine Variable aus einer
+        // anderen Render-Funktion zu nutzen ist genau der Fehler, der schon einmal den
+        // Fahrzeug-Kalender zum Absturz gebracht hat (siehe Changelog "Fehler canEditSchool").
+        const canEditSchool = isAdmin(session) || isSchoolAdmin;
+        const year = new Date().getFullYear();
+        const yearTotal = vehicles.reduce((sum, v) => sum + (v.costs || []).filter(c => (c.date || "").slice(0, 4) === String(year)).reduce((s, c) => s + (Number(c.amount) || 0), 0), 0);
+        function addCost(vehId) {
+            setVehicleCostForm({ vehId, date: new Date().toISOString().slice(0, 10), category: VEHICLE_COST_CATEGORIES[0], amount: "", note: "", error: "" });
+        }
+        function saveVehicleCostForm() {
+            const f = vehicleCostForm;
+            if (!f)
+                return;
+            const amount = parseFloat((f.amount || "").replace(",", "."));
+            if (isNaN(amount)) {
+                setVehicleCostForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
+                return;
+            }
+            const next = vehicles.map(v => v.id === f.vehId ? { ...v, costs: [...(v.costs || []), { id: uniqueId("vc"), date: f.date, category: f.category, amount, note: (f.note || "").trim() }] } : v);
+            saveVehicles(next);
+            setVehicleCostForm(null);
+        }
+        function removeCost(vehId, costId) {
+            saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, costs: (v.costs || []).filter(c => c.id !== costId) } : v));
+        }
+        function setTuvDate(vehId, date) {
+            saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, tuvDate: date } : v));
+        }
+        function setMileage(vehId, km) {
+            saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, mileage: km === "" ? "" : (parseInt(km, 10) || 0) } : v));
+        }
+        if (!canEditSchool) {
+            return React.createElement("div", { className: "pad" },
+                React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16 } }, "Nur für den Fahrschul-Admin"),
+                    React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginTop: 8 } }, "Fahrzeugkosten und Wartungstermine pflegt der Admin deiner Fahrschule.")));
+        }
+        return React.createElement("div", { className: "pad", style: { paddingBottom: 28 } },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Fahrzeuge"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Kosten, Kilometerstand und TÜV/HU-Termine je Fahrzeug."),
+            vehicles.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 8 } }, "Noch keine Fahrzeuge angelegt"),
+                    React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, "Lege Fahrzeuge unter Mehr, Einstellungen, Organisation, Fahrzeuge an."),
+                    React.createElement("button", { className: "btn btn-primary", onClick: () => setView("einstellungen") }, "Zu den Einstellungen"))
+                : React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "card home-tile", style: { marginBottom: 16, cursor: "default" } },
+                        React.createElement("div", { className: "home-num" }, eurFmt(yearTotal)),
+                        React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, "Fahrzeugkosten " + year + " gesamt")),
+                    vehicles.map(v => {
+                        const days = tuvDaysLeft(v);
+                        const tuvColor = days == null ? "var(--muted)" : days < 0 ? "#B3362A" : days <= 60 ? "var(--amber)" : "var(--green)";
+                        const tuvLabel = days == null ? "kein Termin hinterlegt" : days < 0 ? ("überfällig seit " + Math.abs(days) + " Tagen") : (days + " Tage");
+                        const costs = (v.costs || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+                        const vehYearTotal = costs.filter(c => (c.date || "").slice(0, 4) === String(year)).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+                        return React.createElement("div", { key: v.id, className: "card sec", style: { marginBottom: 14 } },
+                            React.createElement("div", { style: { padding: "14px 16px 4px" } },
+                                React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 } },
+                                    React.createElement("div", null,
+                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16 } },
+                                            v.name || "Fahrzeug", v.inactive ? " (inaktiv)" : ""),
+                                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, [v.plate, v.type].filter(Boolean).join(" · "))),
+                                    React.createElement("div", { style: { textAlign: "right", flexShrink: 0 } },
+                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(vehYearTotal)),
+                                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)" } }, "Kosten " + year))),
+                                React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap", margin: "12px 0 4px" } },
+                                    React.createElement("div", { className: "field", style: { flex: "1 1 140px", margin: 0 } },
+                                        React.createElement("label", null, "TÜV / HU fällig"),
+                                        React.createElement("input", { type: "date", value: v.tuvDate || "", onChange: e => setTuvDate(v.id, e.target.value) })),
+                                    React.createElement("div", { className: "field", style: { flex: "1 1 120px", margin: 0 } },
+                                        React.createElement("label", null, "Kilometerstand"),
+                                        React.createElement("input", { type: "number", inputMode: "numeric", value: v.mileage != null ? v.mileage : "", placeholder: "km", onChange: e => setMileage(v.id, e.target.value) }))),
+                                v.tuvDate && React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: tuvColor, margin: "2px 2px 10px" } }, "HU " + tuvLabel)),
+                            React.createElement("div", { style: { padding: "4px 16px 14px" } },
+                                costs.length === 0
+                                    ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", padding: "8px 0" } }, "Noch keine Kosten erfasst.")
+                                    : costs.map((c, i) => React.createElement("div", { key: c.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: i < costs.length - 1 ? "1px solid var(--line)" : "none" } },
+                                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 600 } }, c.category),
+                                            React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
+                                                c.date ? new Date(c.date).toLocaleDateString("de-DE") : "",
+                                                c.note ? (" · " + c.note) : "")),
+                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, eurFmt(c.amount)),
+                                        React.createElement("button", { onClick: () => removeCost(v.id, c.id), "aria-label": "Kostenposten entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 17, padding: "2px 4px", lineHeight: 1 } }, "×"))),
+                                vehicleCostForm && vehicleCostForm.vehId === v.id
+                                    ? React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" } },
+                                        React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                            React.createElement("div", { className: "field", style: { flex: 1 } },
+                                                React.createElement("label", null, "Datum"),
+                                                React.createElement("input", { type: "date", value: vehicleCostForm.date, onChange: e => setVehicleCostForm({ ...vehicleCostForm, date: e.target.value }) })),
+                                            React.createElement("div", { className: "field", style: { flex: 1 } },
+                                                React.createElement("label", null, "Betrag (€)"),
+                                                React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", value: vehicleCostForm.amount, onChange: e => setVehicleCostForm({ ...vehicleCostForm, amount: e.target.value }) }))),
+                                        React.createElement("div", { className: "field" },
+                                            React.createElement("label", null, "Kategorie"),
+                                            React.createElement("select", { value: vehicleCostForm.category, onChange: e => setVehicleCostForm({ ...vehicleCostForm, category: e.target.value }) },
+                                                VEHICLE_COST_CATEGORIES.map(cat => React.createElement("option", { key: cat, value: cat }, cat)))),
+                                        React.createElement("div", { className: "field" },
+                                            React.createElement("label", null, "Notiz (optional)"),
+                                            React.createElement("input", { type: "text", value: vehicleCostForm.note, onChange: e => setVehicleCostForm({ ...vehicleCostForm, note: e.target.value }) })),
+                                        vehicleCostForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 8 } }, vehicleCostForm.error),
+                                        React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                            React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: saveVehicleCostForm }, "Speichern"),
+                                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setVehicleCostForm(null) }, "Abbrechen")))
+                                    : React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "var(--orange-deep)" }, onClick: () => addCost(v.id) }, "+ Kosten erfassen")));
+                    })));
+    }
     function renderDaten() {
         const f = (key, label, type) => React.createElement("div", { className: "field", key: key },
             React.createElement("label", null, label),
@@ -10357,7 +10480,7 @@ function App() {
     }
     // Gruppierte Reiter
     const ausbildungViews = ["adk", "strecken", "tagebuch"];
-    const mehrViews = ["daten", "einstellungen", "videos", "abrechnung"];
+    const mehrViews = ["daten", "einstellungen", "videos", "abrechnung", "fahrzeuge"];
     const fahrlehrerViews = ["theoriepilot", "theoriepilot-topic"];
     const ausbildungActive = ausbildungViews.indexOf(view) >= 0;
     const mehrActive = mehrViews.indexOf(view) >= 0;
@@ -10413,7 +10536,7 @@ function App() {
                     React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); openCalendar(); } },
                         React.createElement(IcCalendar, null),
                         "Fahrzeug-Kalender"),
-                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
             React.createElement("div", { className: "shell", style: fontScale !== 1 ? { zoom: fontScale } : null },
@@ -10446,9 +10569,10 @@ function App() {
                 view === "videos" && renderVideos(),
                 view === "kalender" && renderKalender(),
                 view === "abrechnung" && renderAbrechnung(),
+                view === "fahrzeuge" && renderFahrzeuge(),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -10527,7 +10651,7 @@ function App() {
                                 React.createElement("span", { className: "tabpop-ic" },
                                     React.createElement(IcCalendar, null)),
                                 "Fahrzeug-Kalender"),
-                            [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                            [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                                 React.createElement("span", { className: "tabpop-ic" }, ic),
                                 lbl))),
                         React.createElement("button", { className: "tab" + (mehrActive ? " on" : ""), style: { width: "100%" }, onClick: () => setTabMenu(tabMenu === "mehr" ? null : "mehr") },
