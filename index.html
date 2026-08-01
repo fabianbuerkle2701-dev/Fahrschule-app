@@ -2614,6 +2614,16 @@ async function publicBookingInfo(code) {
     }
     return (data && data[0]) || null;
 }
+// Selbstanmeldung eines neuen Interessenten über den Buchungslink. Legt den Schüler serverseitig
+// mit pending=true an; der Fahrlehrer bestätigt/löscht das in der App (siehe renderListe).
+async function publicEnrollStudent(code, vorname, name, tel, geb, referralCode) {
+    const { data, error } = await sb.rpc("public_enroll_student", { code, p_vorname: vorname, p_name: name, p_tel: tel, p_geb: geb, p_referral_code: referralCode || "" });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Anmeldung fehlgeschlagen");
+    }
+    return data;
+}
 async function publicBusyTimes(code, von, bis) {
     const { data, error } = await sb.rpc("public_busy_times", { code, von, bis });
     if (error) {
@@ -4095,6 +4105,8 @@ function App() {
     const [adkFilter, setAdkFilter] = useState("");
     const [streckenFilter, setStreckenFilter] = useState("");
     useEffect(() => { setAdkFilter(""); setStreckenFilter(""); }, [activeId]);
+    const [referralRedeemCode, setReferralRedeemCode] = useState("");
+    useEffect(() => { setReferralRedeemCode(""); }, [activeId]);
     const [view, setView] = useState("home");
     const [videos, setVideos] = useState(null); // null=noch nicht geladen
     const [videoUpload, setVideoUpload] = useState(null); // {file,title,category,busy,error}
@@ -5244,6 +5256,59 @@ function App() {
         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
         setActiveId(created.id);
         setView("daten");
+    }
+    // Neue Selbstanmeldung (über den Buchungslink, siehe public_enroll_student) übernehmen:
+    // pending-Flag entfernen und, falls ein gültiger Empfehlungscode angegeben wurde, den
+    // Empfehlungsbonus bei Werber und neuem Schüler gutschreiben (einmalig).
+    function activateEnrollment(s) {
+        if (s.referredByCode && !s.referralRewardApplied) {
+            const referrer = students.find(x => x.id !== s.id && (x.referralCode || "").toUpperCase() === s.referredByCode.toUpperCase());
+            if (referrer) {
+                writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward }],
+                    referrals: [...(referrer.referrals || []), { studentId: s.id, name: dispName(s), date: new Date().toISOString().slice(0, 10) }] });
+                writeStudent({ ...s, pending: false, referralRewardApplied: true,
+                    costItems: [...(s.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }] });
+                showToast(dispName(s) + " übernommen. Empfehlungsbonus (" + eurFmt(referralReward) + ") für beide gutgeschrieben.");
+                return;
+            }
+        }
+        writeStudent({ ...s, pending: false });
+        showToast(dispName(s) + " als Schüler übernommen.");
+    }
+    async function rejectEnrollment(s) {
+        if (!await askConfirm({ message: "Anmeldung von " + dispName(s) + " ablehnen und löschen?" }))
+            return;
+        try {
+            await dbDelete(s.id);
+            setStudents(prev => (prev || []).filter(x => x.id !== s.id));
+        }
+        catch (e) {
+            showToast("Konnte nicht gelöscht werden:\n" + e.message);
+        }
+    }
+    // Empfehlungscode eines Freundes manuell nachtragen (z.B. wenn er bei der Anmeldung vergessen
+    // wurde). Gleiche Gutschrift-Logik wie activateEnrollment, nur ohne pending-Zusammenhang.
+    function redeemReferral(stu, rawCode) {
+        const code = (rawCode || "").trim().toUpperCase();
+        if (!code) {
+            showToast("Bitte einen Code eingeben.");
+            return;
+        }
+        const referrer = students.find(s => s.id !== stu.id && (s.referralCode || "").toUpperCase() === code);
+        if (!referrer) {
+            showToast("Kein Schüler mit diesem Code gefunden.");
+            return;
+        }
+        if (stu.referredByCode || stu.referralRewardApplied) {
+            showToast("Für " + dispName(stu) + " wurde bereits ein Empfehlungsbonus eingetragen.");
+            return;
+        }
+        writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward }],
+            referrals: [...(referrer.referrals || []), { studentId: stu.id, name: dispName(stu), date: new Date().toISOString().slice(0, 10) }] });
+        writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }],
+            referredByCode: code, referralRewardApplied: true });
+        setReferralRedeemCode("");
+        showToast("Bonus gutgeschrieben: " + eurFmt(referralReward) + " für " + dispName(stu) + " und " + dispName(referrer) + ".");
     }
     // Screenshot-Import: Bilder zu Base64, an Netlify-Funktion schicken, Schüler anlegen
     function fileToDataUrl(file) {
@@ -6711,6 +6776,7 @@ function App() {
                 a.label))));
     }
     function renderListe() {
+        const pendingList = students.filter(s => s.pending && s._isMine);
         const q = search.trim().toLowerCase();
         let filtered = q ? students.filter(s => dispName(s).toLowerCase().includes(q)) : students.slice();
         filtered.sort((a, b) => {
@@ -6737,6 +6803,21 @@ function App() {
                             React.createElement("circle", { cx: "9", cy: "9", r: "2" }),
                             React.createElement("path", { d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" }))),
                     React.createElement("button", { className: "btn btn-primary", onClick: addStudent }, "+ Sch\u00FCler"))),
+            pendingList.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, border: "1.5px solid var(--orange)" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10, color: "var(--orange-deep)" } },
+                    pendingList.length === 1 ? "1 neue Anmeldung" : pendingList.length + " neue Anmeldungen"),
+                pendingList.map((s, i) => React.createElement("div", { key: s.id, style: { padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 } },
+                        React.createElement("div", null,
+                            React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, dispName(s)),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                [s.tel, s.geb ? new Date(s.geb).toLocaleDateString("de-DE") : ""].filter(Boolean).join(" \u00B7 "),
+                                s.referredByCode ? (" \u00B7 Code " + s.referredByCode) : "")),
+                        React.createElement("span", { style: { fontSize: 10.5, fontWeight: 800, color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase" } }, "Neu")),
+                    React.createElement("div", { style: { display: "flex", gap: 8 } },
+                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1, padding: "9px 12px", fontSize: 13 }, onClick: () => activateEnrollment(s) }, "\u2713 \u00DCbernehmen"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px 12px", fontSize: 13, color: "#B3362A" }, onClick: () => rejectEnrollment(s) }, "Ablehnen")))),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Angemeldet \u00FCber deinen Buchungslink. Bitte pr\u00FCfen und \u00FCbernehmen oder ablehnen.")),
             students.length > 3 && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
                 React.createElement("input", { value: search, onChange: e => setSearch(e.target.value), placeholder: "Sch\u00FCler suchen\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 12, padding: "11px 38px 11px 13px",
                         fontSize: 16, background: "var(--card)" } }),
@@ -6746,8 +6827,8 @@ function App() {
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 17, marginBottom: 6 } }, "Noch keine Sch\u00FCler"),
                 React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lege deinen ersten Sch\u00FCler an, um mit der Ausbildung zu starten."),
                 React.createElement("button", { className: "btn btn-primary", onClick: addStudent }, "+ Ersten Sch\u00FCler anlegen")),
-            React.createElement("div", { className: "stud-grid" }, filtered.filter(s => !s.archived).map(s => studentCard(s))),
-            filtered.filter(s => !s.archived).length === 0 && students.filter(s => !s.archived).length === 0 && students.length > 0 &&
+            React.createElement("div", { className: "stud-grid" }, filtered.filter(s => !s.archived && !s.pending).map(s => studentCard(s))),
+            filtered.filter(s => !s.archived && !s.pending).length === 0 && students.filter(s => !s.archived).length === 0 && students.length > 0 &&
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", textAlign: "center", marginTop: 8 } }, "Alle Sch\u00FCler sind archiviert."),
             filtered.length === 0 && React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", textAlign: "center", marginTop: 20 } },
                 "Kein Sch\u00FCler gefunden f\u00FCr \u201E",
@@ -7903,7 +7984,25 @@ function App() {
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8 } }, "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben."),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinChanged
                         ? "Der Schüler hat den PIN inzwischen selbst geändert. Du siehst hier nur noch den Start-PIN. Vergibst du einen neuen PIN, wird der selbst gewählte des Schülers überschrieben und er legt beim nächsten Login wieder einen eigenen fest."
-                        : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt."))),
+                        : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt.")),
+                React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 12, marginBottom: 4 } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Empfehlungsprogramm"),
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 12 } },
+                        "Wirbt " + dispName(active) + " einen Freund, bekommt ihr beide " + eurFmt(referralReward) + " Rabatt auf die nächste Rechnung."),
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
+                        React.createElement("div", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, letterSpacing: "0.06em", background: "var(--field-bg)", borderRadius: 11, padding: "10px 14px", textAlign: "center" } }, active.referralCode || "–"),
+                        !active.referralCode
+                            ? React.createElement("button", { className: "btn btn-ghost", onClick: () => updateActive({ referralCode: genReferralCode(active) }) }, "Code erzeugen")
+                            : React.createElement("button", { className: "btn btn-ghost", onClick: () => { const text = dispName(active) + " empfiehlt dich für " + ((school && school.name) || "unsere Fahrschule") + "! Nutze den Code " + active.referralCode + " bei der Anmeldung, dann bekommt ihr beide " + eurFmt(referralReward) + " Rabatt."; window.open("https://wa.me/?text=" + encodeURIComponent(text), "_blank"); } }, "Teilen")),
+                    active.referrals && active.referrals.length > 0 && React.createElement("p", { style: { fontSize: 12, color: "var(--green)", fontWeight: 600, marginBottom: 12 } },
+                        dispName(active) + " hat schon " + active.referrals.length + (active.referrals.length === 1 ? " Freund" : " Freunde") + " geworben."),
+                    active.referredByCode
+                        ? React.createElement("p", { style: { fontSize: 12.5, color: "var(--green)", fontWeight: 600 } }, "Geworben mit Code " + active.referredByCode + (active.referralRewardApplied ? " · Bonus gutgeschrieben" : ""))
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("div", { className: "field", style: { marginBottom: 8 } },
+                                React.createElement("label", null, "Empfehlungscode eines Freundes nachtragen"),
+                                React.createElement("input", { type: "text", value: referralRedeemCode, onChange: e => setReferralRedeemCode(e.target.value.toUpperCase()), placeholder: "z.B. CLAR482" })),
+                            React.createElement("button", { className: "btn btn-primary btn-block", disabled: !referralRedeemCode.trim(), onClick: () => redeemReferral(active, referralRedeemCode) }, "Bonus gutschreiben")))),
             studentTab === "fahrten" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 9 } }, "Fahrstunden"),
@@ -9493,6 +9592,12 @@ function App() {
                             React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: pricePerHour, onChange: e => savePricePerHour(e.target.value), placeholder: "z.B. 55", style: { flex: 1 } }),
                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "\u20AC"))),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                            React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: referralReward, onChange: e => saveReferralReward(e.target.value), style: { flex: 1 } }),
+                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Betrag, den Werber und geworbener Schüler je als Gutschrift bekommen, wenn eine Empfehlung im Schülerprofil oder bei der Selbstanmeldung eingelöst wird."),
                     React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
                     packages.length === 0
                         ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Noch keine Pakete angelegt.")
@@ -12402,7 +12507,24 @@ function BookingPage({ code }) {
     const [done, setDone] = React.useState(false);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
-    const [tab, setTab] = React.useState("termine"); // "termine" | "fortschritt"
+    const [tab, setTab] = React.useState("termine"); // "termine" | "fortschritt" | "videos" | "anmelden"
+    const [enrollForm, setEnrollForm] = React.useState({ vorname: "", name: "", tel: "", geb: "", referralCode: "", busy: false, error: "" });
+    const [enrollDone, setEnrollDone] = React.useState(false);
+    async function submitEnrollment() {
+        if (!enrollForm.vorname.trim() || !enrollForm.name.trim()) {
+            setEnrollForm(f => ({ ...f, error: "Bitte Vor- und Nachname angeben." }));
+            return;
+        }
+        setEnrollForm(f => ({ ...f, busy: true, error: "" }));
+        try {
+            await publicEnrollStudent(code, enrollForm.vorname, enrollForm.name, enrollForm.tel, enrollForm.geb, enrollForm.referralCode);
+            setEnrollDone(true);
+            setEnrollForm({ vorname: "", name: "", tel: "", geb: "", referralCode: "", busy: false, error: "" });
+        }
+        catch (e) {
+            setEnrollForm(f => ({ ...f, busy: false, error: e.message || "Anmeldung fehlgeschlagen" }));
+        }
+    }
     React.useEffect(() => {
         publicBookingInfo(code).then(d => {
             setInfo(d);
@@ -12651,7 +12773,32 @@ function BookingPage({ code }) {
             React.createElement("div", { className: "seg", style: { marginBottom: 16 } },
                 React.createElement("button", { className: tab === "termine" ? "on" : "", onClick: () => setTab("termine") }, "Termine"),
                 React.createElement("button", { className: tab === "fortschritt" ? "on" : "", onClick: () => setTab("fortschritt") }, "Mein Fortschritt"),
-                React.createElement("button", { className: tab === "videos" ? "on" : "", onClick: () => setTab("videos") }, "Videos")),
+                React.createElement("button", { className: tab === "videos" ? "on" : "", onClick: () => setTab("videos") }, "Videos"),
+                React.createElement("button", { className: tab === "anmelden" ? "on" : "", onClick: () => setTab("anmelden") }, "Neu anmelden")),
+            tab === "anmelden" && React.createElement("div", null,
+                enrollDone
+                    ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, color: "var(--green)", marginBottom: 6 } }, "✓ Anmeldung eingegangen"),
+                        React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.5 } }, "Deine Fahrschule meldet sich in Kürze bei dir."))
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", margin: "0 2px 16px", lineHeight: 1.5 } }, "Interesse an einem Führerschein bei " + ((info && info.school_name) || "uns") + "? Melde dich hier unverbindlich an, wir melden uns bei dir."),
+                        React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                            React.createElement("label", null, "Vorname"),
+                            React.createElement("input", { type: "text", value: enrollForm.vorname, onChange: e => setEnrollForm(f => ({ ...f, vorname: e.target.value })) })),
+                        React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                            React.createElement("label", null, "Nachname"),
+                            React.createElement("input", { type: "text", value: enrollForm.name, onChange: e => setEnrollForm(f => ({ ...f, name: e.target.value })) })),
+                        React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                            React.createElement("label", null, "Telefon"),
+                            React.createElement("input", { type: "tel", value: enrollForm.tel, onChange: e => setEnrollForm(f => ({ ...f, tel: e.target.value })) })),
+                        React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                            React.createElement("label", null, "Geburtsdatum"),
+                            React.createElement("input", { type: "date", value: enrollForm.geb, onChange: e => setEnrollForm(f => ({ ...f, geb: e.target.value })) })),
+                        React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                            React.createElement("label", null, "Empfehlungscode (optional)"),
+                            React.createElement("input", { type: "text", value: enrollForm.referralCode, placeholder: "z.B. von einer Freundin", onChange: e => setEnrollForm(f => ({ ...f, referralCode: e.target.value.toUpperCase() })) })),
+                        enrollForm.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, enrollForm.error),
+                        React.createElement("button", { className: "btn btn-primary btn-block", disabled: enrollForm.busy, onClick: submitEnrollment }, enrollForm.busy ? "Wird gesendet…" : "Unverbindlich anmelden"))),
             tab === "fortschritt" && React.createElement(StudentArea, { code: code, info: info }),
             tab === "videos" && React.createElement(VideoLibrary, { code: code }),
             tab === "termine" && React.createElement(React.Fragment, null,
