@@ -225,7 +225,9 @@
   .tabpop-item.on .tabpop-ic{color:var(--orange-deep)}
 
   /* ── Header strip (chips) ── */
-  .strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;margin-bottom:4px}
+  .strip{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;margin-bottom:4px;
+    -webkit-mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent 100%);
+    mask-image:linear-gradient(to right,#000 calc(100% - 28px),transparent 100%)}
   .chip{flex-shrink:0;background:var(--sec-tint,var(--field-bg));border:none;border-radius:13px;
     padding:8px 12px;text-align:center;min-width:64px}
   .chip b{display:block;font-family:var(--font-d);font-weight:800;font-size:14px;font-variant-numeric:tabular-nums}
@@ -897,6 +899,11 @@ const DEFAULT_STRECKEN = [
 ];
 const PALETTE = ["#1E7A46", "#1d3557", "#9A6210", "#0F6E78", "#4A4A78", "#7E3B86", "#A23A2E", "#C2410C", "#2E5E8C", "#0F6E78"];
 function uniqueId(prefix) { return prefix + "_" + Math.random().toString(36).slice(2, 9); }
+// Kurzer, teilbarer Empfehlungscode aus dem Vornamen + Zufallszahl, z.B. "CLAR482".
+function genReferralCode(stu) {
+    const base = ((stu && stu.vorname) || "").replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 4) || "FS";
+    return base + Math.floor(100 + Math.random() * 900);
+}
 function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function arrowBtn(disabled) {
     return { width: 30, height: 30, borderRadius: 8, border: "1.5px solid var(--line)",
@@ -4081,6 +4088,13 @@ function App() {
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
     useEffect(() => { setStudentTab("profil"); }, [activeId]);
+    // Freitext-Filter für ADK/Strecken: vor allem bei Strecken wichtig, weil viele Schulen dort
+    // 15-20+ individuell benannte Punkte anlegen (Streckennamen, Sonderfahrten, Technische Fragen…),
+    // bei denen ein Kürzel wie beim ADK-Streifen (erstes Wort) nicht mehr unterscheidbar wäre
+    // (z.B. mehrere "Runde …"-Einträge).
+    const [adkFilter, setAdkFilter] = useState("");
+    const [streckenFilter, setStreckenFilter] = useState("");
+    useEffect(() => { setAdkFilter(""); setStreckenFilter(""); }, [activeId]);
     const [view, setView] = useState("home");
     const [videos, setVideos] = useState(null); // null=noch nicht geladen
     const [videoUpload, setVideoUpload] = useState(null); // {file,title,category,busy,error}
@@ -4116,6 +4130,11 @@ function App() {
     // Ausbildungsfahrt-Arten: nutzt die feste You-Drive-Standardliste, bis ein Fahrschul-Admin eine eigene anlegt
     const arten = (school && Array.isArray(school.arten) && school.arten.length > 0) ? school.arten : APPT_ART;
     const locations = (school && Array.isArray(school.locations)) ? school.locations : [];
+    // Empfehlungsbonus ("Freund wirbt Freund"): Betrag, den Werber und Geworbener je als
+    // Gutschrift bekommen. Default 20, falls die Fahrschule noch nichts eingestellt hat.
+    const referralReward = (school && school.referral_reward != null) ? Number(school.referral_reward) : 20;
+    function saveReferralReward(v) { if (school)
+        writeSchool({ ...school, referral_reward: (v === "" ? 20 : Number(v)) }); }
     function savePricePerHour(v) { if (school)
         writeSchool({ ...school, price_hour: (v === "" ? "" : v) }); }
     function savePackages(list) { if (school)
@@ -6927,7 +6946,10 @@ function App() {
                             } }, "aria-label": "Zur\u00FCckziehen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "\u00D7"))))));
     }
     function renderADK() {
-        const allFull = tplFor(active.klasse).adk.every(adkSectionFull);
+        const allSections = tplFor(active.klasse).adk;
+        const allFull = allSections.every(adkSectionFull);
+        const adkQ = adkFilter.trim().toLowerCase();
+        const sections = adkQ ? allSections.filter(sec => sec.title.toLowerCase().includes(adkQ) || sec.items.some(it => it.label.toLowerCase().includes(adkQ))) : allSections;
         return React.createElement("div", { className: "pad" },
             studentHeader(),
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", margin: "0 2px 12px", gap: 8 } },
@@ -6938,7 +6960,12 @@ function App() {
                             bulkADKAll(false); } }, "Alles zur\u00FCcksetzen")
                     : React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 13px", fontSize: 13 }, onClick: async () => { if (await askConfirm({ message: "Komplette ADK auf einmal abhaken?" }))
                             bulkADKAll(true); } }, "Alles abhaken"))),
-            React.createElement("div", { className: "strip" }, tplFor(active.klasse).adk.map(sec => {
+            allSections.length > 4 && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
+                React.createElement("input", { value: adkFilter, onChange: e => setAdkFilter(e.target.value), placeholder: "Abschnitt oder Punkt suchen…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 12, padding: "11px 38px 11px 13px",
+                        fontSize: 16, background: "var(--card)" } }),
+                adkFilter && React.createElement("button", { onClick: () => setAdkFilter(""), "aria-label": "Suche löschen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
+                        fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "×")),
+            React.createElement("div", { className: "strip" }, sections.map(sec => {
                 const pct = secLern(active, sec);
                 return React.createElement("button", { key: sec.id, className: "chip", style: { "--sec-tint": secTint(sec.color) }, onClick: () => setOpenSection(openSection === sec.id ? null : sec.id) },
                     React.createElement("b", { style: { color: sec.color } },
@@ -6946,7 +6973,8 @@ function App() {
                         "%"),
                     React.createElement("span", null, sec.title.split(" ")[0]));
             })),
-            tplFor(active.klasse).adk.map(adkBlock));
+            sections.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Nichts gefunden."),
+            sections.map(adkBlock));
     }
     /* ── Strecken ── */
     function streckenBlock(sec) {
@@ -7026,7 +7054,10 @@ function App() {
                             fontSize: 14.5, background: "var(--field-bg)", resize: "vertical" } }))));
     }
     function renderStrecken() {
-        const allFull = tplFor(active.klasse).strecken.every(streckenSectionFull);
+        const allSecs = tplFor(active.klasse).strecken;
+        const allFull = allSecs.every(streckenSectionFull);
+        const streckenQ = streckenFilter.trim().toLowerCase();
+        const secs = streckenQ ? allSecs.filter(sec => sec.title.toLowerCase().includes(streckenQ) || sec.items.some(it => it.label.toLowerCase().includes(streckenQ))) : allSecs;
         return React.createElement("div", { className: "pad" },
             studentHeader(),
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", margin: "0 2px 12px", gap: 8 } },
@@ -7037,7 +7068,15 @@ function App() {
                             bulkStreckenAll(false); } }, "Alles zur\u00FCcksetzen")
                     : React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 13px", fontSize: 13 }, onClick: async () => { if (await askConfirm({ message: "Alle Strecken auf einmal abhaken?" }))
                             bulkStreckenAll(true); } }, "Alles abhaken"))),
-            tplFor(active.klasse).strecken.map(streckenBlock));
+            allSecs.length > 6 && React.createElement("div", { style: { position: "relative", marginBottom: 4 } },
+                React.createElement("input", { value: streckenFilter, onChange: e => setStreckenFilter(e.target.value), placeholder: "Strecke oder Punkt suchen…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 12, padding: "11px 38px 11px 13px",
+                        fontSize: 16, background: "var(--card)" } }),
+                streckenFilter && React.createElement("button", { onClick: () => setStreckenFilter(""), "aria-label": "Suche löschen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
+                        fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "×")),
+            allSecs.length > 6 && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 2px 12px" } },
+                secs.length, " von ", allSecs.length, " Abschnitten"),
+            secs.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Nichts gefunden."),
+            secs.map(streckenBlock));
     }
     /* ── Übersicht ── */
     function uebRow(title, color, pct, key) {
