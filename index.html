@@ -3354,14 +3354,14 @@ const WEATHER_CODE_MAP = {
 // für die heutigen Fahrstunden (z.B. Glätte, Starkregen). Rein informativ, blendet sich
 // selbst aus, wenn kein Ort hinterlegt ist oder die Abfrage fehlschlägt.
 function WeatherWidget({ city }) {
-    const [w, setW] = useState(null); // null=lädt/aus, {temp,tempMin,code,rain} | "error"
+    const [w, setW] = useState(null); // null=lädt/aus, {temp,tempMin,code,rain,sunset} | "error"
     useEffect(() => {
         if (!city) {
             setW(null);
             return;
         }
         let cancelled = false;
-        const cacheKey = "v3_weather_" + city.toLowerCase() + "_" + ymd(new Date());
+        const cacheKey = "v4_weather_" + city.toLowerCase() + "_" + ymd(new Date());
         try {
             const cached = localStorage.getItem(cacheKey);
             if (cached) {
@@ -3377,11 +3377,12 @@ function WeatherWidget({ city }) {
                 if (!loc)
                     throw new Error("Ort nicht gefunden");
                 const fc = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude + "&longitude=" + loc.longitude
-                    + "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=1").then(r => r.json());
+                    + "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunset&timezone=auto&forecast_days=1").then(r => r.json());
                 const d = fc && fc.daily;
                 if (!d || !Array.isArray(d.weathercode) || !d.weathercode.length)
                     throw new Error("Keine Vorhersage");
-                const data = { temp: Math.round(d.temperature_2m_max[0]), tempMin: Math.round(d.temperature_2m_min[0]), code: d.weathercode[0], rain: d.precipitation_probability_max ? d.precipitation_probability_max[0] : null };
+                const data = { temp: Math.round(d.temperature_2m_max[0]), tempMin: Math.round(d.temperature_2m_min[0]), code: d.weathercode[0], rain: d.precipitation_probability_max ? d.precipitation_probability_max[0] : null,
+                    sunset: (d.sunset && d.sunset[0]) || null };
                 if (!cancelled) {
                     setW(data);
                     try {
@@ -3400,17 +3401,28 @@ function WeatherWidget({ city }) {
     if (!city || !w || w === "error")
         return null;
     const info = WEATHER_CODE_MAP[w.code] || ["🌤️", ""];
-    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginTop: 7, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
-        React.createElement("span", { style: { fontSize: 15 } }, info[0]),
-        React.createElement("span", null,
-            info[1],
-            ", ",
-            w.tempMin,
-            "–",
-            w.temp,
-            "° in ",
-            city,
-            (w.rain != null && w.rain >= 30) ? (" · " + w.rain + "% Regen") : ""));
+    let sunsetTime = "";
+    if (w.sunset) {
+        try {
+            sunsetTime = new Date(w.sunset).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
+        }
+        catch (e) { }
+    }
+    return React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3, marginTop: 7 } },
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
+            React.createElement("span", { style: { fontSize: 15 } }, info[0]),
+            React.createElement("span", null,
+                info[1],
+                ", ",
+                w.tempMin,
+                "–",
+                w.temp,
+                "° in ",
+                city,
+                (w.rain != null && w.rain >= 30) ? (" · " + w.rain + "% Regen") : "")),
+        sunsetTime && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
+            React.createElement("span", { style: { fontSize: 15 } }, "🌇"),
+            React.createElement("span", null, "Sonnenuntergang " + sunsetTime + " Uhr")));
 }
 /* ════════ Splash & Auth ════════ */
 function Splash({ text }) {
@@ -3993,6 +4005,7 @@ function App() {
     const [videoCat, setVideoCat] = useState(VIDEO_KATEGORIEN[0].code); // aktiver Kategorie-Reiter (Fahrlehrer-Ansicht)
     const [openSection, setOpenSection] = useState(null);
     const [ueberTab, setUeberTab] = useState("beide");
+    const [abrTab, setAbrTab] = useState("monat"); // Zeitraum-Filter der Abrechnungs-Übersicht: monat | jahr | alle
     const [editCounts, setEditCounts] = useState(false);
     const [vorlageKind, setVorlageKind] = useState("adk");
     const [vorlageKlasse, setVorlageKlasse] = useState(DEFAULT_KLASSE); // welche Führerscheinklasse gerade im Vorlagen-Editor bearbeitet wird
@@ -7477,6 +7490,64 @@ function App() {
             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 20, color: "var(--orange-deep)" }, onClick: createContract }, "+ Ausbildungsvertrag erstellen"),
             price === 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } }, "Tipp: Hinterlege deinen Preis pro UE unter Mehr, Einstellungen, Kosten, dann werden die Fahrstunden automatisch berechnet."));
     }
+    /* ── Abrechnung: schulweites Dashboard über Umsatz, offene Forderungen & Rechnungen ── */
+    function renderAbrechnung() {
+        const price = Number(pricePerHour) || 0;
+        const mine = (students || []).filter(s => s._isMine);
+        const allInvoices = [];
+        mine.forEach(s => (s.invoices || []).forEach(inv => allInvoices.push(Object.assign({}, inv, { studentId: s.id, studentName: dispName(s) }))));
+        allInvoices.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.number || "").localeCompare(a.number || ""));
+        const now = new Date();
+        const curYear = now.getFullYear(), curMonth = now.getMonth();
+        const invYear = inv => { const d = inv.date ? new Date(inv.date) : null; return d ? d.getFullYear() : null; };
+        const invMonth = inv => { const d = inv.date ? new Date(inv.date) : null; return d ? d.getMonth() : null; };
+        const umsatzMonat = allInvoices.filter(i => invYear(i) === curYear && invMonth(i) === curMonth).reduce((s, i) => s + (i.total || 0), 0);
+        const umsatzJahr = allInvoices.filter(i => invYear(i) === curYear).reduce((s, i) => s + (i.total || 0), 0);
+        const openList = mine.filter(s => !s.archived).map(s => ({ s, open: sumCharges(s, price) - sumPayments(s) }))
+            .filter(x => x.open > 0.005).sort((a, b) => b.open - a.open);
+        const offenGesamt = openList.reduce((s, x) => s + x.open, 0);
+        const shownInvoices = abrTab === "monat" ? allInvoices.filter(i => invYear(i) === curYear && invMonth(i) === curMonth)
+            : abrTab === "jahr" ? allInvoices.filter(i => invYear(i) === curYear) : allInvoices;
+        function openInvoiceRow(inv) {
+            if (inv.studentId !== (active && active.id))
+                setActiveId(inv.studentId);
+            viewInvoice(inv);
+        }
+        const kpis = [
+            { label: "Umsatz diesen Monat", value: eurFmt(umsatzMonat), color: "var(--ink)" },
+            { label: "Umsatz " + curYear, value: eurFmt(umsatzJahr), color: "var(--ink)" },
+            { label: "Offene Forderungen", value: eurFmt(offenGesamt), color: offenGesamt > 0.005 ? "var(--orange-deep)" : "var(--green)" },
+            { label: "Rechnungen gesamt", value: String(allInvoices.length), color: "var(--ink)" },
+        ];
+        return React.createElement("div", { className: "pad", style: { paddingBottom: 28 } },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Abrechnung"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Umsatz, offene Forderungen und alle Rechnungen deiner Schüler auf einen Blick."),
+            React.createElement("div", { className: "home-grid", style: { marginBottom: 16 } }, kpis.map((k, i) => React.createElement("div", { key: i, className: "card home-tile" },
+                React.createElement("div", null,
+                    React.createElement("div", { className: "home-num", style: { color: k.color, fontSize: 20 } }, k.value),
+                    React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, k.label))))),
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Offene Forderungen"),
+            openList.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Aktuell keine offenen Beträge. ✓")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } }, openList.slice(0, 12).map(x => React.createElement("button", { key: x.s.id, onClick: () => { setActiveId(x.s.id); setView("daten"); setStudentTab("fahrten"); }, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
+                    React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, dispName(x.s)),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, color: "var(--orange-deep)" } }, eurFmt(x.open))))),
+            openList.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 20 }, onClick: openOffenePosten }, "Offene Posten der ganzen Fahrschule ansehen"),
+            React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 8px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, "Rechnungen"),
+                allInvoices.length > 0 && React.createElement("button", { onClick: exportRechnungen, style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "CSV-Export")),
+            React.createElement("div", { className: "seg", style: { marginBottom: 12 } }, [["monat", "Dieser Monat"], ["jahr", "Dieses Jahr"], ["alle", "Alle"]].map(([k, l]) => React.createElement("button", { key: k, className: abrTab === k ? "on" : "", onClick: () => setAbrTab(k) }, l))),
+            shownInvoices.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Rechnungen in diesem Zeitraum.")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px" } }, shownInvoices.map(inv => React.createElement("button", { key: inv.id, onClick: () => openInvoiceRow(inv), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, inv.studentName),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                            inv.number,
+                            " · ",
+                            inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "")),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0 } }, eurFmt(inv.total))))));
+    }
     function renderDaten() {
         const f = (key, label, type) => React.createElement("div", { className: "field", key: key },
             React.createElement("label", null, label),
@@ -9348,6 +9419,44 @@ function App() {
             showToast("Fahrtenbuch konnte nicht exportiert werden.");
         }
     }
+    // Alle Rechnungen (über eigene Schüler hinweg) als CSV exportieren, z.B. für den Steuerberater.
+    function exportRechnungen() {
+        try {
+            const kUnt = !!((school && school.invoice_settings && school.invoice_settings.kleinunternehmer));
+            const rows = [];
+            students.filter(s => s._isMine).forEach(s => {
+                (s.invoices || []).forEach(inv => {
+                    const total = Number(inv.total) || 0;
+                    const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
+                    const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
+                    rows.push({ nummer: inv.number || "", datum: inv.date || "", schueler: dispName(s), netto, ust, brutto: total });
+                });
+            });
+            rows.sort((a, b) => (a.datum || "").localeCompare(b.datum || "") || a.nummer.localeCompare(b.nummer));
+            if (rows.length === 0) {
+                showToast("Noch keine Rechnungen zum Exportieren.");
+                return;
+            }
+            const csvNum = n => String(Math.round((Number(n) || 0) * 100) / 100).replace(".", ",");
+            const csvCell = s => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+            const header = ["Rechnungsnummer", "Datum", "Schüler", "Netto (€)", "USt (€)", "Brutto (€)"];
+            const lines = [header.join(";")].concat(rows.map(r => [
+                csvCell(r.nummer), r.datum, csvCell(r.schueler), csvNum(r.netto), csvNum(r.ust), csvNum(r.brutto),
+            ].join(";")));
+            const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "rechnungen_" + new Date().toISOString().slice(0, 10) + ".csv";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+        catch (e) {
+            showToast("Rechnungen konnten nicht exportiert werden.");
+        }
+    }
     function backupDownload() {
         try {
             const mine = students.filter(s => s._isMine).map(s => cleanData(s));
@@ -10121,7 +10230,7 @@ function App() {
     }
     // Gruppierte Reiter
     const ausbildungViews = ["adk", "strecken", "tagebuch"];
-    const mehrViews = ["daten", "einstellungen", "videos"];
+    const mehrViews = ["daten", "einstellungen", "videos", "abrechnung"];
     const fahrlehrerViews = ["theoriepilot", "theoriepilot-topic"];
     const ausbildungActive = ausbildungViews.indexOf(view) >= 0;
     const mehrActive = mehrViews.indexOf(view) >= 0;
@@ -10177,7 +10286,7 @@ function App() {
                     React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); openCalendar(); } },
                         React.createElement(IcCalendar, null),
                         "Fahrzeug-Kalender"),
-                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
             React.createElement("div", { className: "shell", style: fontScale !== 1 ? { zoom: fontScale } : null },
@@ -10209,9 +10318,10 @@ function App() {
                 view === "einstellungen" && renderEinstellungen(),
                 view === "videos" && renderVideos(),
                 view === "kalender" && renderKalender(),
+                view === "abrechnung" && renderAbrechnung(),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -10290,7 +10400,7 @@ function App() {
                                 React.createElement("span", { className: "tabpop-ic" },
                                     React.createElement(IcCalendar, null)),
                                 "Fahrzeug-Kalender"),
-                            [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                            [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "tabpop-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                                 React.createElement("span", { className: "tabpop-ic" }, ic),
                                 lbl))),
                         React.createElement("button", { className: "tab" + (mehrActive ? " on" : ""), style: { width: "100%" }, onClick: () => setTabMenu(tabMenu === "mehr" ? null : "mehr") },
