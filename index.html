@@ -4102,10 +4102,22 @@ function App() {
     const [adminTeachers, setAdminTeachers] = useState(null); // {school, list} oder null
     const [schoolLeistungen, setSchoolLeistungen] = useState(null); // null | {busy,error,list} schulweite Leistungen-Liste
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
+    const [postfachOpen, setPostfachOpen] = useState(false); // zentraler Nachrichten-Posteingang auf der Startseite
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
-    useEffect(() => { setStudentTab("profil"); }, [activeId]);
+    // Beim Schülerwechsel normalerweise zurück auf "Profil" – außer ein Deep-Link (z.B. aus dem
+    // Postfach) hat über pendingStudentTabRef schon vorgegeben, welcher Reiter geöffnet werden soll.
+    const pendingStudentTabRef = useRef(null);
+    useEffect(() => {
+        if (pendingStudentTabRef.current) {
+            setStudentTab(pendingStudentTabRef.current);
+            pendingStudentTabRef.current = null;
+        }
+        else {
+            setStudentTab("profil");
+        }
+    }, [activeId]);
     // Freitext-Filter für ADK/Strecken: vor allem bei Strecken wichtig, weil viele Schulen dort
     // 15-20+ individuell benannte Punkte anlegen (Streckennamen, Sonderfahrten, Technische Fragen…),
     // bei denen ein Kürzel wie beim ADK-Streifen (erstes Wort) nicht mehr unterscheidbar wäre
@@ -5249,6 +5261,9 @@ function App() {
         return React.createElement(Splash, { text: "Lade Daten\u2026" });
     const active = students.find(s => s.id === activeId) || students[0] || null;
     const dispName = s => [((s.vorname || "").trim()), ((s.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler";
+    // Ein Schüler hat "ungelesen", wenn die letzte Nachricht im Chat vom Schüler kam
+    // (der Fahrlehrer also noch nicht geantwortet hat) – kein separates Read-Flag nötig.
+    const hasUnreadMsg = s => { const m = s.messages || []; return m.length > 0 && m[m.length - 1].from === "student"; };
     const initials = s => {
         const v = (s.vorname || "").trim(), n = (s.name || "").trim();
         const a = v ? v[0] : "", b = n ? n[0] : "";
@@ -6669,6 +6684,7 @@ function App() {
         const icCal = extra => svg(["M8 2v4", "M16 2v4", "M3 10h18", "M5 4h14a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"], extra);
         const icUsers = extra => svg(["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", "M23 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"], extra);
         const icWallet = extra => svg(["M20 12V8H6a2 2 0 0 1 0-4h12v4", "M4 6v12a2 2 0 0 0 2 2h14v-4", "M18 12a2 2 0 0 0 0 4h4v-4z"], extra);
+        const icMail = extra => svg(["M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M22 6l-10 7L2 6"], extra);
         const icPlus = extra => svg(["M12 5v14", "M5 12h14"], extra);
         const icDoc = extra => svg(["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M9 13h6", "M9 17h4"], extra);
         const icRoute = extra => svg(["M9 6h8a3 3 0 0 1 0 6H7a3 3 0 0 0 0 6h8", "M4 6a2 2 0 1 0 4 0 2 2 0 0 0-4 0z", "M16 18a2 2 0 1 0 4 0 2 2 0 0 0-4 0z"], extra);
@@ -6682,6 +6698,7 @@ function App() {
         const jetzt = new Date().toISOString();
         const naechster = heute.find(a => (a.end_at || a.start_at) >= jetzt);
         const aktiveSchueler = (students || []).filter(s => !s.archived).length;
+        const unreadMsgList = (students || []).filter(s => !s.archived && hasUnreadMsg(s));
         const woche = (() => {
             const start = new Date();
             start.setHours(0, 0, 0, 0);
@@ -6738,7 +6755,17 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
                         (recSession.studentName ? recSession.studentName + "  \u00B7  " : "") + rmapFmtDist(recUi.dist) + "  \u00B7  " + rmapFmtDur(recUi.dur))),
                 chev),
-            // 3) Offene Terminvorschläge (nur wenn vorhanden)
+            // 3) Postfach: Schüler mit unbeantworteten Nachrichten (zentraler Posteingang)
+            unreadMsgList.length > 0 && React.createElement("button", { onClick: () => unreadMsgList.length === 1 ? openStudentMessages(unreadMsgList[0]) : setPostfachOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+                React.createElement("span", { className: "home-iconchip", style: { position: "relative" } },
+                    icMail({ width: 19, height: 19 }),
+                    React.createElement("span", { style: { position: "absolute", top: -6, right: -6, minWidth: 19, height: 19, borderRadius: 10, background: "#E5484D", color: "#fff",
+                            fontSize: 11, fontWeight: 800, lineHeight: "19px", textAlign: "center", fontFamily: "var(--font-d)", padding: "0 4px", boxShadow: "0 0 0 2px var(--card)" } }, unreadMsgList.length)),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, unreadMsgList.length === 1 ? "Neue Nachricht" : "Neue Nachrichten"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, unreadMsgList.length === 1 ? dispName(unreadMsgList[0]) + " hat geschrieben" : unreadMsgList.length + " Schüler warten auf Antwort")),
+                chev),
+            // 4) Offene Terminvorschläge (nur wenn vorhanden)
             pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { position: "relative" } },
                     icCal({ width: 19, height: 19 }),
@@ -6748,7 +6775,7 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, pendingCount === 1 ? "Offener Terminvorschlag" : "Offene Terminvorschl\u00E4ge"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Best\u00E4tigen, ablehnen oder neue Zeit vorschlagen")),
                 chev),
-            // 4) Heute
+            // 5) Heute
             React.createElement("div", { className: "card", style: { marginBottom: 12, overflow: "hidden" } },
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", padding: "15px 16px 6px" } },
                     React.createElement("span", { className: "home-eyebrow" },
@@ -6772,7 +6799,7 @@ function App() {
                             noteText(a) && React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 } }, noteText(a))),
                         a.end_at && React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, "bis " + hm(a.end_at)));
                 }))),
-            // 5) KPI-Grid
+            // 6) KPI-Grid
             React.createElement("div", { className: "home-grid", style: { marginBottom: 12 } }, kpis.map(k => React.createElement("button", { key: k.key, className: "card home-tile", onClick: k.onClick },
                 React.createElement("span", { className: "home-iconchip" }, k.icon({ width: 19, height: 19 })),
                 React.createElement("div", null,
@@ -6780,7 +6807,7 @@ function App() {
                         k.value,
                         k.sub && React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "var(--muted)", marginLeft: 6, letterSpacing: 0 } }, k.sub)),
                     React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, k.label))))),
-            // 6) Schnellaktionen (Daumenzone)
+            // 7) Schnellaktionen (Daumenzone)
             React.createElement("div", { className: "home-qa" }, actions.map(a => React.createElement("button", { key: a.key, className: a.primary ? "primary" : "", onClick: a.onClick },
                 React.createElement("span", { className: "qa-ic" }, a.icon({ width: 22, height: 22, strokeWidth: "2.2" })),
                 a.label))));
@@ -7963,7 +7990,7 @@ function App() {
                 React.createElement("button", { className: studentTab === "profil" ? "on" : "", onClick: () => setStudentTab("profil") }, "Profil"),
                 React.createElement("button", { className: studentTab === "fahrten" ? "on" : "", onClick: () => setStudentTab("fahrten") }, "Fahrten & Kosten"),
                 React.createElement("button", { className: studentTab === "antrag" ? "on" : "", onClick: () => setStudentTab("antrag") }, "Führerschein"),
-                React.createElement("button", { className: studentTab === "nachrichten" ? "on" : "", onClick: () => setStudentTab("nachrichten") }, "Nachrichten" + ((active.messages || []).filter(m => m.from === "student").length > 0 ? " •" : ""))),
+                React.createElement("button", { className: studentTab === "nachrichten" ? "on" : "", onClick: () => setStudentTab("nachrichten") }, "Nachrichten" + (hasUnreadMsg(active) ? " •" : ""))),
             React.createElement("label", { className: "btn btn-ghost btn-block", style: { justifyContent: "center", gap: 9, marginBottom: 16, cursor: "pointer" } },
                 React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                     React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
@@ -8488,71 +8515,139 @@ function App() {
                             React.createElement("div", { style: { fontSize: h > 34 ? 12.5 : 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.2 } }, name || a.title || "Termin"));
                     })));
         }
+        // Ein einziger, kompakter "braucht deine Antwort"-Banner statt zwei separater,
+        // immer sichtbarer Kästen – Stornierungen zuerst (dringender), dann Terminvorschläge.
+        const attnCount = pending.length + cancelRequests.length;
+        const attnParts = [];
+        if (cancelRequests.length)
+            attnParts.push(cancelRequests.length + " Stornierung" + (cancelRequests.length === 1 ? "" : "en"));
+        if (pending.length)
+            attnParts.push(pending.length + " offene" + (pending.length === 1 ? "r" : "") + " Terminvorschlag" + (pending.length === 1 ? "" : "e"));
+        const attnUrgent = cancelRequests.length > 0;
         return React.createElement("div", { className: "pad" },
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-end", margin: "6px 2px 16px" } },
                 React.createElement("div", null,
                     React.createElement("div", { className: "home-eyebrow" }, "Kalender"),
                     React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, lineHeight: 1.1, marginTop: 5 } }, calMode === "tag" ? dayLabel : weekLabel)),
                 React.createElement("button", { className: "btn btn-primary", style: { borderRadius: 13, flexShrink: 0 }, onClick: () => openNewAppt(calMode === "tag" ? ymd(calDay) : undefined) }, "+ Termin")),
-            React.createElement("div", { className: "seg", style: { marginBottom: 12 } },
+            React.createElement("div", { className: "seg", style: { marginBottom: 14 } },
                 React.createElement("button", { className: calMode === "woche" ? "on" : "", onClick: () => setCalMode("woche") }, "Woche"),
                 React.createElement("button", { className: calMode === "tag" ? "on" : "", onClick: () => setCalMode("tag") }, "Tag")),
-            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12, gap: 8, color: "#128C3E", border: "1.5px solid #25D366" }, onClick: openProposalForm },
-                React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "currentColor" },
-                    React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z" })),
-                "Terminvorschlag per WhatsApp senden"),
-            React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
-                React.createElement("div", { className: "card home-tile", style: { flex: 1, minHeight: 0, padding: "14px 15px" } },
-                    React.createElement("span", { className: "home-iconchip" },
-                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
-                            React.createElement("circle", { cx: "12", cy: "12", r: "9" }),
-                            React.createElement("path", { d: "M12 7v5l3 2" }))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 25, lineHeight: 1, color: "var(--orange-deep)" } },
-                            fmtUE(weekUE),
-                            React.createElement("span", { style: { fontSize: 13, color: "var(--muted)", marginLeft: 4 } }, "UE")),
-                        React.createElement("div", { className: "home-eyebrow", style: { marginTop: 6, display: "flex", alignItems: "center", gap: 5 } },
-                            "Diese Woche ",
-                            React.createElement(Help, { text: "UE = Unterrichtseinheit. 1 UE sind 45 Minuten. Gez\u00E4hlt werden nur best\u00E4tigte Termine." })))),
-                React.createElement("div", { className: "card home-tile", style: { flex: 1, minHeight: 0, padding: "14px 15px" } },
-                    React.createElement("span", { className: "home-iconchip", style: { background: "var(--field-bg)", color: "var(--ink-2)" } },
-                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
-                            React.createElement("rect", { x: "3", y: "4", width: "18", height: "18", rx: "2" }),
-                            React.createElement("path", { d: "M16 2v4M8 2v4M3 10h18" }))),
-                    React.createElement("div", null,
-                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 25, lineHeight: 1, color: "var(--ink)" } },
-                            fmtUE(monthUE),
-                            React.createElement("span", { style: { fontSize: 13, color: "var(--muted)", marginLeft: 4 } }, "UE")),
-                        React.createElement("div", { className: "home-eyebrow", style: { marginTop: 6 } }, new Date(calWeek).toLocaleDateString("de-DE", { month: "long" }))))),
-            React.createElement("div", { className: "card", style: { marginBottom: 12, overflow: "hidden" } },
+            attnCount > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden", border: "2px solid " + (attnUrgent ? "#B3362A" : "var(--amber)") } },
+                React.createElement("button", { onClick: () => setPendingOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", textAlign: "left",
+                        background: attnUrgent ? "#FDECEA" : "var(--amber-bg)", borderBottom: pendingOpen ? "1px solid var(--line)" : "none",
+                        fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, color: attnUrgent ? "#B3362A" : "var(--amber)" } },
+                    React.createElement("span", { style: { flex: 1 } }, attnParts.join(" · ")),
+                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, pendingOpen ? "Einklappen" : "Ansehen"),
+                    React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: pendingOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
+                pendingOpen && React.createElement(React.Fragment, null,
+                    cancelRequests.map(a => React.createElement("div", { key: a.id, style: { padding: "12px 14px", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 2 } }, fmtDLong(a.start_at)),
+                        React.createElement("div", { style: { fontSize: 13.5, marginBottom: 2 } },
+                            hm(a.start_at),
+                            a.end_at ? " – " + hm(a.end_at) : "",
+                            " Uhr · ",
+                            apptStudentName(a) || a.title || "Schüler"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", fontWeight: 600, marginBottom: 8 } }, "Der Fahrschüler möchte diesen Termin stornieren."),
+                        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5, color: "#B3362A" }, onClick: () => confirmCancel(a.id) }, "Stornierung bestätigen"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => rejectCancel(a.id) }, "Termin behalten")))),
+                    pending.map(a => React.createElement("div", { key: a.id, style: { padding: "12px 14px", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 } },
+                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, fmtDLong(a.start_at))),
+                        React.createElement("div", { style: { fontSize: 13.5, marginBottom: 2 } },
+                            hm(a.start_at),
+                            a.end_at ? " – " + hm(a.end_at) : "",
+                            " Uhr · ",
+                            a.title || "Schüler"),
+                        noteText(a) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8 } }, noteText(a)),
+                        React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginTop: 8 } },
+                            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                React.createElement("button", { className: "btn btn-primary", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => confirmAppt(a.id) }, "✓ Bestätigen"),
+                                React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5, color: "#B3362A" }, onClick: () => rejectAppt(a.id) }, "Ablehnen")),
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px", fontSize: 13.5, color: "var(--blue)", gap: 6 }, onClick: () => openCounterForm(a) },
+                                React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                    React.createElement("path", { d: "M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" }),
+                                    React.createElement("path", { d: "M9 15l6-6M15 9v5M15 9h-5" }),
+                                    React.createElement("rect", { x: "9", y: "13", width: "12", height: "9", rx: "2" })),
+                                "Gegenvorschlag senden")))))),
+            calMode === "woche" ? React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
+                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => setCalWeek(startOfWeek(new Date())) }, "Diese Woche"),
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
+                days.map(d => dayCard(d))) : React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, -1)) }, "‹"),
+                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalDay(d); } }, "Heute"),
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, 1)) }, "›")),
+                dayLimit > 0 && (() => {
+                    const used = confirmedMinutesOnDay(ymd(calDay));
+                    const pct = Math.min(100, Math.round(used / dayLimit * 100));
+                    const over = used >= dayLimit;
+                    const near = used >= dayLimit * 0.85;
+                    const col = over ? "#B3362A" : (near ? "var(--amber)" : "var(--orange)");
+                    return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 } },
+                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, "Heute bestätigt"),
+                            React.createElement("span", { style: { fontSize: 13, fontWeight: 800, fontFamily: "var(--font-d)", color: col, fontVariantNumeric: "tabular-nums" } },
+                                used,
+                                " / ",
+                                dayLimit,
+                                " Min")),
+                        React.createElement("div", { style: { height: 8, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
+                            React.createElement("div", { style: { height: "100%", width: pct + "%", background: col, borderRadius: 99, transition: "width .3s" } })),
+                        over && React.createElement("div", { style: { fontSize: 12, color: "#B3362A", marginTop: 7, fontWeight: 600 } }, "Tageslimit erreicht. Weitere Termine lassen sich nicht bestätigen."));
+                })(),
+                dayTimeline(calDay)),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", margin: "10px 0 18px", lineHeight: 1.5 } }, "Tippe auf einen Termin zum Bearbeiten."),
+            React.createElement("div", { className: "card", style: { overflow: "hidden" } },
                 React.createElement("button", { onClick: () => setCalToolsOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "13px 14px", textAlign: "left",
                         fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14.5, color: "var(--ink)" } },
                     React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("circle", { cx: "12", cy: "12", r: "3" }),
                         React.createElement("path", { d: "M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" })),
-                    "Kalender-Aktionen",
+                    "Statistik & Werkzeuge",
                     React.createElement("span", { style: { flex: 1 } }),
-                    React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: calToolsOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "\u25BE")),
-                calToolsOpen && React.createElement("div", { style: { borderTop: "1px solid var(--line)", padding: "6px 8px 8px" } },
+                    React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: calToolsOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
+                calToolsOpen && React.createElement("div", { style: { borderTop: "1px solid var(--line)", padding: "14px" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 16 } },
+                        React.createElement("div", { style: { flex: 1 } },
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, lineHeight: 1, color: "var(--orange-deep)" } },
+                                fmtUE(weekUE),
+                                React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", marginLeft: 4 } }, "UE")),
+                            React.createElement("div", { className: "home-eyebrow", style: { marginTop: 6, display: "flex", alignItems: "center", gap: 5 } },
+                                "Diese Woche ",
+                                React.createElement(Help, { text: "UE = Unterrichtseinheit. 1 UE sind 45 Minuten. Gezählt werden nur bestätigte Termine." }))),
+                        React.createElement("div", { style: { width: 1, alignSelf: "stretch", background: "var(--line)", margin: "0 14px" } }),
+                        React.createElement("div", { style: { flex: 1 } },
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, lineHeight: 1, color: "var(--ink)" } },
+                                fmtUE(monthUE),
+                                React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", marginLeft: 4 } }, "UE")),
+                            React.createElement("div", { className: "home-eyebrow", style: { marginTop: 6 } }, new Date(calWeek).toLocaleDateString("de-DE", { month: "long" })))),
+                    React.createElement("button", { className: "btn btn-ghost", style: { width: "100%", justifyContent: "flex-start", gap: 9, marginBottom: 6, color: "#128C3E" }, onClick: openProposalForm },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "currentColor" },
+                            React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z" })),
+                        "Terminvorschlag per WhatsApp senden"),
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
                         React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "flex-start", gap: 9 }, onClick: shareBooking },
                             React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                                 React.createElement("path", { d: "M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8" }),
                                 React.createElement("polyline", { points: "16 6 12 2 8 6" }),
                                 React.createElement("line", { x1: "12", y1: "2", x2: "12", y2: "15" })),
-                            "Buchungslink an Sch\u00FCler senden"),
-                        React.createElement(Help, { text: "Diesen Link gibst du deinen Sch\u00FClern. Sie k\u00F6nnen dir dar\u00FCber Wunschtermine vorschlagen, die du dann best\u00E4tigst." })),
+                            "Buchungslink an Schüler senden"),
+                        React.createElement(Help, { text: "Diesen Link gibst du deinen Schülern. Sie können dir darüber Wunschtermine vorschlagen, die du dann bestätigst." })),
                     React.createElement("button", { className: "btn btn-ghost", style: { width: "100%", justifyContent: "flex-start", gap: 9, marginTop: 6 }, onClick: async () => {
                             let url = bookingURL();
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
-                                showFlash("Erzeuge Buchungscode\u2026");
+                                showFlash("Erzeuge Buchungscode…");
                                 const fresh = await fetchBookingCode(uid);
                                 if (fresh)
                                     setBookingCode(fresh);
                                 url = bookingURL();
                             }
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
-                                showToast("Der Buchungslink ist unvollst\u00E4ndig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
+                                showToast("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
                                 return;
                             }
                             setQrModal(url);
@@ -8563,14 +8658,14 @@ function App() {
                             React.createElement("rect", { x: "3", y: "14", width: "7", height: "7" }),
                             React.createElement("path", { d: "M14 14h3v3h-3zM14 20h3M20 14v3M17 20h3v-3" })),
                         "QR-Code anzeigen"),
-                    React.createElement("label", { className: "btn btn-ghost", style: { width: "100%", justifyContent: "flex-start", gap: 9, cursor: "pointer" } },
+                    React.createElement("label", { className: "btn btn-ghost", style: { width: "100%", justifyContent: "flex-start", gap: 9, marginTop: 6, cursor: "pointer" } },
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
                             React.createElement("circle", { cx: "8.5", cy: "8.5", r: "1.5" }),
                             React.createElement("path", { d: "M21 15l-5-5L5 21" })),
-                        "Termine aus Screenshot \u00FCbernehmen",
+                        "Termine aus Screenshot übernehmen",
                         React.createElement("input", { type: "file", accept: "image/*", multiple: true, style: { display: "none" }, onChange: e => { const fs = Array.from(e.target.files || []); e.target.value = ""; handleCalImportFiles(fs); } })),
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 6 } },
                         React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "flex-start", gap: 9 }, onClick: () => setUrlaubForm({ von: ymd(new Date()), bis: ymd(new Date()), vonZeit: "00:00", bisZeit: "23:59", busy: false, error: "" }) },
                             React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                                 React.createElement("circle", { cx: "12", cy: "12", r: "4" }),
@@ -8583,84 +8678,7 @@ function App() {
                                 React.createElement("path", { d: "M6.34 17.66l-1.41 1.41" }),
                                 React.createElement("path", { d: "M19.07 4.93l-1.41 1.41" })),
                             "Urlaub eintragen"),
-                        React.createElement(Help, { text: "Tr\u00E4gt f\u00FCr den gew\u00E4hlten Zeitraum Urlaub ein. Diese Tage sind \u00FCber den Buchungslink komplett belegt und z\u00E4hlen nicht zu deinen Unterrichtsstunden." })))),
-            pending.length > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden", border: "2px solid var(--amber)" } },
-                React.createElement("button", { onClick: () => setPendingOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 8, padding: "11px 14px", textAlign: "left",
-                        background: "var(--amber-bg)", borderBottom: pendingOpen ? "1px solid var(--line)" : "none",
-                        fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, color: "var(--amber)" } },
-                    React.createElement("span", { style: { flex: 1 } },
-                        pending.length,
-                        " offene",
-                        pending.length === 1 ? "r" : "",
-                        " Terminvorschlag",
-                        pending.length === 1 ? "" : "e"),
-                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, pendingOpen ? "Einklappen" : "Ansehen"),
-                    React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: pendingOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "\u25BE")),
-                pendingOpen && pending.map(a => React.createElement("div", { key: a.id, style: { padding: "12px 14px", borderTop: "1px solid var(--line)" } },
-                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 2 } },
-                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, fmtDLong(a.start_at))),
-                    React.createElement("div", { style: { fontSize: 13.5, marginBottom: 2 } },
-                        hm(a.start_at),
-                        a.end_at ? " – " + hm(a.end_at) : "",
-                        " Uhr \u00B7 ",
-                        a.title || "Schüler"),
-                    noteText(a) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8 } }, noteText(a)),
-                    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginTop: 8 } },
-                        React.createElement("div", { style: { display: "flex", gap: 8 } },
-                            React.createElement("button", { className: "btn btn-primary", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => confirmAppt(a.id) }, "\u2713 Best\u00E4tigen"),
-                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5, color: "#B3362A" }, onClick: () => rejectAppt(a.id) }, "Ablehnen")),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px", fontSize: 13.5, color: "var(--blue)", gap: 6 }, onClick: () => openCounterForm(a) },
-                            React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
-                                React.createElement("path", { d: "M21 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3" }),
-                                React.createElement("path", { d: "M9 15l6-6M15 9v5M15 9h-5" }),
-                                React.createElement("rect", { x: "9", y: "13", width: "12", height: "9", rx: "2" })),
-                            "Gegenvorschlag senden"))))),
-            cancelRequests.length > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden", border: "2px solid #B3362A" } },
-                React.createElement("div", { style: { padding: "11px 14px", background: "#FDECEA", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, color: "#B3362A" } },
-                    cancelRequests.length,
-                    " Stornierungs-Anfrage",
-                    cancelRequests.length === 1 ? "" : "n"),
-                cancelRequests.map(a => React.createElement("div", { key: a.id, style: { padding: "12px 14px", borderTop: "1px solid var(--line)" } },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 2 } }, fmtDLong(a.start_at)),
-                    React.createElement("div", { style: { fontSize: 13.5, marginBottom: 2 } },
-                        hm(a.start_at),
-                        a.end_at ? " – " + hm(a.end_at) : "",
-                        " Uhr \u00B7 ",
-                        apptStudentName(a) || a.title || "Schüler"),
-                    React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", fontWeight: 600, marginBottom: 8 } }, "Der Fahrsch\u00FCler m\u00F6chte diesen Termin stornieren."),
-                    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5, color: "#B3362A" }, onClick: () => confirmCancel(a.id) }, "Stornierung best\u00E4tigen"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => rejectCancel(a.id) }, "Termin behalten"))))),
-            calMode === "woche" ? React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "\u2039"),
-                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => setCalWeek(startOfWeek(new Date())) }, "Diese Woche"),
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "\u203A")),
-                days.map(d => dayCard(d))) : React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, -1)) }, "\u2039"),
-                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalDay(d); } }, "Heute"),
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, 1)) }, "\u203A")),
-                dayLimit > 0 && (() => {
-                    const used = confirmedMinutesOnDay(ymd(calDay));
-                    const pct = Math.min(100, Math.round(used / dayLimit * 100));
-                    const over = used >= dayLimit;
-                    const near = used >= dayLimit * 0.85;
-                    const col = over ? "#B3362A" : (near ? "var(--amber)" : "var(--orange)");
-                    return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14 } },
-                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 } },
-                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, "Heute best\u00E4tigt"),
-                            React.createElement("span", { style: { fontSize: 13, fontWeight: 800, fontFamily: "var(--font-d)", color: col, fontVariantNumeric: "tabular-nums" } },
-                                used,
-                                " / ",
-                                dayLimit,
-                                " Min")),
-                        React.createElement("div", { style: { height: 8, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
-                            React.createElement("div", { style: { height: "100%", width: pct + "%", background: col, borderRadius: 99, transition: "width .3s" } })),
-                        over && React.createElement("div", { style: { fontSize: 12, color: "#B3362A", marginTop: 7, fontWeight: 600 } }, "Tageslimit erreicht. Weitere Termine lassen sich nicht best\u00E4tigen."));
-                })(),
-                dayTimeline(calDay)),
-            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 6, lineHeight: 1.5 } }, "Tippe auf einen Termin zum Bearbeiten."));
+                        React.createElement(Help, { text: "Trägt für den gewählten Zeitraum Urlaub ein. Diese Tage sind über den Buchungslink komplett belegt und zählen nicht zu deinen Unterrichtsstunden." })))));
     }
     function loadAdmin() {
         setAdminBusy(true);
@@ -8792,6 +8810,20 @@ function App() {
         setCalShare({ code: null, busy: true });
         fetchCalCode(school.id).then(c => setCalShare({ code: c, busy: false }))
             .catch(() => setCalShare({ code: null, busy: false }));
+    }
+    // Springt direkt in den Nachrichten-Tab eines Schülers (aus dem Postfach auf der Startseite).
+    // Bei echtem Schülerwechsel würde der [activeId]-Reset-Effekt sonst sofort wieder auf
+    // "Profil" zurückspringen – daher der Umweg über pendingStudentTabRef.
+    function openStudentMessages(s) {
+        if (s.id === activeId) {
+            setStudentTab("nachrichten");
+        }
+        else {
+            pendingStudentTabRef.current = "nachrichten";
+            setActiveId(s.id);
+        }
+        setView("daten");
+        setPostfachOpen(false);
     }
     // Offene-Posten-Dashboard öffnen: offene Beträge pro Schüler, über alle Fahrlehrer hinweg
     function openOffenePosten() {
@@ -11703,6 +11735,32 @@ function App() {
                                     React.createElement("b", { style: { color: "var(--ink)" } }, "Hinweis zum Sammelversand:"),
                                     " Ein automatischer Rechnungsversand an alle offenen Posten auf einmal ist noch nicht m\u00F6glich, weil daf\u00FCr jedem Sch\u00FCler eine E-Mail-Adresse oder Telefonnummer sicher zugeordnet und ein Versandweg eingerichtet sein m\u00FCsste. Diese \u00DCbersicht hilft dir aber, gezielt nachzufassen. Ein echter Sammelversand l\u00E4sst sich als eigener Schritt einbauen, wenn die Kontaktdaten daf\u00FCr gepflegt sind.")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOffenePosten(null) }, "Schlie\u00DFen"))),
+        // Postfach: zentraler Posteingang aller Sch\u00FCler-Nachrichten, die noch keine Antwort haben
+        postfachOpen && React.createElement("div", { onClick: () => setPostfachOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Postfach"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Sch\u00FCler, die auf eine Antwort warten"),
+                (() => {
+                    const list = (students || []).filter(s => !s.archived && hasUnreadMsg(s))
+                        .map(s => ({ s, last: s.messages[s.messages.length - 1] }))
+                        .sort((a, b) => (b.last.at || "").localeCompare(a.last.at || ""));
+                    if (list.length === 0)
+                        return React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine offenen Nachrichten. \uD83C\uDF89");
+                    return list.map(({ s, last }) => {
+                        const d = new Date(last.at);
+                        const when = isToday(last.at) ? "heute " + hm(last.at) + " Uhr" : dayMonth(d) + ". \u00B7 " + hm(last.at) + " Uhr";
+                        return React.createElement("button", { key: s.id, onClick: () => openStudentMessages(s), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, textAlign: "left" } },
+                            React.createElement("div", { className: "avatar", style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+                                    React.createElement("span", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
+                                    React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, when)),
+                                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 2 } }, last.text)));
+                    });
+                })(),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setPostfachOpen(false) }, "Schlie\u00DFen"))),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85vh", overflowY: "auto" } },
