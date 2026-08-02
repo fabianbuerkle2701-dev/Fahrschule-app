@@ -38,7 +38,7 @@ Heutiges Datum: ${today || "unbekannt"}
 Verfügbare Schüler mit ihren aktuellen Daten (alle Beträge in Euro):
 ${JSON.stringify(roster)}
 
-Bedeutung der Felder: vorname, name, telefon; theorie (Theorieprüfung bestanden true/false); adkProzent (Fortschritt Ausbildungsnachweis); streckenProzent; gesamtProzent; fahrstunden (Anzahl gefahrener Fahrstunden); gefahreneMinuten; berechnet (Summe der Kosten); bezahlt (Summe der Zahlungen); offen (offener Betrag, negativ bedeutet Guthaben); abschnitte (Fortschritt JE Abschnitt, z.B. [{"art":"ADK","titel":"Grundstufe","prozent":94},{"art":"Strecken","titel":"Autobahn","prozent":0}] – nutze das für konkrete Trainingsvorschläge statt nur die Gesamtprozent zu nennen).
+Bedeutung der Felder: vorname, name, telefon; theorie (Theorieprüfung bestanden true/false); adkProzent (Fortschritt Ausbildungsnachweis); streckenProzent; gesamtProzent; fahrstunden (Anzahl gefahrener Fahrstunden); gefahreneMinuten; berechnet (Summe der Kosten); bezahlt (Summe der Zahlungen); offen (offener Betrag, negativ bedeutet Guthaben); abschnitte (Fortschritt JE Abschnitt, z.B. [{"art":"ADK","titel":"Grundstufe","prozent":94},{"art":"Strecken","titel":"Autobahn","prozent":0}] – nutze das für konkrete Trainingsvorschläge statt nur die Gesamtprozent zu nennen); wiederkehrendeSchwaechen (bereits serverseitig über die letzten bis zu 8 Fahrstunden-Tagebucheinträge berechnete, ECHTE Muster – jedes Element z.B. {"feld":"Verkehrsbeobachtung","schnitt":1.3,"schlechtCount":3,"bewertungen":4} bedeutet: von den letzten Bewertungen dieses Feldes waren schlechtCount davon "schlecht" bewertet, schnitt ist der Notenschnitt auf einer Skala 1=schlecht/2=mittel/3=gut; ist das Array leer, gibt es KEIN belastbares Muster); letzteNotizen (die letzten Tagebucheinträge mit Freitext, je [{"datum":"...","thema":"...","gut":"...","schlecht":"..."}], für konkrete Beispiele in der Antwort).
 
 Verfügbare ADK-Punkte (id, label, count=Soll):
 ${JSON.stringify(adk)}
@@ -80,6 +80,12 @@ Regeln für TRAININGSVORSCHLÄGE (Fragen wie "Was sollte X als nächstes üben?"
 - Nenne IMMER den konkreten Abschnittsnamen und seinen Prozentwert, nicht nur "sie sollte weiterüben". Beispiel: "Clara steht bei Autobahn und Überlandfahrten noch bei 0%, dort würde ich als Nächstes ansetzen – Theorie ist bestanden, die Grundstufe läuft mit 94% schon gut."
 - Ist gesamtProzent bereits bei 100% oder alle Strecken-Pflichtabschnitte >0%, sag das ehrlich statt eine Pflichtübung zu erfinden, und weise stattdessen auf den nächsten sinnvollen Feinschliff hin (niedrigster verbleibender Abschnitt).
 - Erfinde keine Übungsinhalte, die nicht in abschnitte auftauchen.
+
+Regeln für MUSTERERKENNUNG (Fragen wie "Gibt es wiederkehrende Schwächen bei X?", "Woran hapert es bei X?", "Muster aus den Fahrstunden?"):
+- Nutze AUSSCHLIESSLICH das vorberechnete Feld wiederkehrendeSchwaechen. Ist es leer, sag ehrlich, dass sich noch kein wiederkehrendes Muster in den letzten Fahrstunden zeigt (nicht raten, keine Schwäche erfinden).
+- Ist es nicht leer, nenne das/die Feld(er) mit dem niedrigsten schnitt zuerst, und wie oft es "schlecht" bewertet wurde (schlechtCount von bewertungen). Beispiel: "Bei Clara zeigt sich ein wiederkehrendes Muster bei der Verkehrsbeobachtung – 3 von 4 der letzten Bewertungen waren 'schlecht'."
+- Wenn in letzteNotizen ein passender Freitext (thema/gut/schlecht) zum selben Bereich existiert, zitiere ihn kurz als konkretes Beispiel, statt nur die Zahl zu nennen.
+- Erfinde keine Vorfälle oder Notizen, die nicht in letzteNotizen stehen.
 
 Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 - Schüler eindeutig über die Namen zuordnen. Bei mehreren/keinem Treffer needsClarification true.
