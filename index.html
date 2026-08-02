@@ -9,13 +9,13 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Allindrive">
-<title>Allindrive – Termine buchen</title>
+<title>Die Fahrschulapp</title>
 <meta property="og:title" content="Allindrive">
-<meta property="og:description" content="Termine buchen">
+<meta property="og:description" content="Die Fahrschulapp">
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Allindrive">
-<meta name="twitter:description" content="Termine buchen">
+<meta name="twitter:description" content="Die Fahrschulapp">
 <link rel="icon" type="image/png" href="assets/icon.png">
 <link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
 <link rel="manifest" href="assets/site.webmanifest">
@@ -3027,6 +3027,23 @@ function sumCharges(s, pricePerUE) {
 function sumPayments(s) {
     return (s.payments || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 }
+// Auf eine bestimmte Rechnung verbuchte Zahlungen. Zahlungen ohne invoiceId sind
+// Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
+// damit eine Rechnung nur dann als bezahlt gilt, wenn das auch so erfasst wurde.
+function invoicePaid(s, invId) {
+    return (s.payments || []).filter(p => p.invoiceId === invId)
+        .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+}
+// Offener Restbetrag einer Rechnung (nie negativ).
+function invoiceOpen(s, inv) {
+    return Math.max(0, Math.round(((Number(inv.total) || 0) - invoicePaid(s, inv.id)) * 100) / 100);
+}
+// "offen" | "teil" | "bezahlt" – Rundung auf Cent, damit Centbruchteile nicht ewig "offen" bleiben.
+function invoiceStatus(s, inv) {
+    const paid = invoicePaid(s, inv.id), total = Number(inv.total) || 0;
+    if (paid <= 0.005) return "offen";
+    return paid + 0.005 >= total ? "bezahlt" : "teil";
+}
 // Effective box count: per-student override, else template default
 // Kästchen-Anzahl eines Punkts. Seit 1.56.0 gilt einheitlich die Anzahl aus der
 // Klassen-Vorlage für alle Schüler. Frühere Einzel-Schüler-Abweichungen (customCounts)
@@ -5232,7 +5249,10 @@ function App() {
         const stu = students.find(s => s.id === activeId) || active;
         if (!stu)
             return;
-        writeStudent({ ...stu, payments: [...(stu.payments || []), { date: f.date, amount, method: (f.method || "").trim() }] });
+        const entry = { date: f.date, amount, method: (f.method || "").trim() };
+        if (f.invoiceId)
+            entry.invoiceId = f.invoiceId; // ordnet die Zahlung einer konkreten Rechnung zu
+        writeStudent({ ...stu, payments: [...(stu.payments || []), entry] });
         setPaymentForm(null);
     }
     // Nächster anstehender Termin je Schüler, aus den echten Buchungen.
@@ -7827,6 +7847,17 @@ function App() {
         const offenGesamt = openList.reduce((s, x) => s + x.open, 0);
         const shownInvoices = abrTab === "monat" ? allInvoices.filter(i => invYear(i) === curYear && invMonth(i) === curMonth)
             : abrTab === "jahr" ? allInvoices.filter(i => invYear(i) === curYear) : allInvoices;
+        // Zahlung zu einer konkreten Rechnung erfassen: Restbetrag ist vorbelegt, laesst sich
+        // aber ueberschreiben (Teilzahlung). Der Schueler wird dabei aktiv gesetzt, weil
+        // savePaymentForm auf den aktiven Schueler schreibt.
+        function payInvoice(inv) {
+            const stu = mine.find(x => x.id === inv.studentId);
+            const rest = stu ? invoiceOpen(stu, inv) : (Number(inv.total) || 0);
+            if (inv.studentId !== (active && active.id))
+                setActiveId(inv.studentId);
+            setPaymentForm({ amount: rest ? String(rest.toFixed(2)) : "", date: new Date().toISOString().slice(0, 10),
+                method: "Bar", error: "", invoiceId: inv.id, invoiceNumber: inv.number });
+        }
         function openInvoiceRow(inv) {
             if (inv.studentId !== (active && active.id))
                 setActiveId(inv.studentId);
@@ -7889,14 +7920,31 @@ function App() {
             React.createElement("div", { className: "seg", style: { marginBottom: 12 } }, [["monat", "Dieser Monat"], ["jahr", "Dieses Jahr"], ["alle", "Alle"]].map(([k, l]) => React.createElement("button", { key: k, className: abrTab === k ? "on" : "", onClick: () => setAbrTab(k) }, l))),
             shownInvoices.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Rechnungen in diesem Zeitraum.")
-                : React.createElement("div", { className: "card", style: { padding: "6px 14px" } }, shownInvoices.map(inv => React.createElement("button", { key: inv.id, onClick: () => openInvoiceRow(inv), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
-                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                        React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, inv.studentName),
-                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
-                            inv.number,
-                            " · ",
-                            inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "")),
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0 } }, eurFmt(inv.total))))));
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px" } }, shownInvoices.map(inv => {
+                    // Zeile ist ein div statt eines Buttons: sie enthaelt selbst zwei Buttons
+                    // (Rechnung oeffnen / Zahlung erfassen), und Button-in-Button ist ungueltig.
+                    const stu = mine.find(x => x.id === inv.studentId);
+                    const st = stu ? invoiceStatus(stu, inv) : "offen";
+                    const restOffen = stu ? invoiceOpen(stu, inv) : (Number(inv.total) || 0);
+                    const badge = st === "bezahlt" ? { t: "Bezahlt", c: "var(--green)" }
+                        : st === "teil" ? { t: "Teilweise", c: "var(--amber)" }
+                        : { t: "Offen", c: "var(--muted)" };
+                    return React.createElement("div", { key: inv.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--line)" } },
+                        React.createElement("button", { onClick: () => openInvoiceRow(inv), style: { flex: 1, minWidth: 0, textAlign: "left", padding: 0 } },
+                            React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, inv.studentName),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                inv.number,
+                                " · ",
+                                inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "",
+                                " · ",
+                                React.createElement("span", { style: { color: badge.c, fontWeight: 700 } }, badge.t),
+                                st === "teil" ? " · noch " + eurFmt(restOffen) : "")),
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0,
+                                color: st === "bezahlt" ? "var(--muted)" : "var(--ink)",
+                                textDecoration: st === "bezahlt" ? "line-through" : "none" } }, eurFmt(inv.total)),
+                        st !== "bezahlt" && React.createElement("button", { onClick: () => payInvoice(inv), className: "btn btn-ghost",
+                            style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 } }, "Zahlung"));
+                })));
     }
     /* ── Führerschein-Antrag: Checkliste vom Sehtest bis zur bestandenen Prüfung ── */
     function renderLicenseSteps() {
@@ -11354,7 +11402,11 @@ function App() {
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setItemForm(null) }, "Abbrechen"))),
         paymentForm && React.createElement("div", { onClick: () => setPaymentForm(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, "Zahlung erfassen"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: paymentForm.invoiceNumber ? 4 : 16 } }, "Zahlung erfassen"),
+                paymentForm.invoiceNumber && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                    "wird auf Rechnung ",
+                    React.createElement("b", { style: { color: "var(--ink)" } }, paymentForm.invoiceNumber),
+                    " gebucht"),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Betrag"),
