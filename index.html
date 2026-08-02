@@ -5862,7 +5862,7 @@ function App() {
         // (die Datenbank blockt das serverseitig, siehe trg_prevent_delete_students_with_invoices) –
         // stattdessen archivieren, damit die Rechnungshistorie erhalten bleibt.
         if ((s.invoices || []).length > 0) {
-            writeStudent({ ...s, archived: true });
+            writeStudent({ ...s, archived: true, archivedAt: s.archivedAt || new Date().toISOString().slice(0, 10) });
             showToast(dispName(s) + " hat bereits Rechnungen und wurde stattdessen archiviert. Die Rechnungshistorie bleibt erhalten.");
             return;
         }
@@ -5873,7 +5873,7 @@ function App() {
         }
         catch (e) {
             // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
-            writeStudent({ ...s, archived: true });
+            writeStudent({ ...s, archived: true, archivedAt: s.archivedAt || new Date().toISOString().slice(0, 10) });
             showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message);
             return;
         }
@@ -8310,7 +8310,7 @@ function App() {
                 active._isMine
                     ? React.createElement(ShareBox, null)
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Sch\u00FCler wurde mit dir geteilt. Du kannst Eintr\u00E4ge bearbeiten, aber die Freigabe verwaltet der Besitzer."),
-                active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => updateActive({ archived: !active.archived }) }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren")));
+                active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => updateActive(active.archived ? { archived: false } : { archived: true, archivedAt: active.archivedAt || new Date().toISOString().slice(0, 10) }) }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren")));
     }
     /* ── Teilen ── */
     function ShareBox() {
@@ -9152,6 +9152,62 @@ function App() {
             showToast("Logo konnte nicht entfernt werden:\n" + err.message);
         }
     }
+    /* ── Aufbewahrung & Löschung (§ 31 FahrlG + DSGVO) ──
+       § 31 FahrlG: Aufzeichnungen sind nach Ablauf des Jahres, in dem der Unterricht
+       abgeschlossen wurde, fünf Jahre aufzubewahren – und danach zu löschen. Die App
+       hatte dafür bisher keine Grundlage, weil beim Archivieren kein Datum festgehalten
+       wurde. Fristbeginn ist bewusst das JAHRESENDE, nicht der Archivtag. ── */
+    const AUFBEWAHRUNG_JAHRE = 5;
+    function loeschDatum(stu) {
+        const a = stu.archivedAt;
+        if (!a)
+            return null;
+        const jahr = new Date(a).getFullYear();
+        if (isNaN(jahr))
+            return null;
+        return new Date(jahr + AUFBEWAHRUNG_JAHRE, 0, 1); // 1. Januar nach Ablauf der Frist
+    }
+    // Alle Daten eines Schülers als JSON – für DSGVO-Auskunft und Datenmitnahme.
+    function exportStudentData(stu) {
+        const blob = new Blob([JSON.stringify(stu, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "schuelerdaten-" + dispName(stu).replace(/[^\wäöüÄÖÜß]+/g, "-").toLowerCase() + ".json";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+    function renderAufbewahrung() {
+        const archiviert = (students || []).filter(s => s.archived && s._isMine)
+            .map(s => ({ s, faellig: loeschDatum(s) }))
+            .sort((a, b) => (a.faellig && b.faellig) ? a.faellig - b.faellig : 0);
+        const jetzt = new Date();
+        const loeschreif = archiviert.filter(x => x.faellig && x.faellig <= jetzt);
+        return React.createElement("div", { className: "card", style: { padding: "16px", marginTop: 16 } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, marginBottom: 4 } }, "Aufbewahrung & Löschung"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 14 } },
+                "Ausbildungsaufzeichnungen sind nach § 31 Fahrlehrergesetz fünf Jahre aufzubewahren – gerechnet ab Ende des Jahres, in dem die Ausbildung abgeschlossen wurde – und danach zu löschen. Fristbeginn ist hier das Archivierungsdatum."),
+            archiviert.length === 0
+                ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Keine archivierten Schüler. Die Frist beginnt, sobald du einen Schüler als bestanden archivierst.")
+                : React.createElement(React.Fragment, null,
+                    loeschreif.length > 0 && React.createElement("div", { style: { fontSize: 13, fontWeight: 600, color: "var(--amber)", marginBottom: 10 } },
+                        loeschreif.length === 1 ? "1 Schüler ist löschreif." : loeschreif.length + " Schüler sind löschreif."),
+                    archiviert.map(x => {
+                        const reif = x.faellig && x.faellig <= jetzt;
+                        return React.createElement("div", { key: x.s.id, style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 0", borderTop: "1px solid var(--line)" } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 140 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, dispName(x.s)),
+                                React.createElement("div", { style: { fontSize: 12, color: reif ? "var(--amber)" : "var(--muted)" } },
+                                    x.faellig
+                                        ? (reif ? "löschreif seit " + x.faellig.toLocaleDateString("de-DE")
+                                                : "aufzubewahren bis " + x.faellig.toLocaleDateString("de-DE"))
+                                        : "kein Archivdatum hinterlegt")),
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => exportStudentData(x.s) }, "Export"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "#B3362A" }, onClick: () => removeStudent(x.s) }, "Löschen"));
+                    })),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 14 } },
+                "Gelöscht wird nur auf deine Bestätigung – die App löscht nichts von selbst. Schüler mit Rechnungen sind aus Revisionsgründen serverseitig vor dem Löschen geschützt."));
+    }
     function renderDatenschutz() {
         const P = (t) => React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.65, marginBottom: 12 } }, t);
         const H = (t) => React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginTop: 20, marginBottom: 8 } }, t);
@@ -9159,6 +9215,7 @@ function App() {
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, margin: "2px 2px 14px" } },
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setView("einstellungen") }, "\u2039 Zur\u00FCck"),
                 React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, "Datenschutzerkl\u00E4rung")),
+            renderAufbewahrung(),
             React.createElement("div", { className: "card", style: { padding: "16px 16px 4px" } },
                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 6 } }, "Stand: Juli 2026 \u00B7 Entwurf, noch nicht rechtlich gepr\u00FCft"),
                 H("1. Verantwortlicher"),
