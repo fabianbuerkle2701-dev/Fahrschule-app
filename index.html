@@ -7889,6 +7889,41 @@ function App() {
         }
         const qTheorie = quote("theorie"), qPraxis = quote("praxis");
         const hatQuoten = qTheorie.schueler > 0 || qPraxis.schueler > 0;
+        // Ueberfaellig = Rechnung aelter als das Zahlungsziel und noch nicht vollstaendig bezahlt.
+        // Erst seit Rechnungen einen Bezahlstatus haben ist das ueberhaupt bestimmbar.
+        const ZAHLUNGSZIEL_TAGE = 14;
+        const heuteMs = Date.now();
+        const ueberfaellig = allInvoices.map(inv => {
+            const stu = mine.find(x => x.id === inv.studentId);
+            if (!stu || invoiceStatus(stu, inv) === "bezahlt")
+                return null;
+            const d = inv.date ? new Date(inv.date).getTime() : null;
+            if (!d)
+                return null;
+            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
+            if (tage <= 0)
+                return null;
+            return { inv, stu, tage, offen: invoiceOpen(stu, inv) };
+        }).filter(Boolean).sort((a, b) => b.tage - a.tage);
+        const ueberfaelligSumme = ueberfaellig.reduce((sum, x) => sum + x.offen, 0);
+        // Freundlicher, konkreter Erinnerungstext. Bewusst ohne Mahngebuehren-Drohung:
+        // in einer Fahrschule ist der Ton zum Schueler Teil des Geschaefts.
+        function erinnerungText(x) {
+            return "Hallo " + ((x.stu.vorname || "").trim() || dispName(x.stu)) + ", "
+                + "kleine Erinnerung: die Rechnung " + x.inv.number + " vom "
+                + (x.inv.date ? new Date(x.inv.date).toLocaleDateString("de-DE") : "")
+                + " über " + eurFmt(x.offen) + " ist noch offen. "
+                + "Magst du das bei Gelegenheit erledigen? Danke dir! "
+                + ((school && school.name) || "");
+        }
+        function erinnern(x) {
+            const num = waNumber(x.stu.tel);
+            if (!num) {
+                showToast("Für " + dispName(x.stu) + " ist keine Telefonnummer hinterlegt.");
+                return;
+            }
+            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(erinnerungText(x)), "_blank", "noopener");
+        }
         return React.createElement("div", { className: "pad", style: { paddingBottom: 28 } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Abrechnung"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Umsatz, offene Forderungen und alle Rechnungen deiner Schüler auf einen Blick."),
@@ -7896,6 +7931,27 @@ function App() {
                 React.createElement("div", null,
                     React.createElement("div", { className: "home-num", style: { color: k.color, fontSize: 20 } }, k.value),
                     React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, k.label))))),
+            // Überfällige Rechnungen zuoberst: das ist das Geld, das der Fahrschule real fehlt.
+            ueberfaellig.length > 0 && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 8px" } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } },
+                        "Überfällig"),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, eurFmt(ueberfaelligSumme))),
+                React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 8, borderLeft: "3px solid var(--amber)" } },
+                    ueberfaellig.slice(0, 10).map(x => React.createElement("div", { key: x.inv.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, dispName(x.stu)),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                x.inv.number,
+                                " · ",
+                                React.createElement("span", { style: { color: "var(--amber)", fontWeight: 700 } },
+                                    x.tage === 1 ? "1 Tag überfällig" : x.tage + " Tage überfällig"))),
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0 } }, eurFmt(x.offen)),
+                        React.createElement("button", { onClick: () => erinnern(x), className: "btn btn-ghost",
+                            style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: x.stu.tel ? "#128C3E" : "var(--muted)" } },
+                            "Erinnern")))),
+                React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px 20px" } },
+                    "Zahlungsziel " + ZAHLUNGSZIEL_TAGE + " Tage. \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen, freundlichen Text \u2013 du siehst ihn vor dem Senden.")),
             // Prüfungserfolg: die Fahrschulreform verlangt künftig, Erfolgsquoten zu veröffentlichen.
             hatQuoten && React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Prüfungserfolg"),
