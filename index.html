@@ -565,6 +565,18 @@
   .home-today{position:relative;overflow:hidden}
   .home-today::before{content:"";position:absolute;top:0;left:16px;right:16px;height:3px;
     background:repeating-linear-gradient(90deg,var(--orange) 0 14px,transparent 14px 24px);border-radius:0 0 3px 3px}
+  /* "Heute" + "Offene Terminvorschläge" (Redesign 2026, 1:1 wie im Entwurf): auf dem Handy
+     stapeln sich beide Karten normal (das kompakte Banner übernimmt dort die Anfragen-Rolle,
+     die Detailliste rendert nicht), ab Desktop-Breite werden sie zur Zweispalte. */
+  .home-pending-list{display:none}
+  @media (min-width:900px){
+    /* !important nötig: die Banner-Komponente setzt display:flex per Inline-Style
+       (gemeinsam mit anderen Alert-Karten genutzt), das schlägt eine reine Klassenregel. */
+    .home-pending-banner{display:none!important}
+    .home-pending-list{display:block}
+    .home-2col{display:grid;grid-template-columns:1.15fr 1fr;gap:14px;align-items:start}
+    .home-2col>.card{margin-bottom:0!important}
+  }
   .home-live{position:relative;overflow:hidden}
   .home-live::before{content:"";position:absolute;left:0;top:0;bottom:0;width:4px;background:var(--orange)}
   .home-dot{width:9px;height:9px;border-radius:50%;background:var(--orange);box-shadow:0 0 0 0 rgba(255,147,0,.5);animation:homePulse 1.6s ease-out infinite}
@@ -579,6 +591,16 @@
   .home-in>*:nth-child(6){animation-delay:.22s}
   @keyframes homeUp{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
   @media (prefers-reduced-motion:reduce){.home-in>*,.home-dot{animation:none}}
+  /* Reihenfolge weicht zwischen Mobil- und Desktop-Entwurf bewusst voneinander ab (mobil:
+     Heute vor den Kennzahlen-Kacheln; Desktop: Kacheln vor Heute/Anfragen) - per CSS order
+     statt zweier verschiedener JSX-Reihenfolgen gelöst, DOM-Reihenfolge bleibt gleich. */
+  .home-in{display:flex;flex-direction:column}
+  .home-in .home-2col{order:5}
+  .home-in .home-kpis{order:6}
+  @media (min-width:900px){
+    .home-in .home-2col{order:6}
+    .home-in .home-kpis{order:5}
+  }
   /* ── Kalender: sanft & modern ── */
   .cal-today{box-shadow:0 0 0 2px var(--orange),0 2px 14px rgba(24,21,18,.07)}
   [data-theme="dark"] .cal-today{box-shadow:0 0 0 2px var(--orange),0 10px 28px rgba(0,0,0,.35)}
@@ -7200,10 +7222,9 @@ function App() {
             metaParts.push(pendingCount + (pendingCount === 1 ? " offene Anfrage" : " offene Anfragen"));
         const metaLine = metaParts.length ? metaParts.join("  \u00B7  ") : "Alles ruhig. Sch\u00F6nen Tag!";
 
-        // Kennzahlen UND Hauptaktionen als EIN einheitliches Kachel-Raster (Redesign 2026):
-        // vorher zwei getrennte Bausteine (Kennzahlenleiste + drei Aktions-Buttons), jetzt vier
-        // gleichwertige, farbige Kacheln - jede zeigt entweder eine Zahl (Klick fuehrt zur
-        // Quelle) oder ist die eine Aktion ohne eigene Kennzahl (neuer Schueler).
+        // Vier gleichwertige, farbige Kennzahlen-Kacheln - 1:1 wie im Entwurf (Aktive
+        // Sch\u00FCler/Termine-Woche/Offene Rechnungen/Offene Anfragen), keine Aktions-Kachel
+        // mehr: "+ Sch\u00FCler" gibt es bereits eigenst\u00E4ndig auf dem Sch\u00FCler-Reiter.
         const kpis = [
             { key: "schueler", label: "Aktive Sch\u00FCler", value: aktiveSchueler, icon: icUsers, tone: "sage", onClick: () => setView("liste") },
             { key: "woche", label: "Termine/Woche", value: woche, icon: icCal, tone: "clay", onClick: () => setView("kalender") },
@@ -7216,8 +7237,13 @@ function App() {
                     else {
                         setView("liste");
                     } } },
-            { key: "neu", label: "Neuer Sch\u00FCler", icon: icPlus, tone: "orange", action: true, onClick: addStudent },
+            { key: "anfragen", label: "Offene Anfragen", value: pendingCount, icon: icMail, tone: "orange", onClick: () => setView("kalender") },
         ];
+        // Detaillierte Liste der offenen Terminvorschl\u00E4ge f\u00FCrs Desktop-Zweispalten-Layout
+        // (Heute | Offene Terminvorschl\u00E4ge) - auf dem Handy bleibt es beim kompakten Banner.
+        const pendingList = (appts || []).filter(a => a.status === "pending" || a.status === "cancel_requested")
+            .sort((a, b) => a.start_at.localeCompare(b.start_at))
+            .map(a => ({ appt: a, stu: a.student_id ? students.find(x => x.id === a.student_id) : null }));
 
         return React.createElement("div", { className: "pad home-in" },
             // 1) Kopf
@@ -7257,53 +7283,61 @@ function App() {
                         stillList.length === 1 ? "1 Schüler lange nicht gefahren" : stillList.length + " Schüler lange nicht gefahren"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Seit über " + STILL_TAGE + " Tagen kein Termin")),
                 chev),
-            // 4) Offene Terminvorschläge (nur wenn vorhanden)
-            pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left", background: "linear-gradient(90deg, var(--orange-soft), var(--clay-bg))", border: "none" } },
+            // 4) Offene Terminvorschläge - kompaktes Banner nur auf dem Handy (Klasse blendet
+            // sich auf dem Desktop aus, dort übernimmt die Detailliste in Punkt 5 die Rolle)
+            pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "card home-pending-banner", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left", background: "linear-gradient(90deg, var(--orange-soft), var(--clay-bg))", border: "none" } },
                 React.createElement("span", { className: "home-iconchip", style: { position: "relative" } },
                     icCal({ width: 19, height: 19 }),
                     React.createElement("span", { style: { position: "absolute", top: -6, right: -6, minWidth: 19, height: 19, borderRadius: 10, background: "#E5484D", color: "#fff",
                             fontSize: 11, fontWeight: 800, lineHeight: "19px", textAlign: "center", fontFamily: "var(--font-d)", padding: "0 4px", boxShadow: "0 0 0 2px var(--card)" } }, pendingCount)),
                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, pendingCount === 1 ? "Offener Terminvorschlag" : "Offene Terminvorschl\u00E4ge"),
-                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Best\u00E4tigen, ablehnen oder neue Zeit vorschlagen")),
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, pendingCount === 1 ? "Offener Terminvorschlag" : "Offene Terminvorschläge"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Bestätigen, ablehnen oder neue Zeit vorschlagen")),
                 chev),
-            // 5) Heute – mit gestrichelter Fahrbahnlinie als Kopfakzent und farbigem Punkt je Termin
-            React.createElement("div", { className: "card home-today", style: { marginBottom: 12, overflow: "hidden" } },
-                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", padding: "15px 16px 6px" } },
-                    React.createElement("span", { className: "home-eyebrow" },
-                        "Heute",
-                        heute.length ? "  \u00B7  " + heute.length + (heute.length === 1 ? " Termin" : " Termine") : ""),
-                    React.createElement("button", { onClick: () => setView("kalender"), style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "Kalender \u203A")),
-                heute.length === 0 && React.createElement("div", { style: { padding: "8px 16px 20px", fontSize: 13.5, color: "var(--muted)" } }, "Keine Termine heute. Genie\u00DF den freien Tag!"),
-                heute.length > 0 && React.createElement("div", { style: { padding: "4px 8px 8px" } }, heute.map((a, i) => {
-                    const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
-                    const istNaechster = naechster && a.id === naechster.id;
-                    const dotTone = ["var(--sage)", "var(--clay)", "var(--sky)", "var(--orange)"][i % 4];
-                    return React.createElement("button", { key: a.id, className: "home-appt" + (istNaechster ? " next" : ""), onClick: () => { if (stu) {
-                            setActiveId(stu.id);
-                            setView("adk");
-                        }
-                        else {
-                            setView("kalender");
-                        } } },
-                        React.createElement("span", { className: "home-timepill" }, hm(a.start_at)),
-                        React.createElement("span", { className: "home-appt-dot", style: { background: dotTone } }),
+            // 6) Kennzahlen – ein einheitliches Kachel-Raster, 1:1 wie im Entwurf (Redesign 2026)
+            React.createElement("div", { className: "home-kpis" }, kpis.map(k => React.createElement("button", { key: k.key, className: "home-kpi tone-" + k.tone, onClick: k.onClick },
+                React.createElement("span", { className: "home-kpi-ic" }, k.icon({ width: 17, height: 17, strokeWidth: "2.3" })),
+                React.createElement("div", null,
+                    React.createElement("div", { className: "home-num" }, k.value),
+                    React.createElement("div", { className: "home-eyebrow" }, k.label))))),
+            // 5) Heute (links) + Offene Terminvorschläge als Detailliste (rechts, nur Desktop) -
+            // auf dem Desktop ein Zweispalten-Layout wie im Entwurf, auf dem Handy stapeln sich
+            // beide Karten normal (die Detailliste blendet sich dort aus, s.o. das Banner).
+            React.createElement("div", { className: "home-2col" },
+                React.createElement("div", { className: "card home-today", style: { marginBottom: 12, overflow: "hidden" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", padding: "15px 16px 6px" } },
+                        React.createElement("span", { className: "home-eyebrow" },
+                            "Heute",
+                            heute.length ? "  ·  " + heute.length + (heute.length === 1 ? " Termin" : " Termine") : ""),
+                        React.createElement("button", { onClick: () => setView("kalender"), style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "Kalender ›")),
+                    heute.length === 0 && React.createElement("div", { style: { padding: "8px 16px 20px", fontSize: 13.5, color: "var(--muted)" } }, "Keine Termine heute. Genieß den freien Tag!"),
+                    heute.length > 0 && React.createElement("div", { style: { padding: "4px 8px 8px" } }, heute.map((a, i) => {
+                        const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
+                        const istNaechster = naechster && a.id === naechster.id;
+                        const dotTone = ["var(--sage)", "var(--clay)", "var(--sky)", "var(--orange)"][i % 4];
+                        return React.createElement("button", { key: a.id, className: "home-appt" + (istNaechster ? " next" : ""), onClick: () => { if (stu) {
+                                setActiveId(stu.id);
+                                setView("adk");
+                            }
+                            else {
+                                setView("kalender");
+                            } } },
+                            React.createElement("span", { className: "home-timepill" }, hm(a.start_at)),
+                            React.createElement("span", { className: "home-appt-dot", style: { background: dotTone } }),
+                            React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, (stu ? dispName(stu) : a.title) || "Termin"),
+                                noteText(a) && React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 } }, noteText(a))),
+                            a.end_at && React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, "bis " + hm(a.end_at)));
+                    }))),
+                pendingList.length > 0 && React.createElement("div", { className: "card home-pending-list", style: { marginBottom: 12, overflow: "hidden" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", padding: "15px 16px 6px" } },
+                        React.createElement("span", { className: "home-eyebrow" }, "Offene Terminvorschläge"),
+                        React.createElement("span", { style: { fontSize: 12.5, fontWeight: 800, color: "var(--orange-deep)", fontFamily: "var(--font-d)" } }, pendingList.length)),
+                    React.createElement("div", { style: { padding: "4px 8px 8px" } }, pendingList.map(({ appt: a, stu }, i) => React.createElement("button", { key: a.id, className: "home-appt", onClick: () => setView("kalender") },
+                        React.createElement("span", { className: "avatar tone-" + avatarTone(stu ? stu.id : a.id), style: { width: 34, height: 34, minWidth: 34, fontSize: 12, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800 } }, stu ? initials(stu) : "?"),
                         React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, (stu ? dispName(stu) : a.title) || "Termin"),
-                            noteText(a) && React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 } }, noteText(a))),
-                        a.end_at && React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, "bis " + hm(a.end_at)));
-                }))),
-            // 6) Kennzahlen & Hauptaktionen – ein einheitliches Kachel-Raster statt zweier
-            // getrennter Bausteine, jede Kachel farbig und gleichwertig (Redesign 2026)
-            React.createElement("div", { className: "home-kpis" }, kpis.map(k => React.createElement("button", { key: k.key, className: "home-kpi tone-" + k.tone + (k.action ? " action" : ""), onClick: k.onClick },
-                React.createElement("span", { className: "home-kpi-ic" }, k.icon({ width: k.action ? 20 : 17, height: k.action ? 20 : 17, strokeWidth: "2.3" })),
-                k.action
-                    ? React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15.5, marginTop: "auto" } }, k.label)
-                    : React.createElement("div", null,
-                        React.createElement("div", { className: "home-num" },
-                            k.value,
-                            k.sub && React.createElement("span", { style: { fontSize: 13, fontWeight: 700, marginLeft: 5, letterSpacing: 0, opacity: .85 } }, k.sub)),
-                        React.createElement("div", { className: "home-eyebrow" }, k.label))))));
+                            React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, stu ? dispName(stu) : (a.title || "Termin"))),
+                        React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0, textAlign: "right" } }, weekdayShort(a.start_at) + " " + fmtD(a.start_at) + " · " + hm(a.start_at))))))));
     }
     function renderListe() {
         const pendingList = students.filter(s => s.pending && s._isMine);
