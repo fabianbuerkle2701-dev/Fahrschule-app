@@ -277,10 +277,10 @@
   .tab svg{display:block;width:21px;height:21px}
   /* Zentraler Schnellzugriff-Button in der Tab-Leiste (Redesign 2026) – wie im Entwurf ragt
      er oben aus der Leiste heraus, für die häufigste Aktion (neue Fahrstunde eintragen). */
-  .tab-fab{flex-shrink:0;width:46px;height:46px;border-radius:16px;background:var(--orange);color:#1c1305;
-    display:flex;align-items:center;justify-content:center;margin:-22px 6px 0;
+  .tab-fab{flex-shrink:0;width:54px;height:54px;border-radius:18px;background:var(--orange);color:#1c1305;
+    display:flex;align-items:center;justify-content:center;margin:-26px 6px 0;
     box-shadow:0 10px 22px -8px rgba(255,147,0,.65);border:3px solid var(--card)}
-  .tab-fab svg{width:22px;height:22px}
+  .tab-fab svg{width:26px;height:26px}
   .tab-fab:active{transform:scale(.94)}
   .tabpop{position:absolute;bottom:calc(100% + 10px);left:50%;transform:translateX(-50%);
     background:var(--card);border:1px solid var(--line);border-radius:var(--r-lg);padding:7px;z-index:1300;
@@ -3626,8 +3626,11 @@ const WEATHER_CODE_MAP = {
 // Kompaktes Wetter-Pill fürs Kopfzeile (Redesign 2026): zeigt nur noch die AKTUELLE
 // Temperatur + Symbol statt Tagesmin/-max, Regenwahrscheinlichkeit und Sonnenuntergang -
 // wie im Entwurf ein einzelner ruhiger Chip oben rechts, keine zweizeilige Wetterkarte mehr.
-function WeatherWidget({ city }) {
-    const [w, setW] = useState(null); // null=lädt/aus, {temp,code} | "error"
+// useWeather: gemeinsamer Fetch für Kopfzeilen-Chip (Temperatur) UND die
+// Sonnenuntergang-Zeile auf der Startseite - ein Hook statt zweier getrennter
+// Abfragen für denselben Ort.
+function useWeather(city) {
+    const [w, setW] = useState(null); // null=lädt/aus, {temp,code,sunset} | "error"
     useEffect(() => {
         if (!city) {
             setW(null);
@@ -3636,7 +3639,7 @@ function WeatherWidget({ city }) {
         let cancelled = false;
         // Kurzer Cache (30 Min.) statt Tages-Cache: eine AKTUELLE Temperatur veraltet über
         // Stunden hinweg spürbar, ein Tagescache (wie fürs vorherige Tagesmaximum) wäre hier falsch.
-        const cacheKey = "v5_weather_" + city.toLowerCase();
+        const cacheKey = "v6_weather_" + city.toLowerCase();
         try {
             const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
             if (cached && Date.now() - cached.fetchedAt < 30 * 60000) {
@@ -3652,11 +3655,12 @@ function WeatherWidget({ city }) {
                 if (!loc)
                     throw new Error("Ort nicht gefunden");
                 const fc = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude + "&longitude=" + loc.longitude
-                    + "&current=temperature_2m,weather_code&timezone=auto").then(r => r.json());
+                    + "&current=temperature_2m,weather_code&daily=sunset&timezone=auto").then(r => r.json());
                 const cur = fc && fc.current;
                 if (!cur || cur.temperature_2m == null)
                     throw new Error("Keine aktuelle Temperatur");
-                const data = { temp: Math.round(cur.temperature_2m), code: cur.weather_code, fetchedAt: Date.now() };
+                const sunset = fc && fc.daily && fc.daily.sunset && fc.daily.sunset[0];
+                const data = { temp: Math.round(cur.temperature_2m), code: cur.weather_code, sunset, fetchedAt: Date.now() };
                 if (!cancelled) {
                     setW(data);
                     try {
@@ -3672,12 +3676,15 @@ function WeatherWidget({ city }) {
         })();
         return () => { cancelled = true; };
     }, [city]);
-    if (!city || !w || w === "error")
+    return w;
+}
+function WeatherWidget({ city, weather }) {
+    if (!city || !weather || weather === "error")
         return null;
-    const info = WEATHER_CODE_MAP[w.code] || ["🌤️", ""];
+    const info = WEATHER_CODE_MAP[weather.code] || ["🌤️", ""];
     return React.createElement("div", { className: "weather-chip", title: city },
         React.createElement("span", null, info[0]),
-        React.createElement("span", null, w.temp + "°"));
+        React.createElement("span", null, weather.temp + "°"));
 }
 /* ════════ Splash & Auth ════════ */
 function Splash({ text }) {
@@ -4727,6 +4734,7 @@ function App() {
             l = locations[0];
         return (l && l.city && l.city.trim()) || "";
     })();
+    const weather = useWeather(myCity);
     const [birthdayPopup, setBirthdayPopup] = useState(null); // null | Liste der Schüler mit Geburtstag heute
     const [cityTplModal, setCityTplModal] = useState(null); // null | {busy,error,approved:[],mine:[]} Übernahme-/Vorschlag-Dialog
     const [proposeForm, setProposeForm] = useState(null); // null | {title,busy,error} In-App-Dialog zum Einreichen einer Streckenvorlage
@@ -7247,7 +7255,21 @@ function App() {
             metaParts.push(heute.length + (heute.length === 1 ? " Termin heute" : " Termine heute"));
         if (pendingCount > 0)
             metaParts.push(pendingCount + (pendingCount === 1 ? " offene Anfrage" : " offene Anfragen"));
-        const metaLine = metaParts.length ? metaParts.join("  \u00B7  ") : "Alles ruhig. Sch\u00F6nen Tag!";
+        const fallbackMetaLine = metaParts.length ? metaParts.join("  \u00B7  ") : "Alles ruhig. Sch\u00F6nen Tag!";
+        // Sonnenuntergang-Zeile 1:1 wie im Entwurf ("Sonnenuntergang 21:04 Uhr \u00B7 gute Sicht
+        // bis zum Abend") statt der reinen Terminanzahl - die z\u00E4hlt der Fahrlehrer ohnehin
+        // gleich in den Kacheln/der "Heute"-Karte ab. Ohne hinterlegten Ort/Wetterdaten
+        // bleibt die bisherige Status-Zeile als ehrlicher Fallback.
+        const metaLine = (() => {
+            if (!weather || weather === "error" || !weather.sunset)
+                return fallbackMetaLine;
+            const sunset = new Date(weather.sunset);
+            const diffMin = (sunset - new Date()) / 60000;
+            const sichtText = diffMin < 0 ? "bereits dunkel drau\u00DFen"
+                : diffMin < 120 ? "bald wird es d\u00E4mmrig"
+                    : "gute Sicht bis zum Abend";
+            return "Sonnenuntergang " + hm(weather.sunset) + " Uhr \u00B7 " + sichtText;
+        })();
 
         // Vier gleichwertige, farbige Kennzahlen-Kacheln - 1:1 wie im Entwurf (Aktive
         // Sch\u00FCler/Termine-Woche/Offene Rechnungen/Offene Anfragen), keine Aktions-Kachel
@@ -11601,7 +11623,7 @@ function App() {
                                     React.createElement("div", { className: "brand-name" }, (school && school.name) || "Allindrive"),
                                     React.createElement("div", { className: "brand-sub" }, (school && school.subtitle) || "Automatik · Klasse B")))),
                         React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 } },
-                            React.createElement(WeatherWidget, { city: myCity }),
+                            React.createElement(WeatherWidget, { city: myCity, weather: weather }),
                             React.createElement("div", { className: "save-pill" }, saved ? "✓ Gespeichert" : "Speichert…")))),
                 // Hinweiszeile statt Signalkasten: dieser Banner erscheint auf jedem Screen und
                 // stand vorher als amber umrandete Karte mit rotem Vollton-Icon lauter da als der
