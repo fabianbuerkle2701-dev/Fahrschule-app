@@ -2663,6 +2663,15 @@ async function publicBookingInfo(code) {
     }
     return (data && data[0]) || null;
 }
+/* ════════ Öffentlicher Zahler-Zugang (Eltern etc., nur Rechnungen/Zahlstatus) ════════ */
+async function publicPayerOverview(code) {
+    const { data, error } = await sb.rpc("public_payer_overview", { p_code: code });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return (data && data[0]) || null;
+}
 // Selbstanmeldung eines neuen Interessenten über den Buchungslink. Legt den Schüler serverseitig
 // mit pending=true an; der Fahrlehrer bestätigt/löscht das in der App (siehe renderListe).
 async function publicEnrollStudent(code, vorname, name, tel, geb, referralCode) {
@@ -6575,6 +6584,30 @@ function App() {
         }
     }
     // Fahrschüler-Zugang teilen: Buchungslink + Name + persönlicher PIN
+    // Zufaelliger Bearer-Code fuer den Zahler-Link – bewusst deutlich laenger als der
+    // Empfehlungscode (der ist zum Eintippen gedacht, dieser hier ist ein Geheimnis).
+    function genPayerCode() {
+        return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+    }
+    function payerURL(s) {
+        if (!s.payerCode)
+            return "";
+        return window.location.origin + window.location.pathname + "?zahler=" + s.payerCode;
+    }
+    function shareePayerAccess(s) {
+        const code = s.payerCode || genPayerCode();
+        if (!s.payerCode)
+            updateActive({ payerCode: code });
+        const url = window.location.origin + window.location.pathname + "?zahler=" + code;
+        const text = "Zahlungs\u00FCbersicht f\u00FCr " + dispName(s) + ": " + url;
+        const num = waNumber(s.tel);
+        if (num)
+            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+        else {
+            navigator.clipboard && navigator.clipboard.writeText(url);
+            showToast("Kein Telefon hinterlegt \u2013 Link wurde in die Zwischenablage kopiert.");
+        }
+    }
     async function shareStudentAccess(s) {
         if (!bookingCode) {
             showFlash("Erzeuge Buchungscode…");
@@ -8264,6 +8297,21 @@ function App() {
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinChanged
                         ? "Der Schüler hat den PIN inzwischen selbst geändert. Du siehst hier nur noch den Start-PIN. Vergibst du einen neuen PIN, wird der selbst gewählte des Schülers überschrieben und er legt beim nächsten Login wieder einen eigenen fest."
                         : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt.")),
+                React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 12, marginBottom: 4 } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Zahler-Zugang"),
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 12 } },
+                        "Für Eltern oder wer sonst die Ausbildung bezahlt: zeigt ausschließlich Rechnungen und Zahlstatus – keinen ADK-Stand, keine Strecken, keine Termine. ",
+                        dispName(active),
+                        " selbst sieht darüber nichts, weil dieser Link separat ist."),
+                    active.payerCode && React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                        React.createElement("label", null, "Link"),
+                        React.createElement("input", { type: "text", readOnly: true, value: payerURL(active), onFocus: e => e.target.select(), style: { fontSize: 12.5 } })),
+                    React.createElement("div", { style: { display: "flex", gap: 8 } },
+                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, onClick: () => shareePayerAccess(active) },
+                            active.payerCode ? "Erneut teilen" : "Zugang erstellen & teilen"),
+                        active.payerCode && React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8, color: "#B3362A" },
+                            onClick: async () => { if (await askConfirm({ message: "Zahler-Zugang widerrufen? Der bisherige Link funktioniert danach nicht mehr." }))
+                                    updateActive({ payerCode: "" }); } }, "Widerrufen"))),
                 React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 12, marginBottom: 4 } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Empfehlungsprogramm"),
                     React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 12 } },
@@ -12447,6 +12495,13 @@ function getBookingCodeFromURL() {
     catch (e) { }
     return null;
 }
+function getPayerCodeFromURL() {
+    try {
+        return new URL(window.location.href).searchParams.get("zahler");
+    }
+    catch (e) { }
+    return null;
+}
 // ════════ Video-Bibliothek (öffentlich, kein Login nötig) ════════
 function VideoLibrary({ code }) {
     const [list, setList] = React.useState(undefined); // undefined=lädt, null=fehler, []=leer
@@ -12893,6 +12948,52 @@ function ApptRow({ a, past, onCancel, cancelBusy }) {
             React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round" },
                 React.createElement("polyline", { points: "3 6 5 6 21 6" }),
                 React.createElement("path", { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" }))));
+}
+/* ════════ Öffentliche Zahler-Seite: nur Rechnungen & Zahlstatus, kein Ausbildungsstand ════════ */
+function PayerPage({ code }) {
+    const [data, setData] = React.useState(undefined); // undefined=lädt, null=ungültig, {}=geladen
+    React.useEffect(() => {
+        publicPayerOverview(code).then(d => setData(d || null)).catch(() => setData(null));
+    }, [code]);
+    if (data === undefined)
+        return React.createElement(Splash, { text: "Lädt…" });
+    if (!data)
+        return React.createElement("div", { className: "pad", style: { paddingTop: 60, textAlign: "center" } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 8 } }, "Link ungültig"),
+            React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Dieser Zahler-Link ist nicht (mehr) gültig. Bitte bei der Fahrschule nachfragen."));
+    const invoices = (data.invoices || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+    const payments = data.payments || [];
+    const paidFor = id => payments.filter(p => p.invoiceId === id).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    const name = [data.vorname, data.name].filter(Boolean).join(" ");
+    const gesamt = invoices.reduce((s, i) => s + (Number(i.total) || 0), 0);
+    const bezahlt = invoices.reduce((s, i) => s + Math.min(paidFor(i.id), Number(i.total) || 0), 0);
+    return React.createElement("div", { className: "pad", style: { maxWidth: 480, margin: "0 auto" } },
+        React.createElement("div", { style: { margin: "20px 2px" } },
+            React.createElement("div", { className: "home-eyebrow" }, "Zahlungsübersicht"),
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 24, marginTop: 4 } }, name || "Fahrschüler"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 6 } }, "Nur Rechnungen und Zahlstatus – keine Ausbildungsdaten.")),
+        React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 16, display: "flex", gap: 16 } },
+            React.createElement("div", { style: { flex: 1 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, eurFmt(gesamt)),
+                React.createElement("div", { className: "home-eyebrow", style: { marginTop: 4 } }, "Gesamt in Rechnung")),
+            React.createElement("div", { style: { width: 1, background: "var(--line)" } }),
+            React.createElement("div", { style: { flex: 1 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, eurFmt(Math.max(0, gesamt - bezahlt))),
+                React.createElement("div", { className: "home-eyebrow", style: { marginTop: 4 } }, "Noch offen"))),
+        invoices.length === 0
+            ? React.createElement("div", { className: "card", style: { padding: "18px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Rechnungen vorhanden.")
+            : React.createElement("div", { className: "card", style: { padding: "6px 14px" } }, invoices.map(inv => {
+                const paid = paidFor(inv.id), total = Number(inv.total) || 0;
+                const st = paid + 0.005 >= total ? "bezahlt" : paid > 0.005 ? "teil" : "offen";
+                const badge = st === "bezahlt" ? { t: "Bezahlt", c: "var(--green)" } : st === "teil" ? { t: "Teilweise", c: "var(--amber)" } : { t: "Offen", c: "var(--muted)" };
+                return React.createElement("div", { key: inv.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderBottom: "1px solid var(--line)" } },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, inv.number),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                            (inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : ""), " · ",
+                            React.createElement("span", { style: { color: badge.c, fontWeight: 700 } }, badge.t))),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(total)));
+            })));
 }
 function BookingPage({ code }) {
     const [info, setInfo] = React.useState(undefined); // undefined=lädt, null=ungültig
@@ -13790,6 +13891,9 @@ function Root() {
     const code = getBookingCodeFromURL();
     if (code)
         return React.createElement(BookingPage, { code: code });
+    const payerCode = getPayerCodeFromURL();
+    if (payerCode)
+        return React.createElement(PayerPage, { code: payerCode });
     const calCode = getCalCodeFromURL();
     if (calCode)
         return React.createElement(CalendarPage, { code: calCode });
