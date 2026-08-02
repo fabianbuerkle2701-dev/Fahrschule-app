@@ -3978,6 +3978,49 @@ function rmapEnsureLeaflet() {
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
     document.head.appendChild(script);
 }
+// Alle jemals gefahrenen Strecken eines Schuelers uebereinandergelegt – reine Anzeige
+// (kein Aufzeichnen, keine Stecknadeln), fuer Fahrlehrer UND Fahrschueler.
+function AllRoutesMap({ routes, color }) {
+    const lineColor = color || "#FF9300";
+    const elRef = useRef(null), mapRef = useRef(null), layerRef = useRef(null);
+    const [ready, setReady] = useState(!!window.L);
+    useEffect(() => {
+        if (window.L) { setReady(true); return; }
+        rmapEnsureLeaflet();
+        const t = setInterval(() => { if (window.L) { setReady(true); clearInterval(t); } }, 200);
+        return () => clearInterval(t);
+    }, []);
+    useEffect(() => {
+        if (!ready || !elRef.current || mapRef.current)
+            return;
+        const L = window.L;
+        const map = L.map(elRef.current, { zoomControl: true, attributionControl: true }).setView([51.163, 10.447], 5);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+        layerRef.current = L.layerGroup().addTo(map);
+        mapRef.current = map;
+        setTimeout(() => { try { map.invalidateSize(); } catch (_) { } }, 200);
+        return () => { try { map.remove(); } catch (_) { } mapRef.current = null; };
+    }, [ready]);
+    useEffect(() => {
+        const L = window.L, map = mapRef.current, layer = layerRef.current;
+        if (!L || !map || !layer)
+            return;
+        layer.clearLayers();
+        const alleBounds = [];
+        (routes || []).forEach(pts => {
+            if (!pts || pts.length < 2)
+                return;
+            L.polyline(pts, { color: lineColor, weight: 5, opacity: .55, lineJoin: "round" }).addTo(layer);
+            alleBounds.push(...pts);
+        });
+        if (alleBounds.length) {
+            try { map.fitBounds(alleBounds, { padding: [24, 24], maxZoom: 15 }); } catch (_) { }
+        }
+    }, [routes, ready, lineColor]);
+    return React.createElement("div", { className: "rmap-wrap", style: { height: 260, position: "relative" } },
+        React.createElement("div", { ref: elRef, style: { width: "100%", height: "100%" } }),
+        !ready && React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "var(--muted)" } }, "Karte lädt…"));
+}
 function LessonMap({ route, pins, recActive, recTick, recPts, otherRecording, onStart, onStop, onDeleteRoute, onSavePin, onDeletePin, color }) {
     const lineColor = color || "#FF9300";
     const elRef = useRef(null), mapRef = useRef(null), lineRef = useRef(null), liveRef = useRef(null);
@@ -4172,6 +4215,7 @@ function App() {
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
     const [postfachOpen, setPostfachOpen] = useState(false); // zentraler Nachrichten-Posteingang auf der Startseite
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
+    const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
@@ -7441,8 +7485,17 @@ function App() {
     }
     function renderTagebuch() {
         const lessons = active.lessons || [];
+        const alleStrecken = lessons.filter(l => l.route && l.route.pts && l.route.pts.length >= 2).map(l => l.route.pts);
         return React.createElement("div", { className: "pad" },
             studentHeader(),
+            alleStrecken.length > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden" } },
+                React.createElement("button", { onClick: () => setRoutesMapOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "13px 14px", textAlign: "left",
+                        fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14.5, color: "var(--ink)" } },
+                    "Alle Strecken (" + alleStrecken.length + ")",
+                    React.createElement("span", { style: { flex: 1 } }),
+                    React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: routesMapOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
+                routesMapOpen && React.createElement("div", { style: { borderTop: "1px solid var(--line)" } },
+                    React.createElement(AllRoutesMap, { routes: alleStrecken, color: (school && school.color) || "#FF9300" }))),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 2px 12px" } },
                 React.createElement("div", null,
                     React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 20, lineHeight: 1 } }, "Fahrstunden"),
