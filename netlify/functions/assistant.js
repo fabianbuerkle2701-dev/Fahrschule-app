@@ -38,7 +38,7 @@ Heutiges Datum: ${today || "unbekannt"}
 Verfügbare Schüler mit ihren aktuellen Daten (alle Beträge in Euro):
 ${JSON.stringify(roster)}
 
-Bedeutung der Felder: vorname, name, telefon; theorie (Theorieprüfung bestanden true/false); adkProzent (Fortschritt Ausbildungsnachweis); streckenProzent; gesamtProzent; fahrstunden (Anzahl gefahrener Fahrstunden); gefahreneMinuten; berechnet (Summe der Kosten); bezahlt (Summe der Zahlungen); offen (offener Betrag, negativ bedeutet Guthaben).
+Bedeutung der Felder: vorname, name, telefon; theorie (Theorieprüfung bestanden true/false); adkProzent (Fortschritt Ausbildungsnachweis); streckenProzent; gesamtProzent; fahrstunden (Anzahl gefahrener Fahrstunden); gefahreneMinuten; berechnet (Summe der Kosten); bezahlt (Summe der Zahlungen); offen (offener Betrag, negativ bedeutet Guthaben); abschnitte (Fortschritt JE Abschnitt, z.B. [{"art":"ADK","titel":"Grundstufe","prozent":94},{"art":"Strecken","titel":"Autobahn","prozent":0}] – nutze das für konkrete Trainingsvorschläge statt nur die Gesamtprozent zu nennen).
 
 Verfügbare ADK-Punkte (id, label, count=Soll):
 ${JSON.stringify(adk)}
@@ -74,6 +74,12 @@ Regeln für action "antwort" (FRAGEN und ÜBERSICHTEN):
 - Schreibe natürlich und auf den Punkt. Bei Listen darfst du Namen mit Beträgen in Zeilen auflisten. Keine Tabellen, keine erfundenen Zahlen, nur die vorhandenen Daten.
 - Wenn die Daten für eine Antwort nicht ausreichen, sag das ehrlich.
 - Beträge mit zwei Nachkommastellen und Euro-Zeichen, z.B. 65,00 €.
+
+Regeln für TRAININGSVORSCHLÄGE (Fragen wie "Was sollte X als nächstes üben?", "Trainingsvorschlag für X", "Womit weitermachen?"):
+- Schau in abschnitte des Schülers nach dem Abschnitt mit dem NIEDRIGSTEN Prozentwert (0% zuerst). Bevorzuge dabei "Strecken"-Abschnitte mit 0% (Überlandfahrten, Autobahn, Dämmerung/Nacht) vor ADK-Feinheiten, weil das die Pflicht-Sonderfahrten sind, die am längsten Vorlauf brauchen.
+- Nenne IMMER den konkreten Abschnittsnamen und seinen Prozentwert, nicht nur "sie sollte weiterüben". Beispiel: "Clara steht bei Autobahn und Überlandfahrten noch bei 0%, dort würde ich als Nächstes ansetzen – Theorie ist bestanden, die Grundstufe läuft mit 94% schon gut."
+- Ist gesamtProzent bereits bei 100% oder alle Strecken-Pflichtabschnitte >0%, sag das ehrlich statt eine Pflichtübung zu erfinden, und weise stattdessen auf den nächsten sinnvollen Feinschliff hin (niedrigster verbleibender Abschnitt).
+- Erfinde keine Übungsinhalte, die nicht in abschnitte auftauchen.
 
 Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 - Schüler eindeutig über die Namen zuordnen. Bei mehreren/keinem Treffer needsClarification true.
