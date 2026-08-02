@@ -107,19 +107,25 @@
      mit einer Haarlinie abgesetzt. */
   .topbar{background:var(--card);color:var(--ink);
     padding:calc(11px + env(safe-area-inset-top)) 16px 11px;
-    position:sticky;top:0;z-index:30;border-bottom:1px solid var(--line)}
+    position:sticky;top:0;z-index:30}
   .topbar-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
   .brand{display:flex;align-items:center;gap:10px;min-width:0}
-  /* object-fit:cover statt gestreckt – ein nicht quadratisches Logo wird sonst auf 34x34
-     verzerrt, weil <img> ohne object-fit einfach stur auf width/height gestaucht wird. */
-  .brand img{width:34px;height:34px;border-radius:50%;flex-shrink:0;object-fit:cover}
-  .brand-name{font-family:var(--font-d);font-weight:800;font-size:16px;letter-spacing:.01em;line-height:1.1;
+  /* object-fit:cover statt gestreckt – ein nicht quadratisches Logo wird sonst auf 40x40
+     verzerrt, weil <img> ohne object-fit einfach stur auf width/height gestaucht wird.
+     Etwas größer als vorher (34->40px) auf Nutzerwunsch. */
+  .brand img{width:40px;height:40px;border-radius:50%;flex-shrink:0;object-fit:cover}
+  .brand-name{font-family:var(--font-d);font-weight:800;font-size:17px;letter-spacing:.01em;line-height:1.1;
     white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .brand-sub{font-size:10px;font-weight:600;color:var(--muted);letter-spacing:.07em;text-transform:uppercase;margin-top:2px}
   /* Statusanzeige gehört zu den leisesten Infos der App – vorher ein oranges Vollton-Pill,
      das mit den echten Aktionen um Aufmerksamkeit konkurrierte. */
   .save-pill{font-size:11px;font-weight:700;background:transparent;color:var(--muted);
-    border-radius:99px;padding:4px 0;white-space:nowrap}
+    border-radius:99px;padding:4px 0;white-space:nowrap;text-align:right}
+  /* Kompaktes Wetter-Pill oben rechts in der Kopfzeile (Redesign 2026) - nur Icon + aktuelle
+     Temperatur, wie im Entwurf. */
+  .weather-chip{display:inline-flex;align-items:center;gap:5px;flex-shrink:0;background:var(--field-bg);
+    border:1px solid var(--line);border-radius:99px;padding:5px 11px;font-size:12.5px;font-weight:700;
+    color:var(--ink-2);font-family:var(--font-d)}
 
   /* ── Cards & sections ── */
   /* 140px reserviert Platz für Tab-Leiste + schwebenden KI-Helfer-Button am unteren Rand.
@@ -333,10 +339,11 @@
     /* Kopfzeile deutlich präsenter als auf dem Handy statt einer schmalen Leiste. */
     .topbar{padding:22px 28px}
     .brand{gap:14px}
-    .brand img{width:46px;height:46px}
+    .brand img{width:54px;height:54px}
     .brand-name{font-size:22px}
     .brand-sub{font-size:12.5px;margin-top:4px}
     .save-pill{font-size:13px;padding:6px 2px}
+    .weather-chip{font-size:13.5px;padding:7px 13px}
     /* Bottom-Sheets (mobiles Muster) werden auf dem Desktop zu zentrierten Dialogen */
     .modal-overlay{align-items:center!important}
     .modal-overlay>div{max-height:90vh;overflow-y:auto}
@@ -2835,8 +2842,15 @@ async function fetchBookingCode(uid) {
         return data.booking_code;
     // Kein Code vorhanden (z.B. neu registriertes Konto): einen erzeugen und speichern,
     // damit der Buchungslink für diesen Fahrlehrer von Anfang an funktioniert.
+    // Bugfix: Direkt nach der Registrierung existiert die profiles-Zeile manchmal noch
+    // nicht (der DB-Trigger, der sie anlegt, braucht einen Moment) - der upsert() lief dann
+    // als INSERT mit nur id+booking_code und schlug fehl, weil "email" NOT NULL ist ("null
+    // value in column "email" violates not-null constraint"). Email aus der aktuellen
+    // Session mitgeben, damit der Fallback-INSERT auch in diesem Fall funktioniert.
+    const { data: userData } = await sb.auth.getUser();
+    const email = (userData && userData.user && userData.user.email) || undefined;
     const fresh = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 5);
-    const { error: upErr } = await sb.from("profiles").upsert({ id: uid, booking_code: fresh }, { onConflict: "id" });
+    const { error: upErr } = await sb.from("profiles").upsert({ id: uid, booking_code: fresh, email }, { onConflict: "id" });
     if (upErr) {
         console.error("Buchungscode konnte nicht erzeugt werden:", upErr);
         return null;
@@ -3568,19 +3582,24 @@ const WEATHER_CODE_MAP = {
 // Wetter-Kachel für die Startseite: hilft bei der Einschätzung der Straßenverhältnisse
 // für die heutigen Fahrstunden (z.B. Glätte, Starkregen). Rein informativ, blendet sich
 // selbst aus, wenn kein Ort hinterlegt ist oder die Abfrage fehlschlägt.
+// Kompaktes Wetter-Pill fürs Kopfzeile (Redesign 2026): zeigt nur noch die AKTUELLE
+// Temperatur + Symbol statt Tagesmin/-max, Regenwahrscheinlichkeit und Sonnenuntergang -
+// wie im Entwurf ein einzelner ruhiger Chip oben rechts, keine zweizeilige Wetterkarte mehr.
 function WeatherWidget({ city }) {
-    const [w, setW] = useState(null); // null=lädt/aus, {temp,tempMin,code,rain,sunset} | "error"
+    const [w, setW] = useState(null); // null=lädt/aus, {temp,code} | "error"
     useEffect(() => {
         if (!city) {
             setW(null);
             return;
         }
         let cancelled = false;
-        const cacheKey = "v4_weather_" + city.toLowerCase() + "_" + ymd(new Date());
+        // Kurzer Cache (30 Min.) statt Tages-Cache: eine AKTUELLE Temperatur veraltet über
+        // Stunden hinweg spürbar, ein Tagescache (wie fürs vorherige Tagesmaximum) wäre hier falsch.
+        const cacheKey = "v5_weather_" + city.toLowerCase();
         try {
-            const cached = localStorage.getItem(cacheKey);
-            if (cached) {
-                setW(JSON.parse(cached));
+            const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
+            if (cached && Date.now() - cached.fetchedAt < 30 * 60000) {
+                setW(cached);
                 return;
             }
         }
@@ -3592,12 +3611,11 @@ function WeatherWidget({ city }) {
                 if (!loc)
                     throw new Error("Ort nicht gefunden");
                 const fc = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude + "&longitude=" + loc.longitude
-                    + "&daily=weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunset&timezone=auto&forecast_days=1").then(r => r.json());
-                const d = fc && fc.daily;
-                if (!d || !Array.isArray(d.weathercode) || !d.weathercode.length)
-                    throw new Error("Keine Vorhersage");
-                const data = { temp: Math.round(d.temperature_2m_max[0]), tempMin: Math.round(d.temperature_2m_min[0]), code: d.weathercode[0], rain: d.precipitation_probability_max ? d.precipitation_probability_max[0] : null,
-                    sunset: (d.sunset && d.sunset[0]) || null };
+                    + "&current=temperature_2m,weather_code&timezone=auto").then(r => r.json());
+                const cur = fc && fc.current;
+                if (!cur || cur.temperature_2m == null)
+                    throw new Error("Keine aktuelle Temperatur");
+                const data = { temp: Math.round(cur.temperature_2m), code: cur.weather_code, fetchedAt: Date.now() };
                 if (!cancelled) {
                     setW(data);
                     try {
@@ -3616,28 +3634,9 @@ function WeatherWidget({ city }) {
     if (!city || !w || w === "error")
         return null;
     const info = WEATHER_CODE_MAP[w.code] || ["🌤️", ""];
-    let sunsetTime = "";
-    if (w.sunset) {
-        try {
-            sunsetTime = new Date(w.sunset).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
-        }
-        catch (e) { }
-    }
-    return React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3, marginTop: 7 } },
-        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
-            React.createElement("span", { style: { fontSize: 15 } }, info[0]),
-            React.createElement("span", null,
-                info[1],
-                ", ",
-                w.tempMin,
-                "–",
-                w.temp,
-                "° in ",
-                city,
-                (w.rain != null && w.rain >= 30) ? (" · " + w.rain + "% Regen") : "")),
-        sunsetTime && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "var(--muted)", fontWeight: 500 } },
-            React.createElement("span", { style: { fontSize: 15 } }, "🌇"),
-            React.createElement("span", null, "Sonnenuntergang " + sunsetTime + " Uhr")));
+    return React.createElement("div", { className: "weather-chip", title: city },
+        React.createElement("span", null, info[0]),
+        React.createElement("span", null, w.temp + "°"));
 }
 /* ════════ Splash & Auth ════════ */
 function Splash({ text }) {
@@ -7224,8 +7223,7 @@ function App() {
                     gruss,
                     vorname ? (", " + vorname) : "",
                     "!"),
-                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine),
-                React.createElement(WeatherWidget, { city: myCity })),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine)),
             // 2) Live-Aufzeichnung (nur wenn aktiv)
             recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),
@@ -11535,7 +11533,9 @@ function App() {
                                 React.createElement("div", null,
                                     React.createElement("div", { className: "brand-name" }, (school && school.name) || "Allindrive"),
                                     React.createElement("div", { className: "brand-sub" }, (school && school.subtitle) || "Automatik · Klasse B")))),
-                        React.createElement("div", { className: "save-pill" }, saved ? "✓ Gespeichert" : "Speichert…"))),
+                        React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 } },
+                            React.createElement(WeatherWidget, { city: myCity }),
+                            React.createElement("div", { className: "save-pill" }, saved ? "✓ Gespeichert" : "Speichert…")))),
                 // Hinweiszeile statt Signalkasten: dieser Banner erscheint auf jedem Screen und
                 // stand vorher als amber umrandete Karte mit rotem Vollton-Icon lauter da als der
                 // eigentliche Seiteninhalt \u2013 obwohl die Tab-Leiste dieselbe Zahl schon als Badge zeigt.
