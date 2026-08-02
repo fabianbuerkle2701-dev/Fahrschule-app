@@ -1758,7 +1758,7 @@ catch (e) { } }
 // Map a DB row -> app student object (data holds everything; id/owner/shared come from row)
 function rowToStudent(row) {
     const d = row.data || {};
-    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: true };
+    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: true, _createdAt: row.created_at };
 }
 // Fetch all students visible to me (mine + shared with me)
 async function fetchStudents(uid) {
@@ -4171,6 +4171,7 @@ function App() {
     const [schoolLeistungen, setSchoolLeistungen] = useState(null); // null | {busy,error,list} schulweite Leistungen-Liste
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
     const [postfachOpen, setPostfachOpen] = useState(false); // zentraler Nachrichten-Posteingang auf der Startseite
+    const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
@@ -6782,6 +6783,7 @@ function App() {
         const icUsers = extra => svg(["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", "M23 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"], extra);
         const icWallet = extra => svg(["M20 12V8H6a2 2 0 0 1 0-4h12v4", "M4 6v12a2 2 0 0 0 2 2h14v-4", "M18 12a2 2 0 0 0 0 4h4v-4z"], extra);
         const icMail = extra => svg(["M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z", "M22 6l-10 7L2 6"], extra);
+        const icClock = extra => svg(["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 7v5l3 3"], extra);
         const icPlus = extra => svg(["M12 5v14", "M5 12h14"], extra);
         const icDoc = extra => svg(["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M9 13h6", "M9 17h4"], extra);
         const icRoute = extra => svg(["M9 6h8a3 3 0 0 1 0 6H7a3 3 0 0 0 0 6h8", "M4 6a2 2 0 1 0 4 0 2 2 0 0 0-4 0z", "M16 18a2 2 0 1 0 4 0 2 2 0 0 0-4 0z"], extra);
@@ -6796,6 +6798,25 @@ function App() {
         const naechster = heute.find(a => (a.end_at || a.start_at) >= jetzt);
         const aktiveSchueler = (students || []).filter(s => !s.archived).length;
         const unreadMsgList = (students || []).filter(s => !s.archived && hasUnreadMsg(s));
+        // Schüler, die 3 Wochen keinen bestätigten Termin hatten – wer das übersieht,
+        // merkt einen leisen Abbrecher oft erst, wenn er längst weg ist.
+        const STILL_TAGE = 21;
+        const stillVorher = Date.now() - STILL_TAGE * 86400000;
+        const stillList = (() => {
+            const letzterTermin = {};
+            (appts || []).forEach(a => {
+                if (a.status !== "confirmed" || !a.student_id)
+                    return;
+                const t = new Date(a.start_at).getTime();
+                if (!letzterTermin[a.student_id] || t > letzterTermin[a.student_id])
+                    letzterTermin[a.student_id] = t;
+            });
+            return (students || []).filter(s => !s.archived && s._isMine).map(s => {
+                const letzte = letzterTermin[s.id] || (s._createdAt ? new Date(s._createdAt).getTime() : null);
+                return { s, letzte };
+            }).filter(x => x.letzte && x.letzte < stillVorher && x.letzte < Date.now())
+                .sort((a, b) => a.letzte - b.letzte);
+        })();
         const woche = (() => {
             const start = new Date();
             start.setHours(0, 0, 0, 0);
@@ -6863,6 +6884,15 @@ function App() {
                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, unreadMsgList.length === 1 ? "Neue Nachricht" : "Neue Nachrichten"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, unreadMsgList.length === 1 ? dispName(unreadMsgList[0]) + " hat geschrieben" : unreadMsgList.length + " Schüler warten auf Antwort")),
+                chev),
+            // Lange nicht gefahren: leise Abbrecher, bevor sie ganz weg sind
+            stillList.length > 0 && React.createElement("button", { onClick: () => setStillOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--field-bg)", color: "var(--ink-2)" } },
+                    icClock({ width: 19, height: 19 })),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
+                        stillList.length === 1 ? "1 Schüler lange nicht gefahren" : stillList.length + " Schüler lange nicht gefahren"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Seit über " + STILL_TAGE + " Tagen kein Termin")),
                 chev),
             // 4) Offene Terminvorschläge (nur wenn vorhanden)
             pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
@@ -12092,6 +12122,34 @@ function App() {
                     });
                 })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setPostfachOpen(false) }, "Schlie\u00DFen"))),
+        // Lange nicht gefahren: Liste mit fertiger, freundlicher WhatsApp-Erinnerung je Sch\u00FCler
+        stillOpen && React.createElement("div", { onClick: () => setStillOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Lange nicht gefahren"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Seit \u00FCber " + STILL_TAGE + " Tagen kein best\u00E4tigter Termin"),
+                stillList.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Alle Sch\u00FCler waren k\u00FCrzlich da. \uD83C\uDF89")
+                    : stillList.map(({ s, letzte }) => {
+                        const tage = Math.floor((Date.now() - letzte) / 86400000);
+                        function erinnern() {
+                            const num = waNumber(s.tel);
+                            const text = "Hallo " + ((s.vorname || "").trim() || dispName(s)) + ", sch\u00F6n l\u00E4nger nichts von dir geh\u00F6rt \u2013 sollen wir mal wieder einen Fahrtermin ausmachen? Meld dich gern, wenn's passt!";
+                            if (!num) {
+                                showToast("F\u00FCr " + dispName(s) + " ist keine Telefonnummer hinterlegt.");
+                                return;
+                            }
+                            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+                        }
+                        return React.createElement("div", { key: s.id, className: "card", style: { display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8 } },
+                            React.createElement("div", { className: "avatar", style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, "seit " + tage + " Tagen kein Termin")),
+                            React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
+                    }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85vh", overflowY: "auto" } },
