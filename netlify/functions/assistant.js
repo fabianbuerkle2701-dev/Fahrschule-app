@@ -99,7 +99,7 @@ Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 
   const payload = {
     model: "claude-sonnet-5",
-    max_tokens: 700,
+    max_tokens: 1400,
     system,
     messages: [{ role: "user", content: message }],
   };
@@ -122,9 +122,30 @@ Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
     let text = "";
     if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
     text = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    // Manche Antworten enthalten trotz Anweisung noch Text vor/nach dem JSON-Objekt
+    // (z.B. eine kurze Einleitung) - robuster ist, den Bereich zwischen der ersten
+    // öffnenden und letzten schließenden geschweiften Klammer zu extrahieren, statt
+    // nur Markdown-Codezäune am Anfang/Ende zu entfernen.
     let parsed;
     try { parsed = JSON.parse(text); }
-    catch (e) { return { statusCode: 502, headers, body: JSON.stringify({ error: "Antwort konnte nicht gelesen werden", raw: text }) }; }
+    catch (e) {
+      const first = text.indexOf("{");
+      const last = text.lastIndexOf("}");
+      if (first !== -1 && last > first) {
+        try { parsed = JSON.parse(text.slice(first, last + 1)); }
+        catch (e2) { parsed = null; }
+      }
+      if (!parsed) {
+        // Bei Abbruch mitten im JSON (z.B. Antwortlänge ausgeschöpft) ist stop_reason
+        // "max_tokens" - das dem Fahrlehrer statt eines generischen Fehlers zu sagen
+        // hilft beim Einordnen, ob es ein einmaliger Ausrutscher war.
+        const truncated = data && data.stop_reason === "max_tokens";
+        const msg = truncated
+          ? "Die Antwort wurde mitten im Satz abgeschnitten (zu lang). Bitte nochmal versuchen oder die Frage präziser stellen."
+          : "Antwort konnte nicht gelesen werden";
+        return { statusCode: 502, headers, body: JSON.stringify({ error: msg, raw: text }) };
+      }
+    }
     return { statusCode: 200, headers, body: JSON.stringify({ result: parsed }) };
   } catch (e) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
