@@ -3104,7 +3104,9 @@ function calcLern(items, adk, stu) {
 function calcBack(stu, strecken) {
     const str = stu.strecken || {};
     let soll = 0, done = 0;
-    strecken.forEach(sec => sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); }));
+    // Abschnitte "nach Einschätzung" haben kein Soll und zählen nicht in die Prozentrechnung ein –
+    // die übrigen Abschnitte behalten dadurch exakt ihren bisherigen Beitrag zum Gesamtwert.
+    strecken.forEach(sec => { if (isEinschaetzung(sec)) return; sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); }); });
     return soll ? Math.round(done / soll * 100) : 0;
 }
 function secLern(stu, sec) {
@@ -3113,6 +3115,8 @@ function secLern(stu, sec) {
     return soll ? Math.round(done / soll * 100) : 0;
 }
 function secBack(stu, sec) {
+    if (isEinschaetzung(sec))
+        return null; // kein Soll, daher kein Prozentwert – Aufrufer zeigen stattdessen den Zähler (secTally)
     const str = stu.strecken || {};
     let soll = 0, done = 0;
     sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); });
@@ -3220,6 +3224,15 @@ function invoiceStatus(s, inv) {
 // werden bewusst ignoriert, damit eine Änderung der Anzahl überall gleich wirkt.
 function effCount(s, item) {
     return Math.max(1, parseInt(item.count, 10) || 1);
+}
+// Reform 2026/2027: ein Strecken-Abschnitt kann statt fester Soll-Zahlen "nach Einschätzung"
+// geführt werden (kein Ziel, nur ein Zähler). Der Fahrlehrer entscheidet pädagogisch, wann genug
+// geübt wurde. Opt-in je Abschnitt über sec.mode, ohne bestehende Soll-Zahlen zu verändern.
+function isEinschaetzung(sec) { return !!(sec && sec.mode === "einschaetzung"); }
+// Summe der erfassten Durchgänge eines Einschätzungs-Abschnitts (kein Soll, daher kein Prozentwert).
+function secTally(stu, sec) {
+    const str = (stu && stu.strecken) || {};
+    return sec.items.reduce((sum, it) => sum + (parseInt(str[it.id], 10) || 0), 0);
 }
 function fmtD(d) { try {
     return new Date(d).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" });
@@ -3394,12 +3407,13 @@ function pruefungsreife(stu, adk, strecken) {
             offeneADK.push({ sec: sec.title, label: it.label, done, soll: c });
     }));
     const offeneStrecken = []; // Stationen mit weniger Durchgängen als gefordert
-    strecken.forEach(sec => sec.items.forEach(it => {
+    // Abschnitte "nach Einschätzung" haben kein Soll und können die Prüfungsreife daher nie blockieren.
+    strecken.forEach(sec => { if (isEinschaetzung(sec)) return; sec.items.forEach(it => {
         const c = effCount(stu, it);
         const done = (stu.strecken && stu.strecken[it.id]) || 0;
         if (done < c)
             offeneStrecken.push({ sec: sec.title, label: it.label, done, soll: c });
-    }));
+    }); });
     const theorieOffen = !stu.theorie;
     const total = offeneADK.length + offeneStrecken.length + (theorieOffen ? 1 : 0);
     return { offeneADK, offeneStrecken, theorieOffen, total };
@@ -6126,7 +6140,9 @@ function App() {
                 // kann WAS als nächstes dran ist (z.B. "Autobahn 0%"), statt nur eine Gesamtzahl zu nennen.
                 const abschnitte = [
                     ...(tplS.adk || []).map(sec => ({ art: "ADK", titel: sec.title, prozent: secLern(s, sec) })),
-                    ...(tplS.strecken || []).map(sec => ({ art: "Strecken", titel: sec.title, prozent: secBack(s, sec) })),
+                    ...(tplS.strecken || []).map(sec => isEinschaetzung(sec)
+                        ? { art: "Strecken", titel: sec.title, modus: "einschätzung (kein Soll)", durchgaenge: secTally(s, sec) }
+                        : { art: "Strecken", titel: sec.title, prozent: secBack(s, sec) }),
                 ];
                 // Mustererkennung über die letzten Fahrstunden-Tagebucheinträge: pro Bewertungsfeld
                 // (Verkehrsbeobachtung, Position, Tempo, Kommunikation, Bedienung) Durchschnitt und
@@ -7224,7 +7240,12 @@ function App() {
     // Bulk: fill or clear ALL strecken
     function bulkStreckenAll(fill) {
         const strecken = { ...active.strecken };
-        tplFor(active.klasse).strecken.forEach(sec => sec.items.forEach(it => { strecken[it.id] = fill ? effCount(active, it) : 0; }));
+        // "Alles abhaken" befüllt Einschätzungs-Abschnitte nicht auf ihre alte (jetzt bedeutungslose)
+        // Soll-Zahl – ein "Zurücksetzen" auf 0 bleibt aber auch dort ein sinnvoller Reset.
+        tplFor(active.klasse).strecken.forEach(sec => { const einsch = isEinschaetzung(sec); sec.items.forEach(it => {
+            if (fill && einsch) return;
+            strecken[it.id] = fill ? effCount(active, it) : 0;
+        }); });
         updateActive({ strecken });
     }
     // Is a section fully done?
@@ -7782,7 +7803,9 @@ function App() {
     }
     /* ── Strecken ── */
     function streckenBlock(sec) {
+        const einsch = isEinschaetzung(sec);
         const pct = secBack(active, sec), isOpen = openSection === sec.id;
+        const tally = einsch ? secTally(active, sec) : 0;
         const note = (active.streckenNotes && active.streckenNotes[sec.id]) || "";
         return React.createElement("div", { key: sec.id, className: "card sec", style: { "--sec-color": sec.color } },
             React.createElement("button", { className: "sec-head", onClick: () => setOpenSection(isOpen ? null : sec.id) },
@@ -7790,14 +7813,16 @@ function App() {
                     React.createElement("div", { className: "sec-title" },
                         sec.title,
                         note && !isOpen && React.createElement("span", { title: "Notiz vorhanden", style: { marginLeft: 7, fontSize: 12 } }, "\uD83D\uDCDD")),
-                    React.createElement("div", { style: { marginTop: 8, maxWidth: 240 } },
+                    !einsch && React.createElement("div", { style: { marginTop: 8, maxWidth: 240 } },
                         React.createElement(Bar, { pct: pct, color: sec.color, h: 5 }))),
                 React.createElement("div", { className: "sec-meta" },
-                    React.createElement("span", { className: "sec-pct" },
-                        pct,
-                        "%"),
+                    einsch
+                        ? React.createElement("span", { className: "sec-pct", style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" }, title: "Nach Einsch\u00E4tzung \u2013 kein Soll" }, tally + "\u00D7")
+                        : React.createElement("span", { className: "sec-pct" },
+                            pct,
+                            "%"),
                     React.createElement(IcChev, { open: isOpen }))),
-            editCounts && sec.items.length > 0 && (() => {
+            !einsch && editCounts && sec.items.length > 0 && (() => {
                 const counts = sec.items.map(it => effCount(active, it));
                 const uniform = counts.every(c => c === counts[0]) ? counts[0] : null;
                 const base = uniform !== null ? uniform : Math.max.apply(null, counts);
@@ -7809,29 +7834,41 @@ function App() {
                         React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setSectionCount("strecken", sec, base + 1) }, "+")));
             })(),
             isOpen && React.createElement("div", null,
-                editCounts && sec.items.length > 0 && (() => {
+                !einsch && editCounts && sec.items.length > 0 && (() => {
                     const counts = sec.items.map(it => effCount(active, it));
                     const dones = sec.items.map((it, i) => Math.min((active.strecken && active.strecken[it.id]) || 0, counts[i]));
                     const maxC = counts.length ? Math.max.apply(null, counts) : 0;
                     const uniform = dones.length && dones.every(d => d === dones[0]) ? dones[0] : null;
                     const base = uniform !== null ? uniform : (dones.length ? Math.max.apply(null, dones) : 0);
                     return React.createElement("div", { style: { padding: "8px 12px", borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
-                        React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--muted)" } }, "Häkchen je Punkt"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setStreckenSectionDone(sec, Math.max(0, base - 1)) }, "−"),
-                        React.createElement("span", { style: { minWidth: 26, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800 } }, uniform !== null ? uniform : (Math.min.apply(null, dones) + "–" + Math.max.apply(null, dones))),
+                        React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--muted)" } }, "H\u00E4kchen je Punkt"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setStreckenSectionDone(sec, Math.max(0, base - 1)) }, "\u2212"),
+                        React.createElement("span", { style: { minWidth: 26, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800 } }, uniform !== null ? uniform : (Math.min.apply(null, dones) + "\u2013" + Math.max.apply(null, dones))),
                         React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => { if (base < maxC)
                                 setStreckenSectionDone(sec, base + 1); } }, "+"));
                 })(),
-                React.createElement("div", { style: { padding: "8px 12px", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "flex-end" } },
-                    streckenSectionFull(sec)
-                        ? React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" zurücksetzen?' }))
-                                bulkStreckenSection(sec, false); } }, "Abschnitt zurücksetzen")
-                        : React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5 }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" abhaken?' }))
-                                bulkStreckenSection(sec, true); } }, "Alles abhaken")),
+                einsch
+                    ? (tally > 0 && React.createElement("div", { style: { padding: "8px 12px", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "flex-end" } },
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" zur\u00FCcksetzen?' }))
+                                bulkStreckenSection(sec, false); } }, "Abschnitt zur\u00FCcksetzen")))
+                    : React.createElement("div", { style: { padding: "8px 12px", borderTop: "1px solid var(--line)", display: "flex", justifyContent: "flex-end" } },
+                        streckenSectionFull(sec)
+                            ? React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" zur\u00FCcksetzen?' }))
+                                    bulkStreckenSection(sec, false); } }, "Abschnitt zur\u00FCcksetzen")
+                            : React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5 }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" abhaken?' }))
+                                    bulkStreckenSection(sec, true); } }, "Alles abhaken")),
                 sec.items.map(item => {
                     const cnt = effCount(active, item);
                     const done = (active.strecken && active.strecken[item.id]) || 0;
                     const complete = done >= cnt;
+                    if (einsch) {
+                        return React.createElement("div", { key: item.id, className: "row" },
+                            React.createElement("div", { className: "row-label" }, item.label),
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, "aria-label": item.label + ": einen Durchgang abziehen", onClick: () => setStrecke(item.id, Math.max(0, done - 1)) }, "\u2212"),
+                                React.createElement("span", { style: { minWidth: 20, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800 } }, done),
+                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, "aria-label": item.label + ": einen Durchgang hinzuf\u00FCgen", onClick: () => setStrecke(item.id, done + 1) }, "+")));
+                    }
                     return React.createElement("div", { key: item.id, className: "row" },
                         React.createElement("div", { className: "row-label", style: complete ? { color: "var(--green)", fontWeight: 600 } : null },
                             item.label,
@@ -7859,7 +7896,8 @@ function App() {
     }
     function renderStrecken() {
         const allSecs = tplFor(active.klasse).strecken;
-        const allFull = allSecs.every(streckenSectionFull);
+        // Abschnitte "nach Einschätzung" haben kein Soll und zählen daher nicht als "voll".
+        const allFull = allSecs.every(sec => isEinschaetzung(sec) || streckenSectionFull(sec));
         const streckenQ = streckenFilter.trim().toLowerCase();
         const secs = streckenQ ? allSecs.filter(sec => sec.title.toLowerCase().includes(streckenQ) || sec.items.some(it => it.label.toLowerCase().includes(streckenQ))) : allSecs;
         return React.createElement("div", { className: "pad" },
@@ -7883,14 +7921,18 @@ function App() {
             React.createElement("div", { className: "sec-grid" }, secs.map(streckenBlock)));
     }
     /* ── Übersicht ── */
-    function uebRow(title, color, pct, key) {
+    // note: für Abschnitte "nach Einschätzung" (kein Soll) statt Balken/Prozent ein Zähler-Text, z.B. "3×"
+    function uebRow(title, color, pct, key, note) {
         return React.createElement("div", { key: key, style: { display: "flex", alignItems: "center", gap: 11, padding: "7px 4px" } },
             React.createElement("div", { style: { width: 148, fontSize: 12.5, fontWeight: 500, flexShrink: 0, lineHeight: 1.2 } }, title),
-            React.createElement("div", { style: { flex: 1 } },
-                React.createElement(Bar, { pct: pct, color: color, h: 9 })),
-            React.createElement("div", { style: { width: 40, textAlign: "right", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5, fontVariantNumeric: "tabular-nums" } },
-                pct,
-                "%"));
+            note == null
+                ? React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { flex: 1 } },
+                        React.createElement(Bar, { pct: pct, color: color, h: 9 })),
+                    React.createElement("div", { style: { width: 40, textAlign: "right", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5, fontVariantNumeric: "tabular-nums" } },
+                        pct,
+                        "%"))
+                : React.createElement("div", { style: { flex: 1, textAlign: "right", fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, note));
     }
     function renderUebersicht() {
         const vk = active.klasse || DEFAULT_KLASSE;
@@ -7954,7 +7996,9 @@ function App() {
                         strPct,
                         "%"),
                     React.createElement(Bar, { pct: strPct, color: "var(--blue)", h: 6 })),
-                React.createElement("div", { className: "ueb-grid" }, tplFor(vk).strecken.map(sec => uebRow(sec.title, sec.color, secBack(active, sec), sec.id)))));
+                React.createElement("div", { className: "ueb-grid" }, tplFor(vk).strecken.map(sec => isEinschaetzung(sec)
+                    ? uebRow(sec.title, sec.color, null, sec.id, secTally(active, sec) + "×")
+                    : uebRow(sec.title, sec.color, secBack(active, sec), sec.id)))));
     }
     function renderReife() {
         const vk = active.klasse || DEFAULT_KLASSE;
@@ -10997,6 +11041,14 @@ function App() {
             writeTplForKlasse(vk, kind === "adk" ? { adk: newList } : { strecken: newList });
         }
         function renameSec(idx, title) { const a = deepCopy(list); a[idx].title = title; commit(a); }
+        // Reform 2026/2027: Abschnitt zwischen fester Soll-Zahl und "nach Einschätzung" umschalten.
+        // Bestehende item.count-Werte bleiben dabei unangetastet, sie werden nur ignoriert, solange
+        // der Abschnitt auf Einschätzung steht – beim Zurückschalten gelten sie wieder wie vorher.
+        function toggleSecMode(idx) {
+            const a = deepCopy(list);
+            a[idx].mode = isEinschaetzung(a[idx]) ? undefined : "einschaetzung";
+            commit(a);
+        }
         async function delSec(idx) {
             if (!await askConfirm({ message: 'Abschnitt "' + list[idx].title + '" mit allen Punkten löschen?' }))
                 return;
@@ -11164,6 +11216,11 @@ function App() {
                                 React.createElement(IcChev, { open: isOpen })),
                             React.createElement("input", { value: sec.title, onChange: e => renameSec(si, e.target.value), style: { flex: 1, minWidth: 0, border: "1.5px solid transparent", borderRadius: 8, padding: "8px 9px", fontSize: 15,
                                     fontFamily: "var(--font-d)", fontWeight: 700, color: sec.color || "var(--ink)", background: "var(--field-bg)" }, onFocus: e => e.target.style.borderColor = "var(--line)", onBlur: e => e.target.style.borderColor = "transparent" }),
+                            isStrecken && React.createElement("button", { onClick: () => toggleSecMode(si),
+                                    title: "Reform 2026/2027: feste Soll-Zahl oder Einschätzung durch den Fahrlehrer",
+                                    style: { flexShrink: 0, fontSize: 10.5, fontWeight: 800, padding: "6px 9px", borderRadius: 99, border: "1.5px solid var(--line)",
+                                        background: isEinschaetzung(sec) ? "var(--orange-soft)" : "var(--card)", color: isEinschaetzung(sec) ? "var(--orange-deep)" : "var(--muted)",
+                                        textTransform: "uppercase", letterSpacing: ".03em", whiteSpace: "nowrap" } }, isEinschaetzung(sec) ? "Einschätzung" : "Soll-Zahl"),
                             delBtn(() => delSec(si))),
                         isOpen && React.createElement("div", { style: { padding: "0 10px 10px" } },
                             sec.items.map((it, ii) => {
@@ -11174,7 +11231,9 @@ function App() {
                                             opacity: itDragging ? 0.5 : 1 } },
                                         React.createElement(Handle, { onDown: e => startDrag(e, "item", si, ii) }),
                                         React.createElement("input", { value: it.label, onChange: e => renameItem(si, ii, e.target.value), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 9px", fontSize: 14 } }),
-                                        React.createElement("input", { type: "number", min: "1", value: it.count || 1, onChange: e => setItemCount(si, ii, e.target.value), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 14, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
+                                        isEinschaetzung(sec)
+                                            ? React.createElement("span", { style: { width: 48, textAlign: "center", fontSize: 11, color: "var(--muted)" }, title: "Kein Soll \u2013 Abschnitt steht auf Einsch\u00E4tzung" }, "\u2013")
+                                            : React.createElement("input", { type: "number", min: "1", value: it.count || 1, onChange: e => setItemCount(si, ii, e.target.value), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 14, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
                                         delBtn(() => delItem(si, ii))));
                             }),
                             drag && drag.type === "item" && drag.si === si && drag.overIndex === sec.items.length && dropLine,
@@ -11268,20 +11327,18 @@ function App() {
                     React.createElement("h3", null, "Strecken & Sonderfahrten"),
                     tplFor(active.klasse).strecken.map(sec => {
                         const note = (active.streckenNotes && active.streckenNotes[sec.id]) || "";
+                        const einsch = isEinschaetzung(sec);
                         return React.createElement("div", { key: sec.id, style: { marginBottom: 5 } },
                             React.createElement("div", { style: { fontWeight: 700, fontSize: 11, margin: "3px 0 1px" } },
                                 sec.title,
                                 " (",
-                                secBack(active, sec),
-                                "%)"),
+                                einsch ? "nach Einschätzung" : secBack(active, sec) + "%",
+                                ")"),
                             sec.items.map(item => {
                                 const done = (active.strecken && active.strecken[item.id]) || 0;
                                 return React.createElement("div", { key: item.id, className: "ps-row" },
                                     React.createElement("span", { className: "l" }, item.label),
-                                    React.createElement("span", { className: "r" },
-                                        done,
-                                        " / ",
-                                        effCount(active, item)));
+                                    React.createElement("span", { className: "r" }, einsch ? done + "×" : done + " / " + effCount(active, item)));
                             }),
                             note && React.createElement("div", { style: { fontSize: 10.5, fontStyle: "italic", margin: "2px 0 0", color: "#333" } },
                                 "Notiz: ",
@@ -11315,8 +11372,9 @@ function App() {
             return { ...sec, done: done.length, all };
         }).filter(sec => sec.all > 0);
         const streckenSections = tplFor(active.klasse).strecken.map(sec => {
-            const done = sec.items.filter(it => (active.strecken && active.strecken[it.id] || 0) >= effCount(active, it));
-            return { ...sec, done: done.length, all: sec.items.length };
+            const einsch = isEinschaetzung(sec);
+            const done = einsch ? secTally(active, sec) : sec.items.filter(it => (active.strecken && active.strecken[it.id] || 0) >= effCount(active, it)).length;
+            return { ...sec, einsch, done, all: sec.items.length };
         }).filter(sec => sec.all > 0);
         return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10pt", lineHeight: 1.5 } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "2px solid #000", paddingBottom: 10, marginBottom: 14 } },
@@ -11376,8 +11434,8 @@ function App() {
                     React.createElement("tbody", null, streckenSections.map(sec => React.createElement("tr", { key: sec.id, style: { borderBottom: "1px solid #eee" } },
                         React.createElement("td", { style: { padding: "4px 6px" } }, sec.title),
                         React.createElement("td", { style: { textAlign: "center", padding: "4px 6px" } }, sec.done),
-                        React.createElement("td", { style: { textAlign: "center", padding: "4px 6px" } }, sec.all),
-                        React.createElement("td", { style: { textAlign: "center", padding: "4px 6px", color: sec.done === sec.all ? "#12A150" : "#888" } }, sec.done === sec.all ? "✓ Fertig" : sec.done + "/" + sec.all)))))),
+                        React.createElement("td", { style: { textAlign: "center", padding: "4px 6px" } }, sec.einsch ? "–" : sec.all),
+                        React.createElement("td", { style: { textAlign: "center", padding: "4px 6px", color: sec.einsch ? "#888" : (sec.done === sec.all ? "#12A150" : "#888") } }, sec.einsch ? "Einschätzung" : (sec.done === sec.all ? "✓ Fertig" : sec.done + "/" + sec.all))))))),
             React.createElement("div", { style: { marginTop: 24, paddingTop: 14, borderTop: "1px solid #ccc" } },
                 React.createElement("div", { style: { display: "flex", gap: 40 } },
                     React.createElement("div", { style: { flex: 1 } },
@@ -11609,6 +11667,12 @@ function App() {
             React.createElement("div", { className: "ps-sec" },
                 React.createElement("h3", null, "Strecken & Sonderfahrten"),
                 tplFor(active.klasse).strecken.map(sec => {
+                    if (isEinschaetzung(sec)) {
+                        return React.createElement("div", { key: sec.id, className: "pf-bar-row" },
+                            React.createElement("span", { className: "name" }, sec.title),
+                            React.createElement("span", { className: "pf-bar" }),
+                            React.createElement("span", { className: "pct" }, secTally(active, sec) + "×"));
+                    }
                     const p = secBack(active, sec);
                     return React.createElement("div", { key: sec.id, className: "pf-bar-row" },
                         React.createElement("span", { className: "name" }, sec.title),
@@ -13624,6 +13688,12 @@ function StudentArea({ code, info }) {
         strecken.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 10 } }, data.strecken_titel || "Strecken & Sonderfahrten"),
             strecken.map(sec => {
+                if (isEinschaetzung(sec)) {
+                    return React.createElement("div", { key: sec.id, style: { marginBottom: 12 } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 } },
+                            React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700 } }, sec.title),
+                            React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, secTally(stu, sec) + "×")));
+                }
                 const p = secBack(stu, sec);
                 return React.createElement("div", { key: sec.id, style: { marginBottom: 12 } },
                     React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 } },
