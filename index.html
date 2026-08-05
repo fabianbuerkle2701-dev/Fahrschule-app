@@ -1122,7 +1122,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.61.1";
+const APP_VERSION = "1.61.2";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1164,6 +1164,9 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.61.2", date: "August 2026", changes: [
+            "Verbessert: Während eine Strecke aufgezeichnet wird, bleibt der Bildschirm jetzt an (Wake Lock) – der häufigste Grund für eine ungewollt abgebrochene Aufzeichnung war bisher, dass sich der Bildschirm automatisch gesperrt hat. Das Aufnahme-Banner weist zusätzlich darauf hin, dass ein Wechsel zu einer anderen App die Aufzeichnung dennoch unterbrechen kann – echtes Hintergrund-Tracking bei geschlossener App ist mit einer Web-App technisch nicht möglich",
+        ] },
     { v: "1.61.1", date: "August 2026", changes: [
             "Neu: Die \"Nächste Fahrstunde\"-Karte im Fahrschülerbereich zeigt jetzt zusätzlich die erwartete Witterung für diesen Tag (z.B. \"🌧️ Regen, bis 14°\"), sofern der Fahrlehrer einen Standort mit Ort hinterlegt hat und der Termin innerhalb der nächsten 16 Tage liegt",
             "Neu: Im Fahrschülerbereich steht jetzt direkt unter der Begrüßung, wie viel Prozent der Ausbildung insgesamt schon geschafft sind",
@@ -4688,13 +4691,43 @@ function App() {
     const recPtsRef = useRef([]);
     const recStartRef = useRef(0);
     const recLastUiRef = useRef(0);
+    const recWakeLockRef = useRef(null); // hält den Bildschirm während der Aufzeichnung wach
     const [recSession, setRecSession] = useState(null); // null | {studentId,lessonId,studentName}
     const [recUi, setRecUi] = useState({ dist: 0, dur: 0, n: 0, tick: 0 });
+    // Verhindert, dass der Bildschirm während einer laufenden Aufzeichnung automatisch sperrt
+    // (der mit Abstand häufigste Grund, warum eine Strecke ungewollt abbricht: Handy liegt/steckt
+    // in der Halterung, niemand tippt, nach der eingestellten Zeit schaltet sich der Bildschirm ab).
+    // Kein Ersatz für echtes Hintergrund-Tracking: schließt man die App/den Tab oder wechselt aktiv
+    // zu einer anderen App, pausiert das Betriebssystem die Seite trotzdem (siehe Hinweistext im
+    // Aufnahme-Banner weiter unten) – dagegen hilft nur eine native App mit eigener
+    // Standort-Berechtigung, das ist mit reinen Web-Techniken nicht lösbar.
+    async function acquireRecWakeLock() {
+        if (!("wakeLock" in navigator))
+            return;
+        try {
+            recWakeLockRef.current = await navigator.wakeLock.request("screen");
+        }
+        catch (e) { /* z.B. Berechtigung verweigert oder Tab nicht sichtbar - dann bleibt es beim reinen watchPosition */ }
+    }
+    useEffect(() => {
+        if (!recSession)
+            return;
+        function onVisible() { if (document.visibilityState === "visible" && recSession && !recWakeLockRef.current)
+            acquireRecWakeLock(); }
+        document.addEventListener("visibilitychange", onVisible);
+        return () => document.removeEventListener("visibilitychange", onVisible);
+    }, [recSession]);
     useEffect(() => () => { if (recWatchRef.current != null) {
         try {
             navigator.geolocation.clearWatch(recWatchRef.current);
         }
         catch (_) { }
+    } if (recWakeLockRef.current) {
+        try {
+            recWakeLockRef.current.release();
+        }
+        catch (_) { }
+        recWakeLockRef.current = null;
     } }, []);
     const [bookingCode, setBookingCode] = useState(null);
     const [adminSchools, setAdminSchools] = useState(null); // null=nicht geladen
@@ -6594,6 +6627,7 @@ function App() {
                 stopRecording(false);
             }
         }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+        acquireRecWakeLock();
     };
     const stopRecording = (save) => {
         if (recWatchRef.current != null) {
@@ -6602,6 +6636,13 @@ function App() {
             }
             catch (_) { }
             recWatchRef.current = null;
+        }
+        if (recWakeLockRef.current) {
+            try {
+                recWakeLockRef.current.release();
+            }
+            catch (_) { }
+            recWakeLockRef.current = null;
         }
         const pts = recPtsRef.current.slice(), sess = recSession;
         if (save && sess && pts.length >= 2) {
@@ -11981,7 +12022,8 @@ function App() {
                             React.createElement("div", { style: { fontSize: 12, opacity: .9 } },
                                 rmapFmtDist(recUi.dist),
                                 " \u00B7 ",
-                                rmapFmtDur(recUi.dur))),
+                                rmapFmtDur(recUi.dur)),
+                            React.createElement("div", { style: { fontSize: 10.5, opacity: .8, marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "Bildschirm bleibt an \u00B7 bei App-Wechsel kann die Aufnahme abbrechen")),
                         React.createElement("button", { onClick: () => stopRecording(true), style: { flexShrink: 0, background: "#fff", color: "#E5484D", fontWeight: 800,
                                 border: "none", borderRadius: 10, padding: "8px 12px", fontSize: 13 } }, "Stoppen"),
                         React.createElement("button", { onClick: async () => { if (await askConfirm({ message: "Aufzeichnung verwerfen?" }))
