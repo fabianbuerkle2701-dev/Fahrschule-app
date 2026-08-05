@@ -1122,7 +1122,7 @@ function arrowBtn(disabled) {
 }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.61.0";
+const APP_VERSION = "1.61.1";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1164,6 +1164,10 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.61.1", date: "August 2026", changes: [
+            "Neu: Die \"Nächste Fahrstunde\"-Karte im Fahrschülerbereich zeigt jetzt zusätzlich die erwartete Witterung für diesen Tag (z.B. \"🌧️ Regen, bis 14°\"), sofern der Fahrlehrer einen Standort mit Ort hinterlegt hat und der Termin innerhalb der nächsten 16 Tage liegt",
+            "Neu: Im Fahrschülerbereich steht jetzt direkt unter der Begrüßung, wie viel Prozent der Ausbildung insgesamt schon geschafft sind",
+        ] },
     { v: "1.61.0", date: "August 2026", changes: [
             "Neu: Im Fahrschülerbereich steht die nächste Fahrstunde jetzt ganz oben, direkt sichtbar mit Datum, Uhrzeit und einer Zeitangabe wie \"in 2 Tagen\" – vorher musste man dafür erst zur Termine-Liste weiter unten scrollen",
             "Neu: Die ADK- und Strecken-Abschnitte im Fahrschülerbereich lassen sich aufklappen und zeigen dann jeden einzelnen Punkt mit Haken bzw. offenem Kreis (und bei mehrfach zu übende Punkten den Stand, z.B. \"2 / 3\") – Fahrschüler sehen so genau, was noch fehlt, statt nur eine Prozentzahl",
@@ -3778,6 +3782,62 @@ function useWeather(city) {
         })();
         return () => { cancelled = true; };
     }, [city]);
+    return w;
+}
+// Wettervorhersage für einen bestimmten Tag (statt "jetzt gerade" wie useWeather) – für den
+// Fahrschüler-Bereich: zeigt die erwartete Witterung am Tag der nächsten Fahrstunde, damit man
+// weiß, ob man sich auf Regen/Glätte einstellen sollte. Open-Meteo liefert Tagesvorhersagen nur
+// für die nächsten ~16 Tage, weiter in der Zukunft liegende Termine bleiben bewusst ohne Anzeige.
+function useLessonWeather(city, dateISO) {
+    const [w, setW] = useState(null); // null=lädt/aus/zu weit weg, {temp,code} | "error"
+    useEffect(() => {
+        if (!city || !dateISO) {
+            setW(null);
+            return;
+        }
+        const targetDay = dateISO.slice(0, 10);
+        const daysAhead = Math.round((new Date(targetDay + "T12:00:00") - new Date(new Date().toDateString())) / 86400000);
+        if (daysAhead < 0 || daysAhead > 15) {
+            setW(null);
+            return;
+        }
+        let cancelled = false;
+        const cacheKey = "v6_lessonweather_" + city.toLowerCase() + "_" + targetDay;
+        try {
+            const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
+            if (cached && Date.now() - cached.fetchedAt < 6 * 3600000) {
+                setW(cached);
+                return;
+            }
+        }
+        catch (e) { }
+        (async () => {
+            try {
+                const geo = await fetch("https://geocoding-api.open-meteo.com/v1/search?count=1&language=de&format=json&name=" + encodeURIComponent(city)).then(r => r.json());
+                const loc = geo && geo.results && geo.results[0];
+                if (!loc)
+                    throw new Error("Ort nicht gefunden");
+                const fc = await fetch("https://api.open-meteo.com/v1/forecast?latitude=" + loc.latitude + "&longitude=" + loc.longitude
+                    + "&daily=weather_code,temperature_2m_max&timezone=auto&forecast_days=16").then(r => r.json());
+                const idx = fc && fc.daily && fc.daily.time ? fc.daily.time.indexOf(targetDay) : -1;
+                if (idx < 0)
+                    throw new Error("Kein Vorhersagetag gefunden");
+                const data = { temp: Math.round(fc.daily.temperature_2m_max[idx]), code: fc.daily.weather_code[idx], fetchedAt: Date.now() };
+                if (!cancelled) {
+                    setW(data);
+                    try {
+                        localStorage.setItem(cacheKey, JSON.stringify(data));
+                    }
+                    catch (e) { }
+                }
+            }
+            catch (e) {
+                if (!cancelled)
+                    setW("error");
+            }
+        })();
+        return () => { cancelled = true; };
+    }, [city, dateISO]);
     return w;
 }
 function WeatherWidget({ city, weather }) {
@@ -13552,6 +13612,16 @@ function StudentArea({ code, info }) {
     const [msgErr, setMsgErr] = React.useState("");
     const [routesOpen, setRoutesOpen] = React.useState(false); // "Meine Fahrstunden": Streckenkarte eingeklappt starten
     const [openSecs, setOpenSecs] = React.useState({}); // ADK/Strecken-Abschnitte: welche sind aufgeklappt (zeigen einzelne Punkte statt nur %)
+    // Muss hier VOR den bedingten "return"-Statements weiter unten stehen (React-Regel für Hooks,
+    // siehe auch nextApptByStudent in App()), auch wenn "data" hier noch null sein kann.
+    const nextApptStart = (() => {
+        if (!data || !Array.isArray(data.appointments))
+            return null;
+        const now = new Date();
+        const future = data.appointments.filter(a => new Date(a.start_at) >= now).sort((a, b) => a.start_at.localeCompare(b.start_at));
+        return future.length ? future[0].start_at : null;
+    })();
+    const lessonWeather = useLessonWeather((data && data.location && data.location.city) || null, nextApptStart);
     async function sendMessage() {
         if (!msgText.trim())
             return;
@@ -13740,7 +13810,7 @@ function StudentArea({ code, info }) {
                         "Hallo ",
                         (stu.vorname || name.split(" ")[0] || "").trim() || name,
                         "!"),
-                    React.createElement("div", { className: "home-eyebrow", style: { marginTop: 2 } }, "Dein Ausbildungsstand")),
+                    React.createElement("div", { className: "home-eyebrow", style: { marginTop: 2 } }, "Dein Ausbildungsstand" + (gesamtPctS > 0 ? " · " + gesamtPctS + "% geschafft" : ""))),
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5 }, onClick: logout }, "Abmelden")),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-around" } },
                 adk.length > 0 && React.createElement(Ring, { pct: adkPct, label: data.adk_titel || "Ausbildung", color: "var(--sage)" }),
@@ -13757,7 +13827,9 @@ function StudentArea({ code, info }) {
                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("div", { className: "home-eyebrow" }, "Nächste Fahrstunde"),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, marginTop: 2 } },
-                        fmtDLong(kommend[0].start_at) + " · " + hm(kommend[0].start_at) + " Uhr")),
+                        fmtDLong(kommend[0].start_at) + " · " + hm(kommend[0].start_at) + " Uhr"),
+                    lessonWeather && lessonWeather !== "error" && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)", marginTop: 3 } },
+                        (WEATHER_CODE_MAP[lessonWeather.code] || ["🌤️", ""])[0] + " " + (WEATHER_CODE_MAP[lessonWeather.code] || ["", "wechselhaft"])[1] + ", bis " + lessonWeather.temp + "°")),
                 React.createElement("span", { style: { fontSize: 11.5, fontWeight: 800, color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 99, padding: "5px 11px", flexShrink: 0, whiteSpace: "nowrap" } }, relTimeLabel(kommend[0].start_at)))
             : React.createElement("div", { className: "card", style: { padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 11, background: "var(--field-bg)" } },
                 React.createElement("span", { style: { fontSize: 18, flexShrink: 0 } }, "🗓️"),
