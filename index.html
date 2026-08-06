@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.62.5";
+const APP_VERSION = "1.62.6";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1176,8 +1176,8 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "1.62.5", date: "August 2026", changes: [
-            "Fehlerbehebung: Im Administrator-Bereich zeigten ADK und Strecken bei Fahrlehrern anderer Fahrschulen fälschlich 0% an, obwohl dort echter Fortschritt vorlag – die Ansicht lud versehentlich die eigene (leere) Ausbildungsvorlage statt der Vorlage des angesehenen Fahrlehrers",
+    { v: "1.62.6", date: "August 2026", changes: [
+            "Fehlerbehebung: Im Administrator-Bereich zeigten ADK und Strecken bei angesehenen Fahrlehrern fälschlich 0% an, obwohl dort echter Fortschritt vorlag – sowohl bei Fahrlehrern anderer Fahrschulen als auch bei Teammitgliedern der eigenen Schule ohne eigene, selbst angelegte Ausbildungsvorlage",
         ] },
     { v: "1.62.4", date: "August 2026", changes: [
             "Fehlerbehebung: Der Trainingsvorschlag des KI-Helfers wurde manchmal mit der Meldung \"Antwort abgeschnitten\" abgebrochen. Ursache war ein zu knapp bemessenes Antwortlimit, nachdem das zugrunde liegende Modell aktualisiert wurde",
@@ -10066,8 +10066,18 @@ function App() {
     async function openTeacherStudents(teacher) {
         setAdminTeacherStudents({ teacher, list: null });
         try {
-            const [list, tpl] = await Promise.all([adminFetchTeacherStudents(teacher.id), adminFetchTeacherTemplate(teacher.id)]);
-            setAdminTeacherStudents({ teacher, list, tpl });
+            // Vorlagen sind je Fahrlehrer-Konto getrennt gespeichert; nicht jeder Fahrlehrer
+            // eines Teams hat je selbst eine eigene, befüllte Vorlage angelegt (nur wer schon
+            // mal "Vorlage übernehmen" genutzt hat). Deshalb zusätzlich die Vorlage des
+            // Fahrschul-Admins als Rückfallebene laden, sonst zeigen Teammitglieder ohne
+            // eigene Vorlage fälschlich 0%, obwohl sie nach der gleichen Vorlage arbeiten.
+            const schoolId = adminTeachers && adminTeachers.school && adminTeachers.school.id;
+            const [list, tpl, tplFallback] = await Promise.all([
+                adminFetchTeacherStudents(teacher.id),
+                adminFetchTeacherTemplate(teacher.id),
+                fetchSchoolAdminTemplate(schoolId, teacher.id),
+            ]);
+            setAdminTeacherStudents({ teacher, list, tpl, tplFallback });
         }
         catch (e) {
             setAdminTeacherStudents({ teacher, list: [], error: e.message });
@@ -13094,7 +13104,15 @@ function App() {
                         ? React.createElement("div", { style: { padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Dieser Fahrlehrer hat keine Sch\u00FCler.")
                         : React.createElement("div", null,
                             adminTeacherStudents.list.slice().sort((a, b) => dispName(a).localeCompare(dispName(b))).map(s => {
-                                const teacherTplS = (adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse[s.klasse]) || { adk: [], strecken: [] };
+                                // Eigene Vorlage bevorzugen, aber je Kategorie (ADK/Strecken) einzeln auf die
+                                // Vorlage des Fahrschul-Admins zurückfallen, wenn der Fahrlehrer dort selbst
+                                // nichts hinterlegt hat - sonst zeigt "kein eigener Eintrag" fälschlich 0%.
+                                const ownSlice = (adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse[s.klasse]) || {};
+                                const fallbackSlice = (adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse[s.klasse]) || {};
+                                const teacherTplS = {
+                                    adk: (ownSlice.adk && ownSlice.adk.length) ? ownSlice.adk : (fallbackSlice.adk || []),
+                                    strecken: (ownSlice.strecken && ownSlice.strecken.length) ? ownSlice.strecken : (fallbackSlice.strecken || []),
+                                };
                                 const lp = calcLern(s.items, teacherTplS.adk, s), bp = calcBack(s, teacherTplS.strecken);
                                 const ges = Math.max(lp, bp);
                                 return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid var(--line)" } },
