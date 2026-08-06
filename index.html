@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.65.0";
+const APP_VERSION = "1.66.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1181,8 +1181,20 @@ const PRACTICE_STATUS = [
     { id: "gekonnt", label: "Gekonnt", ton: "sage" },
 ];
 function practiceStatusInfo(id) { return PRACTICE_STATUS.find(p => p.id === id) || null; }
+// Emoji-Bewertung für Geübt/Gekonnt-Einträge im Übungs-Verlauf: wie ist es gelaufen.
+// Bei "Angesprochen" gibt es nichts zu bewerten, da das Thema nur erwähnt wurde.
+const PRACTICE_RATINGS = [
+    { id: "good", emoji: "😁", label: "Gut" },
+    { id: "okay", emoji: "😐", label: "Okay" },
+    { id: "bad", emoji: "😟", label: "Schlecht" },
+];
+function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id) || null; }
+const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.66.0", date: "August 2026", changes: [
+            "Neu: Beim Übungs-Verlauf (ADK/Strecken) gibt es bei „Geübt“ und „Gekonnt“ jetzt zusätzlich eine Emoji-Bewertung (😁/😐/😟), wie es gelaufen ist, plus ein optionales Notizfeld zur Begründung (z.B. „Schulterblick vergessen“). „Angesprochen“ bleibt wie gewohnt ohne Zusatzschritt. Die Bewertung erscheint direkt im Verlauf und im Kurz-Hinweis unter dem jeweiligen Punkt",
+        ] },
     { v: "1.65.0", date: "August 2026", changes: [
             "Neu: Kalender abonnieren. Unter Einstellungen → Mein Bereich → Daten & Sicherung lässt sich ein Live-Kalender-Link erzeugen, mit dem sich die eigenen bestätigten Termine dauerhaft in Apple Kalender, Google Kalender oder Outlook einbinden lassen – die App synchronisiert von da an automatisch, ohne dass jeder Termin einzeln exportiert werden muss. Der Link lässt sich jederzeit erneuern oder deaktivieren",
         ] },
@@ -4859,6 +4871,9 @@ function App() {
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
     const [practiceLogEnabled, setPracticeLogEnabled] = useState(false); // persönliche Einstellung: Übungs-Verlauf-Feature an/aus
+    const [pendingRatingStatus, setPendingRatingStatus] = useState(null); // "geuebt"/"gekonnt" während Emoji+Notiz abgefragt wird, sonst null
+    const [pendingRating, setPendingRating] = useState(null); // gewähltes Emoji (good/okay/bad) im offenen Bewertungs-Schritt
+    const [pendingNote, setPendingNote] = useState(""); // Notiz-Entwurf im offenen Bewertungs-Schritt
     const [calendarFeedToken, setCalendarFeedToken] = useState(null); // Token für den abonnierbaren ICS-Kalender-Feed, null = noch nicht eingerichtet
     const [calendarFeedBusy, setCalendarFeedBusy] = useState(false);
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
@@ -6818,15 +6833,26 @@ function App() {
     // ("Angesprochen"/"Geübt"/"Gekonnt") mit Zeitstempel - unabhängig vom Fortschritts-Zähler.
     function openPracticeLog(kind, item, sec) {
         setPracticeLog({ kind, item, sec });
+        setPendingRatingStatus(null);
+        setPendingRating(null);
+        setPendingNote("");
     }
-    function addPracticeEntry(statusId) {
+    // Bei Geübt/Gekonnt wird nicht sofort gespeichert, sondern erst die Emoji-Bewertung
+    // (+ optionale Notiz zur Begründung) abgefragt - siehe pendingRatingStatus im Modal.
+    // Bei Angesprochen gibt es nichts zu bewerten, das speichert weiterhin sofort.
+    function addPracticeEntry(statusId, rating, note) {
         if (!practiceLog || !active)
             return;
         const { kind, item } = practiceLog;
         const field = kind === "adk" ? "adkLog" : "streckenLog";
         const log = { ...(active[field] || {}) };
         const arr = log[item.id] || [];
-        log[item.id] = [...arr, { date: new Date().toISOString().slice(0, 10), status: statusId }];
+        const entry = { date: new Date().toISOString().slice(0, 10), status: statusId };
+        if (rating)
+            entry.rating = rating;
+        if (note && note.trim())
+            entry.note = note.trim();
+        log[item.id] = [...arr, entry];
         updateActive({ [field]: log });
     }
     // Verlaufs-Eintrag im Nachhinein löschen (Vertipper korrigieren).
@@ -8028,6 +8054,7 @@ function App() {
                     const log = (active.adkLog && active.adkLog[item.id]) || [];
                     const lastEntry = log.length ? log[log.length - 1] : null;
                     const lastInfo = lastEntry && practiceStatusInfo(lastEntry.status);
+                    const lastRating = lastEntry && lastEntry.rating && practiceRatingInfo(lastEntry.rating);
                     const labelStyle = complete ? { color: "var(--green)", fontWeight: 600 } : null;
                     return React.createElement("div", { key: item.id, className: "row", style: { flexWrap: "wrap" } },
                         React.createElement("div", { className: "row-label" },
@@ -8039,7 +8066,7 @@ function App() {
                                 "/",
                                 cnt),
                             practiceLogEnabled && lastInfo && React.createElement("div", { style: { marginTop: 2, fontSize: 11, fontWeight: 600, color: "var(--" + lastInfo.ton + "-deep)" } },
-                                lastInfo.label + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
+                                lastInfo.label + (lastRating ? " " + lastRating.emoji : "") + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
                         editCounts
                             ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, Math.max(1, cnt - 1)) }, "\u2212"),
@@ -8218,6 +8245,7 @@ function App() {
                     const log = (active.streckenLog && active.streckenLog[item.id]) || [];
                     const lastEntry = log.length ? log[log.length - 1] : null;
                     const lastInfo = lastEntry && practiceStatusInfo(lastEntry.status);
+                    const lastRating = lastEntry && lastEntry.rating && practiceRatingInfo(lastEntry.rating);
                     const labelStyle = complete ? { color: "var(--green)", fontWeight: 600 } : null;
                     return React.createElement("div", { key: item.id, className: "row", style: { flexWrap: "wrap" } },
                         React.createElement("div", { className: "row-label" },
@@ -8229,7 +8257,7 @@ function App() {
                                 "/",
                                 cnt),
                             practiceLogEnabled && lastInfo && React.createElement("div", { style: { marginTop: 2, fontSize: 11, fontWeight: 600, color: "var(--" + lastInfo.ton + "-deep)" } },
-                                lastInfo.label + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
+                                lastInfo.label + (lastRating ? " " + lastRating.emoji : "") + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
                         editCounts
                             ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, Math.max(1, cnt - 1)) }, "\u2212"),
@@ -13366,20 +13394,52 @@ function App() {
                         borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "80vh", overflowY: "auto" } },
                     React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 14 } }, practiceLog.item.label),
-                    React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" } },
+                    !pendingRatingStatus && React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" } },
                         PRACTICE_STATUS.map(st => React.createElement("button", { key: st.id, style: { flex: "1 1 auto", padding: "10px 12px", fontSize: 13.5, fontWeight: 700, borderRadius: 10, border: "none",
-                                background: "var(--" + st.ton + "-bg)", color: "var(--" + st.ton + "-deep)" }, onClick: () => addPracticeEntry(st.id) }, st.label))),
+                                background: "var(--" + st.ton + "-bg)", color: "var(--" + st.ton + "-deep)" }, onClick: () => {
+                                    if (PRACTICE_RATING_STATUSES.indexOf(st.id) !== -1) {
+                                        setPendingRatingStatus(st.id);
+                                        setPendingRating(null);
+                                        setPendingNote("");
+                                    }
+                                    else {
+                                        addPracticeEntry(st.id);
+                                    }
+                                } }, st.label))),
+                    pendingRatingStatus && (() => {
+                        const st = practiceStatusInfo(pendingRatingStatus);
+                        return React.createElement("div", { style: { background: "var(--field-bg)", borderRadius: 12, padding: "13px 14px", marginBottom: 18 } },
+                            React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 10, color: "var(--" + st.ton + "-deep)" } }, st.label + " \u2013 wie ist es gelaufen?"),
+                            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 12 } },
+                                PRACTICE_RATINGS.map(r => React.createElement("button", { key: r.id, "aria-label": r.label, onClick: () => setPendingRating(r.id), style: { flex: 1, padding: "10px 0", fontSize: 24, borderRadius: 10,
+                                        border: "2px solid " + (pendingRating === r.id ? "var(--" + st.ton + "-deep)" : "var(--line)"),
+                                        background: pendingRating === r.id ? "var(--" + st.ton + "-bg)" : "var(--card)" } }, r.emoji))),
+                            React.createElement("textarea", { value: pendingNote, onChange: e => setPendingNote(e.target.value), placeholder: "Notiz (optional), z.B. \u201ESchulterblick vergessen\u201C", rows: 2,
+                                    style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 13.5, background: "var(--card)", resize: "vertical", marginBottom: 12, fontFamily: "inherit" } }),
+                            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setPendingRatingStatus(null) }, "Abbrechen"),
+                                React.createElement("button", { className: "btn btn-primary", style: { flex: 1, opacity: pendingRating ? 1 : .5 }, disabled: !pendingRating, onClick: () => {
+                                        addPracticeEntry(pendingRatingStatus, pendingRating, pendingNote);
+                                        setPendingRatingStatus(null);
+                                        setPendingRating(null);
+                                        setPendingNote("");
+                                    } }, "Eintrag speichern")));
+                    })(),
                     entries.length === 0
                         ? React.createElement("div", { style: { padding: "6px 0 10px", color: "var(--muted)", fontSize: 13.5 } }, "Noch kein Verlaufs-Eintrag.")
                         : entries.map((e, i) => {
                             const info = practiceStatusInfo(e.status);
+                            const rInfo = e.rating && practiceRatingInfo(e.rating);
                             const origIdx = entries.length - 1 - i; // Index in der ungekehrten Original-Liste f\u00FCr den L\u00F6schen-Aufruf
-                            return React.createElement("div", { key: i, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)" } },
-                                React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: "var(--" + (info ? info.ton : "muted") + "-deep)", flexShrink: 0 } }),
-                                React.createElement("div", { style: { flex: 1 } },
-                                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, info ? info.label : e.status),
-                                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, fmtDLong(e.date))),
-                                React.createElement("button", { onClick: () => deletePracticeEntry(practiceLog.kind, practiceLog.item.id, origIdx), style: { fontSize: 12, color: "var(--muted)", padding: "4px 8px" } }, "\u00D7"));
+                            return React.createElement("div", { key: i, style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)" } },
+                                React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: "var(--" + (info ? info.ton : "muted") + "-deep)", flexShrink: 0, marginTop: 5 } }),
+                                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 } },
+                                        info ? info.label : e.status,
+                                        rInfo && React.createElement("span", { style: { fontSize: 15 } }, rInfo.emoji)),
+                                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, fmtDLong(e.date)),
+                                    e.note && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 3, lineHeight: 1.4 } }, e.note)),
+                                React.createElement("button", { onClick: () => deletePracticeEntry(practiceLog.kind, practiceLog.item.id, origIdx), style: { fontSize: 12, color: "var(--muted)", padding: "4px 8px", flexShrink: 0 } }, "\u00D7"));
                         }),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setPracticeLog(null) }, "Schlie\u00DFen")));
         })(),
