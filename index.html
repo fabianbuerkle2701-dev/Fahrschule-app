@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.62.6";
+const APP_VERSION = "1.63.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1176,6 +1176,16 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.63.0", date: "August 2026", changes: [
+            "Sicherheit: Eine Sicherheitslücke geschlossen, über die sich ein Konto theoretisch selbst Admin- oder Moderator-Rechte hätte verleihen können, ohne dass das durch die Bedienung sichtbar war",
+            "Fehlerbehebung: Die Berechnung der gesetzlichen Aufbewahrungsfrist (§ 31 FahrlG) zeigte Schülerdaten ein Jahr zu früh als löschreif an",
+            "Fehlerbehebung: Beim Bearbeiten einer Fahrzeug-Kalender-Buchung konnte die ursprüngliche Buchung bei einem Fehlschlag (z.B. Doppelbelegung) unwiderruflich verloren gehen – wird jetzt automatisch wiederhergestellt",
+            "Fehlerbehebung: Die Unterschriften-Erfassung zeichnete an leicht versetzter Position zum tatsächlichen Finger-/Stift-Kontakt, besonders am rechten Rand – betraf jede Unterschrift im Programm (Fahrstunden-Bestätigung, Verträge)",
+            "Fehlerbehebung: Ein reines Antippen ohne Zeichnen konnte als gültige (aber leere) Unterschrift gespeichert werden",
+            "Fehlerbehebung: Beim Rückgängigmachen eines gelöschten Termins wurde ein Fehlschlag der Wiederherstellung nicht mehr angezeigt und die Terminart (z.B. Autobahn, Privater Termin) ging dabei verloren",
+            "Fehlerbehebung: Über den KI-Helfer eingetragene ADK-Punkte zählten nicht zur Stundenanzeige und der \"lange nicht gefahren\"-Erinnerungsliste, da anders als bei manueller Eingabe kein Datum vermerkt wurde",
+            "Fehlerbehebung: Bei sehr schnellem Wochen-/Tageswechsel auf der Buchungsseite und im Fahrzeug-Kalender konnte kurzzeitig eine veraltete Belegungsanzeige stehen bleiben",
+        ] },
     { v: "1.62.6", date: "August 2026", changes: [
             "Fehlerbehebung: Im Administrator-Bereich zeigten ADK und Strecken bei angesehenen Fahrlehrern fälschlich 0% an, obwohl dort echter Fortschritt vorlag – sowohl bei Fahrlehrern anderer Fahrschulen als auch bei Teammitgliedern der eigenen Schule ohne eigene, selbst angelegte Ausbildungsvorlage",
         ] },
@@ -3649,17 +3659,26 @@ function Help({ text }) {
 function SignaturePad({ onSave, onClear, existing, label }) {
     const cvs = React.useRef(null);
     const drawing = React.useRef(false);
+    const hasMoved = React.useRef(false);
     const [hasData, setHasData] = React.useState(!!existing);
     const [showCanvas, setShowCanvas] = React.useState(!existing);
+    // Canvas hat eine feste Zeichenpuffer-Breite (440x80), wird aber per CSS auf 100% der
+    // (variablen) Container-Breite skaliert dargestellt - ohne diese Umrechnung landet die
+    // Tinte an der falschen Stelle, sobald die angezeigte Breite von 440px abweicht.
     function getPos(e) {
         const r = cvs.current.getBoundingClientRect();
         const src = e.touches ? e.touches[0] : e;
-        return { x: src.clientX - r.left, y: src.clientY - r.top };
+        const scaleX = cvs.current.width / r.width;
+        const scaleY = cvs.current.height / r.height;
+        return { x: (src.clientX - r.left) * scaleX, y: (src.clientY - r.top) * scaleY };
     }
-    function start(e) { e.preventDefault(); drawing.current = true; const p = getPos(e); const ctx = cvs.current.getContext("2d"); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
+    function start(e) { e.preventDefault(); drawing.current = true; hasMoved.current = false; const p = getPos(e); const ctx = cvs.current.getContext("2d"); ctx.beginPath(); ctx.moveTo(p.x, p.y); }
     function move(e) { e.preventDefault(); if (!drawing.current)
-        return; const p = getPos(e); const ctx = cvs.current.getContext("2d"); ctx.lineTo(p.x, p.y); ctx.stroke(); }
-    function end(e) { e.preventDefault(); drawing.current = false; setHasData(true); }
+        return; hasMoved.current = true; const p = getPos(e); const ctx = cvs.current.getContext("2d"); ctx.lineTo(p.x, p.y); ctx.stroke(); }
+    // Nur eine Unterschrift mit tatsächlich gezeichneter Linie zählt - ein reines Antippen
+    // ohne Bewegung (z.B. schneller Tap) darf keine leere Fläche als gültig markieren.
+    function end(e) { e.preventDefault(); drawing.current = false; if (hasMoved.current)
+        setHasData(true); }
     function save() { const url = cvs.current.toDataURL("image/png"); onSave(url); setShowCanvas(false); }
     function clear() { const ctx = cvs.current.getContext("2d"); ctx.clearRect(0, 0, cvs.current.width, cvs.current.height); setHasData(false); if (onClear)
         onClear(); }
@@ -4437,7 +4456,10 @@ const VEHICLE_COST_CATEGORIES = ["Kraftstoff", "Werkstatt/Reparatur", "TÜV/HU",
 function tuvDaysLeft(v) {
     if (!v.tuvDate)
         return null;
-    const ms = new Date(v.tuvDate + "T00:00:00").getTime() - new Date(new Date().toISOString().slice(0, 10) + "T00:00:00").getTime();
+    // ymd() statt toISOString() für "heute" - toISOString() liefert das UTC-Datum, das in der
+    // Stunde um lokale Mitternacht (je nach Sommer-/Winterzeit) noch der Vortag ist und das
+    // Ergebnis dadurch um einen Tag verfälschen würde.
+    const ms = new Date(v.tuvDate + "T00:00:00").getTime() - new Date(ymd(new Date()) + "T00:00:00").getTime();
     return Math.round(ms / 86400000);
 }
 // Auf- und zuklappbarer Bereich. Bewusst AUSSERHALB von App definiert (nicht als innere
@@ -6525,9 +6547,20 @@ function App() {
             }
             value = Math.max(0, Math.min(value, soll));
             if (p.action === "adk") {
+                // adkDates genauso mitpflegen wie der manuelle Weg (setADK) - sonst zählt ein per
+                // KI-Assistent eingetragener ADK-Punkt nicht zur Stundenanzeige und der Schüler
+                // kann trotz frischer Eintragung fälschlich in der "lange nicht gefahren"-Liste stehen.
+                const prev = typeof (stu.items || {})[p.targetId] === "number" ? stu.items[p.targetId] : 0;
                 const items = { ...(stu.items || {}) };
                 items[p.targetId] = value;
-                writeStudent({ ...stu, items });
+                const adkDates = { ...(stu.adkDates || {}) };
+                if (value > prev) {
+                    const today = new Date().toISOString().slice(0, 10);
+                    const arr = adkDates[p.targetId] || [];
+                    if (arr.indexOf(today) === -1)
+                        adkDates[p.targetId] = [...arr, today];
+                }
+                writeStudent({ ...stu, items, adkDates });
             }
             else {
                 const strecken = { ...(stu.strecken || {}) };
@@ -6993,16 +7026,21 @@ function App() {
             showUndo(label, async () => {
                 apptWritesRef.current++;
                 try {
+                    // art muss mit übergeben werden, sonst fällt dbInsertAppt auf den Default
+                    // "ÜST" zurück und ein wiederhergestellter Spezial-Termin (z.B. Autobahn,
+                    // Privater Termin) würde stillschweigend zu einem Standard-Termin.
                     const created = await dbInsertAppt(uid, {
                         start_at: backup.start_at, end_at: backup.end_at, student_id: backup.student_id,
-                        title: backup.title, note: backup.note, status: backup.status
+                        title: backup.title, note: backup.note, status: backup.status, art: backup.art
                     });
-                    if (created) {
-                        apptDeletedRef.current.delete(id);
-                        setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
-                    }
-                    else
-                        showToast("Wiederherstellen fehlgeschlagen.");
+                    apptDeletedRef.current.delete(id);
+                    setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
+                }
+                catch (e) {
+                    // dbInsertAppt wirft bei Fehlern statt null zurückzugeben - ohne dieses
+                    // catch würde ein Fehlschlag als unbehandelte Promise-Ablehnung verschwinden
+                    // und der Nutzer würde nie erfahren, dass die Wiederherstellung fehlschlug.
+                    showToast("Wiederherstellen fehlgeschlagen:\n" + e.message);
                 }
                 finally {
                     apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -10133,7 +10171,9 @@ function App() {
         const jahr = new Date(a).getFullYear();
         if (isNaN(jahr))
             return null;
-        return new Date(jahr + AUFBEWAHRUNG_JAHRE, 0, 1); // 1. Januar nach Ablauf der Frist
+        // Fristbeginn ist das JAHRESENDE des Archivierungsjahres (s.o.), daher +1 zusätzlich zu
+        // den AUFBEWAHRUNG_JAHRE Jahren - sonst wären Daten ein volles Jahr zu früh "löschreif".
+        return new Date(jahr + AUFBEWAHRUNG_JAHRE + 1, 0, 1); // 1. Januar nach Ablauf der Frist
     }
     // Alle Daten eines Schülers als JSON – für DSGVO-Auskunft und Datenmitnahme.
     function exportStudentData(stu) {
@@ -12927,7 +12967,7 @@ function App() {
                                     t.id === session.user.id ? " · du" : ""),
                                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 1 } }, t.last_seen ? "Zuletzt aktiv: " + new Date(t.last_seen).toLocaleString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) + " Uhr" : "Noch nie aktiv")),
                             React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 } },
-                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.school_admin ? "var(--muted)" : "var(--orange-deep)" }, onClick: () => toggleTeacherAdmin(t.id, t.school_admin) }, t.school_admin ? "Admin entziehen" : "Zu Admin machen"),
+                                isAdmin(session) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.school_admin ? "var(--muted)" : "var(--orange-deep)" }, onClick: () => toggleTeacherAdmin(t.id, t.school_admin) }, t.school_admin ? "Admin entziehen" : "Zu Admin machen"),
                                 isAdmin(session) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.app_moderator ? "var(--muted)" : "var(--blue)" }, onClick: () => toggleTeacherModerator(t.id, t.app_moderator) }, t.app_moderator ? "Moderator entziehen" : "Zu Moderator machen")),
                             t.id !== session.user.id && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, onClick: () => detachTeacher(t.id, t.email) }, "Stilllegen")))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAdminTeachers(null) }, "Schlie\u00DFen"))),
@@ -14248,11 +14288,15 @@ function BookingPage({ code }) {
     React.useEffect(() => {
         if (!info)
             return;
+        let on = true;
         setLoadingBusy(true);
         const von = startOfWeek(week).toISOString();
         const bis = addDays(startOfWeek(week), 7).toISOString();
-        publicBusyTimes(code, von, bis).then(rows => { setBusy(rows || []); setLoadingBusy(false); })
-            .catch(() => { setBusy([]); setLoadingBusy(false); });
+        // "on"-Guard verhindert, dass bei schnellem Wochenwechsel eine spät eintreffende
+        // Antwort für eine bereits verlassene Woche die aktuell angezeigten Belegungen überschreibt.
+        publicBusyTimes(code, von, bis).then(rows => { if (on) { setBusy(rows || []); setLoadingBusy(false); } })
+            .catch(() => { if (on) { setBusy([]); setLoadingBusy(false); } });
+        return () => { on = false; };
     }, [info, week, code, done]);
     // Eigene Termine per Name laden (geräteübergreifende Wiedererkennung)
     React.useEffect(() => {
@@ -14260,11 +14304,13 @@ function BookingPage({ code }) {
             setNameSlots([]);
             return;
         }
+        let on = true;
         const von = startOfWeek(week).toISOString();
         const bis = addDays(startOfWeek(week), 7).toISOString();
         publicMySlots(code, myName.trim(), von, bis)
-            .then(rows => setNameSlots((rows || []).map(r => r.start_at)))
-            .catch(() => setNameSlots([]));
+            .then(rows => { if (on) setNameSlots((rows || []).map(r => r.start_at)); })
+            .catch(() => { if (on) setNameSlots([]); });
+        return () => { on = false; };
     }, [info, week, code, myName, done]);
     if (info === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
@@ -14849,6 +14895,7 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         return () => { on = false; };
     }, [code]);
     // Buchungen des Tages laden
+    const reloadToken = React.useRef(0);
     const reload = React.useCallback(() => {
         let von, bis;
         if (calView === "woche") {
@@ -14862,9 +14909,12 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             bis.setHours(24, 0, 0, 0);
         }
         setLoading(true);
+        // Token-Guard: verhindert, dass bei schnellem Tag-/Wochenwechsel eine spät eintreffende
+        // Antwort für einen bereits verlassenen Zeitraum die aktuell angezeigten Buchungen überschreibt.
+        const myToken = ++reloadToken.current;
         calBookings(code, von.toISOString(), bis.toISOString())
-            .then(r => { setRows(r || []); setLoading(false); })
-            .catch(() => { setRows([]); setLoading(false); });
+            .then(r => { if (myToken === reloadToken.current) { setRows(r || []); setLoading(false); } })
+            .catch(() => { if (myToken === reloadToken.current) { setRows([]); setLoading(false); } });
     }, [code, day, calView]);
     React.useEffect(() => { if (info)
         reload(); }, [info, day, calView, reload]);
@@ -14907,7 +14957,9 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
     }
     // Bestehende Buchung antippen: Bearbeiten-Fenster öffnen (mit Löschen unten)
     function openBookingEdit(r) {
-        setForm({ id: r.id, date: ymd(r.start_at), start: hm(r.start_at), end: hm(r.end_at), teacher: r.teacher_name || "", note: r.note || "", busy: false, error: "" });
+        // "original" wird für saveBooking() aufgehoben, um die Buchung wiederherstellen zu
+        // können, falls das Neuanlegen beim Bearbeiten fehlschlägt (siehe dort).
+        setForm({ id: r.id, date: ymd(r.start_at), start: hm(r.start_at), end: hm(r.end_at), teacher: r.teacher_name || "", note: r.note || "", busy: false, error: "", original: r });
     }
     async function saveBooking() {
         const f = form;
@@ -14929,9 +14981,14 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         const startISO = new Date(basisDatum + "T" + f.start + ":00").toISOString();
         const endISO = new Date(basisDatum + "T" + f.end + ":00").toISOString();
         setForm({ ...f, busy: true, error: "" });
+        // Beim Bearbeiten: alte Buchung entfernen, dann neu anlegen (die Datenbank prüft dabei
+        // erneut auf Doppelbelegung). Schlägt das Neuanlegen fehl (z.B. weil der neue Zeitraum
+        // inzwischen belegt ist), wird versucht, die ursprüngliche Buchung wiederherzustellen -
+        // sonst wäre sie ersatzlos verloren, obwohl der Nutzer nur eine Fehlermeldung sieht.
+        let removedOriginal = null;
         try {
-            // Beim Bearbeiten: alte Buchung entfernen, dann neu anlegen (die Datenbank prüft dabei erneut auf Doppelbelegung)
             if (f.id) {
+                removedOriginal = f.original || null;
                 await calDelete(code, f.id);
             }
             await calBook(code, veh.id, f.teacher.trim(), startISO, endISO, f.note);
@@ -14939,7 +14996,19 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             reload();
         }
         catch (e) {
-            setForm({ ...f, busy: false, error: e.message || "Buchung fehlgeschlagen" });
+            if (removedOriginal) {
+                try {
+                    await calBook(code, veh.id, removedOriginal.teacher_name || f.teacher.trim(), removedOriginal.start_at, removedOriginal.end_at, removedOriginal.note);
+                    setForm({ ...f, busy: false, error: (e.message || "Bearbeiten fehlgeschlagen") + " Die ursprüngliche Buchung wurde wiederhergestellt." });
+                }
+                catch (e2) {
+                    setForm({ ...f, busy: false, error: "Die Buchung konnte nicht geändert und die ursprüngliche Buchung nicht wiederhergestellt werden. Bitte Kalender prüfen. (" + (e.message || "") + ")" });
+                }
+            }
+            else {
+                setForm({ ...f, busy: false, error: e.message || "Buchung fehlgeschlagen" });
+            }
+            reload();
         }
     }
     async function removeBooking(id) {
