@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.62.4";
+const APP_VERSION = "1.62.5";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1176,6 +1176,9 @@ const VIDEO_KATEGORIEN = [
 ];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.62.5", date: "August 2026", changes: [
+            "Fehlerbehebung: Im Administrator-Bereich zeigten ADK und Strecken bei Fahrlehrern anderer Fahrschulen fälschlich 0% an, obwohl dort echter Fortschritt vorlag – die Ansicht lud versehentlich die eigene (leere) Ausbildungsvorlage statt der Vorlage des angesehenen Fahrlehrers",
+        ] },
     { v: "1.62.4", date: "August 2026", changes: [
             "Fehlerbehebung: Der Trainingsvorschlag des KI-Helfers wurde manchmal mit der Meldung \"Antwort abgeschnitten\" abgebrochen. Ursache war ein zu knapp bemessenes Antwortlimit, nachdem das zugrunde liegende Modell aktualisiert wurde",
         ] },
@@ -2736,6 +2739,18 @@ async function adminFetchTeacherStudents(ownerUid) {
         throw new Error(error.message);
     }
     return (data || []).map(r => ({ id: r.id, ...(r.data || {}) }));
+}
+// Ausbildungsvorlage eines bestimmten Fahrlehrers laden (nur zum Ansehen im Admin-Bereich).
+// Wichtig: die globale tplFor()/tpl-Vorlage gehört dem eingeloggten Admin selbst - beim
+// Ansehen fremder Fahrlehrer muss deren EIGENE Vorlage geladen werden, sonst zeigen
+// ADK/Strecken dort fälschlich 0% (leere/fremde Vorlage statt der tatsächlich genutzten).
+async function adminFetchTeacherTemplate(ownerUid) {
+    const { data, error } = await sb.from("templates").select("*").eq("owner", ownerUid).maybeSingle();
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return rowToTplByKlasse(data);
 }
 /* ════════ Termine / Kalender ════════ */
 async function fetchAppointments(uid) {
@@ -10051,8 +10066,8 @@ function App() {
     async function openTeacherStudents(teacher) {
         setAdminTeacherStudents({ teacher, list: null });
         try {
-            const list = await adminFetchTeacherStudents(teacher.id);
-            setAdminTeacherStudents({ teacher, list });
+            const [list, tpl] = await Promise.all([adminFetchTeacherStudents(teacher.id), adminFetchTeacherTemplate(teacher.id)]);
+            setAdminTeacherStudents({ teacher, list, tpl });
         }
         catch (e) {
             setAdminTeacherStudents({ teacher, list: [], error: e.message });
@@ -13079,7 +13094,8 @@ function App() {
                         ? React.createElement("div", { style: { padding: "20px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Dieser Fahrlehrer hat keine Sch\u00FCler.")
                         : React.createElement("div", null,
                             adminTeacherStudents.list.slice().sort((a, b) => dispName(a).localeCompare(dispName(b))).map(s => {
-                                const lp = calcLern(s.items, tplFor(s.klasse).adk, s), bp = calcBack(s, tplFor(s.klasse).strecken);
+                                const teacherTplS = (adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse[s.klasse]) || { adk: [], strecken: [] };
+                                const lp = calcLern(s.items, teacherTplS.adk, s), bp = calcBack(s, teacherTplS.strecken);
                                 const ges = Math.max(lp, bp);
                                 return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid var(--line)" } },
                                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
