@@ -99,7 +99,12 @@ Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 
   const payload = {
     model: "claude-sonnet-5",
-    max_tokens: 1400,
+    max_tokens: 4096,
+    // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach (anders als
+    // Vorgängermodelle), und max_tokens deckelt Denken + Antwort zusammen - bei
+    // dieser kurzen JSON-Klassifizierungsaufgabe wird die Antwort dadurch sonst
+    // knapp und kann abgeschnitten werden. Denken ist hier nicht nötig.
+    thinking: { type: "disabled" },
     system,
     messages: [{ role: "user", content: message }],
   };
