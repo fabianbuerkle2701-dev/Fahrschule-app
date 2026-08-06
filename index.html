@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.63.0";
+const APP_VERSION = "1.64.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1174,8 +1174,18 @@ const VIDEO_KATEGORIEN = [
     { code: "abfahrtskontrolle", label: "Abfahrtskontrolle" },
     { code: "sonstiges", label: "Sonstiges" },
 ];
+// Feste Status-Stufen für den Übungs-Verlauf je ADK-/Strecken-Punkt (mit Zeitstempel).
+const PRACTICE_STATUS = [
+    { id: "angesprochen", label: "Angesprochen", ton: "sky" },
+    { id: "geuebt", label: "Geübt", ton: "clay" },
+    { id: "gekonnt", label: "Gekonnt", ton: "sage" },
+];
+function practiceStatusInfo(id) { return PRACTICE_STATUS.find(p => p.id === id) || null; }
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.64.0", date: "August 2026", changes: [
+            "Neu: Bei ADK- und Strecken-Punkten kann jetzt beim Abhaken direkt ausgewählt werden, wie es gelaufen ist (Angesprochen/Geübt/Gekonnt) – jeder Durchgang wird mit Zeitstempel im Verlauf des Punkts festgehalten und lässt sich dort auch wieder einsehen oder löschen",
+        ] },
     { v: "1.63.0", date: "August 2026", changes: [
             "Sicherheit: Eine Sicherheitslücke geschlossen, über die sich ein Konto theoretisch selbst Admin- oder Moderator-Rechte hätte verleihen können, ohne dass das durch die Bedienung sichtbar war",
             "Fehlerbehebung: Die Berechnung der gesetzlichen Aufbewahrungsfrist (§ 31 FahrlG) zeigte Schülerdaten ein Jahr zu früh als löschreif an",
@@ -4794,6 +4804,8 @@ function App() {
     const [postfachOpen, setPostfachOpen] = useState(false); // zentraler Nachrichten-Posteingang auf der Startseite
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
+    const [statusPicker, setStatusPicker] = useState(null); // {kind,itemId,itemLabel,secColor,newVal} beim Ankreuzen eines ADK/Strecken-Punkts, sonst null
+    const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} zeigt den vollen Übungs-Verlauf eines Punkts, sonst null
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
@@ -6743,6 +6755,58 @@ function App() {
     const setStrecke = (itemId, val) => updateActive({ strecken: { ...active.strecken, [itemId]: val } });
     const setStreckeNote = (secId, val) => updateActive({ streckenNotes: { ...(active.streckenNotes || {}), [secId]: val } });
     const setADKNote = (secId, val) => updateActive({ adkNotes: { ...(active.adkNotes || {}), [secId]: val } });
+    // Übungs-Verlauf: beim Ankreuzen eines neuen Durchgangs (Kästchen füllen, nicht leeren)
+    // öffnet sich statt des direkten setADK/setStrecke ein kleines Zusatzmenü zur Status-Wahl
+    // ("Angesprochen"/"Geübt"/"Gekonnt"), das den Zeitstempel-Eintrag anlegt und danach den
+    // bestehenden Zähler genauso setzt wie vorher - der bestehende Fortschritt bleibt also
+    // unverändert, es kommt nur die Verlaufs-Historie hinzu.
+    function openStatusPicker(kind, item, sec, newVal) {
+        setStatusPicker({ kind, itemId: item.id, itemLabel: item.label, secColor: sec.color, newVal });
+    }
+    function pickStatus(statusId) {
+        if (!statusPicker || !active)
+            return;
+        const { kind, itemId, newVal } = statusPicker;
+        const field = kind === "adk" ? "adkLog" : "streckenLog";
+        const log = { ...(active[field] || {}) };
+        const arr = log[itemId] || [];
+        log[itemId] = [...arr, { date: new Date().toISOString().slice(0, 10), status: statusId }];
+        if (kind === "adk") {
+            const today = new Date().toISOString().slice(0, 10);
+            const prev = typeof active.items[itemId] === "number" ? active.items[itemId] : 0;
+            const adkDates = { ...(active.adkDates || {}) };
+            if (newVal > prev) {
+                const arr2 = adkDates[itemId] || [];
+                if (arr2.indexOf(today) === -1)
+                    adkDates[itemId] = [...arr2, today];
+            }
+            updateActive({ items: { ...active.items, [itemId]: newVal }, adkDates, adkLog: log });
+        }
+        else {
+            updateActive({ strecken: { ...active.strecken, [itemId]: newVal }, streckenLog: log });
+        }
+        setStatusPicker(null);
+    }
+    // Abhaken ohne Verlaufs-Eintrag - nutzt bewusst dieselben setADK/setStrecke wie vorher.
+    function skipStatusPicker() {
+        if (!statusPicker)
+            return;
+        const { kind, itemId, newVal } = statusPicker;
+        if (kind === "adk")
+            setADK(itemId, newVal);
+        else
+            setStrecke(itemId, newVal);
+        setStatusPicker(null);
+    }
+    // Verlaufs-Eintrag im Nachhinein löschen (Vertipper korrigieren), ändert den Zähler nicht.
+    function deletePracticeEntry(kind, itemId, idx) {
+        const field = kind === "adk" ? "adkLog" : "streckenLog";
+        const log = { ...(active[field] || {}) };
+        const arr = (log[itemId] || []).slice();
+        arr.splice(idx, 1);
+        log[itemId] = arr;
+        updateActive({ [field]: log });
+    }
     // Kästchen-Anzahl eines Punkts ändern: schreibt seit 1.56.0 in die VORLAGE der
     // Klasse des aktiven Schülers und gilt damit sofort für ALLE Schüler dieser Klasse
     // (vorher nur Einzel-Abweichung beim aktiven Schüler via customCounts).
@@ -7930,13 +7994,18 @@ function App() {
                     const cnt = effCount(active, item);
                     const done = Math.min(adkDone(active, item), cnt);
                     const complete = done >= cnt;
-                    return React.createElement("div", { key: item.id, className: "row" },
+                    const log = (active.adkLog && active.adkLog[item.id]) || [];
+                    const lastEntry = log.length ? log[log.length - 1] : null;
+                    const lastInfo = lastEntry && practiceStatusInfo(lastEntry.status);
+                    return React.createElement("div", { key: item.id, className: "row", style: { flexWrap: "wrap" } },
                         React.createElement("div", { className: "row-label", style: complete ? { color: "var(--green)", fontWeight: 600 } : null },
                             item.label,
                             React.createElement("span", { className: "row-count" },
                                 done,
                                 "/",
-                                cnt)),
+                                cnt),
+                            lastInfo && React.createElement("button", { onClick: () => setPracticeLog({ kind: "adk", item, sec }), style: { display: "block", marginTop: 2, fontSize: 11, fontWeight: 600, color: "var(--" + lastInfo.ton + "-deep)" } },
+                                lastInfo.label + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
                         editCounts
                             ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, Math.max(1, cnt - 1)) }, "\u2212"),
@@ -7944,7 +8013,7 @@ function App() {
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, cnt + 1) }, "+"))
                             : React.createElement("div", { className: "boxes" }, Array.from({ length: cnt }).map((_, i) => {
                                 const on = i < done;
-                                return React.createElement("button", { key: i, className: "box" + (on ? " on" : ""), "aria-label": item.label + " Durchgang " + (i + 1), onClick: () => setADK(item.id, on ? i : i + 1) },
+                                return React.createElement("button", { key: i, className: "box" + (on ? " on" : ""), "aria-label": item.label + " Durchgang " + (i + 1), onClick: () => on ? setADK(item.id, i) : openStatusPicker("adk", item, sec, i + 1) },
                                     React.createElement(IcCheck, null));
                             })));
                 }),
@@ -8112,13 +8181,18 @@ function App() {
                     const cnt = effCount(active, item);
                     const done = (active.strecken && active.strecken[item.id]) || 0;
                     const complete = done >= cnt;
-                    return React.createElement("div", { key: item.id, className: "row" },
+                    const log = (active.streckenLog && active.streckenLog[item.id]) || [];
+                    const lastEntry = log.length ? log[log.length - 1] : null;
+                    const lastInfo = lastEntry && practiceStatusInfo(lastEntry.status);
+                    return React.createElement("div", { key: item.id, className: "row", style: { flexWrap: "wrap" } },
                         React.createElement("div", { className: "row-label", style: complete ? { color: "var(--green)", fontWeight: 600 } : null },
                             item.label,
                             React.createElement("span", { className: "row-count" },
                                 done,
                                 "/",
-                                cnt)),
+                                cnt),
+                            lastInfo && React.createElement("button", { onClick: () => setPracticeLog({ kind: "strecken", item, sec }), style: { display: "block", marginTop: 2, fontSize: 11, fontWeight: 600, color: "var(--" + lastInfo.ton + "-deep)" } },
+                                lastInfo.label + " \u00b7 " + fmtD(lastEntry.date) + (log.length > 1 ? " \u00b7 " + log.length + "\u00d7" : ""))),
                         editCounts
                             ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, Math.max(1, cnt - 1)) }, "\u2212"),
@@ -8126,7 +8200,7 @@ function App() {
                                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setCount(item.id, cnt + 1) }, "+"))
                             : React.createElement("div", { className: "boxes" }, Array.from({ length: cnt }).map((_, i) => {
                                 const on = i < done;
-                                return React.createElement("button", { key: i, className: "box" + (on ? " on" : ""), "aria-label": item.label + " Durchgang " + (i + 1), onClick: () => setStrecke(item.id, on ? i : i + 1) },
+                                return React.createElement("button", { key: i, className: "box" + (on ? " on" : ""), "aria-label": item.label + " Durchgang " + (i + 1), onClick: () => on ? setStrecke(item.id, i) : openStatusPicker("strecken", item, sec, i + 1) },
                                     React.createElement(IcCheck, null));
                             })));
                 }),
@@ -13171,6 +13245,41 @@ function App() {
                             }),
                             React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 14, lineHeight: 1.5 } }, "Nur zur Ansicht. Die Prozentwerte basieren auf der aktuellen Ausbildungsvorlage.")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAdminTeacherStudents(null) }, "Schlie\u00DFen"))),
+        // Zusatzmen\u00FC beim Ankreuzen eines ADK/Strecken-Durchgangs: Status w\u00E4hlen (mit
+        // Zeitstempel geloggt) oder ohne Verlaufs-Eintrag einfach abhaken.
+        statusPicker && React.createElement("div", { onClick: () => setStatusPicker(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 2 } }, statusPicker.itemLabel),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 16 } }, "Wie ist es gelaufen?"),
+                React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } },
+                    PRACTICE_STATUS.map(st => React.createElement("button", { key: st.id, style: { padding: "13px 16px", fontSize: 15, fontWeight: 700, borderRadius: 12, border: "none",
+                            background: "var(--" + st.ton + "-bg)", color: "var(--" + st.ton + "-deep)", textAlign: "left" }, onClick: () => pickStatus(st.id) }, st.label))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: skipStatusPicker }, "Ohne Verlaufs-Eintrag abhaken"))),
+        // Voller \u00DCbungs-Verlauf eines einzelnen ADK/Strecken-Punkts (Zeitstempel + Status je Durchgang).
+        practiceLog && (() => {
+            const field = practiceLog.kind === "adk" ? "adkLog" : "streckenLog";
+            const entries = ((active && active[field] && active[field][practiceLog.item.id]) || []).slice().reverse();
+            return React.createElement("div", { onClick: () => setPracticeLog(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420,
+                        borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "75vh", overflowY: "auto" } },
+                    React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                    React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 14 } }, practiceLog.item.label),
+                    entries.length === 0
+                        ? React.createElement("div", { style: { padding: "10px 0", color: "var(--muted)", fontSize: 13.5 } }, "Noch kein Verlaufs-Eintrag.")
+                        : entries.map((e, i) => {
+                            const info = practiceStatusInfo(e.status);
+                            const origIdx = entries.length - 1 - i; // Index in der ungekehrten Original-Liste f\u00FCr den L\u00F6schen-Aufruf
+                            return React.createElement("div", { key: i, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                                React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: "var(--" + (info ? info.ton : "muted") + "-deep)", flexShrink: 0 } }),
+                                React.createElement("div", { style: { flex: 1 } },
+                                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, info ? info.label : e.status),
+                                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, fmtDLong(e.date))),
+                                React.createElement("button", { onClick: () => deletePracticeEntry(practiceLog.kind, practiceLog.item.id, origIdx), style: { fontSize: 12, color: "var(--muted)", padding: "4px 8px" } }, "\u00D7"));
+                        }),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setPracticeLog(null) }, "Schlie\u00DFen")));
+        })(),
         waPrompt && React.createElement("div", { onClick: () => setWaPrompt(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 110, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("div", { style: { textAlign: "center", marginBottom: 14 } },
