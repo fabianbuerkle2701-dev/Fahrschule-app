@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.64.1";
+const APP_VERSION = "1.65.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1183,6 +1183,9 @@ const PRACTICE_STATUS = [
 function practiceStatusInfo(id) { return PRACTICE_STATUS.find(p => p.id === id) || null; }
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.65.0", date: "August 2026", changes: [
+            "Neu: Kalender abonnieren. Unter Einstellungen → Mein Bereich → Daten & Sicherung lässt sich ein Live-Kalender-Link erzeugen, mit dem sich die eigenen bestätigten Termine dauerhaft in Apple Kalender, Google Kalender oder Outlook einbinden lassen – die App synchronisiert von da an automatisch, ohne dass jeder Termin einzeln exportiert werden muss. Der Link lässt sich jederzeit erneuern oder deaktivieren",
+        ] },
     { v: "1.64.1", date: "August 2026", changes: [
             "Überarbeitet: Der Übungs-Verlauf für ADK-/Strecken-Punkte (Angesprochen/Geübt/Gekonnt mit Zeitstempel) ist jetzt eine optionale Einstellung, die jeder Fahrlehrer für sich selbst in \"Mein Bereich\" an- oder ausschalten kann (standardmäßig aus). Ist sie aktiviert, öffnet ein Tippen auf den Titel eines Punkts (z.B. \"Sitz einstellen\") das Verlaufs-Menü zur Status-Wahl – das Abhaken der Kästchen selbst bleibt davon unberührt und funktioniert wie gewohnt sofort ohne Zusatzmenü",
         ] },
@@ -2405,6 +2408,36 @@ async function fetchPracticeLogEnabled(uid) {
 }
 async function savePracticeLogEnabled(uid, value) {
     const { error } = await sb.from("profiles").update({ practice_log_enabled: !!value }).eq("id", uid);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+// Kalender-Abo: eigener, per RLS isolierter Token für den Live-ICS-Feed (siehe
+// netlify/functions/calendar-feed.js). Bewusst NICHT in profiles, weil profiles für
+// alle eingeloggten Nutzer lesbar ist und der Token sonst kein Geheimnis mehr wäre.
+async function fetchCalendarFeedToken(uid) {
+    const { data, error } = await sb.from("calendar_feeds").select("token").eq("owner", uid).maybeSingle();
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return (data && data.token) || null;
+}
+function genCalendarFeedToken() {
+    return (crypto.randomUUID() + crypto.randomUUID()).replace(/-/g, "");
+}
+async function regenerateCalendarFeedToken(uid) {
+    const token = genCalendarFeedToken();
+    const { error } = await sb.from("calendar_feeds").upsert({ owner: uid, token }, { onConflict: "owner" });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return token;
+}
+async function revokeCalendarFeedToken(uid) {
+    const { error } = await sb.from("calendar_feeds").delete().eq("owner", uid);
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -4826,6 +4859,8 @@ function App() {
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
     const [practiceLogEnabled, setPracticeLogEnabled] = useState(false); // persönliche Einstellung: Übungs-Verlauf-Feature an/aus
+    const [calendarFeedToken, setCalendarFeedToken] = useState(null); // Token für den abonnierbaren ICS-Kalender-Feed, null = noch nicht eingerichtet
+    const [calendarFeedBusy, setCalendarFeedBusy] = useState(false);
     const [adminTeacherStudents, setAdminTeacherStudents] = useState(null); // {teacher, list} oder null
     const [activeId, setActiveId] = useState(null);
     const [studentTab, setStudentTab] = useState("profil"); // Unterreiter der Schüler-Detailansicht
@@ -5393,6 +5428,7 @@ function App() {
             applySchoolColor(sc.color);
             fetchIsModerator(uid).then(setIsModerator).catch(() => { });
             fetchPracticeLogEnabled(uid).then(setPracticeLogEnabled).catch(() => { });
+            fetchCalendarFeedToken(uid).then(setCalendarFeedToken).catch(() => { });
             fetchMyRights(uid).then(r => {
                 setIsSchoolAdmin(r);
                 // Einmalige Übernahme alter, lokal gespeicherter Preise in die Fahrschule (nur Admin)
@@ -10722,6 +10758,69 @@ function App() {
                         "Fahrtenbuch als CSV exportieren"),
                     React.createElement("span", { style: { color: "var(--muted)" } }, "\u203A")),
                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 4px 0", lineHeight: 1.5 } }, "Alle gefahrenen Fahrstunden mit Datum, Sch\u00FCler und UE, zum \u00D6ffnen in Excel oder zum Import in eine andere Verwaltungssoftware."),
+                React.createElement("div", { className: "eyebrow" }, "Kalender abonnieren"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Deine best\u00E4tigten Termine als Live-Kalender in Apple Kalender, Google Kalender oder Outlook einbinden \u2013 einmal einrichten, danach synchronisiert sich alles von selbst, ohne jeden Termin einzeln zu exportieren."),
+                    !calendarFeedToken
+                        ? React.createElement("button", { className: "btn btn-ghost btn-block", disabled: calendarFeedBusy, onClick: async () => {
+                                setCalendarFeedBusy(true);
+                                try {
+                                    const token = await regenerateCalendarFeedToken(uid);
+                                    setCalendarFeedToken(token);
+                                }
+                                catch (err) {
+                                    showToast("Konnte nicht eingerichtet werden:\n" + err.message);
+                                }
+                                finally {
+                                    setCalendarFeedBusy(false);
+                                }
+                            } }, calendarFeedBusy ? "Wird eingerichtet\u2026" : "Abo-Link erzeugen")
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
+                                React.createElement("input", { readOnly: true, value: "https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, onFocus: e => e.target.select(), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 12.5, background: "var(--field-bg)", color: "var(--muted)" } })),
+                            React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+                                React.createElement("a", { href: "webcal://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, className: "btn btn-primary", style: { flex: "1 1 auto", textAlign: "center" } }, "In Kalender-App \u00F6ffnen"),
+                                React.createElement("button", { className: "btn btn-ghost", onClick: async () => {
+                                        try {
+                                            await navigator.clipboard.writeText("https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken);
+                                            showToast("Link kopiert");
+                                        }
+                                        catch (err) {
+                                            showToast("Konnte nicht kopiert werden.");
+                                        }
+                                    } }, "Kopieren")),
+                            React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 12 } },
+                                React.createElement("button", { disabled: calendarFeedBusy, style: { fontSize: 12, color: "var(--muted)", textDecoration: "underline" }, onClick: async () => {
+                                        if (!await askConfirm({ message: "Neuen Link erzeugen? Der bisherige Link funktioniert danach nicht mehr und muss in der Kalender-App neu abonniert werden." }))
+                                            return;
+                                        setCalendarFeedBusy(true);
+                                        try {
+                                            const token = await regenerateCalendarFeedToken(uid);
+                                            setCalendarFeedToken(token);
+                                            showToast("Neuer Link erzeugt");
+                                        }
+                                        catch (err) {
+                                            showToast("Fehler:\n" + err.message);
+                                        }
+                                        finally {
+                                            setCalendarFeedBusy(false);
+                                        }
+                                    } }, "Link erneuern"),
+                                React.createElement("button", { disabled: calendarFeedBusy, style: { fontSize: 12, color: "#B3362A", textDecoration: "underline" }, onClick: async () => {
+                                        if (!await askConfirm({ message: "Kalender-Abo deaktivieren? Der Link funktioniert danach nicht mehr." }))
+                                            return;
+                                        setCalendarFeedBusy(true);
+                                        try {
+                                            await revokeCalendarFeedToken(uid);
+                                            setCalendarFeedToken(null);
+                                        }
+                                        catch (err) {
+                                            showToast("Fehler:\n" + err.message);
+                                        }
+                                        finally {
+                                            setCalendarFeedBusy(false);
+                                        }
+                                    } }, "Deaktivieren")))),
                 )),
             settingsTab === "admin" && React.createElement(React.Fragment, null,
                 React.createElement(Collapsible, { title: "Meine Fahrschule", subtitle: "Name, Logo, Farbe" }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
