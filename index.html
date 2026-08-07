@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.69.0";
+const APP_VERSION = "1.71.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1197,8 +1197,14 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "1.69.0", date: "August 2026", changes: [
+    { v: "1.71.0", date: "August 2026", changes: [
             "Neu: Terminart „Fahrsimulator“. Die geplante Fahrschulreform erlaubt es, Schaltstunden und die Überprüfungsfahrt bei B197 am Simulator zu absolvieren – die neue Terminart lässt sich wie jede andere bei Termin und Vorschlag auswählen und zählt als reguläre Fahrstunde. Sonderfahrten bleiben davon unberührt, da deren Zähler in der Strecken-Vorlage weiterhin unabhängig von der Terminart geführt werden",
+        ] },
+    { v: "1.70.0", date: "August 2026", changes: [
+            "Fehler behoben: Die Kachel „Offene Rechnungen“ auf der Startseite reagierte bei Solo-Fahrlehrern ohne Fahrschule nicht auf Klicks. Sie öffnet jetzt wie gewohnt die Übersicht der offenen Posten mit den eigenen Schülern",
+        ] },
+    { v: "1.69.0", date: "August 2026", changes: [
+            "Kleinigkeit behoben: Datumsangaben zeigten an mehreren Stellen versehentlich zwei Punkte statt einem (z.B. „07.08..\" statt „07.08.\") – betraf die Wochenanzeige und Tages-Überschriften auf der öffentlichen Buchungsseite sowie die Zeitangabe bei offenen Nachrichten",
         ] },
     { v: "1.68.0", date: "August 2026", changes: [
             "Neu: Beim Öffnen der App wird automatisch der Schüler ausgewählt, dessen bestätigter Termin gerade läuft (statt immer zuletzt genutzten oder ersten Schüler zu zeigen) – praktisch beim Wechsel zwischen mehreren Fahrstunden hintereinander. Manuelles Wechseln über die Schülerliste funktioniert weiterhin unverändert",
@@ -10259,10 +10265,20 @@ function App() {
     }
     // Offene-Posten-Dashboard öffnen: offene Beträge pro Schüler, über alle Fahrlehrer hinweg
     function openOffenePosten() {
-        if (!school || !school.id)
-            return;
-        setOffenePosten({ busy: true, error: "", list: [] });
         const price = Number(pricePerHour) || 0;
+        // Ohne Fahrschule (Solo-Fahrlehrer) gibt es keine schulweite Übersicht zum Laden -
+        // stattdessen direkt aus den bereits geladenen eigenen Schülerdaten zusammenstellen,
+        // statt beim Klick auf die Kachel stillschweigend gar nichts zu tun.
+        if (!school || !school.id) {
+            const list = (students || []).filter(s => !s.archived && s._isMine).map(s => {
+                const charges = sumCharges(s, price);
+                const paid = sumPayments(s);
+                return { studentId: s.id, name: dispName(s), teacher: "", charges, paid, open: charges - paid };
+            }).filter(x => x.open > 0.005).sort((a, b) => b.open - a.open);
+            setOffenePosten({ busy: false, error: "", list, soloMode: true });
+            return;
+        }
+        setOffenePosten({ busy: true, error: "", list: [] });
         fetchSchoolOffenePosten(school.id).then(rows => {
             // Offene Beträge mit derselben Logik wie in der Schüleransicht berechnen
             const list = (rows || []).map(r => {
@@ -13335,7 +13351,7 @@ function App() {
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Offene Posten"),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                !offenePosten.soloMode && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
                     (school && school.name) || "",
                     " \u00B7 alle Fahrlehrer"),
                 offenePosten.busy
@@ -13357,7 +13373,7 @@ function App() {
                                 offenePosten.list.map(x => React.createElement("div", { key: x.studentId, className: "card", style: { padding: "12px 14px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
                                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                         React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, x.name),
-                                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.teacher),
+                                        x.teacher && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.teacher),
                                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
                                             "Gesamt ",
                                             eurFmt(x.charges),
@@ -13383,7 +13399,7 @@ function App() {
                         return React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine offenen Nachrichten. \uD83C\uDF89");
                     return list.map(({ s, last }) => {
                         const d = new Date(last.at);
-                        const when = isToday(last.at) ? "heute " + hm(last.at) + " Uhr" : dayMonth(d) + ". \u00B7 " + hm(last.at) + " Uhr";
+                        const when = isToday(last.at) ? "heute " + hm(last.at) + " Uhr" : dayMonth(d) + " \u00B7 " + hm(last.at) + " Uhr";
                         return React.createElement("button", { key: s.id, onClick: () => openStudentMessages(s), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, textAlign: "left" } },
                             React.createElement("div", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
@@ -14992,8 +15008,7 @@ function BookingPage({ code }) {
                     React.createElement("div", { style: { flex: 1, textAlign: "center", fontSize: 13, fontWeight: 700, fontFamily: "var(--font-d)" } },
                         dayMonth(startOfWeek(week)),
                         " \u2013 ",
-                        dayMonth(weekEnd),
-                        "."),
+                        dayMonth(weekEnd)),
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setWeek(addDays(startOfWeek(week), 7)) }, "\u203A")),
                 loadingBusy && React.createElement("div", { style: { textAlign: "center", fontSize: 13, color: "var(--muted)", padding: "8px" } }, "L\u00E4dt\u2026"),
                 days.map(d => {
@@ -15028,9 +15043,7 @@ function BookingPage({ code }) {
                             React.createElement("div", null,
                                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, textTransform: "capitalize" } }, weekdayShort(d)),
-                                    React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } },
-                                        dayMonth(d),
-                                        ".")),
+                                    React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } }, dayMonth(d))),
                                 dayBlocked
                                     ? React.createElement("div", { style: { fontSize: 11.5, color: "#B3362A", marginTop: 2 } }, "Geschlossen")
                                     : React.createElement("div", { style: { fontSize: 11.5, fontWeight: hasTimeLimit ? 800 : 600, color: hasTimeLimit ? "#B3362A" : "#1B8F4D", marginTop: 2 } }, hoursLabel)),
