@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.69.0";
+const APP_VERSION = "1.70.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1192,6 +1192,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.70.0", date: "August 2026", changes: [
+            "Fehler behoben: Die Kachel „Offene Rechnungen“ auf der Startseite reagierte bei Solo-Fahrlehrern ohne Fahrschule nicht auf Klicks. Sie öffnet jetzt wie gewohnt die Übersicht der offenen Posten mit den eigenen Schülern",
+        ] },
     { v: "1.69.0", date: "August 2026", changes: [
             "Kleinigkeit behoben: Datumsangaben zeigten an mehreren Stellen versehentlich zwei Punkte statt einem (z.B. „07.08..\" statt „07.08.\") – betraf die Wochenanzeige und Tages-Überschriften auf der öffentlichen Buchungsseite sowie die Zeitangabe bei offenen Nachrichten",
         ] },
@@ -10254,10 +10257,20 @@ function App() {
     }
     // Offene-Posten-Dashboard öffnen: offene Beträge pro Schüler, über alle Fahrlehrer hinweg
     function openOffenePosten() {
-        if (!school || !school.id)
-            return;
-        setOffenePosten({ busy: true, error: "", list: [] });
         const price = Number(pricePerHour) || 0;
+        // Ohne Fahrschule (Solo-Fahrlehrer) gibt es keine schulweite Übersicht zum Laden -
+        // stattdessen direkt aus den bereits geladenen eigenen Schülerdaten zusammenstellen,
+        // statt beim Klick auf die Kachel stillschweigend gar nichts zu tun.
+        if (!school || !school.id) {
+            const list = (students || []).filter(s => !s.archived && s._isMine).map(s => {
+                const charges = sumCharges(s, price);
+                const paid = sumPayments(s);
+                return { studentId: s.id, name: dispName(s), teacher: "", charges, paid, open: charges - paid };
+            }).filter(x => x.open > 0.005).sort((a, b) => b.open - a.open);
+            setOffenePosten({ busy: false, error: "", list, soloMode: true });
+            return;
+        }
+        setOffenePosten({ busy: true, error: "", list: [] });
         fetchSchoolOffenePosten(school.id).then(rows => {
             // Offene Beträge mit derselben Logik wie in der Schüleransicht berechnen
             const list = (rows || []).map(r => {
@@ -13330,7 +13343,7 @@ function App() {
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Offene Posten"),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                !offenePosten.soloMode && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
                     (school && school.name) || "",
                     " \u00B7 alle Fahrlehrer"),
                 offenePosten.busy
@@ -13352,7 +13365,7 @@ function App() {
                                 offenePosten.list.map(x => React.createElement("div", { key: x.studentId, className: "card", style: { padding: "12px 14px", marginBottom: 8, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 } },
                                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                         React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, x.name),
-                                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.teacher),
+                                        x.teacher && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.teacher),
                                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
                                             "Gesamt ",
                                             eurFmt(x.charges),
