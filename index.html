@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.68.0";
+const APP_VERSION = "1.69.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1197,8 +1197,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "1.68.0", date: "August 2026", changes: [
+    { v: "1.69.0", date: "August 2026", changes: [
             "Neu: Terminart „Fahrsimulator“. Die geplante Fahrschulreform erlaubt es, Schaltstunden und die Überprüfungsfahrt bei B197 am Simulator zu absolvieren – die neue Terminart lässt sich wie jede andere bei Termin und Vorschlag auswählen und zählt als reguläre Fahrstunde. Sonderfahrten bleiben davon unberührt, da deren Zähler in der Strecken-Vorlage weiterhin unabhängig von der Terminart geführt werden",
+        ] },
+    { v: "1.68.0", date: "August 2026", changes: [
+            "Neu: Beim Öffnen der App wird automatisch der Schüler ausgewählt, dessen bestätigter Termin gerade läuft (statt immer zuletzt genutzten oder ersten Schüler zu zeigen) – praktisch beim Wechsel zwischen mehreren Fahrstunden hintereinander. Manuelles Wechseln über die Schülerliste funktioniert weiterhin unverändert",
         ] },
     { v: "1.67.0", date: "August 2026", changes: [
             "Technisch: Vorbereitung für native Fahrschüler-App. Startet die App ohne den üblichen personalisierten Buchungslink (z.B. beim Öffnen vom Homescreen), erscheint jetzt ein Bildschirm zur Eingabe des Fahrschul-Codes. Der Code wird danach auf dem Gerät gemerkt, sodass man nicht jedes Mal neu eingeben muss, mit Möglichkeit zur Korrektur bei Tippfehlern",
@@ -4585,6 +4588,28 @@ function rmapPathLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++)
 function rmapFmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + " km" : Math.round(m) + " m"; }
 function rmapFmtDur(sec) { const m = Math.round(sec / 60); if (m < 60)
     return m + " Min"; return Math.floor(m / 60) + " Std " + (m % 60) + " Min"; }
+// Termin-Erkennung: findet den Schüler, dessen bestätigter Termin genau jetzt läuft - für
+// die automatische Vorauswahl beim App-Start, statt immer denselben zuletzt genutzten oder
+// ersten Schüler zu zeigen. Manuelles Wechseln (Wechseln-Knopf, Schülerliste) bleibt unberührt,
+// das hier greift nur bei der Ausgangsauswahl.
+function findCurrentApptStudentId(appts) {
+    const now = Date.now();
+    const current = (appts || []).find(a => a.status === "confirmed" && a.student_id &&
+        new Date(a.start_at).getTime() <= now && now <= new Date(a.end_at).getTime());
+    return current ? current.student_id : null;
+}
+// Läuft diese Seite in der nativen Fahrlehrer-App (Capacitor)? Nur dort existiert das
+// Hintergrund-GPS-Plugin - im normalen Browser bleibt es bei navigator.geolocation
+// (funktioniert dort einwandfrei, nur eben nicht mit geschlossenem Tab/Bildschirm).
+function nativeBackgroundGeo() {
+    try {
+        return (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() &&
+            window.Capacitor.Plugins && window.Capacitor.Plugins.BackgroundGeolocation) || null;
+    }
+    catch (e) {
+        return null;
+    }
+}
 function rmapEsc(t) { return String(t == null ? "" : t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function rmapPinSvg(color) {
     return '<svg width="26" height="34" viewBox="0 0 26 34" xmlns="http://www.w3.org/2000/svg">'
@@ -4831,6 +4856,7 @@ function App() {
     const recStartRef = useRef(0);
     const recLastUiRef = useRef(0);
     const recWakeLockRef = useRef(null); // hält den Bildschirm während der Aufzeichnung wach
+    const recNativeWatcherIdRef = useRef(null); // Watcher-ID des nativen Hintergrund-GPS-Plugins (nur in der App, nicht im Browser)
     const [recSession, setRecSession] = useState(null); // null | {studentId,lessonId,studentName}
     const [recUi, setRecUi] = useState({ dist: 0, dur: 0, n: 0, tick: 0 });
     // Verhindert, dass der Bildschirm während einer laufenden Aufzeichnung automatisch sperrt
@@ -5489,7 +5515,12 @@ function App() {
             setSyncing(false);
             setStudents(list || []);
             saveCache(uid, list || []);
-            setActiveId(a => (list.find(s => s.id === a) ? a : (list[0] ? list[0].id : null)));
+            setActiveId(a => {
+                const currentStuId = findCurrentApptStudentId(apptData);
+                if (currentStuId && list.find(s => s.id === currentStuId))
+                    return currentStuId;
+                return list.find(s => s.id === a) ? a : (list[0] ? list[0].id : null);
+            });
             setTpl(tplData);
             saveTplCache(uid, tplData);
             applyFetchedAppts(apptData || []);
@@ -6768,8 +6799,8 @@ function App() {
         recLastUiRef.current = 0;
         setRecUi({ dist: 0, dur: 0, n: 0, tick: 0 });
         setRecSession({ studentId, lessonId, studentName });
-        recWatchRef.current = navigator.geolocation.watchPosition(pos => {
-            const p = [pos.coords.latitude, pos.coords.longitude], arr = recPtsRef.current;
+        const onPoint = (lat, lng) => {
+            const p = [lat, lng], arr = recPtsRef.current;
             if (arr.length === 0 || rmapDist(arr[arr.length - 1], p) > 8) {
                 arr.push(p);
                 const now = Date.now();
@@ -6778,12 +6809,38 @@ function App() {
                     setRecUi(u => ({ dist: rmapPathLen(arr), dur: (now - recStartRef.current) / 1000, n: arr.length, tick: u.tick + 1 }));
                 }
             }
-        }, err => {
-            if (err && err.code === 1) {
-                showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
-                stopRecording(false);
-            }
-        }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+        };
+        // In der nativen App läuft die Aufzeichnung über das Hintergrund-GPS-Plugin weiter,
+        // auch wenn das Display gesperrt oder zu einer anderen App gewechselt wird - reines
+        // navigator.geolocation pausiert dafür, sobald die App nicht mehr im Vordergrund ist.
+        const nativeGeo = nativeBackgroundGeo();
+        if (nativeGeo) {
+            nativeGeo.addWatcher({
+                backgroundTitle: "Allindrive zeichnet die Strecke auf",
+                backgroundMessage: (studentName ? "Fahrstunde mit " + studentName : "Fahrstunde") + " läuft weiter im Hintergrund.",
+                requestPermissions: true,
+                stale: false,
+                distanceFilter: 8,
+            }, (location, err) => {
+                if (err) {
+                    if (err.code === "NOT_AUTHORIZED") {
+                        showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
+                        stopRecording(false);
+                    }
+                    return;
+                }
+                if (location)
+                    onPoint(location.latitude, location.longitude);
+            }).then(id => { recNativeWatcherIdRef.current = id; });
+        }
+        else {
+            recWatchRef.current = navigator.geolocation.watchPosition(pos => onPoint(pos.coords.latitude, pos.coords.longitude), err => {
+                if (err && err.code === 1) {
+                    showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
+                    stopRecording(false);
+                }
+            }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+        }
         acquireRecWakeLock();
     };
     const stopRecording = (save) => {
@@ -6793,6 +6850,16 @@ function App() {
             }
             catch (_) { }
             recWatchRef.current = null;
+        }
+        if (recNativeWatcherIdRef.current != null) {
+            const nativeGeo = nativeBackgroundGeo();
+            if (nativeGeo) {
+                try {
+                    nativeGeo.removeWatcher({ id: recNativeWatcherIdRef.current });
+                }
+                catch (_) { }
+            }
+            recNativeWatcherIdRef.current = null;
         }
         if (recWakeLockRef.current) {
             try {
