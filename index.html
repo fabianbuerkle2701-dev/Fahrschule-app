@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.70.4";
+const APP_VERSION = "1.71.0";
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1192,6 +1192,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.71.0", date: "August 2026", changes: [
+            "Neu: Theorie üben im Fahrschülerbereich. Fahrschüler können jetzt direkt in der App Theorie-Prüfungsfragen üben - nach Thema sortiert oder zufällig gemischt, mit sofortiger Rückmeldung und Erklärung zu jeder Frage. Bei Anmeldung unter „Mein Fortschritt“ wird der Übungsstand pro Thema gespeichert und bei jedem Besuch angezeigt. Aktuell mit einem Satz Beispielfragen zum Ausprobieren - der amtliche Fragenkatalog wird ergänzt, sobald lizenziert",
+        ] },
     { v: "1.70.4", date: "August 2026", changes: [
             "Verbessert: Neue Nachrichten von Fahrschülern aus dem Fahrschülerbereich erschienen im Postfach erst nach einem Neuladen der App. Beim Öffnen von „Nachrichten“ bei einem Schüler wird jetzt sofort der aktuelle Stand nachgeladen",
         ] },
@@ -3120,6 +3123,35 @@ async function publicStudentSendMessage(code, name, pin, text) {
         throw new Error(error.message);
     }
     return data;
+}
+/* ════════ Theorie üben (Fahrschülerbereich) ════════ */
+// Fragen laden - nur der Fahrschul-Code ist nötig, kein PIN (wie bei der Videobibliothek:
+// unpersönlicher Lese-Content, der Fortschritt selbst braucht dagegen den vollen Login).
+async function publicTheoryQuestions(code, klasse) {
+    const { data, error } = await sb.rpc("public_theory_questions", { code, p_klasse: klasse || null });
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data || [];
+}
+// Antwort speichern (braucht Name+PIN, da der Fortschritt am jeweiligen Schüler hängt).
+async function publicTheorySubmitAnswer(code, name, pin, questionId, correct) {
+    const { data, error } = await sb.rpc("public_theory_answer_submit", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_correct: correct });
+    if (error) {
+        console.error(error);
+        return "error";
+    }
+    return data;
+}
+// Bisherigen Theorie-Übungsfortschritt eines eingeloggten Schülers laden (questionId -> {correct, attempts}).
+async function publicTheoryProgress(code, name, pin) {
+    const { data, error } = await sb.rpc("public_theory_progress", { code, p_name: name, p_pin: pin });
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data || {};
 }
 // Buchungs-Code des eingeloggten Fahrlehrers holen/anlegen
 async function fetchBookingCode(uid) {
@@ -14006,6 +14038,161 @@ function VideoLibrary({ code }) {
                     React.createElement("video", { controls: true, preload: "metadata", style: { width: "100%", borderRadius: 10, display: "block", background: "#000" }, src: videoPublicUrl(v.storage_path) })));
         })));
 }
+// Mischt ein Array zufällig (Fisher-Yates), ohne das Original zu verändern.
+function shuffled(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+// ════════ Theorie üben (öffentlich, per Fahrschul-Code; Fortschritt nur bei Login) ════════
+// Fragen sind Beispielinhalte (is_sample=true in der DB), solange der amtliche Fragenkatalog
+// nicht lizenziert ist (siehe Aufgabenliste) - Struktur ist bereits auf echte Inhalte ausgelegt.
+function TheoryPractice({ code }) {
+    const [questions, setQuestions] = React.useState(undefined); // undefined=lädt, null=Fehler, []=leer
+    const [screen, setScreen] = React.useState("themen"); // "themen" | "uebung"
+    const [queue, setQueue] = React.useState([]);
+    const [qIndex, setQIndex] = React.useState(0);
+    const [selected, setSelected] = React.useState([]);
+    const [checked, setChecked] = React.useState(false);
+    const [sessionRichtig, setSessionRichtig] = React.useState(0);
+    const [progress, setProgress] = React.useState({}); // questionId -> {correct} - vom Server (falls eingeloggt) oder nur diese Sitzung
+    React.useEffect(() => {
+        publicTheoryQuestions(code).then(setQuestions).catch(() => setQuestions(null));
+    }, [code]);
+    const LS_NAME = "v3_sa_name_" + code, LS_PIN = "v3_sa_pin_" + code;
+    let loggedInName = "", loggedInPin = "";
+    try {
+        loggedInName = localStorage.getItem(LS_NAME) || "";
+        loggedInPin = localStorage.getItem(LS_PIN) || "";
+    }
+    catch (e) { }
+    const loggedIn = !!(loggedInName && loggedInPin);
+    React.useEffect(() => {
+        if (!loggedIn)
+            return;
+        publicTheoryProgress(code, loggedInName, loggedInPin).then(p => { if (p)
+            setProgress(p); });
+        /* eslint-disable-next-line */
+    }, [code, loggedIn, loggedInName, loggedInPin]);
+    if (questions === undefined)
+        return React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…");
+    if (questions === null)
+        return React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Übungsfragen konnten nicht geladen werden.");
+    if (questions.length === 0)
+        return React.createElement("div", { className: "card", style: { padding: "20px 16px", textAlign: "center" } },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--sky-bg)", color: "var(--sky-deep)", margin: "0 auto 10px" } }, React.createElement(IcBook, null)),
+            React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Es sind noch keine Übungsfragen hinterlegt."));
+    const byTopic = {};
+    questions.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
+    const topics = Object.keys(byTopic);
+    function startRound(topicKey) {
+        const qs = topicKey ? byTopic[topicKey] : questions;
+        setQueue(shuffled(qs));
+        setQIndex(0);
+        setSelected([]);
+        setChecked(false);
+        setSessionRichtig(0);
+        setScreen("uebung");
+    }
+    function toggleOption(optId, multi) {
+        if (checked)
+            return;
+        setSelected(prev => multi ? (prev.includes(optId) ? prev.filter(x => x !== optId) : [...prev, optId]) : [optId]);
+    }
+    function checkAnswer() {
+        const q = queue[qIndex];
+        const correctIds = q.options.filter(o => o.correct).map(o => o.id);
+        const isCorrect = correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
+        setChecked(true);
+        if (isCorrect)
+            setSessionRichtig(c => c + 1);
+        setProgress(prev => ({ ...prev, [q.id]: { correct: isCorrect } }));
+        if (loggedIn)
+            publicTheorySubmitAnswer(code, loggedInName, loggedInPin, q.id, isCorrect);
+    }
+    function nextQuestion() {
+        if (qIndex + 1 < queue.length) {
+            setQIndex(i => i + 1);
+            setSelected([]);
+            setChecked(false);
+        }
+        else {
+            setScreen("themen");
+        }
+    }
+    if (screen === "uebung") {
+        const q = queue[qIndex];
+        const multi = q.options.filter(o => o.correct).length > 1;
+        const correctIds = q.options.filter(o => o.correct).map(o => o.id);
+        const isCorrect = checked && correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
+        return React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setScreen("themen") }, "‹ Themen"),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, (qIndex + 1) + " / " + queue.length + " · " + sessionRichtig + " richtig")),
+            React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.topic_key + " · " + q.points + " Punkte" + (multi ? " · Mehrfachauswahl" : "")),
+                React.createElement("div", { style: { fontSize: 15.5, fontWeight: 700, lineHeight: 1.4, marginBottom: 16 } }, q.question),
+                React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 9, marginBottom: 16 } },
+                    q.options.map(o => {
+                        const isSel = selected.includes(o.id);
+                        let bg = "var(--field-bg)", border = "1.5px solid var(--line)", color = "var(--ink)";
+                        if (checked) {
+                            if (o.correct) {
+                                bg = "var(--sage-bg)";
+                                border = "1.5px solid var(--sage-deep)";
+                            }
+                            else if (isSel) {
+                                bg = "#FDECEA";
+                                border = "1.5px solid #B3362A";
+                            }
+                        }
+                        else if (isSel) {
+                            bg = "var(--orange-soft)";
+                            border = "1.5px solid var(--orange)";
+                        }
+                        return React.createElement("button", { key: o.id, disabled: checked, onClick: () => toggleOption(o.id, multi), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: bg, border, cursor: checked ? "default" : "pointer", fontSize: 14 } },
+                            React.createElement("span", { style: { width: 18, height: 18, borderRadius: multi ? 5 : 99, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0 } }),
+                            React.createElement("span", { style: { flex: 1 } }, o.text));
+                    })),
+                checked && q.explanation && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } },
+                    React.createElement("strong", { style: { color: isCorrect ? "var(--sage-deep)" : "#B3362A" } }, isCorrect ? "Richtig! " : "Leider falsch. "), q.explanation),
+                !checked
+                    ? React.createElement("button", { className: "btn btn-primary btn-block", disabled: selected.length === 0, onClick: checkAnswer }, "Prüfen")
+                    : React.createElement("button", { className: "btn btn-primary btn-block", onClick: nextQuestion }, qIndex + 1 < queue.length ? "Weiter" : "Fertig")));
+    }
+    function topicPct(qs) {
+        if (!loggedIn || qs.length === 0)
+            return null;
+        const gemeistert = qs.filter(q => progress[q.id] && progress[q.id].correct).length;
+        return Math.round((gemeistert / qs.length) * 100);
+    }
+    const gesamtPct = topicPct(questions);
+    return React.createElement("div", null,
+        !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Mein Fortschritt“ an, damit dein Übungsfortschritt gespeichert wird. Üben geht auch so schon."),
+        React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }, onClick: () => startRound(null) },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
+            React.createElement("span", { style: { flex: 1 } },
+                React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Zufällig üben"),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, questions.length + " Fragen aus allen Themen gemischt")),
+            gesamtPct !== null && React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "var(--orange-deep)", flexShrink: 0 } }, gesamtPct + "%")),
+        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
+        React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
+            topics.map((topic, ti) => {
+                const qs = byTopic[topic];
+                const pct = topicPct(qs);
+                const tone = ["sage", "clay", "sky", "orange"][ti % 4];
+                const bg = "var(--" + tone + (tone === "orange" ? "-soft" : "-bg") + ")";
+                const fg = tone === "orange" ? "var(--orange-deep)" : "var(--" + tone + "-deep)";
+                return React.createElement("button", { key: topic, onClick: () => startRound(topic), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: ti > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
+                    React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, width: 30, height: 30, flexShrink: 0 } }, React.createElement(IcBook, null)),
+                    React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, topic),
+                    React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, pct !== null ? (pct + "% · " + qs.length + " Fragen") : (qs.length + " Fragen")));
+            })),
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Beispielfragen zum Ausprobieren - der amtliche Fragenkatalog wird ergänzt, sobald verfügbar."));
+}
 // ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
 // Reine Ansichtskarte für den Schülerbereich: zeigt alle aufgezeichneten Strecken
 // übereinander. Kein Aufzeichnen, keine Stecknadeln, keine Bearbeitung.
@@ -14655,7 +14842,7 @@ function BookingPage({ code }) {
     const [done, setDone] = React.useState(false);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
-    const [tab, setTab] = React.useState("termine"); // "termine" | "fortschritt" | "videos" | "anmelden"
+    const [tab, setTab] = React.useState("termine"); // "termine" | "fortschritt" | "videos" | "theorie" | "anmelden"
     const [enrollForm, setEnrollForm] = React.useState({ vorname: "", name: "", tel: "", geb: "", referralCode: "", busy: false, error: "" });
     const [enrollDone, setEnrollDone] = React.useState(false);
     async function submitEnrollment() {
@@ -14926,6 +15113,7 @@ function BookingPage({ code }) {
         termine: "Wähle einen freien Termin für deine nächste Fahrstunde",
         fortschritt: "Dein Ausbildungsstand, Erfolge und Nachrichten",
         videos: "Lernvideos zu Theorie und Praxis",
+        theorie: "Übe Prüfungsfragen zur Theorie",
         anmelden: "Melde dich unverbindlich zur Ausbildung an",
     };
     return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)" } },
@@ -14944,11 +15132,12 @@ function BookingPage({ code }) {
                     bookingVorname ? (", " + bookingVorname) : "",
                     "!"),
                 React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, tabMeta[tab] || "")),
-            React.createElement("div", { className: "seg", style: { marginBottom: 16 } },
-                React.createElement("button", { className: tab === "termine" ? "on" : "", onClick: () => setTab("termine") }, "Termine"),
-                React.createElement("button", { className: tab === "fortschritt" ? "on" : "", onClick: () => setTab("fortschritt") }, "Mein Fortschritt"),
-                React.createElement("button", { className: tab === "videos" ? "on" : "", onClick: () => setTab("videos") }, "Videos"),
-                React.createElement("button", { className: tab === "anmelden" ? "on" : "", onClick: () => setTab("anmelden") }, "Neu anmelden")),
+            React.createElement("div", { className: "seg", style: { marginBottom: 16, overflowX: "auto", flexWrap: "nowrap" } },
+                React.createElement("button", { className: tab === "termine" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("termine") }, "Termine"),
+                React.createElement("button", { className: tab === "fortschritt" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("fortschritt") }, "Mein Fortschritt"),
+                React.createElement("button", { className: tab === "videos" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("videos") }, "Videos"),
+                React.createElement("button", { className: tab === "theorie" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("theorie") }, "Theorie üben"),
+                React.createElement("button", { className: tab === "anmelden" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("anmelden") }, "Neu anmelden")),
             tab === "anmelden" && React.createElement("div", null,
                 enrollDone
                     ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
@@ -14980,6 +15169,7 @@ function BookingPage({ code }) {
                         React.createElement("button", { className: "btn btn-primary btn-block", disabled: enrollForm.busy, onClick: submitEnrollment }, enrollForm.busy ? "Wird gesendet…" : "Unverbindlich anmelden"))),
             tab === "fortschritt" && React.createElement(StudentArea, { code: code, info: info }),
             tab === "videos" && React.createElement(VideoLibrary, { code: code }),
+            tab === "theorie" && React.createElement(TheoryPractice, { code: code }),
             tab === "termine" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "home-kpis", style: { marginBottom: 4 } }, [
                     { key: "mine", label: "Meine Termine", value: mineSet.size, tone: "sage" },
