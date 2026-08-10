@@ -110,6 +110,9 @@
     position:sticky;top:0;z-index:30}
   .topbar-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
   .brand{display:flex;align-items:center;gap:10px;min-width:0}
+  /* Ohne min-width:0 schrumpft der Textblock nicht, das Ellipsis von .brand-name greift nicht
+     und ein langer Fahrschulname schiebt sich über die Knöpfe rechts daneben. */
+  .brand>div{min-width:0}
   /* object-fit:cover statt gestreckt – ein nicht quadratisches Logo wird sonst auf 40x40
      verzerrt, weil <img> ohne object-fit einfach stur auf width/height gestaucht wird.
      Etwas größer als vorher (34->40px) auf Nutzerwunsch. */
@@ -1134,7 +1137,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.76.1";
+const APP_VERSION = "1.77.0";
 // Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
 // Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
 // über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
@@ -1199,6 +1202,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.77.0", date: "August 2026", changes: [
+            "Neu: Die Fahrschüler-App „Allindrive für Fahrschüler“ hat jetzt einen richtigen Login. Fahrschul-Code, Name und PIN werden einmal beim Start eingegeben - danach bleibt man angemeldet und landet direkt im persönlichen Bereich. Wer noch keinen PIN hat, kann weiterhin ohne Anmeldung Termine anfragen",
+            "Neu: In der App gibt es einen Abmelden-Knopf in der Kopfzeile. Der Reiter „Neu anmelden“ entfällt dort, weil angemeldete Fahrschüler ihn nicht brauchen",
+            "Verbessert: Der eigene Name ist beim Terminvorschlag in der App bereits ausgefüllt - er ist durch die Anmeldung ja bekannt",
+            "Fehler behoben: Bei langen Fahrschulnamen schob sich der Name in der Kopfzeile über die Knöpfe daneben; er wird jetzt sauber abgekürzt",
+        ] },
     { v: "1.76.1", date: "August 2026", changes: [
             "Fehler behoben: Das Löschen eines Fahrlehrer-Kontos durch den App-Admin schlug fehl, sobald das Konto Termine hatte - eine fehlende Löschregel in der Datenbank blockierte den Vorgang. Termine und Personalakten-Dateien werden beim Kontolöschen jetzt sauber mit aufgeräumt",
             "Fehler behoben: Im Kalender-Abo (Live-ICS-Feed) erschienen Überland- und Prüfungsfahrten nur als Kürzel statt mit Namen, Urlaubstage als normale Fahrstunde, und interne Markierungen (§SONST§/§URLAUB§) standen sichtbar in der Terminbeschreibung",
@@ -14497,7 +14506,9 @@ function StudentRouteMap({ lessons, color }) {
     return React.createElement("div", { style: { border: "1.5px solid var(--line)", borderRadius: 14, overflow: "hidden" } },
         React.createElement("div", { ref: elRef, style: { width: "100%", height: "44vh", minHeight: 260, background: "#e8e4da" } }));
 }
-function StudentArea({ code, info }) {
+// appMode: in der nativen Fahrschüler-App gibt es bereits einen Abmelden-Knopf in der Kopfzeile,
+// der die App vollständig abmeldet - der zweite hier drin wäre doppelt und verwirrend.
+function StudentArea({ code, info, appMode }) {
     const LS_NAME = "v3_sa_name_" + code, LS_PIN = "v3_sa_pin_" + code, LS_LANG = "v3_sa_lang_" + code;
     const [lang, setLang] = React.useState(() => { try {
         return localStorage.getItem(LS_LANG) || "de";
@@ -14813,7 +14824,7 @@ function StudentArea({ code, info }) {
                             (stu.vorname || name.split(" ")[0] || "").trim() || name,
                             "!"),
                         React.createElement("div", { className: "home-eyebrow", style: { marginTop: 2 } }, "Dein Ausbildungsstand" + (gesamtPctS > 0 ? " · " + gesamtPctS + "% geschafft" : "")))),
-                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, flexShrink: 0 }, onClick: logout }, "Abmelden")),
+                !appMode && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, flexShrink: 0 }, onClick: logout }, "Abmelden")),
             stu.avatarUrl && React.createElement("button", { disabled: avatarBusy, onClick: removeAvatar, style: { fontSize: 11.5, color: "var(--muted)", textDecoration: "underline", padding: 0, marginBottom: 10, marginTop: -6, display: "block" } }, avatarBusy ? "Wird entfernt…" : "Profilbild entfernen"),
             avatarErr && React.createElement("div", { style: { fontSize: 11.5, color: "#B3362A", marginBottom: 10, marginTop: -6 } }, avatarErr),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-around" } },
@@ -15072,7 +15083,10 @@ function PayerPage({ code }) {
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(total)));
             })));
 }
-function BookingPage({ code }) {
+// appMode: läuft in der nativen Fahrschüler-App (zentraler Login davor). Dann trägt der Kopf
+// den App-Namen statt "Online-Buchung", es gibt einen Abmelden-Knopf, und der Reiter
+// "Neu anmelden" entfällt - wer angemeldet ist, ist bereits Fahrschüler.
+function BookingPage({ code, appMode, onLogout }) {
     const [info, setInfo] = React.useState(undefined); // undefined=lädt, null=ungültig
     const [week, setWeek] = React.useState(() => startOfWeek(new Date()));
     const [busy, setBusy] = React.useState([]);
@@ -15083,9 +15097,12 @@ function BookingPage({ code }) {
     catch (e) {
         return [];
     } });
-    // Name des Fahrschülers (bleibt auf dem Gerät gespeichert), um eigene Termine geräteübergreifend wiederzuerkennen
+    // Name des Fahrschülers (bleibt auf dem Gerät gespeichert), um eigene Termine geräteübergreifend
+    // wiederzuerkennen. In der App ist der Name durch den Login bereits bekannt - ihn dort erneut
+    // abzutippen wäre unnötig und fehleranfällig (er muss exakt zum Login-Namen passen).
     const [myName, setMyName] = React.useState(() => { try {
-        return localStorage.getItem("v3_myname_" + code) || "";
+        return localStorage.getItem("v3_myname_" + code)
+            || (appMode ? (localStorage.getItem("v3_sa_name_" + code) || "") : "");
     }
     catch (e) {
         return "";
@@ -15102,7 +15119,18 @@ function BookingPage({ code }) {
     const [done, setDone] = React.useState(false);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
-    const [tab, setTab] = React.useState("termine"); // "termine" | "fortschritt" | "videos" | "theorie" | "anmelden"
+    // In der App startet ein angemeldeter Schüler beim persönlichen Bereich (dafür hat er sich
+    // angemeldet). Gäste ohne PIN und die öffentliche Buchungsseite starten bei den Terminen.
+    const [tab, setTab] = React.useState(() => {
+        if (!appMode)
+            return "termine";
+        try {
+            return localStorage.getItem("v3_sa_pin_" + code) ? "fortschritt" : "termine";
+        }
+        catch (e) {
+            return "termine";
+        }
+    }); // "termine" | "fortschritt" | "videos" | "theorie" | "anmelden"
     const [enrollForm, setEnrollForm] = React.useState({ vorname: "", name: "", tel: "", geb: "", referralCode: "", busy: false, error: "" });
     const [enrollDone, setEnrollDone] = React.useState(false);
     async function submitEnrollment() {
@@ -15383,7 +15411,14 @@ function BookingPage({ code }) {
                     React.createElement("img", { src: (info && info.logo) ? info.logo : DEFAULT_LOGO, alt: "Logo" }),
                     React.createElement("div", null,
                         React.createElement("div", { className: "brand-name" }, info.school_name || "Fahrschule"),
-                        React.createElement("div", { className: "brand-sub" }, "Online-Buchung"))))),
+                        React.createElement("div", { className: "brand-sub" }, appMode ? "für Fahrschüler" : "Online-Buchung"))),
+                appMode && onLogout && React.createElement("button", { onClick: onLogout, "aria-label": "Abmelden",
+                    style: { flexShrink: 0, marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12.5, fontWeight: 700, color: "var(--muted)", background: "none", border: "none", padding: "6px 2px" } },
+                    React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" }),
+                        React.createElement("polyline", { points: "16 17 21 12 16 7" }),
+                        React.createElement("line", { x1: "21", y1: "12", x2: "9", y2: "12" })),
+                    "Abmelden"))),
         React.createElement("div", { className: "pad readable-shell" },
             React.createElement("div", { style: { margin: "14px 2px 20px" } },
                 React.createElement("div", { className: "home-eyebrow" }, new Date().toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" })),
@@ -15397,7 +15432,7 @@ function BookingPage({ code }) {
                 React.createElement("button", { className: tab === "fortschritt" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("fortschritt") }, "Mein Fortschritt"),
                 React.createElement("button", { className: tab === "videos" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("videos") }, "Videos"),
                 THEORY_UEBEN_RELEASED && info.theory_addon_active && React.createElement("button", { className: tab === "theorie" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("theorie") }, "Theorie üben"),
-                React.createElement("button", { className: tab === "anmelden" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("anmelden") }, "Neu anmelden")),
+                !appMode && React.createElement("button", { className: tab === "anmelden" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("anmelden") }, "Neu anmelden")),
             tab === "anmelden" && React.createElement("div", null,
                 enrollDone
                     ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
@@ -15427,7 +15462,7 @@ function BookingPage({ code }) {
                             React.createElement("input", { type: "text", value: enrollForm.referralCode, placeholder: "z.B. von einer Freundin", onChange: e => setEnrollForm(f => ({ ...f, referralCode: e.target.value.toUpperCase() })) })),
                         enrollForm.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, enrollForm.error),
                         React.createElement("button", { className: "btn btn-primary btn-block", disabled: enrollForm.busy, onClick: submitEnrollment }, enrollForm.busy ? "Wird gesendet…" : "Unverbindlich anmelden"))),
-            tab === "fortschritt" && React.createElement(StudentArea, { code: code, info: info }),
+            tab === "fortschritt" && React.createElement(StudentArea, { code: code, info: info, appMode: appMode }),
             tab === "videos" && React.createElement(VideoLibrary, { code: code }),
             tab === "theorie" && THEORY_UEBEN_RELEASED && info.theory_addon_active && React.createElement(TheoryPractice, { code: code }),
             tab === "termine" && React.createElement(React.Fragment, null,
@@ -16072,33 +16107,172 @@ function clearSchuelerCode() {
     }
     catch (e) { }
 }
-function SchuelerCodeEntry() {
-    const [val, setVal] = React.useState("");
+// Gast-Modus (kein PIN vorhanden): Schüler darf nur Termine anfragen. Wird pro Fahrschul-Code
+// gemerkt, damit die App beim nächsten Start nicht wieder auf dem Login landet.
+function schuelerGuest(code) {
+    try {
+        return localStorage.getItem("v3_schueler_guest_" + code) === "1";
+    }
+    catch (e) {
+        return false;
+    }
+}
+function setSchuelerGuest(code, on) {
+    try {
+        if (on)
+            localStorage.setItem("v3_schueler_guest_" + code, "1");
+        else
+            localStorage.removeItem("v3_schueler_guest_" + code);
+    }
+    catch (e) { }
+}
+// Meldet den Fahrschüler in der App vollständig ab (Login + Gast-Flag + gemerkte Fahrschule).
+function schuelerLogout(code) {
+    try {
+        localStorage.removeItem("v3_sa_name_" + code);
+        localStorage.removeItem("v3_sa_pin_" + code);
+    }
+    catch (e) { }
+    setSchuelerGuest(code, false);
+    clearSchuelerCode();
+}
+// Zentraler Login der Fahrschüler-App: Fahrschul-Code, Name und PIN in einem Schritt.
+// Schreibt bei Erfolg in dieselben Schlüssel, die StudentArea und TheoryPractice ohnehin
+// lesen (v3_sa_name_<code> / v3_sa_pin_<code>) - dadurch sind alle Bereiche der App sofort
+// angemeldet, ohne dass dort erneut ein Login nötig wäre.
+function SchuelerLogin({ onDone }) {
+    const savedCode = schuelerSavedCode();
+    const [code, setCode] = React.useState(savedCode);
+    const [codeOpen, setCodeOpen] = React.useState(!savedCode);
+    const [vorname, setVorname] = React.useState("");
+    const [nachname, setNachname] = React.useState("");
+    const [pin, setPin] = React.useState("");
+    const [busy, setBusy] = React.useState(false);
     const [err, setErr] = React.useState("");
-    function go() {
-        // Codes werden immer kleingeschrieben generiert - Eingabe normalisieren, da
-        // Handy-Tastaturen (und Abtippen vom Aushang) gern Großbuchstaben liefern.
-        const v = val.trim().toLowerCase();
-        if (!v) {
-            setErr("Bitte gib deinen Code ein.");
+    // Codes werden immer kleingeschrieben erzeugt - Eingabe normalisieren, da Handy-Tastaturen
+    // (und das Abtippen vom Aushang) gern Großbuchstaben und Leerzeichen liefern.
+    const cleanCode = () => code.trim().toLowerCase().replace(/\s+/g, "");
+    async function doLogin() {
+        const c = cleanCode();
+        const n = (vorname.trim() + " " + nachname.trim()).trim().replace(/\s+/g, " ");
+        const p = pin.trim();
+        if (!c) {
+            setErr("Bitte gib den Code deiner Fahrschule ein.");
+            setCodeOpen(true);
             return;
         }
-        saveSchuelerCode(v);
-        window.location.href = window.location.origin + window.location.pathname + "?buchen=" + encodeURIComponent(v);
+        if (!vorname.trim() || !nachname.trim()) {
+            setErr("Bitte gib deinen Vor- und Nachnamen ein.");
+            return;
+        }
+        if (!p) {
+            setErr("Bitte gib deinen PIN ein.");
+            return;
+        }
+        setBusy(true);
+        setErr("");
+        try {
+            const d = await publicStudentOverview(c, n, p);
+            if (!d) {
+                setErr("Name oder PIN stimmen nicht. Bitte prüfe deine Eingabe - den PIN bekommst du von deinem Fahrlehrer.");
+                setBusy(false);
+                return;
+            }
+            try {
+                localStorage.setItem("v3_sa_name_" + c, n);
+                localStorage.setItem("v3_sa_pin_" + c, p);
+            }
+            catch (e) { }
+            setSchuelerGuest(c, false);
+            saveSchuelerCode(c);
+            onDone();
+        }
+        catch (e) {
+            setErr("Anmeldung gerade nicht möglich. Bitte prüfe deine Internetverbindung und versuche es erneut.");
+            setBusy(false);
+        }
     }
-    return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 } },
-        React.createElement("div", { className: "card", style: { padding: "28px 22px", maxWidth: 380, width: "100%" } },
-            React.createElement("div", { style: { fontSize: 40, marginBottom: 10, textAlign: "center" } }, "🔑"),
-            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 8, textAlign: "center" } }, "Willkommen bei Allindrive"),
-            React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 18, textAlign: "center" } }, "Gib den Code deiner Fahrschule ein, den du von deinem Fahrlehrer bekommen hast."),
-            React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                React.createElement("label", null, "Fahrschul-Code"),
-                React.createElement("input", { type: "text", value: val, autoCapitalize: "none", autoCorrect: "off", spellCheck: false, onChange: e => { setVal(e.target.value); setErr(""); }, onKeyDown: e => { if (e.key === "Enter")
-                            go(); }, placeholder: "z.B. ab12cd34" })),
-            err && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 12 } }, err),
-            React.createElement("button", { className: "btn btn-primary btn-block", onClick: go }, "Weiter")));
+    // Ohne PIN weiter: Der Schüler kann Termine anfragen, sieht aber keinen persönlichen Bereich.
+    async function doGuest() {
+        const c = cleanCode();
+        if (!c) {
+            setErr("Bitte gib den Code deiner Fahrschule ein.");
+            setCodeOpen(true);
+            return;
+        }
+        setBusy(true);
+        setErr("");
+        try {
+            const info = await publicBookingInfo(c);
+            if (!info) {
+                setErr("Diesen Fahrschul-Code gibt es nicht. Bitte prüfe deine Eingabe.");
+                setBusy(false);
+                return;
+            }
+            setSchuelerGuest(c, true);
+            saveSchuelerCode(c);
+            onDone();
+        }
+        catch (e) {
+            setErr("Verbindung gerade nicht möglich. Bitte prüfe deine Internetverbindung.");
+            setBusy(false);
+        }
+    }
+    const fieldStyle = { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--field-bg)", color: "var(--ink)" };
+    const labelStyle = { display: "block", fontSize: 11.5, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 };
+    // Das Standard-Logo hat eine dunkle "A"-Hälfte und verschwindet auf dunklem Grund - im
+    // Dark-Theme daher die helle Variante. Auf dem Login-Screen wechselt das Theme nicht,
+    // ein einmaliges Auslesen beim Aufbau genügt.
+    const darkTheme = (() => { try {
+        return document.documentElement.getAttribute("data-theme") === "dark";
+    }
+    catch (e) {
+        return false;
+    } })();
+    return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: "24px 20px calc(24px + env(safe-area-inset-bottom))" } },
+        React.createElement("div", { style: { maxWidth: 400, width: "100%" } },
+            React.createElement("div", { style: { textAlign: "center", marginBottom: 22 } },
+                React.createElement("img", { src: darkTheme ? DEFAULT_LOGO_DARKBG : DEFAULT_LOGO, alt: "Allindrive", style: { width: 78, height: 78, objectFit: "contain", marginBottom: 10 } }),
+                React.createElement("h1", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, lineHeight: 1.25 } }, "Allindrive"),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 3, fontWeight: 600 } }, "für Fahrschüler")),
+            React.createElement("div", { className: "card", style: { padding: "22px 19px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16.5, marginBottom: 4 } }, "Anmelden"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55, marginBottom: 16 } }, "Melde dich mit deinem Namen und dem PIN von deinem Fahrlehrer an. Danach siehst du deine Termine, deinen Ausbildungsstand und kannst Theorie üben."),
+                codeOpen
+                    ? React.createElement("div", { style: { marginBottom: 13 } },
+                        React.createElement("label", { style: labelStyle }, "Fahrschul-Code"),
+                        React.createElement("input", { type: "text", value: code, autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text",
+                            onChange: e => { setCode(e.target.value); setErr(""); }, placeholder: "z.B. ab12cd34", style: fieldStyle }))
+                    : React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 13, padding: "9px 12px", background: "var(--field-bg)", borderRadius: 11 } },
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--muted)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                            "Fahrschule: ",
+                            React.createElement("strong", { style: { color: "var(--ink)" } }, code)),
+                        React.createElement("button", { onClick: () => setCodeOpen(true), style: { flexShrink: 0, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", background: "none", border: "none", padding: 0 } }, "ändern")),
+                React.createElement("div", { style: { display: "flex", gap: 9, marginBottom: 13 } },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("label", { style: labelStyle }, "Vorname"),
+                        React.createElement("input", { type: "text", value: vorname, autoCapitalize: "words", autoComplete: "given-name",
+                            onChange: e => { setVorname(e.target.value); setErr(""); }, placeholder: "Anna", style: fieldStyle })),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("label", { style: labelStyle }, "Nachname"),
+                        React.createElement("input", { type: "text", value: nachname, autoCapitalize: "words", autoComplete: "family-name",
+                            onChange: e => { setNachname(e.target.value); setErr(""); }, placeholder: "Müller", style: fieldStyle }))),
+                React.createElement("div", { style: { marginBottom: 15 } },
+                    React.createElement("label", { style: labelStyle }, "Dein PIN"),
+                    React.createElement("input", { type: "password", value: pin, inputMode: "numeric", autoComplete: "current-password",
+                        onChange: e => { setPin(e.target.value); setErr(""); },
+                        onKeyDown: e => { if (e.key === "Enter" && !busy)
+                                doLogin(); }, placeholder: "••••", style: fieldStyle })),
+                err && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", lineHeight: 1.5, marginBottom: 13 } }, err),
+                React.createElement("button", { className: "btn btn-primary btn-block", disabled: busy, onClick: doLogin }, busy ? "Moment…" : "Anmelden"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 9 }, disabled: busy, onClick: doGuest }, "Noch kein PIN? Nur Termine anfragen")),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", lineHeight: 1.6, marginTop: 16 } }, "Den Fahrschul-Code und deinen PIN bekommst du von deinem Fahrlehrer.")));
 }
 function Root() {
+    // Muss vor allen bedingten Returns stehen (React-Hook-Regel). Der Zähler selbst wird nicht
+    // gelesen - er dient nur dazu, nach An-/Abmelden in der Fahrschüler-App neu zu rendern.
+    const [, setAuthTick] = React.useState(0);
+    const rerender = () => setAuthTick(t => t + 1);
     const code = getBookingCodeFromURL();
     if (code)
         return React.createElement(BookingPage, { code: code });
@@ -16116,9 +16290,17 @@ function Root() {
     try {
         if (new URL(window.location.href).searchParams.get("app") === "schueler") {
             const saved = schuelerSavedCode();
-            if (saved)
-                return React.createElement(BookingPage, { code: saved });
-            return React.createElement(SchuelerCodeEntry, null);
+            // Angemeldet ist, wer für diese Fahrschule einen PIN hinterlegt hat oder
+            // sich bewusst für den Gast-Modus (nur Termine anfragen) entschieden hat.
+            let hasPin = false;
+            try {
+                hasPin = !!(saved && localStorage.getItem("v3_sa_pin_" + saved));
+            }
+            catch (e) { }
+            if (saved && (hasPin || schuelerGuest(saved)))
+                return React.createElement(BookingPage, { code: saved, appMode: true,
+                    onLogout: () => { schuelerLogout(saved); rerender(); } });
+            return React.createElement(SchuelerLogin, { onDone: rerender });
         }
     }
     catch (e) { }
