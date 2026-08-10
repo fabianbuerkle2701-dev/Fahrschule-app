@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.72.2";
+const APP_VERSION = "1.73.0";
 // Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
 // Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
 // über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
@@ -1196,6 +1196,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.73.0", date: "August 2026", changes: [
+            "Neu: Theoriepilot-Beiträge freigeben jetzt auch Fahrschul-Admins direkt im Theoriepilot (unter „Beiträge prüfen“), nicht mehr nur der zentrale App-Admin - dabei sind ausschließlich Beiträge von Fahrlehrern der eigenen Fahrschule sichtbar. Einmal freigegeben, bleibt ein Beitrag wie gewohnt für alle Fahrlehrer der App sichtbar",
+            "Neu: Beim Teilen eines Theoriepilot-Beitrags lässt sich jetzt zusätzlich zur Datei ein Link angeben, z.B. zu einem Kahoot-Quiz oder Erklärvideo - erscheint als eigener Button",
+            "Fehler behoben: Bei der Schülerauswahl beim Termin-Anlegen und beim Terminvorschlag-Senden waren die Namen nicht alphabetisch sortiert, sondern in der Reihenfolge, in der die Schüler angelegt wurden",
+        ] },
     { v: "1.72.2", date: "August 2026", changes: [
             "Fehler behoben: Der Fahrschul-Code in der Fahrschüler-App wurde abgelehnt, wenn er mit Großbuchstaben eingegeben wurde - genau das machen Handy-Tastaturen dort aber automatisch. Groß-/Kleinschreibung und versehentliche Leerzeichen sind jetzt egal",
             "Fehler behoben: Zwischen 0 und 2 Uhr nachts stempelte die App an vielen Stellen das Datum des Vortags (z.B. bei neuen Fahrstunden, ADK-Übungsdaten, Zahlungen) - Ursache war die Zeitzonen-Umrechnung, betraf 33 Stellen app-weit",
@@ -2271,7 +2276,7 @@ const THEORY_KINDS = [
     { id: "medium", label: "Medien" },
     { id: "kontrolle", label: "Lernstandskontrolle" },
 ];
-async function proposeTheoryResource(uid, name, klasse, topicKey, kind, title, content, file) {
+async function proposeTheoryResource(uid, name, klasse, topicKey, kind, title, content, file, link) {
     let filePath = null, fileName = null;
     if (file) {
         const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -2283,9 +2288,12 @@ async function proposeTheoryResource(uid, name, klasse, topicKey, kind, title, c
         }
         fileName = file.name;
     }
+    let cleanLink = (link || "").trim();
+    if (cleanLink && !/^https?:\/\//i.test(cleanLink))
+        cleanLink = "https://" + cleanLink;
     const { error } = await sb.from("theory_resources").insert({
         klasse, topic_key: topicKey, kind, title: (title || "").trim(), content: (content || "").trim(),
-        file_path: filePath, file_name: fileName, status: "pending", proposed_by: uid, proposed_by_name: name || null,
+        file_path: filePath, file_name: fileName, link: cleanLink || null, status: "pending", proposed_by: uid, proposed_by_name: name || null,
     });
     if (error) {
         console.error(error);
@@ -5820,7 +5828,7 @@ function App() {
         }
         setTheoryForm({ ...f, busy: true, error: "" });
         try {
-            await proposeTheoryResource(uid, teacherName, t.klasse, t.topicKey + ":" + theoryKind, theoryKind, f.title, f.content, f.file);
+            await proposeTheoryResource(uid, teacherName, t.klasse, t.topicKey + ":" + theoryKind, theoryKind, f.title, f.content, f.file, f.link);
             setTheoryForm(null);
             showFlash("✓ Beitrag eingereicht, wartet auf Freigabe");
             loadTheoryData(t.klasse, t.topicKey, theoryKind);
@@ -8306,6 +8314,53 @@ function App() {
                             setADKNote(sec.id, e.target.value); }, placeholder: "Notiz zu diesem Abschnitt\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
                             fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }))));
     }
+    // Wiederverwendete Prüf-Karte für offene Theoriepilot-Beiträge: im Admin-Bereich für
+    // App-Admin/App-Moderator, direkt im Theoriepilot zusätzlich für Fahrschul-Admins - RLS
+    // (_can_review_theory_resource) lässt Fahrschul-Admins dabei nur Beiträge von Fahrlehrern
+    // der eigenen Fahrschule sehen/freigeben/ablehnen, App-Admin/Moderator sehen alle.
+    function renderTheoryReviewCard() {
+        return React.createElement(React.Fragment, null,
+            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Theoriepilot-Beiträge prüfen"),
+            React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, theoryQueue === null
+                ? React.createElement("button", { className: "btn btn-ghost", onClick: async () => { try {
+                        const q = await adminFetchPendingTheoryResources();
+                        setTheoryQueue(q);
+                    }
+                    catch (e) {
+                        showToast("Fehler:\n" + (e.message || e));
+                    } } }, "Beiträge laden")
+                : theoryQueue.length === 0
+                    ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Keine offenen Beiträge.")
+                    : theoryQueue.map(r => React.createElement("div", { key: r.id, style: { padding: "11px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, r.title),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", margin: "2px 0 6px" } },
+                            "Klasse ",
+                            r.klasse,
+                            " · ",
+                            r.topic_key,
+                            r.proposed_by_name ? " · von " + r.proposed_by_name : ""),
+                        r.content && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" } }, r.content),
+                        React.createElement("div", { style: { display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 } },
+                            r.link && React.createElement("a", { href: r.link, target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "🔗 Link öffnen"),
+                            r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "📎 " + (r.file_name || "Anhang ansehen"))),
+                        React.createElement("div", { style: { display: "flex", gap: 8 } },
+                            React.createElement("button", { className: "btn btn-primary", style: { fontSize: 13 }, onClick: async () => { try {
+                                    await adminApproveTheoryResource(r.id);
+                                    setTheoryQueue(q => q.filter(x => x.id !== r.id));
+                                    showFlash("✓ Freigegeben");
+                                }
+                                catch (e) {
+                                    showToast("Fehler:\n" + (e.message || e));
+                                } } }, "Freigeben"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 13, color: "#B3362A" }, onClick: async () => { if (!await askConfirm({ message: "Beitrag \"" + r.title + "\" ablehnen und löschen?" }))
+                                    return; try {
+                                    await adminRejectTheoryResource(r.id);
+                                    setTheoryQueue(q => q.filter(x => x.id !== r.id));
+                                }
+                                catch (e) {
+                                    showToast("Fehler:\n" + (e.message || e));
+                                } } }, "Ablehnen"))))));
+    }
     /* ── Karte: Live-Tracking & Stecknadeln ── */
     function renderTheoriepilot() {
         function topicRow(klasse, topicKey, title, showBorder) {
@@ -8318,7 +8373,8 @@ function App() {
             React.createElement("div", { style: { margin: "6px 2px 18px" } },
                 React.createElement("div", { className: "home-eyebrow" }, "Theoriepilot"),
                 React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 23, marginTop: 5 } }, "Theorieunterricht"),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 } }, "Methoden, Medien und Lernstandskontrollen zu jedem Thema, von Fahrlehrern geteilt und von einem App-Admin freigegeben.")),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 } }, "Methoden, Medien und Lernstandskontrollen zu jedem Thema, von Fahrlehrern geteilt und von einem Fahrschul-Admin freigegeben – danach für alle Fahrlehrer in der App sichtbar.")),
+            isSchoolAdmin && !canModerateApp && React.createElement(Collapsible, { title: "Beiträge prüfen", subtitle: "Als Fahrschul-Admin freigeben oder ablehnen" }, renderTheoryReviewCard()),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Grundstoff \u00B7 alle Klassen (12 Themen)"),
             React.createElement("div", { className: "card", style: { padding: "4px 14px", marginBottom: 18 } },
                 GRUNDSTOFF_THEMEN.map((title, i) => topicRow("ALL", "grundstoff-" + (i + 1), (i + 1) + ". " + title, i < GRUNDSTOFF_THEMEN.length - 1))),
@@ -8351,19 +8407,22 @@ function App() {
                         if (!theoryData[k2])
                             loadTheoryData(t.klasse, t.topicKey, k.id);
                     } }, k.label))),
-            React.createElement("button", { className: "btn btn-primary btn-block", style: { margin: "14px 0" }, onClick: () => setTheoryForm({ title: "", content: "", file: null, busy: false, error: "" }) }, "+ Beitrag teilen"),
+            React.createElement("button", { className: "btn btn-primary btn-block", style: { margin: "14px 0" }, onClick: () => setTheoryForm({ title: "", content: "", file: null, link: "", busy: false, error: "" }) }, "+ Beitrag teilen"),
             d.loading && React.createElement("div", { style: { padding: "20px 0", textAlign: "center", color: "var(--muted)", fontSize: 13 } }, "L\u00E4dt\u2026"),
             d.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, d.error),
             !d.loading && approved.length === 0 && mine.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Beitr\u00E4ge zu diesem Thema. Sei der Erste!"),
             approved.length > 0 && React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 12 } }, approved.map((r, i) => React.createElement("div", { key: r.id, style: { padding: "11px 0", borderTop: (i > 0 ? "1px solid var(--line)" : "none") } },
                 React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, r.title),
                 r.content && React.createElement("div", { style: { fontSize: 13, color: "var(--ink-2)", marginTop: 3, lineHeight: 1.5, whiteSpace: "pre-wrap" } }, r.content),
-                r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } },
-                    React.createElement("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
-                        React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }),
-                        React.createElement("polyline", { points: "7 10 12 15 17 10" }),
-                        React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })),
-                    r.file_name || "Datei \u00F6ffnen"),
+                React.createElement("div", { style: { display: "flex", gap: 14, flexWrap: "wrap" } },
+                    r.link && React.createElement("a", { href: r.link, target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } },
+                        "\uD83D\uDD17 Link \u00F6ffnen"),
+                    r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginTop: 6, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } },
+                        React.createElement("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }),
+                            React.createElement("polyline", { points: "7 10 12 15 17 10" }),
+                            React.createElement("line", { x1: "12", y1: "15", x2: "12", y2: "3" })),
+                        r.file_name || "Datei \u00F6ffnen")),
                 React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 5 } }, r.proposed_by_name ? "von " + r.proposed_by_name : "")))),
             mine.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
                 React.createElement("div", { className: "home-eyebrow", style: { margin: "0 2px 8px" } }, "Deine eigenen Beitr\u00E4ge"),
@@ -10719,44 +10778,7 @@ function App() {
                                             showToast("Fehler:\n" + (e.message || e));
                                         } } }, "Ablehnen")));
                         }))),
-                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Theoriepilot-Beitr\u00E4ge pr\u00FCfen"),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, theoryQueue === null
-                    ? React.createElement("button", { className: "btn btn-ghost", onClick: async () => { try {
-                            const q = await adminFetchPendingTheoryResources();
-                            setTheoryQueue(q);
-                        }
-                        catch (e) {
-                            showToast("Fehler:\n" + (e.message || e));
-                        } } }, "Beitr\u00E4ge laden")
-                    : theoryQueue.length === 0
-                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Keine offenen Beitr\u00E4ge.")
-                        : theoryQueue.map(r => React.createElement("div", { key: r.id, style: { padding: "11px 0", borderTop: "1px solid var(--line)" } },
-                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, r.title),
-                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", margin: "2px 0 6px" } },
-                                "Klasse ",
-                                r.klasse,
-                                " \u00B7 ",
-                                r.topic_key,
-                                r.proposed_by_name ? " \u00B7 von " + r.proposed_by_name : ""),
-                            r.content && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" } }, r.content),
-                            r.file_path && React.createElement("a", { href: theoryFilePublicUrl(r.file_path), target: "_blank", rel: "noopener noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 5, marginBottom: 10, fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "\uD83D\uDCCE " + (r.file_name || "Anhang ansehen")),
-                            React.createElement("div", { style: { display: "flex", gap: 8 } },
-                                React.createElement("button", { className: "btn btn-primary", style: { fontSize: 13 }, onClick: async () => { try {
-                                        await adminApproveTheoryResource(r.id);
-                                        setTheoryQueue(q => q.filter(x => x.id !== r.id));
-                                        showFlash("✓ Freigegeben");
-                                    }
-                                    catch (e) {
-                                        showToast("Fehler:\n" + (e.message || e));
-                                    } } }, "Freigeben"),
-                                React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 13, color: "#B3362A" }, onClick: async () => { if (!await askConfirm({ message: "Beitrag \"" + r.title + "\" ablehnen und löschen?" }))
-                                        return; try {
-                                        await adminRejectTheoryResource(r.id);
-                                        setTheoryQueue(q => q.filter(x => x.id !== r.id));
-                                    }
-                                    catch (e) {
-                                        showToast("Fehler:\n" + (e.message || e));
-                                    } } }, "Ablehnen"))))),
+                renderTheoryReviewCard(),
             isAdmin(session) && React.createElement(React.Fragment, null,
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Zahlungsempf\u00E4nger (Monatsabo)"),
             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
@@ -13847,7 +13869,7 @@ function App() {
                         React.createElement("label", null, "Sch\u00FCler"),
                         React.createElement("select", { value: proposalForm.student_id, onChange: e => setProposalForm({ ...proposalForm, student_id: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                             React.createElement("option", { value: "" }, "Bitte w\u00E4hlen\u2026"),
-                            students.filter(s => s._isMine && !s.archived).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s))))),
+                            students.filter(s => s._isMine && !s.archived).sort((a, b) => dispName(a).localeCompare(dispName(b), "de")).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s))))),
                     React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                         React.createElement("label", null, "Art der Stunde"),
                         React.createElement("select", { value: proposalForm.art, onChange: e => setProposalForm({ ...proposalForm, art: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, arten.map(a => React.createElement("option", { key: a.code, value: a.code }, a.label)))),
@@ -13955,7 +13977,7 @@ function App() {
                     React.createElement("label", null, "Sch\u00FCler (optional)"),
                     React.createElement("select", { value: apptForm.student_id, onChange: e => setApptForm({ ...apptForm, student_id: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                         React.createElement("option", { value: "" }, "\u2013 kein Sch\u00FCler \u2013"),
-                        students.filter(s => s._isMine && !s.archived).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s))))),
+                        students.filter(s => s._isMine && !s.archived).sort((a, b) => dispName(a).localeCompare(dispName(b), "de")).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s))))),
                 React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                     React.createElement("label", null, "Notiz (optional)"),
                     React.createElement("input", { type: "text", value: apptForm.note, onChange: e => setApptForm({ ...apptForm, note: e.target.value }), placeholder: "z.B. Autobahnfahrt, Treffpunkt\u2026" })),
@@ -14048,17 +14070,21 @@ function App() {
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 4 } },
                     "Beitrag teilen \u00B7 ",
                     THEORY_KINDS.find(k => k.id === theoryKind) ? THEORY_KINDS.find(k => k.id === theoryKind).label : ""),
-                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, "Dein Beitrag ist erst f\u00FCr andere Fahrlehrer sichtbar, nachdem ihn ein App-Admin freigegeben hat."),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, "Dein Beitrag ist erst f\u00FCr andere Fahrlehrer sichtbar, nachdem ihn ein Fahrschul-Admin freigegeben hat."),
                 React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                     React.createElement("label", null, "Titel"),
                     React.createElement("input", { type: "text", value: theoryForm.title, onChange: e => setTheoryForm({ ...theoryForm, title: e.target.value }), placeholder: "z. B. Kreisverkehr-Modell aus Pappe" })),
                 React.createElement("div", { className: "field", style: { marginBottom: 14 } },
-                    React.createElement("label", null, "Beschreibung, Link oder Anleitung"),
-                    React.createElement("textarea", { rows: 4, value: theoryForm.content, onChange: e => setTheoryForm({ ...theoryForm, content: e.target.value }), placeholder: "Kurz erkl\u00E4ren, wie es funktioniert, oder einen Link einf\u00FCgen\u2026" })),
+                    React.createElement("label", null, "Beschreibung (optional)"),
+                    React.createElement("textarea", { rows: 3, value: theoryForm.content, onChange: e => setTheoryForm({ ...theoryForm, content: e.target.value }), placeholder: "Kurz erkl\u00E4ren, wie es funktioniert\u2026" })),
+                React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                    React.createElement("label", null, "Link (optional)"),
+                    React.createElement("input", { type: "text", value: theoryForm.link || "", onChange: e => setTheoryForm({ ...theoryForm, link: e.target.value }), placeholder: "z. B. ein Kahoot-Link" }),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "Erscheint als eigener Button, z. B. f\u00FCr ein Kahoot-Quiz oder ein Erkl\u00E4rvideo.")),
                 React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                     React.createElement("label", null, "Datei anh\u00E4ngen (optional)"),
                     React.createElement("input", { type: "file", onChange: e => setTheoryForm({ ...theoryForm, file: (e.target.files && e.target.files[0]) || null }) }),
-                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "Z. B. ein Arbeitsblatt, eine exportierte Kahoot-Datei oder ein Bild. Ein Kahoot-Link funktioniert auch einfach als Text oben.")),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } }, "Z. B. ein Arbeitsblatt oder ein Bild.")),
                 theoryForm.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, theoryForm.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: theoryForm.busy, onClick: submitTheoryForm }, theoryForm.busy ? "Wird gesendet\u2026" : "Einreichen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: theoryForm.busy, onClick: () => setTheoryForm(null) }, "Abbrechen"))),
