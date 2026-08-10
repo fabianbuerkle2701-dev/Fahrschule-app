@@ -45,7 +45,7 @@ exports.handler = async function (event) {
     }
 
     // Profile dazu laden (Fahrschule, Admin-Status, Abo-Status)
-    const profResp = await fetch(SUPABASE_URL + "/rest/v1/profiles?select=id,email,school_id,school_admin,subscription_active,subscription_amount,subscription_last_paid", {
+    const profResp = await fetch(SUPABASE_URL + "/rest/v1/profiles?select=id,email,school_id,school_admin,subscription_active,subscription_amount,subscription_last_paid,theory_addon_active", {
       headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
     });
     const profiles = profResp.ok ? await profResp.json() : [];
@@ -73,6 +73,7 @@ exports.handler = async function (event) {
         subscription_active: !!prof.subscription_active,
         subscription_amount: prof.subscription_amount || null,
         subscription_last_paid: prof.subscription_last_paid || null,
+        theory_addon_active: !!prof.theory_addon_active,
       };
     }).sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
 
