@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.73.0";
+const APP_VERSION = "1.74.0";
 // Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
 // Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
 // über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
@@ -1196,6 +1196,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.74.0", date: "August 2026", changes: [
+            "Neu: Kalender-Wochenansicht jetzt wahlweise als Zeitstrahl statt als Kartenliste - zeigt alle Tage der Woche nebeneinander mit gemeinsamer Stundenachse, so wie man es aus der Tagesansicht kennt. Umschalten über die neuen Buttons „Karten“/„Zeitstrahl“ oberhalb der Wochenansicht",
+        ] },
     { v: "1.73.0", date: "August 2026", changes: [
             "Neu: Theoriepilot-Beiträge freigeben jetzt auch Fahrschul-Admins direkt im Theoriepilot (unter „Beiträge prüfen“), nicht mehr nur der zentrale App-Admin - dabei sind ausschließlich Beiträge von Fahrlehrern der eigenen Fahrschule sichtbar. Einmal freigegeben, bleibt ein Beitrag wie gewohnt für alle Fahrlehrer der App sichtbar",
             "Neu: Beim Teilen eines Theoriepilot-Beitrags lässt sich jetzt zusätzlich zur Datei ein Link angeben, z.B. zu einem Kahoot-Quiz oder Erklärvideo - erscheint als eigener Button",
@@ -5153,6 +5156,7 @@ function App() {
     const [openLesson, setOpenLesson] = useState(null);
     const [calWeek, setCalWeek] = useState(() => startOfWeek(new Date())); // Montag der gezeigten Woche
     const [calMode, setCalMode] = useState("woche"); // "woche" | "tag"
+    const [calWeekStyle, setCalWeekStyle] = useState("karten"); // "karten" | "zeitstrahl" - nur relevant bei calMode "woche"
     const [calDay, setCalDay] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }); // gewählter Tag
     const [apptForm, setApptForm] = useState(null); // null | {date,start,end,student_id,note,id?}
     const [apptChoice, setApptChoice] = useState(null); // null | Termin, für den beim Antippen "Bearbeiten / Fahrstunde anlegen" zur Wahl steht
@@ -10173,6 +10177,96 @@ function App() {
                             React.createElement("div", { style: { fontSize: h > 34 ? 12.5 : 11.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.2 } }, name || a.title || "Termin"));
                     })));
         }
+        // Ganze Woche als Zeitstrahl - dieselbe Zeitachsen-Logik wie dayTimeline(), nur alle Tage
+        // nebeneinander mit gemeinsamer Stunden-Skala, statt nur die Reihenfolge der Termine zu
+        // zeigen (wie die Karten-Wochenansicht). Auf schmalen Bildschirmen horizontal scrollbar,
+        // da 6 Spalten mit Zeitachse auf einem Handy nicht gleichzeitig lesbar nebeneinander passen.
+        function weekTimeline(days) {
+            const PXH = 52; // etwas kompakter als bei der Tagesansicht (64px), da mehrere Spalten nebeneinander stehen
+            let startH = 6, endH = 21;
+            const perDay = days.map(d => {
+                const k = ymd(d);
+                const fullList = (byDay[k] || []).slice().sort((a, b) => a.start_at.localeCompare(b.start_at));
+                const urlaubDay = fullList.find(a => isUrlaub(a));
+                const list = fullList.filter(a => !isUrlaub(a));
+                list.forEach(a => {
+                    const s = new Date(a.start_at);
+                    const sh = s.getHours() + s.getMinutes() / 60;
+                    const e = a.end_at ? new Date(a.end_at) : new Date(s.getTime() + 45 * 60000);
+                    const eh = e.getHours() + e.getMinutes() / 60;
+                    if (sh < startH)
+                        startH = Math.floor(sh);
+                    if (eh > endH)
+                        endH = Math.ceil(eh);
+                });
+                return { d, k, list, urlaubDay };
+            });
+            const totalH = endH - startH;
+            const hours = [];
+            for (let h = startH; h <= endH; h++)
+                hours.push(h);
+            function yFor(dateObj) { const hh = dateObj.getHours() + dateObj.getMinutes() / 60; return (hh - startH) * PXH; }
+            const HEAD_H = 36;
+            return React.createElement("div", { className: "card", style: { overflow: "hidden" } },
+                React.createElement("div", { style: { display: "flex", overflowX: "auto" } },
+                    React.createElement("div", { style: { flexShrink: 0, width: 40, position: "relative", height: HEAD_H + totalH * PXH } },
+                        hours.map(h => React.createElement("div", { key: h, style: { position: "absolute", left: 0, right: 4, top: HEAD_H + (h - startH) * PXH - 7, textAlign: "right", fontSize: 10.5, color: "var(--muted)", fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums" } },
+                            String(h).padStart(2, "0") + ":00"))),
+                    perDay.map(({ d, k, list, urlaubDay }) => {
+                        const today = isToday(d);
+                        const dayTone = ["sage", "clay", "sky", "orange"][d.getDay() % 4];
+                        const withRange = list.map(a => {
+                            const s = new Date(a.start_at);
+                            const e = a.end_at ? new Date(a.end_at) : new Date(s.getTime() + 45 * 60000);
+                            return { a, s, e };
+                        });
+                        const cols = [];
+                        withRange.forEach(item => {
+                            let placed = false;
+                            for (const col of cols) {
+                                const last = col[col.length - 1];
+                                if (item.s >= last.e) {
+                                    col.push(item);
+                                    placed = true;
+                                    break;
+                                }
+                            }
+                            if (!placed)
+                                cols.push([item]);
+                        });
+                        const colCount = Math.max(1, cols.length);
+                        const blockMeta = {};
+                        cols.forEach((col, ci) => col.forEach(item => { blockMeta[item.a.id] = { col: ci }; }));
+                        const nowY = today ? yFor(new Date()) : null;
+                        return React.createElement("div", { key: k, style: { flex: "1 0 116px", minWidth: 116, borderLeft: "1px solid var(--line)" } },
+                            React.createElement("button", { onClick: () => openNewAppt(k), style: { width: "100%", height: HEAD_H, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 1,
+                                    background: today ? "var(--" + dayTone + (dayTone === "orange" ? "-soft" : "-bg") + ")" : "transparent", borderBottom: "1px solid var(--line)" } },
+                                React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 12.5, textTransform: "capitalize", color: today ? "var(--orange-deep)" : "var(--ink)" } }, weekdayShort(d)),
+                                React.createElement("span", { style: { fontSize: 10.5, color: today ? "var(--orange-deep)" : "var(--muted)" } }, dayMonth(d))),
+                            React.createElement("div", { style: { position: "relative", height: totalH * PXH } },
+                                hours.map(h => React.createElement("div", { key: h, style: { position: "absolute", left: 0, right: 0, top: (h - startH) * PXH, borderTop: "1px solid var(--line)", opacity: .5 } })),
+                                nowY != null && nowY >= 0 && nowY <= totalH * PXH &&
+                                    React.createElement("div", { style: { position: "absolute", left: 0, right: 0, top: nowY, borderTop: "2px solid #D63A2E", zIndex: 2 } }),
+                                urlaubDay && React.createElement("div", { style: { position: "absolute", left: 2, right: 2, top: 4, background: "var(--amber-bg)", borderRadius: 7, padding: "3px 5px", fontSize: 10, fontWeight: 700, color: "var(--amber)", zIndex: 1 } }, "🌴 Urlaub"),
+                                withRange.map(({ a, s, e }) => {
+                                    const top = Math.max(0, yFor(s));
+                                    const rawH = yFor(e) - yFor(s);
+                                    const h = Math.max(20, rawH);
+                                    const meta = blockMeta[a.id] || { col: 0 };
+                                    const wPct = 100 / colCount;
+                                    const pend = a.status === "pending";
+                                    const name = apptStudentName(a);
+                                    const hasLeist = !pend && apptHasLeistung(a);
+                                    const aColor = artColor(apptArt(a));
+                                    const bg = pend ? "var(--amber-bg)" : (hasLeist ? "#E3F4E9" : softBg(aColor));
+                                    const bd = pend ? "var(--amber)" : (hasLeist ? "#1B8F4D" : aColor);
+                                    return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { position: "absolute", top, height: h, left: "calc(" + (meta.col * wPct) + "% + 1px)", width: "calc(" + wPct + "% - 2px)",
+                                            background: bg, borderLeft: "3px solid " + bd, borderRadius: 7, padding: "3px 5px", overflow: "hidden", textAlign: "left", zIndex: 1 } },
+                                        React.createElement("div", { style: { fontSize: 9.5, fontWeight: 800, fontFamily: "var(--font-d)", color: bd, lineHeight: 1.1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, hm(a.start_at)),
+                                        h > 28 && React.createElement("div", { style: { fontSize: 10.5, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", lineHeight: 1.15 } }, name || a.title || "Termin"));
+                                })));
+                    })));
+        }
         // Ein einziger, kompakter "braucht deine Antwort"-Banner statt zwei separater,
         // immer sichtbarer Kästen – Stornierungen zuerst (dringender), dann Terminvorschläge.
         const attnCount = pending.length + cancelRequests.length;
@@ -10257,11 +10351,17 @@ function App() {
                                     React.createElement("rect", { x: "9", y: "13", width: "12", height: "9", rx: "2" })),
                                 "Gegenvorschlag senden")))))),
             calMode === "woche" ? React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
                     React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14 } }, dayMonth(calWeek) + " – " + dayMonth(weekEnd)),
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
-                React.createElement("div", { className: "cal-week-grid" }, days.map(d => dayCard(d)))) : React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", justifyContent: "center", gap: 6, marginBottom: 14 } },
+                    [["karten", "Karten"], ["zeitstrahl", "Zeitstrahl"]].map(([v, lbl]) => React.createElement("button", { key: v, onClick: () => setCalWeekStyle(v), style: { padding: "5px 13px", borderRadius: 99, fontSize: 12.5, fontWeight: 700,
+                            border: "1.5px solid " + (calWeekStyle === v ? "var(--orange)" : "var(--line)"),
+                            background: calWeekStyle === v ? "var(--orange-soft)" : "transparent", color: calWeekStyle === v ? "var(--orange-deep)" : "var(--muted)" } }, lbl))),
+                calWeekStyle === "karten"
+                    ? React.createElement("div", { className: "cal-week-grid" }, days.map(d => dayCard(d)))
+                    : weekTimeline(days)) : React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, -1)) }, "‹"),
                     React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalDay(d); } }, "Heute"),
