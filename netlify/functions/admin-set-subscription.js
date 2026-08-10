@@ -42,7 +42,8 @@ exports.handler = async function (event) {
     const patch = {};
     if (typeof body.subscription_active === "boolean") patch.subscription_active = body.subscription_active;
     if (body.subscription_amount === null || typeof body.subscription_amount === "number") patch.subscription_amount = body.subscription_amount;
-    if (body.mark_paid_today === true) patch.subscription_last_paid = new Date().toISOString().slice(0, 10);
+    // "Heute" aus deutscher Zeit, nicht UTC - sonst landet zwischen 0 und 2 Uhr nachts das Vortagsdatum in der DB
+    if (body.mark_paid_today === true) patch.subscription_last_paid = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
     if (typeof body.theory_addon_active === "boolean") patch.theory_addon_active = body.theory_addon_active;
 
     if (Object.keys(patch).length === 0) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine gültigen Felder übergeben" }) };
