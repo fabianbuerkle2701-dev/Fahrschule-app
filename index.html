@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.71.3";
+const APP_VERSION = "1.71.4";
 // Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
 // Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
 // über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
@@ -1196,6 +1196,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.71.4", date: "August 2026", changes: [
+            "Fehler behoben: Wetter und Sonnenuntergangszeit auf der Startseite blieben bei den meisten Fahrschulen leer, weil sie nur bei eingerichtetem „Standort“ (ein selten genutztes Zusatzfeature) angezeigt wurden. Sie greifen jetzt zusätzlich auf die bei der Registrierung hinterlegte Stadt zurück - betrifft sowohl die Lehrer- als auch die Fahrschüler-Ansicht",
+            "Kleinigkeit behoben: Die Überschrift „Diese Woche“ im Wochenkalender sah wie ein Button aus, hatte aber keine Funktion. Steht jetzt als reiner Datumsbereich da (z.B. „10.08. – 16.08.“)",
+        ] },
     { v: "1.71.3", date: "August 2026", changes: [
             "Geändert: „Theorie üben“ ist vorübergehend nicht sichtbar. Die Funktion wird als separat buchbares Zusatzpaket freigeschaltet, sobald der amtliche Fragenkatalog verfügbar ist",
         ] },
@@ -5154,16 +5158,6 @@ function App() {
     const [packageEdit, setPackageEdit] = useState(null); // null | {name, amount, ue, error} – Paket hinzufügen
     const [artEdit, setArtEdit] = useState(null); // null | {code, label, error} – Terminart hinzufügen
     const [myLocationId, setMyLocationId] = useState(""); // eigener Standort des Fahrlehrers (für neue Schüler)
-    // Stadt des eigenen Standorts. Muss NACH myLocationId stehen, sonst ist die Variable hier noch nicht verfügbar.
-    const myCity = (() => {
-        if (!myLocationId || locations.length === 0)
-            return "";
-        let l = locations.find(x => x.id === myLocationId);
-        if (!l && locations.length === 1)
-            l = locations[0];
-        return (l && l.city && l.city.trim()) || "";
-    })();
-    const weather = useWeather(myCity);
     const [birthdayPopup, setBirthdayPopup] = useState(null); // null | Liste der Schüler mit Geburtstag heute
     const [cityTplModal, setCityTplModal] = useState(null); // null | {busy,error,approved:[],mine:[]} Übernahme-/Vorschlag-Dialog
     const [proposeForm, setProposeForm] = useState(null); // null | {title,busy,error} In-App-Dialog zum Einreichen einer Streckenvorlage
@@ -5283,6 +5277,35 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    // Eigene Profildaten (Name, Adresse, Telefon, Geburtsdatum), müssen beim ersten Login vollständig sein.
+    // "complete" bewusst true bei Ladefehler, damit niemand fälschlich blockiert wird. Steht hier (statt weiter
+    // unten) und VOR myCity, weil myCity als Fallback auf profileData.city zurückgreift.
+    const [profileData, setProfileData] = useState(null); // null solange nicht geladen
+    const [profileComplete, setProfileComplete] = useState(true);
+    useEffect(() => {
+        if (!uid)
+            return;
+        fetchProfileData(uid).then(d => {
+            setProfileData(d || {});
+            const ok = !!(d && d.display_name && d.street && d.house_no && d.zip && d.city && d.phone && d.birthdate);
+            setProfileComplete(ok);
+        }).catch(e => { console.error("Profildaten konnten nicht geladen werden:", e); setProfileData({}); setProfileComplete(true); });
+    }, [uid]);
+    // Stadt des eigenen Standorts. Ohne eingerichteten Standort (der Normalfall - "Standorte" sind ein selten
+    // genutztes Zusatzfeature für Fahrschulen mit mehreren Filialen) auf die bei der Registrierung erfasste
+    // eigene Stadt zurückfallen, statt Wetter/Sonnenuntergang und Streckenvorschläge für praktisch alle
+    // Fahrlehrer stumm zu deaktivieren.
+    const myCity = (() => {
+        if (myLocationId && locations.length > 0) {
+            let l = locations.find(x => x.id === myLocationId);
+            if (!l && locations.length === 1)
+                l = locations[0];
+            if (l && l.city && l.city.trim())
+                return l.city.trim();
+        }
+        return (profileData && profileData.city && profileData.city.trim()) || "";
+    })();
+    const weather = useWeather(myCity);
     useEffect(() => {
         if (!uid) {
             setMyLocationId("");
@@ -5441,19 +5464,6 @@ function App() {
         fetchOwnSubscription(uid).then(s => setMySubscription(s || { subscription_active: false }))
             .catch(e => { console.error("Abo-Status konnte nicht geladen werden:", e); setMySubscription({ subscription_active: false }); });
         fetchAppSettings().then(s => setPaypalLink((s && s.paypal_link) || "")).catch(() => setPaypalLink(""));
-    }, [uid]);
-    // Eigene Profildaten (Name, Adresse, Telefon, Geburtsdatum), müssen beim ersten Login vollständig sein.
-    // "complete" bewusst true bei Ladefehler, damit niemand fälschlich blockiert wird.
-    const [profileData, setProfileData] = useState(null); // null solange nicht geladen
-    const [profileComplete, setProfileComplete] = useState(true);
-    useEffect(() => {
-        if (!uid)
-            return;
-        fetchProfileData(uid).then(d => {
-            setProfileData(d || {});
-            const ok = !!(d && d.display_name && d.street && d.house_no && d.zip && d.city && d.phone && d.birthdate);
-            setProfileComplete(ok);
-        }).catch(e => { console.error("Profildaten konnten nicht geladen werden:", e); setProfileData({}); setProfileComplete(true); });
     }, [uid]);
     // Eigener Text für die Buchungslink-Nachricht. Leer = Standardtext wird verwendet.
     const [bookingMessage, setBookingMessage] = useState(null); // null solange nicht geladen
@@ -10149,7 +10159,7 @@ function App() {
             calMode === "woche" ? React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
-                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => setCalWeek(startOfWeek(new Date())) }, "Diese Woche"),
+                    React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14 } }, dayMonth(calWeek) + " – " + dayMonth(weekEnd)),
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
                 React.createElement("div", { className: "cal-week-grid" }, days.map(d => dayCard(d)))) : React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
