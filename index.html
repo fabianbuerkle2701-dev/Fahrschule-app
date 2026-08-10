@@ -1134,7 +1134,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.71.9";
+const APP_VERSION = "1.72.0";
 // Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
 // Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
 // über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
@@ -1196,6 +1196,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.72.0", date: "August 2026", changes: [
+            "Neu: Eigenes Profilbild. Unter Einstellungen → Mein Bereich → Profil lässt sich jetzt ein Profilbild hochladen, das oben auf der Startseite neben der Begrüßung erscheint - nur für dich sichtbar, nicht für Schüler. Ohne Profilbild zeigt ein Kreis mit dem Anfangsbuchstaben deines Namens",
+        ] },
     { v: "1.71.9", date: "August 2026", changes: [
             "Fehler behoben: In mehreren Eingabefeldern (u.a. die neue Notiz bei „Geübt“/„Gekonnt“ im ADK/Strecken-Verlauf) war die Schrift kleiner als 16px eingestellt. Auf dem iPhone löst das beim Antippen einen automatischen Hineinzoom aus, der in der App (anders als im normalen Safari-Tab) danach nicht mehr von selbst zurückging und sich auch nicht per Fingergeste korrigieren ließ - betraf 30 Felder app-weit, jetzt alle auf mindestens 16px",
         ] },
@@ -2618,7 +2621,7 @@ async function saveAppSettings(patch) {
 }
 // Persönliche Profildaten laden (Name, Adresse, Telefon, Geburtsdatum). Gibt null bei Fehler zurück.
 async function fetchProfileData(uid) {
-    const { data, error } = await sb.from("profiles").select("display_name,street,house_no,zip,city,phone,birthdate").eq("id", uid).maybeSingle();
+    const { data, error } = await sb.from("profiles").select("display_name,street,house_no,zip,city,phone,birthdate,avatar_url").eq("id", uid).maybeSingle();
     if (error) {
         console.error(error);
         return null;
@@ -8000,13 +8003,18 @@ function App() {
 
         return React.createElement("div", { className: "pad home-in" },
             // 1) Kopf
-            React.createElement("div", { style: { margin: "12px 2px 20px" } },
-                React.createElement("div", { className: "home-eyebrow" }, new Date().toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" })),
-                React.createElement("h2", { className: "home-hi", style: { marginTop: 6 } },
-                    gruss,
-                    vorname ? (", " + vorname) : "",
-                    "!"),
-                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine)),
+            React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 14, margin: "12px 2px 20px" } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("div", { className: "home-eyebrow" }, new Date().toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" })),
+                    React.createElement("h2", { className: "home-hi", style: { marginTop: 6 } },
+                        gruss,
+                        vorname ? (", " + vorname) : "",
+                        "!"),
+                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine)),
+                React.createElement("button", { onClick: () => { setSettingsTab("fahrlehrer"); setView("einstellungen"); }, "aria-label": "Profilbild ändern", style: { flexShrink: 0, padding: 0, border: "none", background: "none", cursor: "pointer" } },
+                    (profileData && profileData.avatar_url)
+                        ? React.createElement("img", { src: profileData.avatar_url, alt: "Profilbild", style: { width: 46, height: 46, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--line)", display: "block" } })
+                        : React.createElement("div", { style: { width: 46, height: 46, borderRadius: "50%", border: "2px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
             // 2) Live-Aufzeichnung (nur wenn aktiv)
             recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),
@@ -10832,6 +10840,37 @@ function App() {
                 showToast("Logo konnte nicht verarbeitet werden:\n" + err.message);
             }
         }
+        async function onAvatarFile(e) {
+            const file = e.target.files && e.target.files[0];
+            e.target.value = ""; // erlaubt erneutes Wählen derselben Datei
+            if (!file || !uid)
+                return;
+            if (file.size > 8 * 1024 * 1024) {
+                showToast("Bild ist zu groß (max. 8 MB).");
+                return;
+            }
+            try {
+                const dataUrl = await resizeImageToDataURL(file, 256);
+                await saveProfileData(uid, { avatar_url: dataUrl });
+                setProfileData(pd => ({ ...(pd || {}), avatar_url: dataUrl }));
+            }
+            catch (err) {
+                showToast("Profilbild konnte nicht verarbeitet werden:\n" + err.message);
+            }
+        }
+        async function removeAvatar() {
+            if (!uid)
+                return;
+            if (!await askConfirm({ message: "Profilbild entfernen?" }))
+                return;
+            try {
+                await saveProfileData(uid, { avatar_url: null });
+                setProfileData(pd => ({ ...(pd || {}), avatar_url: null }));
+            }
+            catch (err) {
+                showToast("Profilbild konnte nicht entfernt werden:\n" + (err.message || err));
+            }
+        }
         return React.createElement("div", { className: "pad" },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 14px" } }, "Einstellungen"),
             React.createElement("div", { className: "settings-shell" },
@@ -10862,6 +10901,18 @@ function App() {
                         React.createElement("label", null, "Anzeigename (z.B. Fabian B\u00FCrkle)"),
                         React.createElement("input", { type: "text", value: teacherName, placeholder: "Vor- und Nachname", onChange: e => setTeacherName(e.target.value) }),
                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgef\u00FCllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer."))),
+                React.createElement("div", { className: "eyebrow" }, "Profilbild"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
+                        (profileData && profileData.avatar_url)
+                            ? React.createElement("img", { src: profileData.avatar_url, alt: "Profilbild", style: { width: 58, height: 58, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--line)" } })
+                            : React.createElement("div", { style: { width: 58, height: 58, borderRadius: "50%", border: "2px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, (teacherName || "?").trim().charAt(0).toUpperCase() || "?"),
+                        React.createElement("div", { style: { flex: 1, display: "flex", flexDirection: "column", gap: 8 } },
+                            React.createElement("label", { className: "btn btn-ghost", style: { cursor: "pointer", margin: 0, justifyContent: "center" } },
+                                (profileData && profileData.avatar_url) ? "Bild \u00E4ndern" : "Profilbild hochladen",
+                                React.createElement("input", { type: "file", accept: "image/*", onChange: onAvatarFile, style: { display: "none" } })),
+                            (profileData && profileData.avatar_url) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px", fontSize: 13, color: "#B3362A" }, onClick: removeAvatar }, "Entfernen"))),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "12px 0 0", lineHeight: 1.5 } }, "Erscheint oben auf deiner Startseite. Nur f\u00FCr dich sichtbar, nicht f\u00FCr Sch\u00FCler.")),
                 locations.length > 0 && React.createElement(React.Fragment, null,
                     React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Mein Standort"),
                     React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
