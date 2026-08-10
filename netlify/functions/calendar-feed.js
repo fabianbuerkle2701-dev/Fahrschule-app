@@ -7,10 +7,31 @@
 
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 
+// Muss zu APPT_ART in index.html passen - die alte Liste hier enthielt Codes,
+// die es in der App nie gab (LF, PZ), wodurch z.B. Überland- und Prüfungsfahrten
+// im Kalender-Abo nur als kryptisches Kürzel erschienen.
 const ART_LABELS = {
-  "ÜST": "Übungsfahrt", "AB": "Autobahnfahrt", "LF": "Landstraßenfahrt",
-  "NF": "Nachtfahrt", "PZ": "Prüfungsfahrt", "SF": "Sonderfahrt",
+  "ÜST": "Übungsfahrt", "AB": "Autobahnfahrt", "ÜL": "Überlandfahrt",
+  "NF": "Dunkelheitsfahrt", "GF": "Grundfahraufgaben", "UW": "Unterweisung am Fahrzeug",
+  "AKH": "Abfahrtskontrolle / Handfertigkeiten", "VS": "Versetzt",
+  "VT": "Vorstellung Theoretische Prüfung", "PF": "Prüfungsfahrt",
+  "SF": "sonstige Fahrstunden", "ST": "sonstige Tätigkeiten", "STI": "Sonstige Tätigkeiten intern",
+  "T1": "Teilprüfung 1", "T2": "Teilprüfung 2", "T3": "Teilprüfung 3",
+  "B197": "Testfahrt B197", "FPASF": "Fahrprobe ASF", "SASF": "Seminarteilnahme ASF",
+  "TH": "Theorieunterricht", "PRIVAT": "Privater Termin",
 };
+
+// Interne Marker am Notiz-Anfang (siehe SONST_MARK/URLAUB_MARK in index.html):
+// dürfen im Kalender-Abo weder in der Beschreibung erscheinen noch als normale
+// Fahrstunde betitelt werden.
+const SONST_MARK = "§SONST§";
+const URLAUB_MARK = "§URLAUB§";
+function cleanNote(n) {
+  n = n || "";
+  if (n.indexOf(SONST_MARK) === 0) return n.slice(SONST_MARK.length);
+  if (n.indexOf(URLAUB_MARK) === 0) return n.slice(URLAUB_MARK.length);
+  return n;
+}
 
 function pad(n) { return String(n).padStart(2, "0"); }
 function toICSDate(iso) {
@@ -97,16 +118,23 @@ exports.handler = async function (event) {
       "X-PUBLISHED-TTL:PT1H",
     ];
     (appts || []).forEach(a => {
+      const note = a.note || "";
+      const isUrlaub = note.indexOf(URLAUB_MARK) === 0;
+      const isSonstige = note.indexOf(SONST_MARK) === 0;
+      const desc = cleanNote(note);
       const artLabel = ART_LABELS[a.art] || a.art || "Fahrstunde";
       const stuName = a.student_id ? nameById[a.student_id] : null;
-      const summary = stuName ? (artLabel + " – " + stuName) : (a.title || artLabel);
+      let summary;
+      if (isUrlaub) summary = "Urlaub";
+      else if (isSonstige) summary = a.title || desc || "Sonstige Tätigkeit";
+      else summary = stuName ? (artLabel + " – " + stuName) : (a.title || artLabel);
       lines.push("BEGIN:VEVENT");
       lines.push(foldLine("UID:allindrive-" + a.id + "@allindrive.netlify.app"));
       lines.push("DTSTAMP:" + toICSDate(new Date().toISOString()));
       lines.push("DTSTART:" + toICSDate(a.start_at));
       lines.push("DTEND:" + toICSDate(a.end_at || a.start_at));
       lines.push(foldLine("SUMMARY:" + icsEscape(summary)));
-      if (a.note) lines.push(foldLine("DESCRIPTION:" + icsEscape(a.note)));
+      if (desc && summary !== desc) lines.push(foldLine("DESCRIPTION:" + icsEscape(desc)));
       lines.push("END:VEVENT");
     });
     lines.push("END:VCALENDAR");
