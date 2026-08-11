@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.84.0";
+const APP_VERSION = "1.85.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,13 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.85.0", date: "August 2026", changes: [
+            "Überarbeitet: Der Bereich „Üben“ ist jetzt eine echte Schritt-für-Schritt-Anleitung für die Begleitperson. Die App zeigt genau eine Übung („Schritt 3 von 16“) - komplett erklärt mit Ziel, drei Tipps und dem häufigsten Fehler - und darunter einen Knopf: Übungsfahrt starten",
+            "Während der Fahrt zeigt der Bildschirm nur noch das Nötige: die laufende Aufzeichnung, die Tipps zur heutigen Übung und „Angekommen – Fahrt beenden“. Alles andere ist ausgeblendet",
+            "Abhaken ohne Umwege: „Sitzt schon ✓“ direkt unter der Übung springt zur nächsten. Wer etwas anderes üben will, tippt „Etwas anderes üben“",
+            "Aufgeräumt: Fahrtenbuch, Streckenkarte, Checkliste, Regeln für die Begleitperson und der Reform-Ausblick stehen jetzt gesammelt unter „Mehr“ - zum Nachschlagen da, aber nicht mehr im Weg",
+            "Die Kopfkarte zeigt beides auf einen Blick: wie viele Übungen sitzen und wie weit ihr auf dem Weg zu den 1.000 Kilometern seid",
+        ] },
     { v: "1.84.0", date: "August 2026", changes: [
             "Neu: Ausbildungsplan für begleitete Übungsfahrten - 16 Übungen in vier Stufen (Grundstufe bis Prüfungsvorbereitung). Jede Übung erklärt das Ziel, gibt drei konkrete Tipps zum Beibringen und nennt den häufigsten Fehler der Begleitperson",
             "Abhaken je Übung: Offen, Geübt, Sitzt. Die App schlägt immer die nächste offene Übung vor, damit die Begleitperson nicht raten muss, was dran ist",
@@ -14739,8 +14746,9 @@ function BegleitFahrten({ code }) {
     const [auswahl, setAuswahl] = React.useState(null); // Übungswahl vor dem Losfahren
     const [busy, setBusy] = React.useState(false);
     const [err, setErr] = React.useState("");
-    const [offen, setOffen] = React.useState(""); // "" | "check" | "regeln" | "reform" | "karte"
+    const [offen, setOffen] = React.useState(""); // "" | "check" | "regeln" | "reform" | "karte" | "buch"
     const [stufeOffen, setStufeOffen] = React.useState("grund");
+    const [ansichtPlan, setAnsichtPlan] = React.useState(false); // Überblick über alle Übungen
     // Die laufende Aufzeichnung lebt außerhalb der Komponente (siehe bfRec) - hier wird nur
     // neu gezeichnet, wenn sie etwas meldet.
     const [, neuZeichnen] = React.useReducer(x => x + 1, 0);
@@ -15016,77 +15024,148 @@ function BegleitFahrten({ code }) {
                 React.createElement("button", { className: "btn btn-primary btn-block", disabled: busy, onClick: speichern }, busy ? "Wird gespeichert…" : "Fahrt speichern"),
                 !form.neu && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8, color: "#B3362A" }, disabled: busy, onClick: loeschen }, "Fahrt löschen")));
     }
-    // ── Hauptansicht ──
+    // ── Gemeinsame Bausteine der Anleitung ──
+    // Eine Übung komplett auserzählt: Ziel, nummerierte Tipps, häufigster Fehler. Wird im
+    // Fahrmodus und in der Hauptansicht identisch gebraucht - die Begleitperson soll immer
+    // dieselbe, vollständige Erklärung sehen, nie eine Kurzfassung.
+    function uebungErklaert(u) {
+        return React.createElement(React.Fragment, null,
+            React.createElement("p", { style: { fontSize: 13.4, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 13 } }, u.ziel),
+            React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, "So bringst du es bei"),
+            u.tipps.map((tip, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 9 } },
+                React.createElement("span", { style: { width: 21, height: 21, borderRadius: 99, background: "var(--sage-bg)", color: "var(--sage-deep)", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 } }, i + 1),
+                React.createElement("span", { style: { fontSize: 13.3, lineHeight: 1.55, color: "var(--ink-2)" } }, tip))),
+            React.createElement("div", { style: { background: "var(--amber-bg)", borderRadius: 12, padding: "10px 12px", marginTop: 4 } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--orange-deep)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 3 } }, "Bitte nicht"),
+                React.createElement("div", { style: { fontSize: 12.8, lineHeight: 1.5, color: "var(--ink-2)" } }, u.fehler)));
+    }
     const laufendeThemen = (bfRec.themen || []).map(k => begleitUebung(k)).filter(Boolean);
+    // ── Fahrmodus: während der Fahrt zeigt die App nur die Übung und den Beenden-Knopf ──
+    if (bfRec.aktiv) {
+        return React.createElement("div", null,
+            React.createElement("div", { className: "card", style: { padding: "17px 17px 15px", marginBottom: 12, background: "linear-gradient(135deg, var(--orange-soft), var(--sky-bg))", border: "none" } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 12 } },
+                    React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: "#B3362A", flexShrink: 0, animation: "bfblink 1.2s ease-in-out infinite" } }),
+                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } },
+                        rmapFmtDist(rmapPathLen(bfRec.pts)) + " · " + rmapFmtDur(bfRecDauer())),
+                    React.createElement("span", { style: { fontSize: 12, color: "var(--ink-2)", marginLeft: "auto" } }, "zeichnet auf")),
+                React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungBeenden }, "Angekommen – Fahrt beenden")),
+            laufendeThemen.map(u => React.createElement("div", { key: u.k, className: "card", style: { padding: "16px 15px", marginBottom: 12 } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--sage-deep)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } }, "Heute dran"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18.5, lineHeight: 1.25, marginBottom: 7 } }, u.t),
+                uebungErklaert(u))),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", textAlign: "center", lineHeight: 1.5, padding: "0 8px" } }, "Handy weglegen und in Ruhe fahren – die Aufzeichnung läuft in der App auch mit gesperrtem Bildschirm weiter."));
+    }
+    // ── Überblick: alle Übungen mit Stand, nach Stufen ──
+    if (ansichtPlan) {
+        return React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setAnsichtPlan(false) }, "‹ Zurück"),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, anzahlSitzt + " von " + BEGLEIT_UEBUNGEN.length + " sitzen")),
+            BEGLEIT_STUFEN.map(st => {
+                const uebungen = BEGLEIT_UEBUNGEN.filter(u => u.stufe === st.k);
+                const fertig = uebungen.filter(u => standVon(u.k) === "sitzt").length;
+                const auf = stufeOffen === st.k;
+                const bg = "var(--" + st.tone + (st.tone === "orange" ? "-soft" : "-bg") + ")";
+                const fg = st.tone === "orange" ? "var(--orange-deep)" : "var(--" + st.tone + "-deep)";
+                return React.createElement("div", { key: st.k, className: "card", style: { padding: 0, marginBottom: 10, overflow: "hidden" } },
+                    React.createElement("button", { onClick: () => setStufeOffen(auf ? "" : st.k), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", background: "none", border: "none", textAlign: "left", cursor: "pointer" } },
+                        React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, flexShrink: 0 } },
+                            bfIcon(fertig === uebungen.length ? ["M20 6L9 17l-5-5"] : ["M12 20V10M18 20V4M6 20v-4"])),
+                        React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, st.t),
+                            React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, st.d + " · " + fertig + " von " + uebungen.length)),
+                        React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, transform: auf ? "rotate(180deg)" : "none", transition: "transform .15s" } }, bfIcon(["M6 9l6 6 6-6"], 16))),
+                    auf && React.createElement("div", { style: { padding: "0 15px 6px" } }, uebungen.map(u => {
+                        const stand = standVon(u.k);
+                        const farbe = stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange-deep)" : "var(--muted)");
+                        return React.createElement("button", { key: u.k, onClick: () => setDetail(u),
+                            style: { width: "100%", display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: "1px solid var(--line)", cursor: "pointer" } },
+                            React.createElement("span", { style: { width: 22, height: 22, borderRadius: 99, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                                background: stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange)" : "var(--field-bg)"),
+                                color: stand === "offen" ? "var(--muted)" : "#fff", border: stand === "offen" ? "1.5px solid var(--line)" : "none" } },
+                                stand === "offen" ? "" : bfIcon(stand === "sitzt" ? ["M20 6L9 17l-5-5"] : ["M12 5v14"], 12)),
+                            React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, u.t),
+                            React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: farbe, flexShrink: 0 } },
+                                stand === "sitzt" ? "Sitzt" : (stand === "geuebt" ? "Geübt" : "Offen")),
+                            React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 14)));
+                    })));
+            }));
+    }
+    // ── Hauptansicht: die Anleitung. Eine Übung, komplett erklärt, ein Knopf. ──
+    const naechsteStufe = naechste ? (BEGLEIT_STUFEN.find(s => s.k === naechste.stufe) || BEGLEIT_STUFEN[0]) : null;
     return React.createElement("div", null,
-        // Übersicht: was habt ihr zusammen schon geschafft
-        React.createElement("div", { className: "card", style: { padding: "17px 17px 15px", marginBottom: 14, background: "linear-gradient(135deg, var(--orange-soft), var(--sky-bg))", border: "none" } },
-            React.createElement("div", { className: "home-eyebrow" }, "Gemeinsam geübt"),
-            React.createElement("div", { style: { display: "flex", gap: 18, marginTop: 8, flexWrap: "wrap" } },
-                [{ v: liste.length, l: liste.length === 1 ? "Fahrt" : "Fahrten" },
-                 // Komma statt Punkt - "0.9 Stunden" liest sich auf Deutsch falsch
-                 { v: String(Math.round(summeMin / 6) / 10).replace(".", ","), l: "Stunden" },
-                 { v: String(Math.round(summeKm * 10) / 10).replace(".", ","), l: "Kilometer" },
-                 { v: anzahlSitzt + "/" + BEGLEIT_UEBUNGEN.length, l: "Sitzt" }].map(k => React.createElement("div", { key: k.l },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 24, lineHeight: 1.1 } }, k.v),
-                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600, marginTop: 2 } }, k.l)))),
-            // Kilometerbalken mit den beiden Stufen der geplanten Erprobung. Die Marke bei
-            // 500-600 km ist die Beobachtungsfahrt, das Ende sind die 1.000 km aus § 8.
-            React.createElement("div", { style: { marginTop: 14 } },
-                React.createElement("div", { style: { position: "relative", height: 8, borderRadius: 99, background: "rgba(0,0,0,.10)", overflow: "hidden" } },
-                    React.createElement("div", { style: { position: "absolute", inset: 0, right: "auto", width: Math.min(100, summeKm / BEGLEIT_KM_ZIEL * 100) + "%", background: summeKm >= BEGLEIT_KM_ZIEL ? "var(--sage-deep)" : "var(--orange)", borderRadius: 99, transition: "width .3s" } }),
-                    React.createElement("div", { style: { position: "absolute", top: 0, bottom: 0, left: (BEGLEIT_KM_BEOBACHTUNG_VON / BEGLEIT_KM_ZIEL * 100) + "%",
-                        width: ((BEGLEIT_KM_BEOBACHTUNG_BIS - BEGLEIT_KM_BEOBACHTUNG_VON) / BEGLEIT_KM_ZIEL * 100) + "%", background: "rgba(0,0,0,.28)" } })),
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600 } },
-                    React.createElement("span", null, summeKm >= BEGLEIT_KM_ZIEL
-                        ? "1.000 km erreicht"
-                        : (summeKm >= BEGLEIT_KM_BEOBACHTUNG_VON
-                            ? "Beobachtungsfahrt steht an"
-                            : (Math.max(0, Math.ceil(BEGLEIT_KM_BEOBACHTUNG_VON - summeKm)) + " km bis zur Beobachtungsfahrt"))),
-                    React.createElement("span", { style: { color: "var(--muted)" } }, "Ziel 1.000 km"))),
-            // Laufende Aufzeichnung: Strecke und Dauer im Sekundentakt, sonst der Weg in die
-            // Übungswahl - erst überlegen, was geübt wird, dann losfahren.
-            loggedIn && (bfRec.aktiv
-                ? React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 8 } },
-                        React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: "#B3362A", flexShrink: 0, animation: "bfblink 1.2s ease-in-out infinite" } }),
-                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
-                            rmapFmtDist(rmapPathLen(bfRec.pts)) + " · " + rmapFmtDur(bfRecDauer())),
-                        React.createElement("span", { style: { fontSize: 12, color: "var(--ink-2)", marginLeft: "auto" } }, "zeichnet auf")),
-                    laufendeThemen.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5 } },
-                        "Heute dran: " + laufendeThemen.map(u => u.t).join(", ")),
-                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungBeenden }, "Aufzeichnung beenden"))
-                // Aufzeichnen ist der Regelweg und bekommt die volle Breite; nebeneinander
-                // bricht "Strecke aufzeichnen" auf schmalen Geräten in zwei Zeilen um.
-                : React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setAuswahl({ themen: naechste ? [naechste.k] : [] }) }, "Übungsfahrt starten"),
-                    React.createElement("button", { onClick: () => neueFahrt(null, []), style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Fahrt von Hand eintragen")))),
-        // Während der Fahrt sind die Tipps das Wichtigste - deshalb hier direkt erreichbar.
-        bfRec.aktiv && laufendeThemen.length > 0 && React.createElement("div", { className: "card", style: { padding: "4px 15px", marginBottom: 12 } },
-            laufendeThemen.map((u, i) => React.createElement("button", { key: u.k, onClick: () => setDetail(u),
-                style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "12px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
-                React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 30, height: 30, flexShrink: 0 } }, bfIcon(["M9 18h6M10 22h4", "M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"], 15)),
-                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                    React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } }, u.t),
-                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } }, "Tipps zum Beibringen ansehen")),
-                React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))))),
-        !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann kannst du eure Fahrten und euren Ausbildungsstand hier festhalten. Die Tipps und Hinweise gelten auch ohne Anmeldung."),
-        err && !form && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, err),
-        // Sicherheitshinweis - steht bewusst weit oben und ist nicht wegklickbar
+        // Wo ihr steht - Übungen, Kilometer und die Summen in einer Karte
+        React.createElement("div", { className: "card", style: { padding: "16px 17px 14px", marginBottom: 12, background: "linear-gradient(135deg, var(--orange-soft), var(--sky-bg))", border: "none" } },
+            React.createElement("div", { className: "home-eyebrow" }, "Eure Ausbildung"),
+            React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginTop: 7 } },
+                React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 25, lineHeight: 1 } }, anzahlSitzt + " von " + BEGLEIT_UEBUNGEN.length),
+                React.createElement("span", { style: { fontSize: 12.5, color: "var(--ink-2)", fontWeight: 600 } }, "Übungen sitzen")),
+            React.createElement("div", { style: { position: "relative", height: 8, borderRadius: 99, background: "rgba(0,0,0,.10)", overflow: "hidden", marginTop: 9 } },
+                React.createElement("div", { style: { position: "absolute", inset: 0, right: "auto", width: (anzahlSitzt / BEGLEIT_UEBUNGEN.length * 100) + "%", background: "var(--sage-deep)", borderRadius: 99, transition: "width .3s" } })),
+            // Kilometerstand mit den Stufen der geplanten Erprobung (Beobachtungsfahrt bei
+            // 500-600 km, Ziel 1.000 km - siehe Abschnitt zur Reform weiter unten)
+            React.createElement("div", { style: { position: "relative", height: 8, borderRadius: 99, background: "rgba(0,0,0,.10)", overflow: "hidden", marginTop: 8 } },
+                React.createElement("div", { style: { position: "absolute", inset: 0, right: "auto", width: Math.min(100, summeKm / BEGLEIT_KM_ZIEL * 100) + "%", background: summeKm >= BEGLEIT_KM_ZIEL ? "var(--sage-deep)" : "var(--orange)", borderRadius: 99, transition: "width .3s" } }),
+                React.createElement("div", { style: { position: "absolute", top: 0, bottom: 0, left: (BEGLEIT_KM_BEOBACHTUNG_VON / BEGLEIT_KM_ZIEL * 100) + "%",
+                    width: ((BEGLEIT_KM_BEOBACHTUNG_BIS - BEGLEIT_KM_BEOBACHTUNG_VON) / BEGLEIT_KM_ZIEL * 100) + "%", background: "rgba(0,0,0,.28)" } })),
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 7, fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600 } },
+                React.createElement("span", null, liste.length + (liste.length === 1 ? " Fahrt · " : " Fahrten · ") + String(Math.round(summeMin / 6) / 10).replace(".", ",") + " Std · " + String(Math.round(summeKm * 10) / 10).replace(".", ",") + " km"),
+                React.createElement("span", { style: { color: "var(--muted)" } }, summeKm >= BEGLEIT_KM_ZIEL ? "1.000 km erreicht" : "Ziel 1.000 km"))),
+        !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann führt euch die App durch die Ausbildung und speichert eure Fahrten. Lesen könnt ihr alles auch so."),
+        err && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, err),
+        // Der eigentliche Kern: die App sagt, was jetzt dran ist, erklärt es vollständig
+        // und bietet genau einen Hauptknopf an.
+        naechste
+            ? React.createElement("div", { className: "card", style: { padding: "17px 16px", marginBottom: 12, borderTop: "4px solid var(--sage-deep)" } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--sage-deep)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 5 } },
+                    "Schritt " + (BEGLEIT_UEBUNGEN.indexOf(naechste) + 1) + " von " + BEGLEIT_UEBUNGEN.length + " · " + naechsteStufe.t),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, lineHeight: 1.25, marginBottom: 7 } }, naechste.t),
+                uebungErklaert(naechste),
+                loggedIn && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 15 }, onClick: () => aufzeichnungStarten([naechste.k]) }, "Übungsfahrt starten"),
+                loggedIn && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 10 } },
+                    React.createElement("button", { onClick: () => setAuswahl({ themen: [naechste.k] }), style: { background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", padding: "2px 0", cursor: "pointer" } }, "Etwas anderes üben"),
+                    React.createElement("button", { onClick: () => standSetzen(naechste.k, "sitzt"), style: { background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--sage-deep)", padding: "2px 0", cursor: "pointer" } }, "Sitzt schon ✓")))
+            : React.createElement("div", { className: "card", style: { padding: "22px 16px", marginBottom: 12, textAlign: "center", background: "var(--sage-bg)", border: "1.5px solid var(--sage)" } },
+                React.createElement("div", { style: { fontSize: 30, marginBottom: 8 } }, "🎉"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 6 } }, "Alle 16 Übungen sitzen!"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--ink-2)", lineHeight: 1.55 } }, "Weiter Routine sammeln lohnt sich trotzdem – jede Fahrt zählt. Sprecht mit eurer Fahrschule über den Prüfungstermin.")),
+        // Sicherheitshinweis - bewusst nicht wegklickbar
         React.createElement("div", { className: "card", style: { padding: "13px 15px", marginBottom: 12, background: "var(--amber-bg)", borderLeft: "4px solid var(--orange)" } },
             React.createElement("div", { style: { fontSize: 12.8, color: "var(--ink-2)", lineHeight: 1.55 } },
                 React.createElement("strong", null, "Erst fahren, wenn alles vorliegt. "),
                 "Begleitetes Fahren ist nur mit gültiger Prüfbescheinigung und eingetragener Begleitperson erlaubt. Ohne Fahrerlaubnis zu fahren ist eine Straftat (§ 21 StVG) – auch mit Begleitung.")),
-        // Der Faden durch die Ausbildung: eine klare nächste Übung statt sechzehn gleichwertiger.
-        naechste && !bfRec.aktiv && React.createElement("button", { onClick: () => setDetail(naechste),
-            style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 13, padding: "15px 16px", marginBottom: 12,
-                borderRadius: "var(--r-lg)", background: "var(--sage-bg)", border: "1.5px solid var(--sage)", cursor: "pointer" } },
-            React.createElement("span", { className: "home-iconchip", style: { background: "var(--card)", color: "var(--sage-deep)", flexShrink: 0 } }, bfIcon(["M9 18h6M10 22h4", "M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"])),
-            React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                React.createElement("span", { style: { display: "block", fontSize: 11, fontWeight: 800, color: "var(--sage-deep)", textTransform: "uppercase", letterSpacing: ".05em" } }, "Als Nächstes dran"),
-                React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15.5, marginTop: 3 } }, naechste.t),
-                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--ink-2)", marginTop: 2 } }, "Tipps zum Beibringen ansehen")),
-            React.createElement("span", { style: { color: "var(--sage-deep)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))),
+        // Alles Weitere aufgeräumt unter "Mehr": nachschlagen statt scrollen
+        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Mehr"),
+        React.createElement("div", { className: "card", style: { padding: 0, marginBottom: 12, overflow: "hidden" } },
+            React.createElement("button", { onClick: () => setAnsichtPlan(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "14px 15px", background: "none", border: "none", textAlign: "left", cursor: "pointer" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", flexShrink: 0 } }, bfIcon(["M8 6h13M8 12h13M8 18h13", "M3 6h.01M3 12h.01M3 18h.01"])),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, "Alle 16 Übungen"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Überblick und Abhaken, nach Stufen sortiert")),
+                React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16)))),
+        klappe("buch", "Fahrtenbuch", liste.length === 0 ? "Noch keine Fahrt eingetragen" : (liste.length + (liste.length === 1 ? " Fahrt" : " Fahrten")), "clay", ["M8 2v4M16 2v4M3 10h18", "M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"],
+            React.createElement(React.Fragment, null,
+                fahrten === undefined
+                    ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "4px 0" } }, "Lädt…")
+                    : (liste.length === 0
+                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "4px 0", lineHeight: 1.5 } }, loggedIn ? "Nach eurer ersten gemeinsamen Fahrt steht sie hier." : "Melde dich an, um eure Fahrten festzuhalten.")
+                        : liste.map((f, fi) => React.createElement("button", { key: f.id, onClick: () => { setErr(""); setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || ""), themen: f.themen || [], neu: false }); },
+                            style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: fi > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
+                            React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 32, height: 32, flexShrink: 0 } }, bfIcon(["M5 17h14M6 17V9l2-4h8l2 4v8", "M7 21v-2M17 21v-2"], 16)),
+                            React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } },
+                                    new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "2-digit" })
+                                        + ((f.start && f.ende) ? ("  ·  " + f.start + "–" + f.ende) : "")),
+                                React.createElement("span", { style: { display: "block", fontSize: 12.3, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                                    [f.dauer ? (f.dauer + " Min") : "", f.km ? (String(f.km).replace(".", ",") + " km") : "", f.begleiter || "",
+                                     (f.route && f.route.pts && f.route.pts.length >= 2) ? "🗺 Strecke" : ""].filter(Boolean).join(" · ")),
+                                (f.themen || []).length > 0 && React.createElement("span", { style: { display: "block", fontSize: 11.8, color: "var(--sage-deep)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
+                                    (f.themen || []).map(begleitTitel).filter(Boolean).join(", "))),
+                            React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))))),
+                loggedIn && React.createElement("button", { onClick: () => neueFahrt(null, []), style: { display: "block", width: "100%", marginTop: 8, background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", padding: "6px 0", borderTop: liste.length > 0 ? "1px solid var(--line)" : "none", cursor: "pointer", textAlign: "center" } }, "+ Fahrt von Hand eintragen"))),
+        alleStrecken.length > 0 && klappe("karte", "Eure Strecken", alleStrecken.length + (alleStrecken.length === 1 ? " aufgezeichnete Fahrt" : " aufgezeichnete Fahrten"), "orange", ["M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z", "M8 2v16M16 6v16"],
+            React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E" })),
         klappe("check", "Vor jeder Fahrt", "Sechs Punkte, die stimmen müssen", "sage", ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"],
             React.createElement("ul", { style: { margin: 0, paddingLeft: 18 } }, BEGLEIT_CHECK.map((c, i) => React.createElement("li", { key: i, style: { marginBottom: 6 } }, c)))),
         klappe("regeln", "Für die Begleitperson", "Was du darfst – und was nicht", "sky", ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"],
@@ -15130,65 +15209,9 @@ function BegleitFahrten({ code }) {
                      "die Haftpflichtversicherung muss diese Fahrten ausdrücklich einschließen",
                      "Genehmigungsbescheinigung und Teilnahmenachweis gehören ins Auto und werden bei einer Kontrolle vorgezeigt"].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
                 React.createElement("p", { style: { color: "var(--muted)", fontSize: 12.3 } }, "Der Teilnahmenachweis über alle Fahrten wird von der Fahrschule auf Vollständigkeit und Plausibilität geprüft und ist danach drei Jahre aufzubewahren. Genau dafür ist dieses Fahrtenbuch gedacht – sobald die Erprobung startet, könnt ihr es weiternutzen."))),
-        // Alle aufgezeichneten Strecken übereinander - zeigt auf einen Blick, ob ihr immer
-        // dieselbe Runde fahrt oder wirklich unterschiedliche Gegenden erkundet.
-        alleStrecken.length > 0 && klappe("karte", "Eure Strecken", alleStrecken.length + (alleStrecken.length === 1 ? " aufgezeichnete Fahrt" : " aufgezeichnete Fahrten"), "orange", ["M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z", "M8 2v16M16 6v16"],
-            React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E" })),
-        // Der Ausbildungsplan: vier Stufen, in jeder Stufe die Übungen mit ihrem Stand.
-        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Ausbildungsplan"),
-        BEGLEIT_STUFEN.map(st => {
-            const uebungen = BEGLEIT_UEBUNGEN.filter(u => u.stufe === st.k);
-            const fertig = uebungen.filter(u => standVon(u.k) === "sitzt").length;
-            const auf = stufeOffen === st.k;
-            const bg = "var(--" + st.tone + (st.tone === "orange" ? "-soft" : "-bg") + ")";
-            const fg = st.tone === "orange" ? "var(--orange-deep)" : "var(--" + st.tone + "-deep)";
-            return React.createElement("div", { key: st.k, className: "card", style: { padding: 0, marginBottom: 10, overflow: "hidden" } },
-                React.createElement("button", { onClick: () => setStufeOffen(auf ? "" : st.k), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", background: "none", border: "none", textAlign: "left", cursor: "pointer" } },
-                    React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, flexShrink: 0 } },
-                        bfIcon(fertig === uebungen.length ? ["M20 6L9 17l-5-5"] : ["M12 20V10M18 20V4M6 20v-4"])),
-                    React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                        React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, st.t),
-                        React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, st.d + " · " + fertig + " von " + uebungen.length)),
-                    React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, transform: auf ? "rotate(180deg)" : "none", transition: "transform .15s" } }, bfIcon(["M6 9l6 6 6-6"], 16))),
-                auf && React.createElement("div", { style: { padding: "0 15px 6px" } }, uebungen.map((u, ui) => {
-                    const stand = standVon(u.k);
-                    const farbe = stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange-deep)" : "var(--muted)");
-                    return React.createElement("button", { key: u.k, onClick: () => setDetail(u),
-                        style: { width: "100%", display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: "1px solid var(--line)", cursor: "pointer" } },
-                        React.createElement("span", { style: { width: 22, height: 22, borderRadius: 99, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                            background: stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange)" : "var(--field-bg)"),
-                            color: stand === "offen" ? "var(--muted)" : "#fff", border: stand === "offen" ? "1.5px solid var(--line)" : "none" } },
-                            stand === "offen" ? "" : bfIcon(stand === "sitzt" ? ["M20 6L9 17l-5-5"] : ["M12 5v14"], 12)),
-                        React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, u.t),
-                        React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: farbe, flexShrink: 0 } },
-                            stand === "sitzt" ? "Sitzt" : (stand === "geuebt" ? "Geübt" : "Offen")),
-                        React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 14)));
-                })));
-        }),
-        // Fahrtenbuch
-        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Fahrtenbuch"),
-        fahrten === undefined
-            ? React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…")
-            : (liste.length === 0
-                ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
-                    React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)", margin: "0 auto 10px" } }, bfIcon(["M8 2v4M16 2v4M3 10h18", "M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"])),
-                    React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55 } }, loggedIn ? "Noch keine Fahrt eingetragen. Nach der ersten gemeinsamen Runde siehst du sie hier." : "Melde dich an, um eure Fahrten festzuhalten."))
-                : React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
-                    liste.map((f, fi) => React.createElement("button", { key: f.id, onClick: () => { setErr(""); setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || ""), themen: f.themen || [], neu: false }); },
-                        style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "12px 0", borderTop: fi > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
-                        React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 32, height: 32, flexShrink: 0 } }, bfIcon(["M5 17h14M6 17V9l2-4h8l2 4v8", "M7 21v-2M17 21v-2"], 16)),
-                        React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } },
-                                new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "2-digit" })
-                                    + ((f.start && f.ende) ? ("  ·  " + f.start + "–" + f.ende) : "")),
-                            React.createElement("span", { style: { display: "block", fontSize: 12.3, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                                [f.dauer ? (f.dauer + " Min") : "", f.km ? (String(f.km).replace(".", ",") + " km") : "", f.begleiter || "",
-                                 (f.route && f.route.pts && f.route.pts.length >= 2) ? "🗺 Strecke" : ""].filter(Boolean).join(" · ")),
-                            (f.themen || []).length > 0 && React.createElement("span", { style: { display: "block", fontSize: 11.8, color: "var(--sage-deep)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                                (f.themen || []).map(begleitTitel).filter(Boolean).join(", "))),
-                        React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16)))))),
         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Dieses Fahrtenbuch ist eine Hilfe für euch, kein amtlicher Nachweis. Es ersetzt keine Auskunft deiner Fahrschule oder der Fahrerlaubnisbehörde."));
 }
+
 // ════════ Theorie üben (öffentlich, per Fahrschul-Code; Fortschritt nur bei Login) ════════
 // Fragen sind Beispielinhalte (is_sample=true in der DB), solange der amtliche Fragenkatalog
 // nicht lizenziert ist (siehe Aufgabenliste) - Struktur ist bereits auf echte Inhalte ausgelegt.
