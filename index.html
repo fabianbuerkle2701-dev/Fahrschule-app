@@ -1141,11 +1141,23 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.80.0";
-// Master-Schalter für "Theorie üben": bleibt false, bis der amtliche Fragenkatalog lizenziert ist.
-// Auf true stellen, um die Funktion grundsätzlich freizuschalten (pro Fahrschule zusätzlich noch
-// über profiles.theory_addon_active gesteuert, siehe public_booking_info/mySubscription).
+const APP_VERSION = "1.81.0";
+// Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
+// Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
+// Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
 const THEORY_UEBEN_RELEASED = false;
+// Vorschau-Phase: In der Fahrschüler-App ist der Lernbereich schon nutzbar - allerdings nur mit
+// den selbst verfassten Beispielfragen (is_sample=true in theory_questions), nicht mit amtlichen
+// Inhalten. Deshalb hängt er hier bewusst NICHT am kostenpflichtigen Zusatzpaket.
+// Auf der öffentlichen Buchungsseite bleibt er unsichtbar: dort landen auch Interessenten,
+// die (noch) keine Fahrschüler sind, und der Link wird frei weitergegeben.
+const THEORY_UEBEN_APP_VORSCHAU = true;
+// Einzige Stelle, die entscheidet, ob "Theorie üben" sichtbar ist. appMode = native Fahrschüler-App.
+function theorieVerfuegbar(info, appMode) {
+    if (THEORY_UEBEN_RELEASED)
+        return !!(info && info.theory_addon_active);
+    return !!(THEORY_UEBEN_APP_VORSCHAU && appMode);
+}
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
@@ -1206,6 +1218,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.81.0", date: "August 2026", changes: [
+            "Neu in der App „Allindrive für Fahrschüler“: Theorie üben. Der Reiter „Lernen“ hat jetzt zwei Bereiche - die Lernvideos deiner Fahrschule und Übungsfragen zur Theorie, sortiert nach den zwölf Themen des Grundstoffs",
+            "Übungsfragen zeigen nach dem Antworten sofort, was richtig war, und erklären warum. Wer in der App angemeldet ist, dessen Fortschritt wird gespeichert und je Thema in Prozent angezeigt",
+            "Wichtig: Die Fragen sind bislang eigene Übungsfragen, kein amtlicher Fragenkatalog. Der offizielle Katalog kommt dazu, sobald die Lizenz geklärt ist",
+            "Der Übungsbereich erscheint bewusst nur in der Fahrschüler-App, nicht auf der öffentlichen Buchungsseite - dort landen auch Interessenten, die noch keine Fahrschüler sind",
+        ] },
     { v: "1.80.0", date: "August 2026", changes: [
             "Verbessert: Beim ersten Anmelden im Fahrschülerbereich musste bisher zwingend ein eigener PIN vergeben werden, bevor überhaupt etwas zu sehen war. Jetzt landet man direkt bei seinem Fortschritt und seinen Erfolgen - der Hinweis auf den Start-PIN steht als Banner darüber und lässt sich jederzeit später erledigen",
             "Neu: Den eigenen PIN kann man jetzt jederzeit über diesen Hinweis ändern, nicht mehr nur beim allerersten Login. Im PIN-Dialog gibt es außerdem einen „Später“-Knopf zurück zur Übersicht",
@@ -14401,9 +14419,17 @@ function TheoryPractice({ code }) {
             React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Es sind noch keine Übungsfragen hinterlegt."));
     const byTopic = {};
     questions.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
-    const topics = Object.keys(byTopic);
+    // Reihenfolge wie in der amtlichen Themenliste (Anlage 1 FahrschAusbO), damit die Themen
+    // so dastehen wie im Theorieunterricht - nicht in zufälliger Datenbankreihenfolge.
+    const topics = Object.keys(byTopic).sort((a, b) => {
+        const ia = GRUNDSTOFF_THEMEN.indexOf(a), ib = GRUNDSTOFF_THEMEN.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+    });
+    // Eine gemischte Runde bleibt auf Prüfungslänge begrenzt. Sonst wächst sie mit jedem neuen
+    // Thema weiter an und man wird in einer Sitzung nie fertig.
+    const MIX_LEN = 20;
     function startRound(topicKey) {
-        const qs = topicKey ? byTopic[topicKey] : questions;
+        const qs = topicKey ? byTopic[topicKey] : shuffled(questions).slice(0, MIX_LEN);
         setQueue(shuffled(qs));
         setQIndex(0);
         setSelected([]);
@@ -14490,7 +14516,7 @@ function TheoryPractice({ code }) {
             React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
             React.createElement("span", { style: { flex: 1 } },
                 React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Zufällig üben"),
-                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, questions.length + " Fragen aus allen Themen gemischt")),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, Math.min(MIX_LEN, questions.length) + " Fragen aus allen Themen gemischt")),
             gesamtPct !== null && React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "var(--orange-deep)", flexShrink: 0 } }, gesamtPct + "%")),
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
@@ -14505,7 +14531,7 @@ function TheoryPractice({ code }) {
                     React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, topic),
                     React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, pct !== null ? (pct + "% · " + qs.length + " Fragen") : (qs.length + " Fragen")));
             })),
-        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Beispielfragen zum Ausprobieren - der amtliche Fragenkatalog wird ergänzt, sobald verfügbar."));
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Eigene Übungsfragen zu den Themen des Grundstoffs. Sie ersetzen den amtlichen Fragenkatalog nicht – der kommt dazu, sobald er verfügbar ist."));
 }
 // ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
 // Reine Ansichtskarte für den Schülerbereich: zeigt alle aufgezeichneten Strecken
@@ -15250,9 +15276,16 @@ function SchuelerStart({ code, info, onGoTab }) {
             React.createElement("button", { onClick: () => onGoTab("fortschritt") },
                 svg(["M22 11.08V12a10 10 0 1 1-5.93-9.14", "M22 4L12 14.01l-3-3"], { width: 21, height: 21 }),
                 "Fortschritt"),
-            React.createElement("button", { onClick: () => onGoTab("videos") },
-                svg(["M23 7l-7 5 7 5V7z", "M14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"], { width: 21, height: 21 }),
-                "Videos")));
+            // Der Lern-Reiter startet bei den Videos - die Abkürzung führt deshalb direkt zu den
+            // Theoriefragen, solange es sie gibt. Ein vierter Knopf würde in der 3er-Spalte
+            // allein in einer zweiten Zeile stehen.
+            theorieVerfuegbar(info, true)
+                ? React.createElement("button", { onClick: () => onGoTab("videos", "theorie") },
+                    svg(["M4 19.5A2.5 2.5 0 0 1 6.5 17H20", "M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"], { width: 21, height: 21 }),
+                    "Theorie")
+                : React.createElement("button", { onClick: () => onGoTab("videos") },
+                    svg(["M23 7l-7 5 7 5V7z", "M14 5H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"], { width: 21, height: 21 }),
+                    "Videos")));
 }
 // appMode: läuft in der nativen Fahrschüler-App (zentraler Login davor). Dann trägt der Kopf
 // den App-Namen statt "Online-Buchung", es gibt einen Abmelden-Knopf, und der Reiter
@@ -15293,6 +15326,9 @@ function BookingPage({ code, appMode, onLogout }) {
     // In der App beginnt man auf der Startseite (wie in der Fahrlehrer-App), auf der
     // öffentlichen Buchungsseite dagegen direkt bei den Terminen - dort gibt es keine Startseite.
     const [tab, setTab] = React.useState(appMode ? "start" : "termine"); // "start" | "termine" | "fortschritt" | "videos" | "theorie" | "anmelden"
+    // Unterbereich des Lern-Reiters in der App: dort liegen Videos und Theoriefragen
+    // nebeneinander, statt die untere Leiste auf fünf Knöpfe aufzublähen.
+    const [lernTab, setLernTab] = React.useState("videos"); // "videos" | "theorie"
     // Aktuelles Farbschema mitverfolgen: iOS kann tagsüber auf hell und abends auf dunkel
     // wechseln, ohne dass die Seite neu lädt. Nur einmal auszulesen würde dann das falsche
     // Logo stehen lassen.
@@ -15577,7 +15613,9 @@ function BookingPage({ code, appMode, onLogout }) {
     const tabMeta = {
         termine: "Wähle einen freien Termin für deine nächste Fahrstunde",
         fortschritt: "Dein Ausbildungsstand und deine Erfolge",
-        videos: "Lernvideos zu Theorie und Praxis",
+        videos: theorieVerfuegbar(info, appMode)
+            ? (lernTab === "theorie" ? "Übe Prüfungsfragen zur Theorie" : "Lernvideos deiner Fahrschule")
+            : "Lernvideos zu Theorie und Praxis",
         theorie: "Übe Prüfungsfragen zur Theorie",
         anmelden: "Melde dich unverbindlich zur Ausbildung an",
     };
@@ -15614,9 +15652,10 @@ function BookingPage({ code, appMode, onLogout }) {
                 React.createElement("button", { className: tab === "termine" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("termine") }, "Termine"),
                 React.createElement("button", { className: tab === "fortschritt" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("fortschritt") }, "Mein Fortschritt"),
                 React.createElement("button", { className: tab === "videos" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("videos") }, "Videos"),
-                THEORY_UEBEN_RELEASED && info.theory_addon_active && React.createElement("button", { className: tab === "theorie" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("theorie") }, "Theorie üben"),
+                theorieVerfuegbar(info, appMode) && React.createElement("button", { className: tab === "theorie" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("theorie") }, "Theorie üben"),
                 React.createElement("button", { className: tab === "anmelden" ? "on" : "", style: { flex: "none", whiteSpace: "nowrap" }, onClick: () => setTab("anmelden") }, "Neu anmelden")),
-            appMode && tab === "start" && React.createElement(SchuelerStart, { code: code, info: info, onGoTab: setTab }),
+            appMode && tab === "start" && React.createElement(SchuelerStart, { code: code, info: info, onGoTab: (t, sub) => { if (sub)
+                    setLernTab(sub); setTab(t); } }),
             tab === "anmelden" && React.createElement("div", null,
                 enrollDone
                     ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
@@ -15647,8 +15686,18 @@ function BookingPage({ code, appMode, onLogout }) {
                         enrollForm.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, enrollForm.error),
                         React.createElement("button", { className: "btn btn-primary btn-block", disabled: enrollForm.busy, onClick: submitEnrollment }, enrollForm.busy ? "Wird gesendet…" : "Unverbindlich anmelden"))),
             tab === "fortschritt" && React.createElement(StudentArea, { code: code, info: info, appMode: appMode }),
-            tab === "videos" && React.createElement(VideoLibrary, { code: code }),
-            tab === "theorie" && THEORY_UEBEN_RELEASED && info.theory_addon_active && React.createElement(TheoryPractice, { code: code }),
+            // Lern-Reiter: in der App zwei Unterbereiche (Videos der Fahrschule, Theoriefragen),
+            // auf der öffentlichen Buchungsseite unverändert nur die Videos.
+            tab === "videos" && (theorieVerfuegbar(info, appMode)
+                ? React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "seg", style: { marginBottom: 16 } },
+                        React.createElement("button", { className: lernTab === "videos" ? "on" : "", onClick: () => setLernTab("videos") }, "Videos"),
+                        React.createElement("button", { className: lernTab === "theorie" ? "on" : "", onClick: () => setLernTab("theorie") }, "Theorie")),
+                    lernTab === "theorie"
+                        ? React.createElement(TheoryPractice, { code: code })
+                        : React.createElement(VideoLibrary, { code: code }))
+                : React.createElement(VideoLibrary, { code: code })),
+            tab === "theorie" && theorieVerfuegbar(info, appMode) && React.createElement(TheoryPractice, { code: code }),
             tab === "termine" && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "home-kpis", style: { marginBottom: 4 } }, [
                     { key: "mine", label: "Meine Termine", value: mineSet.size, tone: "sage" },
