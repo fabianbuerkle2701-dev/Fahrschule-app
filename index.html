@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.83.0";
+const APP_VERSION = "1.84.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,14 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.84.0", date: "August 2026", changes: [
+            "Neu: Ausbildungsplan für begleitete Übungsfahrten - 16 Übungen in vier Stufen (Grundstufe bis Prüfungsvorbereitung). Jede Übung erklärt das Ziel, gibt drei konkrete Tipps zum Beibringen und nennt den häufigsten Fehler der Begleitperson",
+            "Abhaken je Übung: Offen, Geübt, Sitzt. Die App schlägt immer die nächste offene Übung vor, damit die Begleitperson nicht raten muss, was dran ist",
+            "Vor dem Losfahren wählt ihr die Übung für heute, während der Fahrt sind die Tipps mit einem Tipp erreichbar, und nach der Fahrt hakt ihr direkt im Formular ab",
+            "Übungsfahrten werden jetzt auch zeitlich festgehalten - von wann bis wann, wie bei einer Fahrstunde. Nach einer Aufzeichnung stehen Uhrzeit, Dauer und Kilometer schon drin",
+            "Neuer Kilometerbalken mit den beiden Stufen aus dem Verordnungsentwurf: Beobachtungsfahrt zwischen 500 und 600 km, Ziel 1.000 km",
+            "Der Abschnitt zur Reform nennt jetzt die tatsächlichen Vorgaben aus dem Entwurf der Fahrpraxisanleitungs-Verordnung statt allgemeiner Hinweise: Kilometerstufen, Voraussetzungen, Anforderungen an die Begleitperson, Schild am Fahrzeug, Tempolimit 130",
+        ] },
     { v: "1.83.0", date: "August 2026", changes: [
             "Neu: Streckenaufzeichnung für die Übungsfahrten. „Strecke aufzeichnen“ antippen, losfahren, hinterher beenden - Dauer und Kilometer sind dann schon ausgefüllt und die gefahrene Strecke liegt als Karte beim Eintrag",
             "Die Aufzeichnung läuft weiter, wenn man in der App zu Terminen oder Fortschritt wechselt. Ein roter Streifen über der Navigationsleiste erinnert daran und führt mit einem Tipp zurück",
@@ -3272,6 +3280,15 @@ async function publicStudentSetAvatar(code, name, pin, dataUrl) {
 // Legt einen Eintrag an oder ersetzt einen bestehenden mit derselben id. Gibt true bei Erfolg.
 async function publicStudentDriveSave(code, name, pin, entry) {
     const { data, error } = await sb.rpc("public_student_drive_save", { code, p_name: name, p_pin: pin, p_entry: entry });
+    if (error) {
+        console.error(error);
+        return false;
+    }
+    return data === "ok";
+}
+// Stand einer Übung im Ausbildungsplan setzen ("geuebt" | "sitzt" | "offen" zum Zurücksetzen).
+async function publicStudentDriveSkill(code, name, pin, key, stand) {
+    const { data, error } = await sb.rpc("public_student_drive_skill", { code, p_name: name, p_pin: pin, p_key: key, p_stand: stand });
     if (error) {
         console.error(error);
         return false;
@@ -14429,16 +14446,131 @@ function shuffled(arr) {
 //      die noch nicht feststehen.
 // Der Bereich richtet sich ausdrücklich auch an die Begleitperson (meist ein Elternteil),
 // die sonst nirgends erfährt, was sie darf, was sie üben soll und wie sie es festhält.
-const BEGLEIT_THEMEN = [
-    { k: "stadt", t: "Stadtverkehr", d: "Ampeln, Kreuzungen, enge Straßen", tone: "sky" },
-    { k: "land", t: "Landstraße", d: "Kurven, Überholen, Tempo anpassen", tone: "sage" },
-    { k: "autobahn", t: "Autobahn", d: "Auffahren, Spurwechsel, Abstand", tone: "clay" },
-    { k: "parken", t: "Parken & Rangieren", d: "Längs, quer, rückwärts, Parkhaus", tone: "orange" },
-    { k: "abbiegen", t: "Kreisverkehr & Abbiegen", d: "Blinken, Vorfahrt, Schulterblick", tone: "sky" },
-    { k: "dunkel", t: "Dunkelheit", d: "Licht, Blenden, Wildwechsel", tone: "sage" },
-    { k: "wetter", t: "Nässe, Nebel & Winter", d: "Bremsweg, Sicht, Glätte", tone: "clay" },
-    { k: "strecke", t: "Längere Strecke", d: "Konzentration, Pausen, Navigation", tone: "orange" },
+// ── Ausbildungsplan für begleitete Übungsfahrten ──
+// Aufgebaut wie die Leistungsstufen in der Fahrlehrer-Ausbildung (siehe LEISTUNGSSTUFEN),
+// aber in der Sprache von Eltern statt von Fahrlehrern. Jede Übung sagt, worum es geht,
+// wie man es beibringt und welcher Fehler dabei am häufigsten passiert.
+const BEGLEIT_STUFEN = [
+    { k: "grund", t: "Grundstufe", d: "Das Auto beherrschen", tone: "sage" },
+    { k: "aufbau", t: "Aufbaustufe", d: "Im Verkehr zurechtkommen", tone: "sky" },
+    { k: "leistung", t: "Leistungsstufe", d: "Schwierige Bedingungen", tone: "clay" },
+    { k: "reife", t: "Prüfungsvorbereitung", d: "Allein entscheiden", tone: "orange" },
 ];
+const BEGLEIT_UEBUNGEN = [
+    { k: "anfahren", stufe: "grund", t: "Anfahren und Anhalten",
+        ziel: "Sanft losfahren, weich zum Stehen kommen - ohne Ruckeln und ohne abzuwürgen.",
+        tipps: ["Die ersten Male auf einen leeren Parkplatz, ohne Zeitdruck und ohne Zuschauer.",
+            "Sag nicht „bremsen!“, sondern vorher: „wir halten am nächsten Schild“. Dann bleibt Zeit zum Selbstdenken.",
+            "Den Schleifpunkt selbst finden lassen. Mitzählen oder Kommandos helfen dabei nicht."],
+        fehler: "Zu früh in den echten Verkehr. Wer noch abwürgt, hat im Kreisverkehr nichts verloren." },
+    { k: "lenken", stufe: "grund", t: "Lenken und Spur halten",
+        ziel: "Das Auto bleibt ruhig in der Spur, der Blick geht weit nach vorn.",
+        tipps: ["„Schau dahin, wo du hinwillst“ wirkt besser als jede Anweisung zum Lenkrad.",
+            "Wandert das Auto, klebt meist der Blick zu dicht vor der Motorhaube.",
+            "Erst breite Straßen, dann enge. Enge Straßen sind eine eigene Übung, keine Steigerung nebenbei."],
+        fehler: "Ans Lenkrad erinnern statt an den Blick - das behandelt das Symptom." },
+    { k: "schalten", stufe: "grund", t: "Schalten und Geschwindigkeit",
+        ziel: "Der passende Gang kommt von selbst, der Motor heult nicht und würgt nicht.",
+        tipps: ["Nach Gehör arbeiten lassen, nicht nach Drehzahlmesser.",
+            "„Hörst du, wie der Motor arbeitet?“ bringt mehr als „jetzt den dritten“.",
+            "Bergauf und bergab getrennt üben - das sind zwei verschiedene Baustellen."],
+        fehler: "Jeden einzelnen Schaltvorgang kommentieren. Das macht nervös und verlangsamt das Lernen." },
+    { k: "blick", stufe: "grund", t: "Spiegel und Schulterblick",
+        ziel: "Spiegel, Blinker, Schulterblick sitzen als feste Reihenfolge - auch beim Spurwechsel.",
+        tipps: ["Frag nach der Fahrt: „was war hinter uns?“ Wer es nicht weiß, hat nicht geschaut.",
+            "Selbst konsequent Schulterblick machen, wenn du fährst. Das wird abgeschaut.",
+            "Anfangs die Reihenfolge laut mitsprechen lassen: Spiegel - Blinker - Schulterblick."],
+        fehler: "Den Schulterblick nur beim Abbiegen üben. Beim Spurwechsel wird er dann vergessen." },
+    { k: "vorfahrt", stufe: "aufbau", t: "Vorfahrt erkennen",
+        ziel: "Rechts vor links, Schilder und Ampeln werden früh genug erkannt, nicht erst an der Haltelinie.",
+        tipps: ["Vor der Kreuzung fragen „wer darf zuerst?“ - und die Antwort nicht selbst geben.",
+            "Anfangs Wohngebiete mit vielen Rechts-vor-links-Kreuzungen suchen.",
+            "Fehler erst nach der Kreuzung besprechen, nicht mittendrin."],
+        fehler: "Im letzten Moment „Halt!“ rufen. Das erschreckt mehr, als es hilft - und lehrt nichts." },
+    { k: "abbiegen", stufe: "aufbau", t: "Abbiegen",
+        ziel: "Rechtzeitig einordnen, blinken, und beim Rechtsabbiegen an Rad- und Fußverkehr denken.",
+        tipps: ["Früh ansagen: „in 200 Metern rechts“. Aus zu später Ansage wird Reagieren statt Üben.",
+            "Den Radweg zum Thema machen, bevor ihr an der Kreuzung seid.",
+            "Linksabbiegen zuerst dort üben, wo eine Ampel mit Grünpfeil hilft."],
+        fehler: "Zu spät ansagen und sich dann über die Hektik wundern." },
+    { k: "kreisverkehr", stufe: "aufbau", t: "Kreisverkehr",
+        ziel: "Einfahren ohne zu blinken, Ausfahrt rechtzeitig anzeigen, im Kreis den Überblick behalten.",
+        tipps: ["Erst als Fahrer vormachen und dabei laut erklären, worauf du achtest.",
+            "Kleine einspurige Kreisverkehre zuerst, mehrspurige ganz zum Schluss.",
+            "Die Ausfahrten vorher gemeinsam zählen, dann wird es planbar."],
+        fehler: "Beim Einfahren blinken lassen. Das ist falsch und hält sich später hartnäckig." },
+    { k: "schwaechere", stufe: "aufbau", t: "Rücksicht auf andere",
+        ziel: "Kinder, Radfahrende und ältere Menschen werden früh gesehen und mit Abstand behandelt.",
+        tipps: ["Vor Schulen und Kitas bewusst langsam fahren - und laut sagen, warum.",
+            "Nach dem Überholen eines Radfahrers fragen, ob der Abstand gepasst hat (1,5 Meter innerorts).",
+            "Bushaltestellen gezielt ansteuern und das Verhalten dort üben."],
+        fehler: "Über Regeln reden statt über das, was gerade zu sehen ist." },
+    { k: "landstrasse", stufe: "leistung", t: "Landstraße",
+        ziel: "Tempo an Kurven und Sicht anpassen, Abstand halten, vorausschauend fahren.",
+        tipps: ["Kurven zuerst nur fahren, ohne Überholthema. Erst muss das Tempo sitzen.",
+            "Über die Sichtweite sprechen: „wie weit kannst du gerade sehen?“",
+            "Baumreihen, Feldausfahrten und Wildwechsel als Übung fürs Vorausdenken nutzen."],
+        fehler: "Überholen üben, bevor Tempo und Abstand sicher sitzen." },
+    { k: "autobahn", stufe: "leistung", t: "Autobahn",
+        ziel: "Auffahren mit passender Geschwindigkeit, sauberer Spurwechsel, ausreichender Abstand.",
+        tipps: ["Die erste Auffahrt bei wenig Verkehr - Sonntagmorgen ist ideal.",
+            "Vorher klären: Auf dem Beschleunigungsstreifen wird beschleunigt, nicht gewartet.",
+            "Abstand mit den Leitpfosten am Rand üben, das gibt ein greifbares Maß."],
+        fehler: "Zur Hauptverkehrszeit anfangen. Danach ist die Autobahn erst mal ein Angstthema." },
+    { k: "parken", stufe: "leistung", t: "Parken und Rangieren",
+        ziel: "Längs, quer und rückwärts einparken - auch ohne Kamera und Piepser.",
+        tipps: ["Auf leerem Parkplatz mit zwei Kartons statt echter Autos beginnen.",
+            "Zwischendurch aussteigen und selbst anschauen lassen, wie das Auto steht.",
+            "Kamera und Sensoren bewusst mal ignorieren - in der Prüfung zählt der Blick."],
+        fehler: "Einweisen und gleichzeitig ins Lenken reden. Lieber aussteigen und zeigen." },
+    { k: "wetter", stufe: "leistung", t: "Dunkelheit, Nässe und Winter",
+        ziel: "Mit schlechter Sicht und längerem Bremsweg umgehen, ohne sich zu überfordern.",
+        tipps: ["Die erste Nachtfahrt auf einer Strecke, die ihr beide schon kennt.",
+            "Über Blendung sprechen, bevor das erste Auto entgegenkommt.",
+            "Bei Nässe auf leerem Gelände einmal spüren lassen, wie viel länger der Bremsweg wird."],
+        fehler: "Winterfahren erst im Winter anfangen - dann fehlt die Ruhe zum Üben." },
+    { k: "langstrecke", stufe: "reife", t: "Längere Fahrt am Stück",
+        ziel: "60 bis 90 Minuten konzentriert fahren und selbst merken, wann eine Pause fällig ist.",
+        tipps: ["Die Fahrt vorher planen und die Pause fest einbauen.",
+            "Nach der Hälfte fragen: „wie konzentriert fühlst du dich noch?“",
+            "Einmal mit Musik und Gespräch fahren, einmal ohne - der Unterschied ist lehrreich."],
+        fehler: "So lange fahren, bis es schlecht läuft. Dann bleibt nur der Frust hängen." },
+    { k: "fremd", stufe: "reife", t: "Unbekannte Strecken",
+        ziel: "In fremder Umgebung Schilder lesen, Spuren wählen und den Weg selbst finden.",
+        tipps: ["Nur das Ziel nennen, den Weg selbst finden lassen.",
+            "Navi darf mitlaufen, aber die Schilder haben Vorrang - das gehört besprochen.",
+            "Sich zu verfahren ist Teil der Übung. Nicht sofort eingreifen."],
+        fehler: "Jede Abzweigung vorsagen. Dann übt nur das Navi." },
+    { k: "voraus", stufe: "reife", t: "Vorausschauend fahren",
+        ziel: "Situationen erkennen, bevor sie brenzlig werden - Bremslichter, Lücken, spielende Kinder.",
+        tipps: ["Frag „was könnte gleich passieren?“ statt zu warnen.",
+            "Bremslichter weiter vorn zum Thema machen, nicht nur das Auto direkt davor.",
+            "Nach der Fahrt eine Situation gemeinsam nacherzählen - das verankert sie."],
+        fehler: "Nur auf Fehler hinweisen und gute Entscheidungen unkommentiert lassen." },
+    { k: "selbst", stufe: "reife", t: "Selbstständig fahren",
+        ziel: "Eine ganze Fahrt ohne Hinweise von der Seite - so, wie es in der Prüfung sein wird.",
+        tipps: ["Eine komplette Fahrt lang nichts sagen, außer es wird wirklich gefährlich.",
+            "Danach fragen, was selbst aufgefallen ist - vor deiner eigenen Rückmeldung.",
+            "Wenn das ruhig läuft, ist der Prüfungstermin nicht mehr weit."],
+        fehler: "Bis zum Schluss mitlenken - und sei es nur im Kopf und mit dem Fuß." },
+];
+// Die erste Fassung des Fahrtenbuchs hatte acht freie Themen statt des Ausbildungsplans.
+// Damit früher eingetragene Fahrten weiterhin lesbar bleiben, stehen ihre Bezeichnungen hier.
+const BEGLEIT_ALT_THEMEN = {
+    stadt: "Stadtverkehr", land: "Landstraße", autobahn: "Autobahn", parken: "Parken & Rangieren",
+    abbiegen: "Kreisverkehr & Abbiegen", dunkel: "Dunkelheit", wetter: "Nässe, Nebel & Winter", strecke: "Längere Strecke",
+};
+// Kilometerstufen aus der geplanten Fahrpraxisanleitungs-Verordnung (FahrPraxAnlV, Artikel 2
+// der Verordnung zur Modernisierung der Fahrschulausbildung, Bearbeitungsstand 04.05.2026):
+//   § 7 Abs. 1  nach mindestens 500 und höchstens 600 km die Beobachtungsfahrt mit
+//               Fahrpraxisanleiter UND Fahrlehrer, danach mind. 6 Unterrichtseinheiten
+//   § 8         nach mindestens 1.000 km geht es zum Abschluss in die Fahrschule
+// Achtung: Das gilt für die geplante Erprobung, NICHT für das heutige Begleitete Fahren ab 17 -
+// dort schreibt das Recht keine Mindestkilometer vor. Deshalb sind die Stufen im Bildschirm
+// als Orientierung gekennzeichnet, nicht als Pflicht.
+const BEGLEIT_KM_BEOBACHTUNG_VON = 500, BEGLEIT_KM_BEOBACHTUNG_BIS = 600, BEGLEIT_KM_ZIEL = 1000;
+function begleitUebung(k) { return BEGLEIT_UEBUNGEN.find(u => u.k === k) || null; }
+function begleitTitel(k) { const u = begleitUebung(k); return u ? u.t : (BEGLEIT_ALT_THEMEN[k] || ""); }
 // Punkte, die vor jeder Fahrt stimmen müssen. Bewusst kurz - eine Liste, die niemand liest,
 // hilft niemandem.
 const BEGLEIT_CHECK = [
@@ -14459,6 +14591,9 @@ function bfIcon(paths, size) {
 // im Browser nur, solange die Seite im Vordergrund ist.
 const bfRec = {
     aktiv: false, pts: [], start: 0, watchId: null, nativeId: null, wake: null, ticker: null,
+    // themen: die für diese Fahrt vorgenommenen Übungen; zuletztStart überlebt das Beenden,
+    // damit das Formular die Uhrzeit "von" noch kennt.
+    themen: [], zuletztStart: 0,
     hoerer: [],
     melde() { this.hoerer.slice().forEach(f => { try {
         f();
@@ -14499,6 +14634,8 @@ function bfRecStart(onFehler) {
     bfRec.aktiv = true;
     bfRec.pts = [];
     bfRec.start = Date.now();
+    bfRec.zuletztStart = bfRec.start;
+    bfRec.themen = [];
     const punkt = (lat, lng) => {
         const p = [lat, lng];
         if (bfRec.pts.length === 0 || rmapDist(bfRec.pts[bfRec.pts.length - 1], p) > 8)
@@ -14571,6 +14708,7 @@ function bfRecStop() {
     bfRec.aktiv = false;
     bfRec.pts = [];
     bfRec.start = 0;
+    bfRec.themen = [];
     bfRec.melde();
     if (pts.length < 2)
         return null;
@@ -14595,10 +14733,14 @@ function BegleitFahrten({ code }) {
     catch (e) { }
     const loggedIn = !!(loginName && loginPin);
     const [fahrten, setFahrten] = React.useState(loggedIn ? undefined : []); // undefined=lädt
+    const [plan, setPlan] = React.useState({}); // uebungKey -> {stand, datum}
     const [form, setForm] = React.useState(null);
+    const [detail, setDetail] = React.useState(null); // geöffnete Übung (Tipps)
+    const [auswahl, setAuswahl] = React.useState(null); // Übungswahl vor dem Losfahren
     const [busy, setBusy] = React.useState(false);
     const [err, setErr] = React.useState("");
     const [offen, setOffen] = React.useState(""); // "" | "check" | "regeln" | "reform" | "karte"
+    const [stufeOffen, setStufeOffen] = React.useState("grund");
     // Die laufende Aufzeichnung lebt außerhalb der Komponente (siehe bfRec) - hier wird nur
     // neu gezeichnet, wenn sie etwas meldet.
     const [, neuZeichnen] = React.useReducer(x => x + 1, 0);
@@ -14608,48 +14750,92 @@ function BegleitFahrten({ code }) {
             return;
         let weg = false;
         publicStudentOverview(code, loginName, loginPin)
-            .then(r => { if (!weg)
-            setFahrten((r && r.student && asArray(r.student.begleitfahrten)) || []); })
+            .then(r => {
+            if (weg)
+                return;
+            const s = (r && r.student) || {};
+            setFahrten(asArray(s.begleitfahrten) || []);
+            setPlan((s.begleitplan && typeof s.begleitplan === "object") ? s.begleitplan : {});
+        })
             .catch(() => { if (!weg)
             setFahrten([]); });
         return () => { weg = true; };
         /* eslint-disable-next-line */
     }, [code, loggedIn, loginName, loginPin]);
-    const liste = (fahrten || []).slice().sort((a, b) => String(b.datum || "").localeCompare(String(a.datum || "")));
+    const liste = (fahrten || []).slice().sort((a, b) => (String(b.datum || "") + (b.start || "")).localeCompare(String(a.datum || "") + (a.start || "")));
     const summeKm = liste.reduce((s, f) => s + (Number(f.km) || 0), 0);
     const summeMin = liste.reduce((s, f) => s + (Number(f.dauer) || 0), 0);
     const alleStrecken = liste.filter(f => f.route && Array.isArray(f.route.pts) && f.route.pts.length >= 2).map(f => f.route.pts);
-    function neueFahrt(route) {
+    const standVon = k => (plan[k] && plan[k].stand) || "offen";
+    const anzahlSitzt = BEGLEIT_UEBUNGEN.filter(u => standVon(u.k) === "sitzt").length;
+    // Wovon die Führung lebt: die erste Übung, die noch nicht sitzt - in der Reihenfolge des Plans.
+    const naechste = BEGLEIT_UEBUNGEN.find(u => standVon(u.k) !== "sitzt") || null;
+    async function standSetzen(k, stand) {
+        if (!loggedIn)
+            return;
+        const vorher = plan[k];
+        // Sofort umschalten, damit sich das Antippen nicht zäh anfühlt; bei Fehler zurück.
+        setPlan(p => {
+            const n = { ...p };
+            if (stand === "offen")
+                delete n[k];
+            else
+                n[k] = { stand, datum: ymd(new Date()) };
+            return n;
+        });
+        const ok = await publicStudentDriveSkill(code, loginName, loginPin, k, stand);
+        if (!ok) {
+            setPlan(p => {
+                const n = { ...p };
+                if (vorher)
+                    n[k] = vorher;
+                else
+                    delete n[k];
+                return n;
+            });
+            setErr("Der Stand konnte nicht gespeichert werden.");
+        }
+    }
+    function neueFahrt(route, themen) {
         let vorbelegt = "";
         try {
             vorbelegt = localStorage.getItem(LS_BEGL) || "";
         }
         catch (e) { }
+        const jetzt = new Date();
+        const hm = d => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+        const beginn = route && bfRec.zuletztStart ? new Date(bfRec.zuletztStart) : null;
         setErr("");
-        setForm({ id: bfNewId(), datum: ymd(new Date()),
-            // Nach einer Aufzeichnung sind Dauer und Kilometer schon bekannt - abtippen wäre
-            // unnötig und ungenauer. Beides bleibt änderbar.
+        setForm({ id: bfNewId(), datum: ymd(jetzt),
+            // Nach einer Aufzeichnung sind Uhrzeit, Dauer und Kilometer bekannt - abtippen
+            // wäre unnötig und ungenauer. Alles bleibt änderbar.
+            start: beginn ? hm(beginn) : "",
+            ende: route ? hm(jetzt) : "",
             dauer: route ? String(Math.round(route.dur / 60)) : "",
             km: route ? String(Math.round(route.dist / 100) / 10) : "",
-            begleiter: vorbelegt, themen: [], notiz: "", route: route || null, neu: true });
+            begleiter: vorbelegt, themen: themen || [], notiz: "", route: route || null, neu: true });
     }
-    function aufzeichnungStarten() {
+    function aufzeichnungStarten(themen) {
         setErr("");
-        bfRecStart(m => setErr(m));
+        setAuswahl(null);
+        if (bfRecStart(m => setErr(m)))
+            bfRec.themen = themen || [];
     }
     function aufzeichnungBeenden() {
+        const themen = (bfRec.themen || []).slice();
         const route = bfRecStop();
         if (!route) {
             setErr("Es wurden zu wenige Punkte empfangen - die Strecke wurde nicht gespeichert. Du kannst die Fahrt trotzdem von Hand eintragen.");
             return;
         }
-        neueFahrt(route);
+        neueFahrt(route, themen);
     }
     async function speichern() {
         if (!form)
             return;
         const eintrag = {
-            id: form.id, datum: form.datum, dauer: Number(form.dauer) || 0, km: Number(form.km) || 0,
+            id: form.id, datum: form.datum, start: form.start || "", ende: form.ende || "",
+            dauer: Number(form.dauer) || 0, km: Number(form.km) || 0,
             begleiter: (form.begleiter || "").trim(), themen: form.themen || [], notiz: (form.notiz || "").trim(),
             route: form.route || null,
         };
@@ -14704,6 +14890,73 @@ function BegleitFahrten({ code }) {
                 React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, transform: auf ? "rotate(180deg)" : "none", transition: "transform .15s" } }, bfIcon(["M6 9l6 6 6-6"], 16))),
             auf && React.createElement("div", { style: { padding: "0 15px 15px", fontSize: 13, color: "var(--ink-2)", lineHeight: 1.6 } }, inhalt));
     }
+    // Die drei Stände einer Übung. "Sitzt" ist bewusst das Ende der Fahne - dorthin soll es gehen.
+    function standKnoepfe(k, klein) {
+        const jetzt = standVon(k);
+        const opt = [{ v: "offen", t: "Offen" }, { v: "geuebt", t: "Geübt" }, { v: "sitzt", t: "Sitzt" }];
+        return React.createElement("div", { style: { display: "flex", gap: 6 } }, opt.map(o => {
+            const an = jetzt === o.v;
+            const farbe = o.v === "sitzt" ? "var(--sage-deep)" : (o.v === "geuebt" ? "var(--orange)" : "var(--line)");
+            return React.createElement("button", { key: o.v, disabled: !loggedIn, onClick: e => { e.stopPropagation(); standSetzen(k, o.v); },
+                style: { flex: 1, padding: klein ? "6px 4px" : "9px 6px", borderRadius: 10, fontSize: klein ? 11.5 : 12.5, fontWeight: 700,
+                    cursor: loggedIn ? "pointer" : "default", opacity: loggedIn ? 1 : .5,
+                    background: an ? farbe : "var(--field-bg)", color: an ? (o.v === "offen" ? "var(--ink-2)" : "#fff") : "var(--muted)",
+                    border: "1.5px solid " + (an ? farbe : "var(--line)") } }, o.t);
+        }));
+    }
+    // ── Ansicht: eine Übung im Detail, mit Tipps für die Begleitperson ──
+    if (detail) {
+        const u = detail;
+        const stufe = BEGLEIT_STUFEN.find(s => s.k === u.stufe) || BEGLEIT_STUFEN[0];
+        return React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setDetail(null) }, "‹ Zurück"),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, stufe.t)),
+            React.createElement("div", { className: "card", style: { padding: "17px 16px" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, lineHeight: 1.25, marginBottom: 8 } }, u.t),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, u.ziel),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, "So bringst du es bei"),
+                React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 } },
+                    u.tipps.map((tip, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, alignItems: "flex-start" } },
+                        React.createElement("span", { style: { width: 21, height: 21, borderRadius: 99, background: "var(--sage-bg)", color: "var(--sage-deep)", fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, marginTop: 1 } }, i + 1),
+                        React.createElement("span", { style: { fontSize: 13.3, lineHeight: 1.55, color: "var(--ink-2)" } }, tip)))),
+                React.createElement("div", { style: { background: "var(--amber-bg)", borderRadius: 12, padding: "11px 13px", marginBottom: 16 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--orange-deep)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 4 } }, "Häufigster Fehler"),
+                    React.createElement("div", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)" } }, u.fehler)),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 7 } }, "Wie weit seid ihr?"),
+                standKnoepfe(u.k, false),
+                plan[u.k] && plan[u.k].datum && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, textAlign: "center" } },
+                    "zuletzt geändert am " + new Date(plan[u.k].datum + "T12:00:00").toLocaleDateString("de-DE")),
+                !bfRec.aktiv && loggedIn && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 16 },
+                    onClick: () => { setDetail(null); aufzeichnungStarten([u.k]); } }, "Jetzt üben und aufzeichnen")));
+    }
+    // ── Ansicht: Übungen für die kommende Fahrt wählen ──
+    if (auswahl) {
+        const gewaehlt = auswahl.themen || [];
+        return React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setAuswahl(null) }, "‹ Zurück"),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, gewaehlt.length + " gewählt")),
+            React.createElement("div", { className: "card", style: { padding: "15px 16px", marginBottom: 12 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, marginBottom: 5 } }, "Was übt ihr heute?"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55 } }, "Ein Ziel pro Fahrt reicht völlig. Wer sich zu viel vornimmt, übt am Ende nichts richtig.")),
+            BEGLEIT_STUFEN.map(st => {
+                const uebungen = BEGLEIT_UEBUNGEN.filter(u => u.stufe === st.k);
+                return React.createElement("div", { key: st.k, style: { marginBottom: 12 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 7px" } }, st.t),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } }, uebungen.map(u => {
+                        const an = gewaehlt.includes(u.k);
+                        const fertig = standVon(u.k) === "sitzt";
+                        return React.createElement("button", { key: u.k, onClick: () => setAuswahl(a => ({ themen: an ? a.themen.filter(x => x !== u.k) : [...a.themen, u.k] })),
+                            style: { padding: "8px 13px", borderRadius: 999, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
+                                background: an ? "var(--orange)" : "var(--field-bg)", color: an ? "#1c1305" : (fertig ? "var(--muted)" : "var(--ink-2)"),
+                                border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)") } }, (fertig ? "✓ " : "") + u.t);
+                    })));
+            }),
+            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 4 }, onClick: () => aufzeichnungStarten(gewaehlt) }, "Losfahren und aufzeichnen"),
+            React.createElement("button", { onClick: () => { setAuswahl(null); neueFahrt(null, gewaehlt); }, style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Ohne Aufzeichnung eintragen"));
+    }
+    // ── Ansicht: Fahrt eintragen oder bearbeiten ──
     if (form) {
         const feld = (label, kind) => React.createElement("div", { className: "field", style: { marginBottom: 10 } },
             React.createElement("label", null, label),
@@ -14715,6 +14968,11 @@ function BegleitFahrten({ code }) {
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, form.neu ? "Neue Fahrt" : "Fahrt bearbeiten")),
             React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
                 feld("Datum", { key: "datum", type: "date" }),
+                // Uhrzeit von-bis wie im Fahrtenbuch des Fahrlehrers: eine Übungsfahrt ist eine
+                // Fahrstunde und wird auch zeitlich festgehalten, nicht nur als Dauer.
+                React.createElement("div", { style: { display: "flex", gap: 10 } },
+                    React.createElement("div", { style: { flex: 1 } }, feld("Von", { key: "start", type: "time" })),
+                    React.createElement("div", { style: { flex: 1 } }, feld("Bis", { key: "ende", type: "time" }))),
                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                     React.createElement("div", { style: { flex: 1 } }, feld("Dauer (Minuten)", { key: "dauer", type: "number", inputMode: "numeric", placeholder: "z.B. 45" })),
                     React.createElement("div", { style: { flex: 1 } }, feld("Kilometer", { key: "km", type: "number", inputMode: "numeric", placeholder: "z.B. 28" }))),
@@ -14731,12 +14989,24 @@ function BegleitFahrten({ code }) {
                     React.createElement(AllRoutesMap, { routes: [form.route.pts], color: "#E8871E" })),
                 React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "14px 0 8px" } }, "Was habt ihr geübt?"),
                 React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 14 } },
-                    BEGLEIT_THEMEN.map(th => {
-                        const an = (form.themen || []).includes(th.k);
-                        return React.createElement("button", { key: th.k, onClick: () => setForm(f => ({ ...f, themen: an ? f.themen.filter(x => x !== th.k) : [...(f.themen || []), th.k] })),
+                    BEGLEIT_UEBUNGEN.map(u => {
+                        const an = (form.themen || []).includes(u.k);
+                        return React.createElement("button", { key: u.k, onClick: () => setForm(f => ({ ...f, themen: an ? f.themen.filter(x => x !== u.k) : [...(f.themen || []), u.k] })),
                             style: { padding: "7px 12px", borderRadius: 999, fontSize: 12.5, fontWeight: 600, cursor: "pointer",
                                 background: an ? "var(--orange)" : "var(--field-bg)", color: an ? "#1c1305" : "var(--ink-2)",
-                                border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)") } }, th.t);
+                                border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)") } }, u.t);
+                    })),
+                // Direkt nach der Fahrt abhaken, solange es frisch ist - genau dann weiß man,
+                // ob es schon sitzt oder nur geübt wurde.
+                (form.themen || []).length > 0 && React.createElement("div", { style: { marginBottom: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, "Wie lief es?"),
+                    (form.themen || []).map(k => {
+                        const u = begleitUebung(k);
+                        if (!u)
+                            return null;
+                        return React.createElement("div", { key: k, style: { marginBottom: 10 } },
+                            React.createElement("div", { style: { fontSize: 13, fontWeight: 600, marginBottom: 6 } }, u.t),
+                            standKnoepfe(k, true));
                     })),
                 React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                     React.createElement("label", null, "Notiz (freiwillig)"),
@@ -14746,6 +15016,8 @@ function BegleitFahrten({ code }) {
                 React.createElement("button", { className: "btn btn-primary btn-block", disabled: busy, onClick: speichern }, busy ? "Wird gespeichert…" : "Fahrt speichern"),
                 !form.neu && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8, color: "#B3362A" }, disabled: busy, onClick: loeschen }, "Fahrt löschen")));
     }
+    // ── Hauptansicht ──
+    const laufendeThemen = (bfRec.themen || []).map(k => begleitUebung(k)).filter(Boolean);
     return React.createElement("div", null,
         // Übersicht: was habt ihr zusammen schon geschafft
         React.createElement("div", { className: "card", style: { padding: "17px 17px 15px", marginBottom: 14, background: "linear-gradient(135deg, var(--orange-soft), var(--sky-bg))", border: "none" } },
@@ -14754,30 +15026,67 @@ function BegleitFahrten({ code }) {
                 [{ v: liste.length, l: liste.length === 1 ? "Fahrt" : "Fahrten" },
                  // Komma statt Punkt - "0.9 Stunden" liest sich auf Deutsch falsch
                  { v: String(Math.round(summeMin / 6) / 10).replace(".", ","), l: "Stunden" },
-                 { v: String(Math.round(summeKm * 10) / 10).replace(".", ","), l: "Kilometer" }].map(k => React.createElement("div", { key: k.l },
+                 { v: String(Math.round(summeKm * 10) / 10).replace(".", ","), l: "Kilometer" },
+                 { v: anzahlSitzt + "/" + BEGLEIT_UEBUNGEN.length, l: "Sitzt" }].map(k => React.createElement("div", { key: k.l },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 24, lineHeight: 1.1 } }, k.v),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600, marginTop: 2 } }, k.l)))),
-            // Laufende Aufzeichnung: Strecke und Dauer im Sekundentakt, sonst die beiden Wege,
-            // eine Fahrt festzuhalten - mitfahren lassen oder hinterher eintippen.
+            // Kilometerbalken mit den beiden Stufen der geplanten Erprobung. Die Marke bei
+            // 500-600 km ist die Beobachtungsfahrt, das Ende sind die 1.000 km aus § 8.
+            React.createElement("div", { style: { marginTop: 14 } },
+                React.createElement("div", { style: { position: "relative", height: 8, borderRadius: 99, background: "rgba(0,0,0,.10)", overflow: "hidden" } },
+                    React.createElement("div", { style: { position: "absolute", inset: 0, right: "auto", width: Math.min(100, summeKm / BEGLEIT_KM_ZIEL * 100) + "%", background: summeKm >= BEGLEIT_KM_ZIEL ? "var(--sage-deep)" : "var(--orange)", borderRadius: 99, transition: "width .3s" } }),
+                    React.createElement("div", { style: { position: "absolute", top: 0, bottom: 0, left: (BEGLEIT_KM_BEOBACHTUNG_VON / BEGLEIT_KM_ZIEL * 100) + "%",
+                        width: ((BEGLEIT_KM_BEOBACHTUNG_BIS - BEGLEIT_KM_BEOBACHTUNG_VON) / BEGLEIT_KM_ZIEL * 100) + "%", background: "rgba(0,0,0,.28)" } })),
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600 } },
+                    React.createElement("span", null, summeKm >= BEGLEIT_KM_ZIEL
+                        ? "1.000 km erreicht"
+                        : (summeKm >= BEGLEIT_KM_BEOBACHTUNG_VON
+                            ? "Beobachtungsfahrt steht an"
+                            : (Math.max(0, Math.ceil(BEGLEIT_KM_BEOBACHTUNG_VON - summeKm)) + " km bis zur Beobachtungsfahrt"))),
+                    React.createElement("span", { style: { color: "var(--muted)" } }, "Ziel 1.000 km"))),
+            // Laufende Aufzeichnung: Strecke und Dauer im Sekundentakt, sonst der Weg in die
+            // Übungswahl - erst überlegen, was geübt wird, dann losfahren.
             loggedIn && (bfRec.aktiv
                 ? React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 10 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 8 } },
                         React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: "#B3362A", flexShrink: 0, animation: "bfblink 1.2s ease-in-out infinite" } }),
                         React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
                             rmapFmtDist(rmapPathLen(bfRec.pts)) + " · " + rmapFmtDur(bfRecDauer())),
                         React.createElement("span", { style: { fontSize: 12, color: "var(--ink-2)", marginLeft: "auto" } }, "zeichnet auf")),
+                    laufendeThemen.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5 } },
+                        "Heute dran: " + laufendeThemen.map(u => u.t).join(", ")),
                     React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungBeenden }, "Aufzeichnung beenden"))
                 // Aufzeichnen ist der Regelweg und bekommt die volle Breite; nebeneinander
                 // bricht "Strecke aufzeichnen" auf schmalen Geräten in zwei Zeilen um.
                 : React.createElement("div", { style: { marginTop: 14 } },
-                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungStarten }, "Strecke aufzeichnen"),
-                    React.createElement("button", { onClick: () => neueFahrt(null), style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Fahrt von Hand eintragen")))),
-        !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann kannst du eure Fahrten hier festhalten. Die Hinweise unten gelten auch ohne Anmeldung."),
+                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setAuswahl({ themen: naechste ? [naechste.k] : [] }) }, "Übungsfahrt starten"),
+                    React.createElement("button", { onClick: () => neueFahrt(null, []), style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Fahrt von Hand eintragen")))),
+        // Während der Fahrt sind die Tipps das Wichtigste - deshalb hier direkt erreichbar.
+        bfRec.aktiv && laufendeThemen.length > 0 && React.createElement("div", { className: "card", style: { padding: "4px 15px", marginBottom: 12 } },
+            laufendeThemen.map((u, i) => React.createElement("button", { key: u.k, onClick: () => setDetail(u),
+                style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "12px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 30, height: 30, flexShrink: 0 } }, bfIcon(["M9 18h6M10 22h4", "M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"], 15)),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } }, u.t),
+                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } }, "Tipps zum Beibringen ansehen")),
+                React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))))),
+        !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann kannst du eure Fahrten und euren Ausbildungsstand hier festhalten. Die Tipps und Hinweise gelten auch ohne Anmeldung."),
+        err && !form && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 12 } }, err),
         // Sicherheitshinweis - steht bewusst weit oben und ist nicht wegklickbar
         React.createElement("div", { className: "card", style: { padding: "13px 15px", marginBottom: 12, background: "var(--amber-bg)", borderLeft: "4px solid var(--orange)" } },
             React.createElement("div", { style: { fontSize: 12.8, color: "var(--ink-2)", lineHeight: 1.55 } },
                 React.createElement("strong", null, "Erst fahren, wenn alles vorliegt. "),
                 "Begleitetes Fahren ist nur mit gültiger Prüfbescheinigung und eingetragener Begleitperson erlaubt. Ohne Fahrerlaubnis zu fahren ist eine Straftat (§ 21 StVG) – auch mit Begleitung.")),
+        // Der Faden durch die Ausbildung: eine klare nächste Übung statt sechzehn gleichwertiger.
+        naechste && !bfRec.aktiv && React.createElement("button", { onClick: () => setDetail(naechste),
+            style: { width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 13, padding: "15px 16px", marginBottom: 12,
+                borderRadius: "var(--r-lg)", background: "var(--sage-bg)", border: "1.5px solid var(--sage)", cursor: "pointer" } },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--card)", color: "var(--sage-deep)", flexShrink: 0 } }, bfIcon(["M9 18h6M10 22h4", "M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"])),
+            React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                React.createElement("span", { style: { display: "block", fontSize: 11, fontWeight: 800, color: "var(--sage-deep)", textTransform: "uppercase", letterSpacing: ".05em" } }, "Als Nächstes dran"),
+                React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15.5, marginTop: 3 } }, naechste.t),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--ink-2)", marginTop: 2 } }, "Tipps zum Beibringen ansehen")),
+            React.createElement("span", { style: { color: "var(--sage-deep)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))),
         klappe("check", "Vor jeder Fahrt", "Sechs Punkte, die stimmen müssen", "sage", ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"],
             React.createElement("ul", { style: { margin: 0, paddingLeft: 18 } }, BEGLEIT_CHECK.map((c, i) => React.createElement("li", { key: i, style: { marginBottom: 6 } }, c)))),
         klappe("regeln", "Für die Begleitperson", "Was du darfst – und was nicht", "sky", ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"],
@@ -14794,36 +15103,70 @@ function BegleitFahrten({ code }) {
         klappe("reform", "Was sich 2027 ändern könnte", "Fahrpraxis unter Anleitung – Stand des Gesetzentwurfs", "clay", ["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z", "M14 2v6h6", "M9 13h6M9 17h4"],
             React.createElement(React.Fragment, null,
                 React.createElement("p", { style: { marginBottom: 10 } }, "Der Bund plant, das Üben mit einer nahestehenden Person schon vor der praktischen Prüfung zu erlauben – „Fahrpraxis unter Anleitung“ nach dem geplanten § 2e StVG. Das ist ", React.createElement("strong", null, "noch kein geltendes Recht"), ": Der Referentenentwurf stammt vom 19. Mai 2026, das Kabinett hat ihn am 10. Juni 2026 beschlossen, Bundestag und Bundesrat sind noch dran."),
-                React.createElement("p", { style: { marginBottom: 10 } }, "Vorgesehen ist eine befristete Erprobung, die die Bundesanstalt für Straßenwesen wissenschaftlich begleitet. Jedes Bundesland entscheidet selbst per Rechtsverordnung, ob es mitmacht."),
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "So soll es laufen"),
+                React.createElement("p", { style: { marginBottom: 10 } }, "Vorgesehen ist eine befristete Erprobung, die die Bundesanstalt für Straßenwesen wissenschaftlich begleitet. Jedes Bundesland entscheidet selbst per Rechtsverordnung, ob es mitmacht. Die Einzelheiten stehen im Entwurf der Fahrpraxisanleitungs-Verordnung (Stand 4. Mai 2026)."),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "Wie viele Kilometer?"),
                 React.createElement("ul", { style: { margin: "0 0 10px", paddingLeft: 18 } },
-                    ["Der Fahrschüler beantragt eine Genehmigung bei der Fahrerlaubnisbehörde.",
-                     "Vorher braucht es die Grundausbildung in der Fahrschule – die Befähigung muss schon bei der ersten Fahrt nachweisbar sein.",
-                     "Die Begleitperson heißt „Fahrpraxisanleiter“, wird namentlich benannt, muss ihren Führerschein mitführen und darf kein Geld dafür nehmen.",
-                     "Fahrschüler und Anleiter absolvieren zusätzlich gemeinsame Pflichtmodule in der Fahrschule.",
-                     "Das Fahrzeug muss gekennzeichnet und ausdrücklich für diese Fahrten versichert sein.",
-                     "Es gibt Fahrtenbuch- und Nachweispflichten gegenüber der Behörde."].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
-                React.createElement("p", { style: { color: "var(--muted)", fontSize: 12.3 } }, "Die genauen Zahlen – Mindestalter, zulässige Punkte, Umfang der Fahrten – stehen noch nicht fest. Sie kommen erst mit einer Rechtsverordnung. Sobald das feststeht, könnt ihr dieses Fahrtenbuch dafür weiternutzen."))),
+                    ["Nach mindestens 500 und höchstens 600 Kilometern steht eine Beobachtungsfahrt an – gemeinsam mit der Begleitperson und einem Fahrlehrer (§ 7). Danach folgen mindestens sechs Unterrichtseinheiten in der Fahrschule.",
+                     "Autobahn ist erst nach dieser Beobachtungsfahrt erlaubt.",
+                     "Nach mindestens 1.000 Kilometern geht es zurück in die Fahrschule, bis die praktische Ausbildung abgeschlossen ist (§ 8)."].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "Bevor es losgehen darf"),
+                React.createElement("ul", { style: { margin: "0 0 10px", paddingLeft: 18 } },
+                    ["Die theoretische Prüfung muss bestanden sein.",
+                     "Mindestens sechs Unterrichtseinheiten Fahrpraxis in der Fahrschule.",
+                     "Eine gemeinsame theoretische Einweisung in der Fahrschule – Fahrschüler und Begleitperson zusammen, eine Unterrichtseinheit.",
+                     "Genehmigung der Fahrerlaubnisbehörde: nur einmal und für höchstens zwölf zusammenhängende Monate."].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "Die Begleitperson („Fahrpraxisanleiter“)"),
+                React.createElement("ul", { style: { margin: "0 0 10px", paddingLeft: 18 } },
+                    ["besonderes Näheverhältnis zum Fahrschüler, höchstens zwei Personen benannt – aber nur eine je Fahrt",
+                     "seit mindestens sieben Jahren ununterbrochen Fahrerlaubnis der Klasse B",
+                     "in den letzten drei Jahren kein Fahrverbot, höchstens ein Punkt im Fahreignungsregister",
+                     "sitzt auf dem Beifahrersitz, beobachtet den Verkehr, gibt kurze Hinweise und achtet auf das Tempo",
+                     "führt den Führerschein mit und händigt ihn bei einer Kontrolle aus",
+                     "für beide gilt striktes Alkohol- und Cannabisverbot (§ 24c StVG)"].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "Am Fahrzeug und unterwegs"),
+                React.createElement("ul", { style: { margin: "0 0 10px", paddingLeft: 18 } },
+                    ["vorne und hinten ein quadratisches Schild, 16 mal 16 Zentimeter: „L“ weiß auf blau und „Übungsfahrt“ schwarz auf weiß",
+                     "höchstens 130 km/h",
+                     "die Haftpflichtversicherung muss diese Fahrten ausdrücklich einschließen",
+                     "Genehmigungsbescheinigung und Teilnahmenachweis gehören ins Auto und werden bei einer Kontrolle vorgezeigt"].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
+                React.createElement("p", { style: { color: "var(--muted)", fontSize: 12.3 } }, "Der Teilnahmenachweis über alle Fahrten wird von der Fahrschule auf Vollständigkeit und Plausibilität geprüft und ist danach drei Jahre aufzubewahren. Genau dafür ist dieses Fahrtenbuch gedacht – sobald die Erprobung startet, könnt ihr es weiternutzen."))),
         // Alle aufgezeichneten Strecken übereinander - zeigt auf einen Blick, ob ihr immer
         // dieselbe Runde fahrt oder wirklich unterschiedliche Gegenden erkundet.
         alleStrecken.length > 0 && klappe("karte", "Eure Strecken", alleStrecken.length + (alleStrecken.length === 1 ? " aufgezeichnete Fahrt" : " aufgezeichnete Fahrten"), "orange", ["M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z", "M8 2v16M16 6v16"],
             React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E" })),
-        // Themenübersicht: wo habt ihr schon geübt, wo noch nicht
-        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Übungsthemen"),
-        React.createElement("div", { className: "card", style: { padding: "4px 15px", marginBottom: 16 } },
-            BEGLEIT_THEMEN.map((th, ti) => {
-                const anzahl = liste.filter(f => (f.themen || []).includes(th.k)).length;
-                const bg = "var(--" + th.tone + (th.tone === "orange" ? "-soft" : "-bg") + ")";
-                const fg = th.tone === "orange" ? "var(--orange-deep)" : "var(--" + th.tone + "-deep)";
-                return React.createElement("div", { key: th.k, style: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: ti > 0 ? "1px solid var(--line)" : "none" } },
-                    React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, width: 30, height: 30, flexShrink: 0, opacity: anzahl ? 1 : .45 } }, bfIcon(anzahl ? ["M20 6L9 17l-5-5"] : ["M12 8v8", "M8 12h8"], 15)),
+        // Der Ausbildungsplan: vier Stufen, in jeder Stufe die Übungen mit ihrem Stand.
+        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Ausbildungsplan"),
+        BEGLEIT_STUFEN.map(st => {
+            const uebungen = BEGLEIT_UEBUNGEN.filter(u => u.stufe === st.k);
+            const fertig = uebungen.filter(u => standVon(u.k) === "sitzt").length;
+            const auf = stufeOffen === st.k;
+            const bg = "var(--" + st.tone + (st.tone === "orange" ? "-soft" : "-bg") + ")";
+            const fg = st.tone === "orange" ? "var(--orange-deep)" : "var(--" + st.tone + "-deep)";
+            return React.createElement("div", { key: st.k, className: "card", style: { padding: 0, marginBottom: 10, overflow: "hidden" } },
+                React.createElement("button", { onClick: () => setStufeOffen(auf ? "" : st.k), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, padding: "13px 15px", background: "none", border: "none", textAlign: "left", cursor: "pointer" } },
+                    React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, flexShrink: 0 } },
+                        bfIcon(fertig === uebungen.length ? ["M20 6L9 17l-5-5"] : ["M12 20V10M18 20V4M6 20v-4"])),
                     React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                        React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 600 } }, th.t),
-                        React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } }, th.d)),
-                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: anzahl ? "var(--sage-deep)" : "var(--muted)", flexShrink: 0 } }, anzahl ? (anzahl + "×") : "offen"));
-            })),
+                        React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, st.t),
+                        React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, st.d + " · " + fertig + " von " + uebungen.length)),
+                    React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, transform: auf ? "rotate(180deg)" : "none", transition: "transform .15s" } }, bfIcon(["M6 9l6 6 6-6"], 16))),
+                auf && React.createElement("div", { style: { padding: "0 15px 6px" } }, uebungen.map((u, ui) => {
+                    const stand = standVon(u.k);
+                    const farbe = stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange-deep)" : "var(--muted)");
+                    return React.createElement("button", { key: u.k, onClick: () => setDetail(u),
+                        style: { width: "100%", display: "flex", alignItems: "center", gap: 11, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: "1px solid var(--line)", cursor: "pointer" } },
+                        React.createElement("span", { style: { width: 22, height: 22, borderRadius: 99, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
+                            background: stand === "sitzt" ? "var(--sage-deep)" : (stand === "geuebt" ? "var(--orange)" : "var(--field-bg)"),
+                            color: stand === "offen" ? "var(--muted)" : "#fff", border: stand === "offen" ? "1.5px solid var(--line)" : "none" } },
+                            stand === "offen" ? "" : bfIcon(stand === "sitzt" ? ["M20 6L9 17l-5-5"] : ["M12 5v14"], 12)),
+                        React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, u.t),
+                        React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: farbe, flexShrink: 0 } },
+                            stand === "sitzt" ? "Sitzt" : (stand === "geuebt" ? "Geübt" : "Offen")),
+                        React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 14)));
+                })));
+        }),
         // Fahrtenbuch
-        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Fahrtenbuch"),
+        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Fahrtenbuch"),
         fahrten === undefined
             ? React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…")
             : (liste.length === 0
@@ -14836,12 +15179,13 @@ function BegleitFahrten({ code }) {
                         React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 32, height: 32, flexShrink: 0 } }, bfIcon(["M5 17h14M6 17V9l2-4h8l2 4v8", "M7 21v-2M17 21v-2"], 16)),
                         React.createElement("span", { style: { flex: 1, minWidth: 0 } },
                             React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } },
-                                new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "2-digit" })),
+                                new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "2-digit" })
+                                    + ((f.start && f.ende) ? ("  ·  " + f.start + "–" + f.ende) : "")),
                             React.createElement("span", { style: { display: "block", fontSize: 12.3, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                                 [f.dauer ? (f.dauer + " Min") : "", f.km ? (String(f.km).replace(".", ",") + " km") : "", f.begleiter || "",
                                  (f.route && f.route.pts && f.route.pts.length >= 2) ? "🗺 Strecke" : ""].filter(Boolean).join(" · ")),
                             (f.themen || []).length > 0 && React.createElement("span", { style: { display: "block", fontSize: 11.8, color: "var(--sage-deep)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                                (f.themen || []).map(k => (BEGLEIT_THEMEN.find(t => t.k === k) || {}).t).filter(Boolean).join(", "))),
+                                (f.themen || []).map(begleitTitel).filter(Boolean).join(", "))),
                         React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16)))))),
         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Dieses Fahrtenbuch ist eine Hilfe für euch, kein amtlicher Nachweis. Es ersetzt keine Auskunft deiner Fahrschule oder der Fahrerlaubnisbehörde."));
 }
