@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.89.0";
+const APP_VERSION = "1.90.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.90.0", date: "August 2026", changes: [
+            "Neu für Fahrlehrer: Reiter „Begleitfahrten“ in den Schülerdaten (sobald ein Schüler das Fahrtenbuch der Fahrschüler-App nutzt). Zeigt Fahrten, Stunden, Kilometer und Ausbildungsfortschritt auf einen Blick - direkt aus dem, was Schüler und Begleitperson unterwegs eintragen",
+            "Neu: Automatische Plausibilitätsprüfung des Fahrtenbuchs - erkennt Zukunftsdaten, fehlende Angaben und rechnerisch unmögliche Durchschnittsgeschwindigkeiten, statt dass das von Hand durchgesehen werden muss",
+            "Der Kilometerbalken zeigt an, wann die Beobachtungsfahrt-Marke (500–600 km) erreicht ist - vorbereitet auf die geplante Fahrpraxisanleitungs-Verordnung",
+        ] },
     { v: "1.89.0", date: "August 2026", changes: [
             "Korrigiert nach dem Verordnungsentwurf: Der Ausbildungsplan beginnt nicht mehr bei null. Vor der ersten Begleitfahrt hat der Fahrschüler die Fahrschule schon hinter sich - heute die komplette Ausbildung (BF17), nach der Reform mindestens Theorieprüfung und sechs Fahrstunden. Die Verordnung nennt die Übungsphase ausdrücklich einen „ergänzenden Praxisteil für bereits vorqualifizierte Bewerber“",
             "Neu: Die erste gemeinsame Fahrt ist eine Bestandsaufnahme - „Zeigen, was schon sitzt“. Das Kind fährt, die Begleitperson beobachtet still, danach werden alle vier Grundfertigkeiten mit den Gesichtern bewertet. Was sitzt, wird direkt abgehakt - der Plan überspringt, was die Fahrschule schon erledigt hat",
@@ -9725,6 +9730,94 @@ function App() {
                                     : React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "var(--orange-deep)" }, onClick: () => addCost(v.id) }, "+ Kosten erfassen")));
                     }))));
     }
+    // Übernimmt für den Fahrlehrer genau die Prüfung, die § 5 Abs. 2 FahrPraxAnlV der
+    // Fahrschule als Pflicht zuweist ("der Teilnahmenachweis ist [...] von der Fahrschule
+    // auf Vollständigkeit und Plausibilität zu überprüfen"): heute manuell Aufgabe einer
+    // Verwaltungskraft, hier automatisch aus dem Fahrtenbuch der Fahrschüler-App berechnet.
+    // Datenquelle: dieselben students.data-Felder (begleitfahrten/begleitplan), die die
+    // Begleitperson in der Fahrschüler-App befüllt - keine doppelte Erfassung nötig.
+    function renderBegleitfahrten() {
+        const fahrten = asArray(active.begleitfahrten) || [];
+        const plan = (active.begleitplan && typeof active.begleitplan === "object") ? active.begleitplan : {};
+        const liste = fahrten.slice().sort((a, b) => (String(b.datum || "") + (b.start || "")).localeCompare(String(a.datum || "") + (a.start || "")));
+        const summeKm = liste.reduce((s, f) => s + (Number(f.km) || 0), 0);
+        const summeMin = liste.reduce((s, f) => s + (Number(f.dauer) || 0), 0);
+        const sitzt = BEGLEIT_UEBUNGEN.filter(u => plan[u.k] && plan[u.k].stand === "sitzt").length;
+        const heute = ymd(new Date());
+        // Automatische Plausibilitätsprüfung je Fahrt: Zukunftsdatum, Nulleintrag oder
+        // eine rechnerische Durchschnittsgeschwindigkeit außerhalb eines plausiblen Bereichs
+        // (unter 2 km/h wirkt wie ein Zähl- statt Fahrfehler, über 150 km/h ist mit einem
+        // Fahranfänger nicht erklärbar).
+        const pruefungen = liste.map(f => {
+            const km = Number(f.km) || 0, min = Number(f.dauer) || 0;
+            const kmh = min > 0 ? km / (min / 60) : null;
+            const warnungen = [];
+            if (!f.datum)
+                warnungen.push("Kein Datum");
+            else if (f.datum > heute)
+                warnungen.push("Datum liegt in der Zukunft");
+            if (km <= 0 && min <= 0)
+                warnungen.push("Weder Kilometer noch Dauer eingetragen");
+            if (kmh !== null && kmh > 150)
+                warnungen.push("Rechnerisch " + Math.round(kmh) + " km/h Durchschnitt – prüfen");
+            if (kmh !== null && kmh < 2 && km > 0)
+                warnungen.push("Rechnerisch nur " + kmh.toFixed(1) + " km/h Durchschnitt – prüfen");
+            if (!f.begleiter)
+                warnungen.push("Keine Begleitperson eingetragen");
+            return { f, warnungen };
+        });
+        const auffaellig = pruefungen.filter(p => p.warnungen.length > 0);
+        const bereitBeobachtung = summeKm >= BEGLEIT_KM_BEOBACHTUNG_VON;
+        return React.createElement("div", { className: "pad readable-shell", key: active.id + "-begl" },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Begleitfahrten"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 14px" } },
+                dispName(active), " · aus dem Fahrtenbuch der Fahrschüler-App, ", liste.length, (liste.length === 1 ? " Eintrag" : " Einträge")),
+            React.createElement("div", { className: "seg", style: { marginBottom: 16 } },
+                React.createElement("button", { className: studentTab === "profil" ? "on" : "", onClick: () => setStudentTab("profil") }, "Profil"),
+                React.createElement("button", { className: studentTab === "fahrten" ? "on" : "", onClick: () => setStudentTab("fahrten") }, "Fahrten & Kosten"),
+                React.createElement("button", { className: studentTab === "antrag" ? "on" : "", onClick: () => setStudentTab("antrag") }, "Führerschein"),
+                React.createElement("button", { className: "on" }, "Begleitfahrten")),
+            React.createElement("div", { className: "card", style: { padding: "15px 16px", marginBottom: 14 } },
+                React.createElement("div", { style: { display: "flex", gap: 18, flexWrap: "wrap", marginBottom: 10 } },
+                    [{ v: liste.length, l: liste.length === 1 ? "Fahrt" : "Fahrten" },
+                     { v: String(Math.round(summeMin / 6) / 10).replace(".", ","), l: "Stunden" },
+                     { v: String(Math.round(summeKm * 10) / 10).replace(".", ","), l: "Kilometer" },
+                     { v: sitzt + "/" + BEGLEIT_UEBUNGEN.length, l: "Übungen sitzen" }].map(k => React.createElement("div", { key: k.l },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21, lineHeight: 1.1 } }, k.v),
+                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", fontWeight: 600, marginTop: 1 } }, k.l)))),
+                React.createElement("div", { style: { position: "relative", height: 7, borderRadius: 99, background: "var(--field-bg)", overflow: "hidden" } },
+                    React.createElement("div", { style: { position: "absolute", inset: 0, right: "auto", width: Math.min(100, summeKm / BEGLEIT_KM_ZIEL * 100) + "%", background: summeKm >= BEGLEIT_KM_ZIEL ? "var(--sage-deep)" : "var(--orange)", borderRadius: 99 } }),
+                    React.createElement("div", { style: { position: "absolute", top: 0, bottom: 0, left: (BEGLEIT_KM_BEOBACHTUNG_VON / BEGLEIT_KM_ZIEL * 100) + "%",
+                        width: ((BEGLEIT_KM_BEOBACHTUNG_BIS - BEGLEIT_KM_BEOBACHTUNG_VON) / BEGLEIT_KM_ZIEL * 100) + "%", background: "var(--line)" } })),
+                React.createElement("div", { style: { fontSize: 11.5, color: bereitBeobachtung ? "var(--sage-deep)" : "var(--muted)", fontWeight: 700, marginTop: 6 } },
+                    bereitBeobachtung
+                        ? "Im Fenster für die Beobachtungsfahrt (500–600 km) – auf Sie als Fahrlehrer wartet der nächste Schritt, sobald die Erprobung gilt"
+                        : "Beobachtungsfahrt ab 500 km erreichbar · Ziel 1.000 km")),
+            React.createElement("div", { className: "card", style: { padding: "15px 16px", marginBottom: 14, borderLeft: "4px solid " + (auffaellig.length > 0 ? "var(--orange)" : "var(--sage-deep)") } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 8 } },
+                    React.createElement("span", { style: { fontSize: 18 } }, auffaellig.length > 0 ? "⚠️" : "✅"),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Plausibilitätsprüfung")),
+                auffaellig.length === 0
+                    ? React.createElement("p", { style: { fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5 } },
+                        liste.length === 0 ? "Noch keine Fahrten eingetragen." : ("Alle " + liste.length + (liste.length === 1 ? " Eintrag wirkt" : " Einträge wirken") + " vollständig und plausibel."))
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("p", { style: { fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 8 } },
+                            auffaellig.length + " von " + liste.length + " Einträgen mit Auffälligkeiten – vor der Bestätigung gegenüber der Behörde kurz mit der Familie klären:"),
+                        auffaellig.map((p, i) => React.createElement("div", { key: i, style: { fontSize: 12.5, padding: "6px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                            React.createElement("strong", null, p.f.datum ? new Date(p.f.datum + "T12:00:00").toLocaleDateString("de-DE") : "Ohne Datum"),
+                            " – ", p.warnungen.join(", "))))),
+            liste.length > 0 && React.createElement("div", { className: "card", style: { padding: "4px 16px", marginBottom: 14 } },
+                liste.map((f, fi) => React.createElement("div", { key: f.id || fi, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: fi > 0 ? "1px solid var(--line)" : "none" } },
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 13, fontWeight: 700 } },
+                            (f.datum ? new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" }) : "–")
+                                + ((f.start && f.ende) ? ("  ·  " + f.start + "–" + f.ende) : "")),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 1 } },
+                            [f.dauer ? (f.dauer + " Min") : "", f.km ? (String(f.km).replace(".", ",") + " km") : "", f.begleiter || "—",
+                             (f.themen || []).map(begleitTitel).filter(Boolean).join(", ")].filter(Boolean).join(" · "))),
+                    (f.route && f.route.pts && f.route.pts.length >= 2) && React.createElement("span", { style: { fontSize: 15, flexShrink: 0 }, title: "Strecke aufgezeichnet" }, "🗺")))),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } }, "Grundlage: Begleitetes Fahren ab 17 (§ 48a FeV). Die Kilometerstufen orientieren sich am Entwurf der Fahrpraxisanleitungs-Verordnung und gelten erst, sobald diese Erprobung in Kraft ist."));
+    }
     function renderDaten() {
         const f = (key, label, type) => React.createElement("div", { className: "field", key: key },
             React.createElement("label", null, label),
@@ -9739,6 +9832,7 @@ function App() {
                 React.createElement("button", { className: studentTab === "profil" ? "on" : "", onClick: () => setStudentTab("profil") }, "Profil"),
                 React.createElement("button", { className: studentTab === "fahrten" ? "on" : "", onClick: () => setStudentTab("fahrten") }, "Fahrten & Kosten"),
                 React.createElement("button", { className: studentTab === "antrag" ? "on" : "", onClick: () => setStudentTab("antrag") }, "Führerschein"),
+                (active.begleitfahrten || active.begleitplan) && React.createElement("button", { className: studentTab === "begleitung" ? "on" : "", onClick: () => setStudentTab("begleitung") }, "Begleitfahrten"),
                 THEORY_UEBEN_RELEASED && mySubscription && mySubscription.theory_addon_active && React.createElement("button", { className: studentTab === "theorie" ? "on" : "", onClick: () => { setStudentTab("theorie"); loadTheoryQuestions(); } }, "Theorie")),
             React.createElement("label", { className: "btn btn-ghost btn-block", style: { justifyContent: "center", gap: 9, marginBottom: 16, cursor: "pointer" } },
                 React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
@@ -12897,7 +12991,8 @@ function App() {
                 view === "theoriepilot" && renderTheoriepilot(),
                 view === "theoriepilot-topic" && renderTheoriepilotTopic(),
                 view === "uebersicht" && active && renderUebersicht(),
-                view === "daten" && active && renderDaten(),
+                view === "daten" && active && studentTab === "begleitung" && (active.begleitfahrten || active.begleitplan) && renderBegleitfahrten(),
+                view === "daten" && active && !(studentTab === "begleitung" && (active.begleitfahrten || active.begleitplan)) && renderDaten(),
                 tabMenu && React.createElement("div", { onClick: () => setTabMenu(null), className: "modal-overlay", style: { position: "fixed", inset: 0, zIndex: 46 } }),
                 cmdOpen && renderCommandPalette(),
                 React.createElement("button", { onClick: () => setAssistant({ open: true, busy: false, error: "", input: "", proposal: null }), "aria-label": "KI-Helfer", className: "fab-assistant", style: { position: "fixed", right: 16, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 47,
