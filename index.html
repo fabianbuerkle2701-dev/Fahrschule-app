@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.87.0";
+const APP_VERSION = "1.88.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.88.0", date: "August 2026", changes: [
+            "Neu: Nach der Fahrt wird jeder Punkt der Stunde mit einem Gesicht bewertet - 😄 klappt, 😐 geht so, 😖 noch schwer. Sind alle Punkte 😄, empfiehlt die App „Sitzt“",
+            "Neu: Was bei der letzten Fahrt 😐 oder 😖 war, nimmt die nächste Fahrt automatisch wieder mit. Beim Anlegen zeigt eine eigene Karte „Aus der letzten Fahrt nochmal dran“, welche Punkte das sind - und die Übung fährt mit, bis sie sitzt",
+            "Die Startseite kündigt die Wiederholung an („Dazu Wiederholung von letzter Fahrt: …“), damit niemand überrascht wird",
+            "Beim Bearbeiten einer alten Fahrt werden die vergebenen Gesichter wieder angezeigt und lassen sich ändern",
+        ] },
     { v: "1.87.0", date: "August 2026", changes: [
             "Vereinfacht: Der Bereich „Üben“ zeigt beim Öffnen nur noch drei Dinge - den Fortschritt in einer Zeile, die nächste Stunde mit einem Knopf „Fahrt anlegen“, und einen Eintrag „Mehr“. Alles passt ohne Scrollen auf einen Bildschirm",
             "Jeder Bildschirm zeigt nur, was in diesem Moment gebraucht wird: beim Anlegen der Ablauf der Stunde, während der Fahrt die Hilfen für die Begleitperson, nach der Fahrt das Abhaken",
@@ -14902,6 +14908,22 @@ function BegleitFahrten({ code }) {
     const anzahlSitzt = BEGLEIT_UEBUNGEN.filter(u => standVon(u.k) === "sitzt").length;
     // Wovon die Führung lebt: die erste Übung, die noch nicht sitzt - in der Reihenfolge des Plans.
     const naechste = BEGLEIT_UEBUNGEN.find(u => standVon(u.k) !== "sitzt") || null;
+    // Was bei der letzten Fahrt 😐 oder 😖 bewertet wurde, kommt automatisch wieder auf den
+    // Zettel - solange die Übung nicht inzwischen ohnehin sitzt.
+    const letzteFahrt = liste[0] || null;
+    const wiederholung = [];
+    if (letzteFahrt && letzteFahrt.erfolgBew) {
+        Object.keys(letzteFahrt.erfolgBew).forEach(wk => {
+            const wu = begleitUebung(wk);
+            if (!wu || standVon(wk) === "sitzt")
+                return;
+            (letzteFahrt.erfolgBew[wk] || []).forEach((b, i) => {
+                if ((b === "mittel" || b === "schwer") && wu.erfolg && wu.erfolg[i])
+                    wiederholung.push({ k: wk, text: wu.erfolg[i], schwer: b === "schwer" });
+            });
+        });
+    }
+    const wiederholungKeys = wiederholung.map(w => w.k).filter((x, i, a) => a.indexOf(x) === i);
     async function standSetzen(k, stand) {
         if (!loggedIn)
             return;
@@ -14975,6 +14997,18 @@ function BegleitFahrten({ code }) {
             begleiter: (form.begleiter || "").trim(), themen: form.themen || [], notiz: (form.notiz || "").trim(),
             route: form.route || null,
         };
+        // Die Emoji-Bewertung je Erfolgskriterium wandert mit in den Eintrag - daraus baut
+        // die nächste Fahrt ihre Wiederholung (alles mit 😐 oder 😖 kommt wieder dran).
+        const erfolgBew = {};
+        (form.themen || []).forEach(tk => {
+            const tu = begleitUebung(tk);
+            if (!tu || !tu.erfolg)
+                return;
+            const arr = tu.erfolg.map((x, i) => haken[tk + "|" + i] || null);
+            if (arr.some(Boolean))
+                erfolgBew[tk] = arr;
+        });
+        eintrag.erfolgBew = erfolgBew;
         if (!eintrag.datum) {
             setErr("Bitte ein Datum angeben.");
             return;
@@ -15148,21 +15182,30 @@ function BegleitFahrten({ code }) {
                             return null;
                         // Erst die Erfolgskriterien abhaken, dann entscheiden: alle Haken -> "Sitzt",
                         // sonst "Geübt". So wird die Einschätzung eine Beobachtung statt ein Bauchgefühl.
+                        // Je Punkt drei Gesichter statt eines Hakens: 😄 klappt, 😐 geht so,
+                        // 😖 noch schwer. Aus 😐 und 😖 baut die nächste Fahrt ihre Wiederholung.
                         const kriterien = u.erfolg || [];
-                        const alleGesetzt = kriterien.length > 0 && kriterien.every((x, i) => haken[k + "|" + i]);
+                        const werte = kriterien.map((x, i) => haken[k + "|" + i] || null);
+                        const allesGut = kriterien.length > 0 && werte.every(w => w === "gut");
+                        const bewertet = werte.some(Boolean);
                         return React.createElement("div", { key: k, style: { marginBottom: 14 } },
                             React.createElement("div", { style: { fontSize: 13, fontWeight: 600, marginBottom: 7 } }, u.t),
                             kriterien.map((x, i) => {
-                                const an = !!haken[k + "|" + i];
-                                return React.createElement("button", { key: i, onClick: () => setHaken(h => ({ ...h, [k + "|" + i]: !h[k + "|" + i] })),
-                                    style: { width: "100%", display: "flex", gap: 10, alignItems: "flex-start", background: "none", border: "none", textAlign: "left", padding: "5px 0", cursor: "pointer" } },
-                                    React.createElement("span", { style: { width: 20, height: 20, borderRadius: 6, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", marginTop: 1,
-                                        background: an ? "var(--sage-deep)" : "var(--field-bg)", color: "#fff", border: an ? "none" : "1.5px solid var(--line)" } },
-                                        an ? bfIcon(["M20 6L9 17l-5-5"], 12) : ""),
-                                    React.createElement("span", { style: { fontSize: 13, lineHeight: 1.5, color: an ? "var(--ink)" : "var(--ink-2)" } }, x));
+                                const wert = werte[i];
+                                return React.createElement("div", { key: i, style: { display: "flex", gap: 10, alignItems: "center", padding: "5px 0" } },
+                                    React.createElement("span", { style: { flex: 1, fontSize: 13, lineHeight: 1.45, color: "var(--ink-2)" } }, x),
+                                    React.createElement("div", { style: { display: "flex", gap: 5, flexShrink: 0 } },
+                                        [{ v: "gut", e: "😄", bg: "var(--sage-bg)", bo: "var(--sage-deep)" },
+                                         { v: "mittel", e: "😐", bg: "var(--amber-bg)", bo: "var(--orange)" },
+                                         { v: "schwer", e: "😖", bg: "#FDECEA", bo: "#B3362A" }].map(o =>
+                                            React.createElement("button", { key: o.v, onClick: () => setHaken(h => ({ ...h, [k + "|" + i]: h[k + "|" + i] === o.v ? null : o.v })),
+                                                style: { width: 34, height: 34, borderRadius: 10, fontSize: 17, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer",
+                                                    background: wert === o.v ? o.bg : "var(--field-bg)",
+                                                    border: "1.5px solid " + (wert === o.v ? o.bo : "var(--line)"),
+                                                    opacity: wert && wert !== o.v ? .45 : 1 } }, o.e))));
                             }),
-                            React.createElement("div", { style: { fontSize: 12, color: alleGesetzt ? "var(--sage-deep)" : "var(--muted)", fontWeight: 600, margin: "6px 0 7px" } },
-                                alleGesetzt ? "Alle Punkte erfüllt – dann darf es auf „Sitzt“!" : "Noch nicht alles erfüllt? Dann ehrlich bei „Geübt“ bleiben."),
+                            React.createElement("div", { style: { fontSize: 12, color: allesGut ? "var(--sage-deep)" : "var(--muted)", fontWeight: 600, margin: "6px 0 7px" } },
+                                allesGut ? "Alles 😄 – dann darf es auf „Sitzt“!" : (bewertet ? "Was 😐 oder 😖 war, kommt bei der nächsten Fahrt automatisch wieder dran." : "Bewertet kurz jeden Punkt – daraus baut sich die nächste Fahrt.")),
                             standKnoepfe(k, true));
                     })),
                 React.createElement("div", { className: "field", style: { marginBottom: 14 } },
@@ -15247,9 +15290,16 @@ function BegleitFahrten({ code }) {
                 // Vor der Fahrt zählt nur das Vorher: Ziel, Ort, Ablauf. Die Hilfen kommen
                 // unterwegs auf den Bildschirm, das Abhaken danach.
                 uebungErklaert(briefing, "vor"),
+                // Die Schwachstellen der letzten Fahrt fahren mit - so schließt sich der Kreis
+                // aus Bewerten und Wiederholen von selbst.
+                wiederholung.length > 0 && React.createElement("div", { style: { background: "var(--sky-bg)", borderRadius: 12, padding: "11px 13px", marginTop: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--sky-deep)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, "Aus der letzten Fahrt nochmal dran"),
+                    wiederholung.map((w, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 4 } },
+                        React.createElement("span", { style: { flexShrink: 0 } }, w.schwer ? "😖" : "😐"),
+                        React.createElement("span", { style: { fontSize: 12.8, lineHeight: 1.45, color: "var(--ink-2)" } }, begleitTitel(w.k) + ": " + w.text)))),
                 React.createElement("div", { style: { fontSize: 12.3, color: "var(--ink-2)", background: "var(--amber-bg)", borderRadius: 10, padding: "9px 12px", marginTop: 14, lineHeight: 1.5 } }, "Nur mit gültiger Prüfbescheinigung und eingetragener Begleitperson – ohne Fahrerlaubnis zu fahren ist eine Straftat (§ 21 StVG)."),
-                loggedIn && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 }, onClick: () => { const u = briefing; setBriefing(null); aufzeichnungStarten([u.k]); } }, "Losfahren – Strecke aufzeichnen"),
-                loggedIn && React.createElement("button", { onClick: () => { const u = briefing; setBriefing(null); neueFahrt(null, [u.k]); }, style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Ohne Aufzeichnung eintragen"),
+                loggedIn && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 }, onClick: () => { const u = briefing; setBriefing(null); aufzeichnungStarten([u.k].concat(wiederholungKeys.filter(x => x !== u.k))); } }, "Losfahren – Strecke aufzeichnen"),
+                loggedIn && React.createElement("button", { onClick: () => { const u = briefing; setBriefing(null); neueFahrt(null, [u.k].concat(wiederholungKeys.filter(x => x !== u.k))); }, style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Ohne Aufzeichnung eintragen"),
                 !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 12, lineHeight: 1.5 } }, "Zum Losfahren und Speichern unter „Fortschritt“ mit dem PIN anmelden.")));
     }
     // ── Überblick: alle Übungen mit Stand, nach Stufen ──
@@ -15306,7 +15356,13 @@ function BegleitFahrten({ code }) {
                         ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "4px 0" } }, "Lädt…")
                         : (liste.length === 0
                             ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "4px 0", lineHeight: 1.5 } }, loggedIn ? "Nach eurer ersten gemeinsamen Fahrt steht sie hier." : "Melde dich an, um eure Fahrten festzuhalten.")
-                            : liste.map((f, fi) => React.createElement("button", { key: f.id, onClick: () => { setErr(""); setFormDetails(true); setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || ""), themen: f.themen || [], neu: false }); },
+                            : liste.map((f, fi) => React.createElement("button", { key: f.id, onClick: () => { setErr(""); setFormDetails(true);
+                                // gespeicherte Emoji-Bewertungen zum Bearbeiten zurückladen
+                                const h = {};
+                                Object.keys(f.erfolgBew || {}).forEach(hk => (f.erfolgBew[hk] || []).forEach((b, i) => { if (b)
+                                    h[hk + "|" + i] = b; }));
+                                setHaken(h);
+                                setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || ""), themen: f.themen || [], neu: false }); },
                                 style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: fi > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
                                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 32, height: 32, flexShrink: 0 } }, bfIcon(["M5 17h14M6 17V9l2-4h8l2 4v8", "M7 21v-2M17 21v-2"], 16)),
                                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
@@ -15388,6 +15444,8 @@ function BegleitFahrten({ code }) {
                     "Eure nächste Stunde · Schritt " + (BEGLEIT_UEBUNGEN.indexOf(naechste) + 1) + " von " + BEGLEIT_UEBUNGEN.length),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, lineHeight: 1.25, marginBottom: 6 } }, naechste.t),
                 React.createElement("p", { style: { fontSize: 13.4, color: "var(--ink-2)", lineHeight: 1.55 } }, naechste.ziel),
+                wiederholung.length > 0 && React.createElement("p", { style: { fontSize: 12.3, color: "var(--sky-deep)", fontWeight: 600, marginTop: 7 } },
+                    "Dazu Wiederholung von letzter Fahrt: " + wiederholungKeys.map(begleitTitel).filter(Boolean).join(", ")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14 }, onClick: () => setBriefing(naechste) }, "Fahrt anlegen"))
             : React.createElement("div", { className: "card", style: { padding: "22px 16px", marginBottom: 12, textAlign: "center", background: "var(--sage-bg)", border: "1.5px solid var(--sage)" } },
                 React.createElement("div", { style: { fontSize: 30, marginBottom: 8 } }, "🎉"),
