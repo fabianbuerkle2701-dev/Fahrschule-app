@@ -320,6 +320,9 @@
   /* rechts ausgerichtet (für den letzten Reiter, damit nichts über den Rand ragt) */
   .tabpop.right{left:auto;right:6px;transform:none;animation:popupR .15s ease}
   @keyframes popupR{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+  /* Pulsierender Punkt bei laufender Streckenaufzeichnung im Fahrschüler-Fahrtenbuch */
+  @keyframes bfblink{0%,100%{opacity:1}50%{opacity:.25}}
+  @media (prefers-reduced-motion:reduce){ [style*="bfblink"]{animation:none!important} }
   .tabpop.right::after{left:auto;right:22px;transform:none}
   .tabpop-item{display:flex;align-items:center;gap:10px;width:100%;padding:11px 13px;border-radius:13px;
     font-family:var(--font-d);font-weight:700;font-size:14.5px;color:var(--ink);text-align:left;white-space:nowrap}
@@ -1141,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.82.0";
+const APP_VERSION = "1.83.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1224,6 +1227,13 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.83.0", date: "August 2026", changes: [
+            "Neu: Streckenaufzeichnung für die Übungsfahrten. „Strecke aufzeichnen“ antippen, losfahren, hinterher beenden - Dauer und Kilometer sind dann schon ausgefüllt und die gefahrene Strecke liegt als Karte beim Eintrag",
+            "Die Aufzeichnung läuft weiter, wenn man in der App zu Terminen oder Fortschritt wechselt. Ein roter Streifen über der Navigationsleiste erinnert daran und führt mit einem Tipp zurück",
+            "Neue Karte „Eure Strecken“: alle aufgezeichneten Übungsfahrten übereinander - so sieht man, ob immer dieselbe Runde gefahren wird",
+            "Fahrten lassen sich weiterhin von Hand eintragen, etwa wenn die Aufzeichnung vergessen wurde",
+            "Kleinigkeit: Entfernungen werden jetzt überall mit deutschem Komma angezeigt („1,4 km“ statt „1.4 km“) - das betraf auch die Fahrlehreransicht",
+        ] },
     { v: "1.82.0", date: "August 2026", changes: [
             "Neu in der App „Allindrive für Fahrschüler“: der Bereich „Üben“ für begleitete Übungsfahrten - gedacht für Fahrschüler und ihre Begleitperson, meist die Eltern",
             "Fahrtenbuch: Datum, Dauer, Kilometer, Begleitperson, geübte Themen und eine Notiz je Fahrt. Oben stehen Fahrten, Stunden und Kilometer insgesamt, darunter acht Übungsthemen mit Häkchen, sobald ihr sie gefahren seid",
@@ -4801,7 +4811,8 @@ function rmapDist(a, b) {
 }
 function rmapPathLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++)
     s += rmapDist(pts[i - 1], pts[i]); return s; }
-function rmapFmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1) + " km" : Math.round(m) + " m"; }
+// Deutsches Dezimalkomma: toFixed liefert "1.4", angezeigt wird aber überall sonst "1,4"
+function rmapFmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1).replace(".", ",") + " km" : Math.round(m) + " m"; }
 function rmapFmtDur(sec) { const m = Math.round(sec / 60); if (m < 60)
     return m + " Min"; return Math.floor(m / 60) + " Std " + (m % 60) + " Min"; }
 // Termin-Erkennung: findet den Schüler, dessen bestätigter Termin genau jetzt läuft - für
@@ -14441,6 +14452,131 @@ const BEGLEIT_CHECK = [
 function bfIcon(paths, size) {
     return React.createElement("svg", { width: size || 18, height: size || 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.1, strokeLinecap: "round", strokeLinejoin: "round" }, paths.map((d, i) => React.createElement("path", { key: i, d })));
 }
+// ── Streckenaufzeichnung für die Übungsfahrten ──
+// Der Zustand liegt bewusst AUSSERHALB der Komponente: wer während der Fahrt auf "Termine"
+// wechselt, würde sonst die laufende Aufzeichnung verlieren, weil React die Komponente
+// abräumt. Wie beim Fahrlehrer läuft sie in der nativen App über das Hintergrund-GPS weiter;
+// im Browser nur, solange die Seite im Vordergrund ist.
+const bfRec = {
+    aktiv: false, pts: [], start: 0, watchId: null, nativeId: null, wake: null, ticker: null,
+    hoerer: [],
+    melde() { this.hoerer.slice().forEach(f => { try {
+        f();
+    }
+    catch (e) { } }); },
+};
+function bfRecAbonnieren(f) {
+    bfRec.hoerer.push(f);
+    return () => { bfRec.hoerer = bfRec.hoerer.filter(x => x !== f); };
+}
+function bfRecDauer() { return bfRec.start ? (Date.now() - bfRec.start) / 1000 : 0; }
+// Rohe GPS-Spuren haben schnell mehrere tausend Punkte. Da alles in students.data landet,
+// wird die Linie vor dem Speichern gleichmäßig ausgedünnt - auf der Karte sieht man keinen
+// Unterschied, die Datenmenge sinkt aber um ein Vielfaches.
+function bfRecAusduennen(pts, max) {
+    if (pts.length <= max)
+        return pts;
+    const schritt = (pts.length - 1) / (max - 1), out = [];
+    for (let i = 0; i < max; i++)
+        out.push(pts[Math.round(i * schritt)]);
+    return out;
+}
+async function bfRecWakeLock() {
+    if (!("wakeLock" in navigator))
+        return;
+    try {
+        bfRec.wake = await navigator.wakeLock.request("screen");
+    }
+    catch (e) { /* z.B. Tab nicht sichtbar - dann bleibt es beim reinen watchPosition */ }
+}
+function bfRecStart(onFehler) {
+    if (bfRec.aktiv)
+        return true;
+    if (!navigator.geolocation) {
+        onFehler("Dieses Gerät kann den Standort nicht ermitteln.");
+        return false;
+    }
+    bfRec.aktiv = true;
+    bfRec.pts = [];
+    bfRec.start = Date.now();
+    const punkt = (lat, lng) => {
+        const p = [lat, lng];
+        if (bfRec.pts.length === 0 || rmapDist(bfRec.pts[bfRec.pts.length - 1], p) > 8)
+            bfRec.pts.push(p);
+    };
+    const nativeGeo = nativeBackgroundGeo();
+    if (nativeGeo) {
+        nativeGeo.addWatcher({
+            backgroundTitle: "Allindrive zeichnet eure Übungsfahrt auf",
+            backgroundMessage: "Läuft weiter, auch wenn das Display aus ist.",
+            requestPermissions: true, stale: false, distanceFilter: 8,
+        }, (location, err) => {
+            if (err) {
+                if (err.code === "NOT_AUTHORIZED") {
+                    onFehler("Ohne Standortfreigabe kann die Strecke nicht aufgezeichnet werden.");
+                    bfRecStop();
+                }
+                return;
+            }
+            if (location)
+                punkt(location.latitude, location.longitude);
+        }).then(id => { bfRec.nativeId = id; });
+    }
+    else {
+        bfRec.watchId = navigator.geolocation.watchPosition(pos => punkt(pos.coords.latitude, pos.coords.longitude), err => {
+            if (err && err.code === 1) {
+                onFehler("Ohne Standortfreigabe kann die Strecke nicht aufgezeichnet werden.");
+                bfRecStop();
+            }
+        }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
+    }
+    bfRecWakeLock();
+    // Eigener Takt, damit die angezeigte Dauer auch dann weiterläuft, wenn das Auto steht
+    // und deshalb keine neuen GPS-Punkte hereinkommen.
+    bfRec.ticker = setInterval(() => bfRec.melde(), 1000);
+    bfRec.melde();
+    return true;
+}
+// Gibt die fertige Strecke zurück oder null, wenn zu wenig aufgezeichnet wurde.
+function bfRecStop() {
+    if (bfRec.watchId != null) {
+        try {
+            navigator.geolocation.clearWatch(bfRec.watchId);
+        }
+        catch (e) { }
+        bfRec.watchId = null;
+    }
+    if (bfRec.nativeId != null) {
+        const nativeGeo = nativeBackgroundGeo();
+        if (nativeGeo) {
+            try {
+                nativeGeo.removeWatcher({ id: bfRec.nativeId });
+            }
+            catch (e) { }
+        }
+        bfRec.nativeId = null;
+    }
+    if (bfRec.wake) {
+        try {
+            bfRec.wake.release();
+        }
+        catch (e) { }
+        bfRec.wake = null;
+    }
+    if (bfRec.ticker) {
+        clearInterval(bfRec.ticker);
+        bfRec.ticker = null;
+    }
+    const pts = bfRec.pts.slice(), dauer = bfRecDauer();
+    bfRec.aktiv = false;
+    bfRec.pts = [];
+    bfRec.start = 0;
+    bfRec.melde();
+    if (pts.length < 2)
+        return null;
+    const schlank = bfRecAusduennen(pts, 1500);
+    return { pts: schlank, dist: Math.round(rmapPathLen(pts)), dur: Math.round(dauer), recordedAt: new Date().toISOString() };
+}
 function bfNewId() {
     try {
         if (window.crypto && window.crypto.randomUUID)
@@ -14462,7 +14598,11 @@ function BegleitFahrten({ code }) {
     const [form, setForm] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [err, setErr] = React.useState("");
-    const [offen, setOffen] = React.useState(""); // "" | "check" | "regeln" | "reform"
+    const [offen, setOffen] = React.useState(""); // "" | "check" | "regeln" | "reform" | "karte"
+    // Die laufende Aufzeichnung lebt außerhalb der Komponente (siehe bfRec) - hier wird nur
+    // neu gezeichnet, wenn sie etwas meldet.
+    const [, neuZeichnen] = React.useReducer(x => x + 1, 0);
+    React.useEffect(() => bfRecAbonnieren(neuZeichnen), []);
     React.useEffect(() => {
         if (!loggedIn)
             return;
@@ -14478,14 +14618,32 @@ function BegleitFahrten({ code }) {
     const liste = (fahrten || []).slice().sort((a, b) => String(b.datum || "").localeCompare(String(a.datum || "")));
     const summeKm = liste.reduce((s, f) => s + (Number(f.km) || 0), 0);
     const summeMin = liste.reduce((s, f) => s + (Number(f.dauer) || 0), 0);
-    function neueFahrt() {
+    const alleStrecken = liste.filter(f => f.route && Array.isArray(f.route.pts) && f.route.pts.length >= 2).map(f => f.route.pts);
+    function neueFahrt(route) {
         let vorbelegt = "";
         try {
             vorbelegt = localStorage.getItem(LS_BEGL) || "";
         }
         catch (e) { }
         setErr("");
-        setForm({ id: bfNewId(), datum: ymd(new Date()), dauer: "", km: "", begleiter: vorbelegt, themen: [], notiz: "", neu: true });
+        setForm({ id: bfNewId(), datum: ymd(new Date()),
+            // Nach einer Aufzeichnung sind Dauer und Kilometer schon bekannt - abtippen wäre
+            // unnötig und ungenauer. Beides bleibt änderbar.
+            dauer: route ? String(Math.round(route.dur / 60)) : "",
+            km: route ? String(Math.round(route.dist / 100) / 10) : "",
+            begleiter: vorbelegt, themen: [], notiz: "", route: route || null, neu: true });
+    }
+    function aufzeichnungStarten() {
+        setErr("");
+        bfRecStart(m => setErr(m));
+    }
+    function aufzeichnungBeenden() {
+        const route = bfRecStop();
+        if (!route) {
+            setErr("Es wurden zu wenige Punkte empfangen - die Strecke wurde nicht gespeichert. Du kannst die Fahrt trotzdem von Hand eintragen.");
+            return;
+        }
+        neueFahrt(route);
     }
     async function speichern() {
         if (!form)
@@ -14493,6 +14651,7 @@ function BegleitFahrten({ code }) {
         const eintrag = {
             id: form.id, datum: form.datum, dauer: Number(form.dauer) || 0, km: Number(form.km) || 0,
             begleiter: (form.begleiter || "").trim(), themen: form.themen || [], notiz: (form.notiz || "").trim(),
+            route: form.route || null,
         };
         if (!eintrag.datum) {
             setErr("Bitte ein Datum angeben.");
@@ -14560,6 +14719,16 @@ function BegleitFahrten({ code }) {
                     React.createElement("div", { style: { flex: 1 } }, feld("Dauer (Minuten)", { key: "dauer", type: "number", inputMode: "numeric", placeholder: "z.B. 45" })),
                     React.createElement("div", { style: { flex: 1 } }, feld("Kilometer", { key: "km", type: "number", inputMode: "numeric", placeholder: "z.B. 28" }))),
                 feld("Begleitperson", { key: "begleiter", type: "text", placeholder: "z.B. Mama" }),
+                // Aufgezeichnete Strecke: Karte plus die gemessenen Werte, damit man sieht,
+                // woher Dauer und Kilometer kommen.
+                form.route && Array.isArray(form.route.pts) && form.route.pts.length >= 2 && React.createElement("div", { style: { marginTop: 4, marginBottom: 12 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 7 } },
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em" } },
+                            "Aufgezeichnet · " + rmapFmtDist(form.route.dist || 0) + " · " + rmapFmtDur(form.route.dur || 0)),
+                        React.createElement("button", { onClick: () => setForm(f => ({ ...f, route: null })), style: { background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "#B3362A", padding: "2px 0", cursor: "pointer" } }, "Entfernen")),
+                    // Leaflet zeichnet die Linie als SVG-Attribut - dort greifen CSS-Variablen nicht,
+                    // deshalb hier die feste Markenfarbe statt var(--orange).
+                    React.createElement(AllRoutesMap, { routes: [form.route.pts], color: "#E8871E" })),
                 React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "14px 0 8px" } }, "Was habt ihr geübt?"),
                 React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 14 } },
                     BEGLEIT_THEMEN.map(th => {
@@ -14585,10 +14754,24 @@ function BegleitFahrten({ code }) {
                 [{ v: liste.length, l: liste.length === 1 ? "Fahrt" : "Fahrten" },
                  // Komma statt Punkt - "0.9 Stunden" liest sich auf Deutsch falsch
                  { v: String(Math.round(summeMin / 6) / 10).replace(".", ","), l: "Stunden" },
-                 { v: summeKm, l: "Kilometer" }].map(k => React.createElement("div", { key: k.l },
+                 { v: String(Math.round(summeKm * 10) / 10).replace(".", ","), l: "Kilometer" }].map(k => React.createElement("div", { key: k.l },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 24, lineHeight: 1.1 } }, k.v),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", fontWeight: 600, marginTop: 2 } }, k.l)))),
-            loggedIn && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14 }, onClick: neueFahrt }, "+ Fahrt eintragen")),
+            // Laufende Aufzeichnung: Strecke und Dauer im Sekundentakt, sonst die beiden Wege,
+            // eine Fahrt festzuhalten - mitfahren lassen oder hinterher eintippen.
+            loggedIn && (bfRec.aktiv
+                ? React.createElement("div", { style: { marginTop: 14 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 10 } },
+                        React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: "#B3362A", flexShrink: 0, animation: "bfblink 1.2s ease-in-out infinite" } }),
+                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
+                            rmapFmtDist(rmapPathLen(bfRec.pts)) + " · " + rmapFmtDur(bfRecDauer())),
+                        React.createElement("span", { style: { fontSize: 12, color: "var(--ink-2)", marginLeft: "auto" } }, "zeichnet auf")),
+                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungBeenden }, "Aufzeichnung beenden"))
+                // Aufzeichnen ist der Regelweg und bekommt die volle Breite; nebeneinander
+                // bricht "Strecke aufzeichnen" auf schmalen Geräten in zwei Zeilen um.
+                : React.createElement("div", { style: { marginTop: 14 } },
+                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: aufzeichnungStarten }, "Strecke aufzeichnen"),
+                    React.createElement("button", { onClick: () => neueFahrt(null), style: { display: "block", width: "100%", marginTop: 9, background: "none", border: "none", fontSize: 13, fontWeight: 700, color: "var(--ink-2)", padding: "4px 0", cursor: "pointer" } }, "Fahrt von Hand eintragen")))),
         !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann kannst du eure Fahrten hier festhalten. Die Hinweise unten gelten auch ohne Anmeldung."),
         // Sicherheitshinweis - steht bewusst weit oben und ist nicht wegklickbar
         React.createElement("div", { className: "card", style: { padding: "13px 15px", marginBottom: 12, background: "var(--amber-bg)", borderLeft: "4px solid var(--orange)" } },
@@ -14621,6 +14804,10 @@ function BegleitFahrten({ code }) {
                      "Das Fahrzeug muss gekennzeichnet und ausdrücklich für diese Fahrten versichert sein.",
                      "Es gibt Fahrtenbuch- und Nachweispflichten gegenüber der Behörde."].map((x, i) => React.createElement("li", { key: i, style: { marginBottom: 5 } }, x))),
                 React.createElement("p", { style: { color: "var(--muted)", fontSize: 12.3 } }, "Die genauen Zahlen – Mindestalter, zulässige Punkte, Umfang der Fahrten – stehen noch nicht fest. Sie kommen erst mit einer Rechtsverordnung. Sobald das feststeht, könnt ihr dieses Fahrtenbuch dafür weiternutzen."))),
+        // Alle aufgezeichneten Strecken übereinander - zeigt auf einen Blick, ob ihr immer
+        // dieselbe Runde fahrt oder wirklich unterschiedliche Gegenden erkundet.
+        alleStrecken.length > 0 && klappe("karte", "Eure Strecken", alleStrecken.length + (alleStrecken.length === 1 ? " aufgezeichnete Fahrt" : " aufgezeichnete Fahrten"), "orange", ["M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z", "M8 2v16M16 6v16"],
+            React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E" })),
         // Themenübersicht: wo habt ihr schon geübt, wo noch nicht
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "18px 2px 8px" } }, "Übungsthemen"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px", marginBottom: 16 } },
@@ -14651,7 +14838,8 @@ function BegleitFahrten({ code }) {
                             React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700 } },
                                 new Date(f.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit", year: "2-digit" })),
                             React.createElement("span", { style: { display: "block", fontSize: 12.3, color: "var(--muted)", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
-                                [f.dauer ? (f.dauer + " Min") : "", f.km ? (f.km + " km") : "", f.begleiter || ""].filter(Boolean).join(" · ")),
+                                [f.dauer ? (f.dauer + " Min") : "", f.km ? (String(f.km).replace(".", ",") + " km") : "", f.begleiter || "",
+                                 (f.route && f.route.pts && f.route.pts.length >= 2) ? "🗺 Strecke" : ""].filter(Boolean).join(" · ")),
                             (f.themen || []).length > 0 && React.createElement("span", { style: { display: "block", fontSize: 11.8, color: "var(--sage-deep)", marginTop: 3, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                                 (f.themen || []).map(k => (BEGLEIT_THEMEN.find(t => t.k === k) || {}).t).filter(Boolean).join(", "))),
                         React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16)))))),
@@ -15607,6 +15795,10 @@ function BookingPage({ code, appMode, onLogout }) {
     // Unterbereich des Lern-Reiters in der App: dort liegen Videos und Theoriefragen
     // nebeneinander, statt die untere Leiste auf fünf Knöpfe aufzublähen.
     const [lernTab, setLernTab] = React.useState("videos"); // "videos" | "theorie"
+    // Damit der Hinweisstreifen zur laufenden Streckenaufzeichnung auch in anderen Reitern
+    // erscheint und mitzählt (der Zustand selbst liegt in bfRec, außerhalb von React).
+    const [, bfNeuZeichnen] = React.useReducer(x => x + 1, 0);
+    React.useEffect(() => bfRecAbonnieren(bfNeuZeichnen), []);
     // Aktuelles Farbschema mitverfolgen: iOS kann tagsüber auf hell und abends auf dunkel
     // wechseln, ohne dass die Seite neu lädt. Nur einmal auszulesen würde dann das falsche
     // Logo stehen lassen.
@@ -16212,6 +16404,17 @@ function BookingPage({ code, appMode, onLogout }) {
                         React.createElement("a", { href: window.location.origin + "/?datenschutz=1", target: "_blank", rel: "noopener noreferrer", style: { color: "var(--orange-deep)", fontWeight: 600 } }, "Datenschutzerkl\u00E4rung"),
                         " gelesen zu haben und mit der Verarbeitung deiner Daten zur Terminvereinbarung einverstanden zu sein."),
                     React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setForm(null) }, "Abbrechen"))),
+        // Läuft eine Streckenaufzeichnung, während man in einem anderen Reiter unterwegs ist,
+        // erinnert dieser Streifen daran - sonst läuft sie unbemerkt bis zum Akku-Ende weiter.
+        appMode && bfRec.aktiv && tab !== "begleitung" && React.createElement("button", {
+            onClick: () => { setTab("begleitung"); window.scrollTo(0, 0); },
+            style: { position: "fixed", left: "50%", transform: "translateX(-50%)", bottom: "calc(84px + env(safe-area-inset-bottom))",
+                width: "calc(100% - 32px)", maxWidth: 520, zIndex: 47, display: "flex", alignItems: "center", gap: 9,
+                background: "#B3362A", color: "#fff", border: "none", borderRadius: 999, padding: "10px 16px",
+                fontSize: 13, fontWeight: 700, boxShadow: "var(--sh-3)", cursor: "pointer" } },
+            React.createElement("span", { style: { width: 9, height: 9, borderRadius: 99, background: "#fff", flexShrink: 0, animation: "bfblink 1.2s ease-in-out infinite" } }),
+            "Übungsfahrt wird aufgezeichnet",
+            React.createElement("span", { style: { marginLeft: "auto", opacity: .85, fontWeight: 600 } }, rmapFmtDist(rmapPathLen(bfRec.pts)))),
         // Navigationsleiste unten - dieselbe schwebende Pillen-Leiste wie in der Fahrlehrer-App
         appMode && React.createElement("nav", { className: "tabbar tabbar-app" }, [
             { id: "start", label: "Start", d: ["M3 10.5L12 3l9 7.5", "M5 9.5V21h14V9.5"] },
