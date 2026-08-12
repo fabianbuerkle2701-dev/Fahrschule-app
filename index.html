@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.92.0";
+const APP_VERSION = "1.93.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.93.0", date: "August 2026", changes: [
+            "Aufbewahrung & Löschung (Beweis-Akte, Phase 1): Die Löschfrist eines archivierten Schülers berücksichtigt jetzt getrennt die fünfjährige Frist für Ausbildungsaufzeichnungen (§ 31 FahrlG, ab Archivierung) UND die zehnjährige Frist für Rechnungen (§ 147 Abs. 3 AO, ab der letzten Rechnung) - maßgeblich ist die spätere der beiden Fristen",
+            "Bisher wurde nur das Archivierungsdatum betrachtet. Bei Schülern mit Rechnungen aus späteren Jahren zeigte die App dadurch teils ein zu frühes 'aufzubewahren bis'-Datum an, obwohl die Rechnung serverseitig ohnehin vor Löschung schützt",
+            "Weichen beide Fristen voneinander ab, zeigt die App jetzt beide Einzelfristen mit Rechtsgrundlage direkt unter dem Schüler an, statt nur die kombinierte Zahl",
+        ] },
     { v: "1.92.0", date: "August 2026", changes: [
             "Neu: Quotenpilot im Reiter Abrechnung. Bricht die Prüfungserfolgsquote nach Zeitraum (3/6/12 Monate, dieses Jahr, alle Zeit), Führerscheinklasse und - bei mehreren Fahrlehrern derselben Fahrschule - je Fahrlehrer auf, statt nur eine einzige Gesamtzahl zu zeigen",
             "Trend zur Vorperiode auf einen Blick (z.B. „+17 Pp. zur Vorperiode“), plus ein Monatsverlauf der letzten 12 Monate als kleine Balkenübersicht für Theorie und Praxis getrennt",
@@ -11122,22 +11127,49 @@ function App() {
             showToast("Logo konnte nicht entfernt werden:\n" + err.message);
         }
     }
-    /* ── Aufbewahrung & Löschung (§ 31 FahrlG + DSGVO) ──
-       § 31 FahrlG: Aufzeichnungen sind nach Ablauf des Jahres, in dem der Unterricht
-       abgeschlossen wurde, fünf Jahre aufzubewahren – und danach zu löschen. Die App
-       hatte dafür bisher keine Grundlage, weil beim Archivieren kein Datum festgehalten
-       wurde. Fristbeginn ist bewusst das JAHRESENDE, nicht der Archivtag. ── */
-    const AUFBEWAHRUNG_JAHRE = 5;
-    function loeschDatum(stu) {
-        const a = stu.archivedAt;
-        if (!a)
+    /* ── Aufbewahrung & Löschung, nach Dokumentklasse getrennt ──
+       Ein Schülerdatensatz trägt mehrere Dokumente mit UNTERSCHIEDLICHEN gesetzlichen Fristen,
+       nicht eine gemeinsame. Die App kannte bisher nur eine einzige Frist (Ausbildung, 5 Jahre)
+       und ignorierte dabei Rechnungen komplett - ein archivierter Schüler mit Rechnung aus dem
+       Vorjahr wurde nach 5 Jahren als "löschreif" angezeigt, obwohl die Rechnung nach § 147 AO
+       noch 10 Jahre aufzubewahren ist. Der Server blockte das Löschen zwar ohnehin (siehe
+       trg_prevent_delete_students_with_invoices), aber die Anzeige war irreführend und sagte nie,
+       WANN es tatsächlich so weit ist. Fristbeginn ist bei beiden Klassen bewusst das JAHRESENDE
+       des maßgeblichen Datums, nicht der Tag selbst - siehe frühere Korrektur zu § 31 FahrlG. */
+    const AUFBEWAHRUNG_JAHRE_AUSBILDUNG = 5; // § 31 FahrlG, ab Ende des Archivierungsjahres
+    const AUFBEWAHRUNG_JAHRE_RECHNUNG = 10; // § 147 Abs. 3 AO, ab Ende des Jahres der letzten Rechnung
+    function fristAbJahresende(datumISO, jahre) {
+        if (!datumISO)
             return null;
-        const jahr = new Date(a).getFullYear();
+        const jahr = new Date(datumISO).getFullYear();
         if (isNaN(jahr))
             return null;
-        // Fristbeginn ist das JAHRESENDE des Archivierungsjahres (s.o.), daher +1 zusätzlich zu
-        // den AUFBEWAHRUNG_JAHRE Jahren - sonst wären Daten ein volles Jahr zu früh "löschreif".
-        return new Date(jahr + AUFBEWAHRUNG_JAHRE + 1, 0, 1); // 1. Januar nach Ablauf der Frist
+        // +1 zusätzlich zu den Jahren, weil die Frist erst mit Jahresende beginnt - sonst wären
+        // Daten ein volles Jahr zu früh "fällig" (derselbe Fehler wie bei der ursprünglichen
+        // Ausbildungsfrist, hier von vornherein vermieden).
+        return new Date(jahr + jahre + 1, 0, 1); // 1. Januar nach Ablauf der Frist
+    }
+    // Alle für einen Schüler geltenden Einzelfristen, je Dokumentklasse - leer, wenn keine
+    // Klasse zutrifft (z.B. nie archiviert und nie eine Rechnung gestellt).
+    function aufbewahrungsfristen(stu) {
+        const fristen = [];
+        if (stu.archivedAt) {
+            fristen.push({ klasse: "ausbildung", label: "Ausbildungsaufzeichnungen", rechtsgrundlage: "§ 31 FahrlG",
+                jahre: AUFBEWAHRUNG_JAHRE_AUSBILDUNG, faellig: fristAbJahresende(stu.archivedAt, AUFBEWAHRUNG_JAHRE_AUSBILDUNG) });
+        }
+        // Maßgeblich ist die JÜNGSTE Rechnung - sie bestimmt den spätesten Fristbeginn.
+        const letzteRechnung = (stu.invoices || []).reduce((max, inv) => (inv.date && (!max || inv.date > max)) ? inv.date : max, null);
+        if (letzteRechnung) {
+            fristen.push({ klasse: "rechnung", label: "Rechnungen", rechtsgrundlage: "§ 147 Abs. 3 AO",
+                jahre: AUFBEWAHRUNG_JAHRE_RECHNUNG, faellig: fristAbJahresende(letzteRechnung, AUFBEWAHRUNG_JAHRE_RECHNUNG) });
+        }
+        return fristen;
+    }
+    // Gesamt-Löschreife: erst wenn ALLE Einzelfristen abgelaufen sind, nicht nur die kürzeste -
+    // maßgeblich ist also die SPÄTESTE der Einzelfristen.
+    function loeschDatum(stu) {
+        const daten = aufbewahrungsfristen(stu).map(f => f.faellig).filter(Boolean);
+        return daten.length ? new Date(Math.max(...daten.map(d => d.getTime()))) : null;
     }
     // Alle Daten eines Schülers als JSON – für DSGVO-Auskunft und Datenmitnahme.
     function exportStudentData(stu) {
@@ -11151,14 +11183,14 @@ function App() {
     }
     function renderAufbewahrung() {
         const archiviert = (students || []).filter(s => s.archived && s._isMine)
-            .map(s => ({ s, faellig: loeschDatum(s) }))
+            .map(s => ({ s, fristen: aufbewahrungsfristen(s), faellig: loeschDatum(s) }))
             .sort((a, b) => (a.faellig && b.faellig) ? a.faellig - b.faellig : 0);
         const jetzt = new Date();
         const loeschreif = archiviert.filter(x => x.faellig && x.faellig <= jetzt);
         return React.createElement("div", { className: "card", style: { padding: "16px", marginTop: 16 } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, marginBottom: 4 } }, "Aufbewahrung & Löschung"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6, marginBottom: 14 } },
-                "Ausbildungsaufzeichnungen sind nach § 31 Fahrlehrergesetz fünf Jahre aufzubewahren – gerechnet ab Ende des Jahres, in dem die Ausbildung abgeschlossen wurde – und danach zu löschen. Fristbeginn ist hier das Archivierungsdatum."),
+                "Ausbildungsaufzeichnungen sind nach § 31 Fahrlehrergesetz fünf Jahre aufzubewahren – gerechnet ab Ende des Jahres, in dem die Ausbildung abgeschlossen wurde. Rechnungen unterliegen zusätzlich der zehnjährigen Aufbewahrungspflicht nach § 147 Abs. 3 AO, gerechnet ab Ende des Jahres der letzten Rechnung. Maßgeblich für die Löschreife ist die jeweils spätere der beiden Fristen."),
             archiviert.length === 0
                 ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Keine archivierten Schüler. Die Frist beginnt, sobald du einen Schüler als bestanden archivierst.")
                 : React.createElement(React.Fragment, null,
@@ -11173,7 +11205,9 @@ function App() {
                                     x.faellig
                                         ? (reif ? "löschreif seit " + x.faellig.toLocaleDateString("de-DE")
                                                 : "aufzubewahren bis " + x.faellig.toLocaleDateString("de-DE"))
-                                        : "kein Archivdatum hinterlegt")),
+                                        : "kein Archivdatum hinterlegt"),
+                                x.fristen.length > 1 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
+                                    x.fristen.map(f => f.label + " (" + f.rechtsgrundlage + "): bis " + f.faellig.toLocaleDateString("de-DE")).join(" · "))),
                             React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => exportStudentData(x.s) }, "Export"),
                             React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "#B3362A" }, onClick: () => removeStudent(x.s) }, "Löschen"));
                     })),
