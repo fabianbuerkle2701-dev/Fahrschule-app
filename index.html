@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.91.0";
+const APP_VERSION = "1.92.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.92.0", date: "August 2026", changes: [
+            "Neu: Quotenpilot im Reiter Abrechnung. Bricht die Prüfungserfolgsquote nach Zeitraum (3/6/12 Monate, dieses Jahr, alle Zeit), Führerscheinklasse und - bei mehreren Fahrlehrern derselben Fahrschule - je Fahrlehrer auf, statt nur eine einzige Gesamtzahl zu zeigen",
+            "Trend zur Vorperiode auf einen Blick (z.B. „+17 Pp. zur Vorperiode“), plus ein Monatsverlauf der letzten 12 Monate als kleine Balkenübersicht für Theorie und Praxis getrennt",
+            "Bei weniger als 5 Fällen warnt die App ausdrücklich vor Scheinpräzision, statt eine große Prozentzahl ohne Kontext zu zeigen - eine 100%-Quote aus einem einzigen Schüler ist keine verlässliche Aussage",
+            "Hintergrund: Ab ca. Juli 2027 soll die Erfolgsquote über die Mobilithek öffentlich einsehbar werden. Der Quotenpilot hilft, die eigene Quote vorher zu kennen und gezielt zu verbessern, statt sie erst zu erfahren, wenn sie schon online steht",
+        ] },
     { v: "1.91.0", date: "August 2026", changes: [
             "Neu im Reiter „Begleitfahrten“: Genehmigungs-Bereitschaft. Zeigt auf einen Blick, ob ein Schüler die drei Voraussetzungen für die geplante „Fahrpraxis unter Anleitung“ erfüllt - Theorieprüfung bestanden, mindestens 6 Unterrichtseinheiten Fahrpraxis (automatisch aus dem Fahrtenbuch berechnet) und die gemeinsame theoretische Einweisung mit der Begleitperson",
             "Die gemeinsame Einweisung lässt sich direkt hier mit einem Tipp eintragen (mit Datum) oder wieder zurücknehmen - vorher musste dafür nichts extra gepflegt werden, jetzt steht es an der Stelle, wo es gebraucht wird",
@@ -2986,6 +2992,16 @@ async function nextDocumentNumber(schoolId, kind) {
     }
     return data;
 }
+// Prüfungsversuche aller Schüler einer Fahrschule laden (für den Quotenpilot). Liefert bewusst
+// nur Klasse, Fahrlehrer-E-Mail und die Versuche selbst - keine Namen, siehe RPC-Kommentar.
+async function fetchSchoolExamStats(schoolId) {
+    const { data, error } = await sb.rpc("school_exam_stats", { p_school_id: schoolId });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Daten konnten nicht geladen werden");
+    }
+    return data || [];
+}
 // Abrechnungsdaten aller Schüler einer Fahrschule laden (für das Offene-Posten-Dashboard).
 // Die offenen Beträge berechnet die App danach selbst, mit derselben Logik wie in der Schüleransicht.
 async function fetchSchoolOffenePosten(schoolId) {
@@ -3604,6 +3620,93 @@ function lessonMinutes(s) {
 }
 function lessonUE(s) {
     return lessonMinutes(s) / 45;
+}
+/* ════════ Quotenpilot: Erfolgsquoten-Cockpit ════════
+   Rechenkern getrennt von der Anzeige, damit dieselbe Logik für die eigene Fahrschule (aus
+   students/exams[] im Speicher) und für die schulweite Auswertung (aus school_exam_stats)
+   verwendet werden kann - beide liefern am Ende dieselbe flache Zeilenform. */
+// Wandelt eine Liste von {klasse, teacher, exams:[{art,date,passed}]} in flache Zeilen um,
+// je Prüfungsversuch eine Zeile. studentId wird durchgereicht, damit "je Schüler zählt nur
+// der erste Versuch" korrekt gruppiert werden kann.
+function quotenpilotFlatten(quellen) {
+    const rows = [];
+    (quellen || []).forEach(q => {
+        const klasse = (q.klasse || "B").trim() || "B";
+        const teacher = q.teacher || q.teacher_email || "";
+        (q.exams || []).forEach(e => {
+            if (!e || !e.art || !e.date)
+                return;
+            rows.push({ studentId: q.id || q.student_id, klasse, teacher, art: e.art, date: e.date, passed: !!e.passed });
+        });
+    });
+    return rows;
+}
+// Kernmetrik der ganzen App (siehe renderAbrechnung/quote()): bestanden im ERSTEN Versuch =
+// Erfolg. Hier zusätzlich nach Zeitraum und Klasse filterbar. Ein Schüler zählt in dem Zeitraum,
+// in dem sein erster Versuch dieser Prüfungsart liegt - nicht in dem, in dem er (ggf. später)
+// bestanden hat, sonst würde eine Wiederholungsprüfung ihr eigenes Startdatum verschleiern.
+function quotenpilotQuote(rows, art, vonISO, bisISO, klasse) {
+    const jeSchueler = {};
+    rows.forEach(r => {
+        if (r.art !== art)
+            return;
+        if (klasse && klasse !== "alle" && r.klasse !== klasse)
+            return;
+        const arr = jeSchueler[r.studentId] || (jeSchueler[r.studentId] = []);
+        arr.push(r);
+    });
+    let ersterBestanden = 0, mitVersuch = 0, versucheGesamt = 0;
+    Object.keys(jeSchueler).forEach(sid => {
+        const liste = jeSchueler[sid].slice().sort((a, b) => a.date.localeCompare(b.date));
+        const erster = liste[0];
+        if (vonISO && erster.date < vonISO)
+            return;
+        if (bisISO && erster.date > bisISO)
+            return;
+        mitVersuch++;
+        versucheGesamt += liste.length;
+        if (erster.passed)
+            ersterBestanden++;
+    });
+    return { pct: mitVersuch ? Math.round(ersterBestanden / mitVersuch * 100) : null,
+        schueler: mitVersuch, schnitt: mitVersuch ? versucheGesamt / mitVersuch : 0 };
+}
+// Monatsverlauf der letzten n Monate (Standard 12), je Monat dieselbe Erster-Versuch-Metrik -
+// für die kleine Balkenübersicht im Cockpit.
+function quotenpilotMonatsverlauf(rows, art, klasse, monate) {
+    const heute = new Date();
+    const out = [];
+    for (let i = (monate || 12) - 1; i >= 0; i--) {
+        const d = new Date(heute.getFullYear(), heute.getMonth() - i, 1);
+        const von = ymd(d);
+        const bisD = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+        const bis = ymd(bisD);
+        const q = quotenpilotQuote(rows, art, von, bis, klasse);
+        out.push({ monat: d.toLocaleDateString("de-DE", { month: "short" }), jahr: d.getFullYear(), von, bis, ...q });
+    }
+    return out;
+}
+// Alle Klassen, die in den Zeilen tatsächlich vorkommen - nur die als Filter anbieten, sonst
+// wählt man zwischen 17 Führerscheinklassen, von denen die Fahrschule vielleicht 2 ausbildet.
+function quotenpilotKlassen(rows) {
+    const set = {};
+    rows.forEach(r => { set[r.klasse] = true; });
+    return Object.keys(set).sort();
+}
+// Zeitfenster für die Filterauswahl, plus die unmittelbar davorliegende gleich lange Periode
+// für den Trendvergleich. "Dieses Jahr" und "Alle Zeit" haben keine sinnvolle Vorperiode fester
+// Länge und liefern deshalb bewusst keine.
+function quotenpilotZeitraum(zeitraum) {
+    const heute = new Date();
+    if (zeitraum === "alle")
+        return { von: null, bis: null, vorVon: null, vorBis: null };
+    if (zeitraum === "jahr")
+        return { von: ymd(new Date(heute.getFullYear(), 0, 1)), bis: ymd(heute), vorVon: null, vorBis: null };
+    const monate = Number(zeitraum) || 3;
+    const vonD = new Date(heute.getFullYear(), heute.getMonth() - monate + 1, 1);
+    const vorBisD = new Date(vonD.getFullYear(), vonD.getMonth(), 0);
+    const vorVonD = new Date(vonD.getFullYear(), vonD.getMonth() - monate, 1);
+    return { von: ymd(vonD), bis: ymd(heute), vorVon: ymd(vorVonD), vorBis: ymd(vorBisD) };
 }
 // Preis einer einzelnen Fahrstunde: eigener gespeicherter Preis, sonst Standard
 function lessonPricePerUE(l, stdPrice) {
@@ -5188,6 +5291,7 @@ function App() {
     const [adminTeachers, setAdminTeachers] = useState(null); // {school, list} oder null
     const [schoolLeistungen, setSchoolLeistungen] = useState(null); // null | {busy,error,list} schulweite Leistungen-Liste
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
+    const [quotenpilot, setQuotenpilot] = useState(null); // null | {busy,error,rows,zeitraum,klasse} Erfolgsquoten-Cockpit
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
@@ -5575,6 +5679,7 @@ function App() {
             else if (proposalForm) { if (!proposalForm.busy) setProposalForm(null); }
             else if (printChoice) setPrintChoice(false);
             else if (offenePosten) setOffenePosten(null);
+            else if (quotenpilot) setQuotenpilot(null);
             else if (stillOpen) setStillOpen(false);
             else if (schoolLeistungen) setSchoolLeistungen(null);
             else if (adminEdit) setAdminEdit(null);
@@ -5585,7 +5690,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, quotenpilot, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -9469,8 +9574,9 @@ function App() {
                         React.createElement("div", { className: "home-eyebrow", style: { marginTop: 6 } }, lbl + " 1. Versuch"),
                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 3 } },
                             q.schueler === 0 ? "keine Daten" : (q.schueler + (q.schueler === 1 ? " Schüler · " : " Schüler · ") + q.schnitt.toFixed(1).replace(".", ",") + " Versuche"))))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 }, onClick: openQuotenpilot }, "Quotenpilot öffnen · nach Klasse, Zeitraum und Verlauf"),
                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px 20px" } },
-                    "Berechnet aus den Prüfungsversuchen im Führerschein-Reiter jedes Schülers. Schüler ohne erfassten Versuch zählen nicht mit.")),
+                    "Berechnet aus den Prüfungsversuchen im Führerschein-Reiter jedes Schülers. Schüler ohne erfassten Versuch zählen nicht mit. Ab ca. Juli 2027 soll die Erfolgsquote über die Mobilithek öffentlich einsehbar werden – der Quotenpilot hilft, sie vorher zu kennen.")),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Offene Forderungen"),
             openList.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Aktuell keine offenen Beträge. ✓")
@@ -10873,6 +10979,22 @@ function App() {
             .catch(() => setCalShare({ code: null, busy: false }));
     }
     // Offene-Posten-Dashboard öffnen: offene Beträge pro Schüler, über alle Fahrlehrer hinweg
+    // Lädt die Rohdaten für den Quotenpilot einmalig; Zeitraum- und Klassenfilter werden danach
+    // nur noch im geladenen quotenpilot-State umgeschaltet (kein erneuter Serverzugriff nötig).
+    function openQuotenpilot() {
+        const kannSchulweit = school && school.id && (isAdmin(session) || isSchoolAdmin);
+        if (!kannSchulweit) {
+            const rows = quotenpilotFlatten((students || []).filter(s => !s.archived && s._isMine)
+                .map(s => ({ id: s.id, klasse: s.klasse, teacher: "", exams: s.exams })));
+            setQuotenpilot({ busy: false, error: "", rows, zeitraum: "3", klasse: "alle", soloMode: true });
+            return;
+        }
+        setQuotenpilot({ busy: true, error: "", rows: [], zeitraum: "3", klasse: "alle", soloMode: false });
+        fetchSchoolExamStats(school.id).then(schoolRows => {
+            const rows = quotenpilotFlatten(schoolRows);
+            setQuotenpilot(prev => (prev ? { ...prev, busy: false, rows } : prev));
+        }).catch(e => setQuotenpilot(prev => (prev ? { ...prev, busy: false, error: e.message || "Fehler beim Laden" } : prev)));
+    }
     function openOffenePosten() {
         const price = Number(pricePerHour) || 0;
         // Ohne Fahrschule (Solo-Fahrlehrer) gibt es keine schulweite Übersicht zum Laden -
@@ -14025,6 +14147,106 @@ function App() {
                                     React.createElement("b", { style: { color: "var(--ink)" } }, "Hinweis zum Sammelversand:"),
                                     " Ein automatischer Rechnungsversand an alle offenen Posten auf einmal ist noch nicht m\u00F6glich, weil daf\u00FCr jedem Sch\u00FCler eine E-Mail-Adresse oder Telefonnummer sicher zugeordnet und ein Versandweg eingerichtet sein m\u00FCsste. Diese \u00DCbersicht hilft dir aber, gezielt nachzufassen. Ein echter Sammelversand l\u00E4sst sich als eigener Schritt einbauen, wenn die Kontaktdaten daf\u00FCr gepflegt sind.")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOffenePosten(null) }, "Schlie\u00DFen"))),
+        // Quotenpilot: Erfolgsquoten-Cockpit mit Zeitraum-/Klassenfilter, Trend und Monatsverlauf.
+        // Reagiert auf die kommende Mobilithek-Meldepflicht - Ziel ist, die eigene Quote zu kennen
+        // und steuern zu k\u00F6nnen, bevor sie \u00F6ffentlich einsehbar wird.
+        quotenpilot && React.createElement("div", { onClick: () => setQuotenpilot(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Quotenpilot"),
+                !quotenpilot.soloMode && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                    (school && school.name) || "", " \u00B7 alle Fahrlehrer"),
+                quotenpilot.soloMode && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Deine Fahrschule"),
+                quotenpilot.busy
+                    ? React.createElement("div", { style: { textAlign: "center", padding: "20px", color: "var(--muted)" } }, "L\u00E4dt\u2026")
+                    : quotenpilot.error
+                        ? React.createElement("div", { className: "card", style: { padding: "16px 14px", fontSize: 13.5, color: "#B3362A" } }, quotenpilot.error)
+                        : quotenpilot.rows.length === 0
+                            ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", lineHeight: 1.55 } },
+                                "Noch keine Pr\u00FCfungsversuche erfasst. Trage sie im F\u00FChrerschein-Reiter jedes Sch\u00FClers ein \u2013 der Quotenpilot f\u00FCllt sich dann von selbst.")
+                            : (() => {
+                                const rows = quotenpilot.rows;
+                                const klassen = quotenpilotKlassen(rows);
+                                const zr = quotenpilotZeitraum(quotenpilot.zeitraum);
+                                const qT = quotenpilotQuote(rows, "theorie", zr.von, zr.bis, quotenpilot.klasse);
+                                const qP = quotenpilotQuote(rows, "praxis", zr.von, zr.bis, quotenpilot.klasse);
+                                const vorQT = zr.vorVon ? quotenpilotQuote(rows, "theorie", zr.vorVon, zr.vorBis, quotenpilot.klasse) : null;
+                                const vorQP = zr.vorVon ? quotenpilotQuote(rows, "praxis", zr.vorVon, zr.vorBis, quotenpilot.klasse) : null;
+                                const monateT = quotenpilotMonatsverlauf(rows, "theorie", quotenpilot.klasse, 12);
+                                const monateP = quotenpilotMonatsverlauf(rows, "praxis", quotenpilot.klasse, 12);
+                                const lehrer = quotenpilot.soloMode ? [] : Array.from(new Set(rows.map(r => r.teacher).filter(Boolean))).sort();
+                                const MIN_FALLZAHL = 5;
+                                function trendBadge(q, vorQ) {
+                                    if (!vorQ || q.schueler < 3 || vorQ.schueler < 3 || q.pct === null || vorQ.pct === null)
+                                        return null;
+                                    const delta = q.pct - vorQ.pct;
+                                    if (delta === 0)
+                                        return React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", fontWeight: 700 } }, "unver\u00E4ndert zur Vorperiode");
+                                    const hoch = delta > 0;
+                                    return React.createElement("span", { style: { fontSize: 11.5, color: hoch ? "var(--sage-deep)" : "#B3362A", fontWeight: 700 } },
+                                        (hoch ? "\u25B2 +" : "\u25BC ") + delta + " Pp. zur Vorperiode");
+                                }
+                                function quoteCard(lbl, q, vorQ) {
+                                    return React.createElement("div", { className: "card", style: { padding: "14px 15px" } },
+                                        React.createElement("div", { className: "home-num", style: { fontSize: 28, lineHeight: 1.1 } }, q.pct === null ? "\u2013" : q.pct + "%"),
+                                        React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", marginTop: 2 } }, lbl + " \u00B7 1. Versuch"),
+                                        trendBadge(q, vorQ) && React.createElement("div", { style: { marginTop: 4 } }, trendBadge(q, vorQ)),
+                                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 } },
+                                            q.schueler === 0 ? "keine Daten in diesem Zeitraum" : (q.schueler + (q.schueler === 1 ? " Sch\u00FCler \u00B7 " : " Sch\u00FCler \u00B7 ") + q.schnitt.toFixed(1).replace(".", ",") + " Versuche im Schnitt")),
+                                        q.schueler > 0 && q.schueler < MIN_FALLZAHL && React.createElement("div", { style: { fontSize: 11, color: "var(--orange-deep)", marginTop: 5, lineHeight: 1.4 } },
+                                            "Nur " + q.schueler + " F\u00E4lle \u2013 noch keine verl\u00E4ssliche Aussage."));
+                                }
+                                function balken(monate) {
+                                    const maxH = 34;
+                                    return React.createElement("div", { style: { display: "flex", alignItems: "flex-end", gap: 3, height: maxH + 16 } },
+                                        monate.map((m, i) => {
+                                            const farbe = m.schueler === 0 ? "var(--line)" : (m.pct >= 70 ? "var(--sage-deep)" : (m.pct >= 40 ? "var(--orange)" : "#B3362A"));
+                                            const h = m.schueler === 0 ? 3 : Math.max(4, Math.round(m.pct / 100 * maxH));
+                                            return React.createElement("div", { key: i, title: m.monat + " " + m.jahr + ": " + (m.schueler === 0 ? "keine Daten" : (m.pct + "% \u00B7 " + m.schueler + " Sch\u00FCler")),
+                                                    style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 3 } },
+                                                React.createElement("div", { style: { width: "100%", maxWidth: 14, height: h, background: farbe, borderRadius: 2 } }),
+                                                i % 3 === 0 && React.createElement("div", { style: { fontSize: 8.5, color: "var(--muted)" } }, m.monat));
+                                        }));
+                                }
+                                return React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { display: "flex", gap: 6, overflowX: "auto", marginBottom: 10, paddingBottom: 2 } },
+                                        [["3", "3 Monate"], ["6", "6 Monate"], ["12", "12 Monate"], ["jahr", "Dieses Jahr"], ["alle", "Alle Zeit"]].map(([k, l]) =>
+                                            React.createElement("button", { key: k, onClick: () => setQuotenpilot(p => ({ ...p, zeitraum: k })),
+                                                    style: { flexShrink: 0, padding: "7px 13px", borderRadius: 999, fontSize: 12.5, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap",
+                                                        background: quotenpilot.zeitraum === k ? "var(--orange)" : "var(--field-bg)", color: quotenpilot.zeitraum === k ? "#1c1305" : "var(--ink-2)",
+                                                        border: "1.5px solid " + (quotenpilot.zeitraum === k ? "var(--orange)" : "var(--line)") } }, l))),
+                                    klassen.length > 1 && React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } },
+                                        [["alle", "Alle Klassen"]].concat(klassen.map(k => [k, "Klasse " + k])).map(([k, l]) =>
+                                            React.createElement("button", { key: k, onClick: () => setQuotenpilot(p => ({ ...p, klasse: k })),
+                                                    style: { padding: "6px 12px", borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: "pointer",
+                                                        background: quotenpilot.klasse === k ? "var(--sky-bg)" : "var(--field-bg)", color: quotenpilot.klasse === k ? "var(--sky-deep)" : "var(--muted)",
+                                                        border: "1.5px solid " + (quotenpilot.klasse === k ? "var(--sky-deep)" : "var(--line)") } }, l))),
+                                    React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 16 } },
+                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Theorie", qT, vorQT)),
+                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Praxis", qP, vorQP))),
+                                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Verlauf \u00B7 letzte 12 Monate"),
+                                    React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+                                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 4 } }, "Theorie"),
+                                        balken(monateT),
+                                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", margin: "10px 0 4px" } }, "Praxis"),
+                                        balken(monateP)),
+                                    lehrer.length > 1 && React.createElement(React.Fragment, null,
+                                        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Je Fahrlehrer"),
+                                        React.createElement("div", { className: "card", style: { padding: "4px 15px", marginBottom: 16 } },
+                                            lehrer.map((le, i) => {
+                                                const rowsLe = rows.filter(r => r.teacher === le);
+                                                const qtLe = quotenpilotQuote(rowsLe, "theorie", zr.von, zr.bis, quotenpilot.klasse);
+                                                const qpLe = quotenpilotQuote(rowsLe, "praxis", zr.von, zr.bis, quotenpilot.klasse);
+                                                return React.createElement("div", { key: le, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                                    React.createElement("div", { style: { flex: 1, minWidth: 0, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, le),
+                                                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } },
+                                                        "Theorie " + (qtLe.pct === null ? "\u2013" : qtLe.pct + "%") + " \u00B7 Praxis " + (qpLe.pct === null ? "\u2013" : qpLe.pct + "%")));
+                                            }))),
+                                    React.createElement("div", { style: { padding: "12px 14px", borderRadius: 12, background: "var(--field-bg)", fontSize: 12, color: "var(--muted)", lineHeight: 1.55 } },
+                                        "Prozentwerte bei weniger als " + MIN_FALLZAHL + " F\u00E4llen sind statistisch nicht belastbar \u2013 lies sie als Tendenz, nicht als Zusage. Grundlage sind ausschlie\u00DFlich die selbst erfassten Pr\u00FCfungsversuche, keine amtlichen Daten."));
+                            })(),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setQuotenpilot(null) }, "Schlie\u00DFen"))),
         // Postfach: zentraler Posteingang aller Sch\u00FCler-Nachrichten, die noch keine Antwort haben
         // Lange nicht gefahren: Liste mit fertiger, freundlicher WhatsApp-Erinnerung je Sch\u00FCler
         stillOpen && React.createElement("div", { onClick: () => setStillOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
