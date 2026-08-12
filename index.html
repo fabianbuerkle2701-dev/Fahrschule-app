@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.93.0";
+const APP_VERSION = "1.94.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.94.0", date: "August 2026", changes: [
+            "Neu im Theorie-Bereich: Probeprüfung Klasse B (30 Fragen wie in der echten Prüfung, ohne sofortige Rückmeldung, Ergebnis erst am Ende mit Fehlerpunkte-Auswertung und Bestehensgrenze)",
+            "Fragen lassen sich jetzt merken (★) und später gezielt über 'Markierte Fragen' wiederholen",
+            "Neue Fragen mit Verkehrszeichen-Grafik (19 gängige Schilder) und mit einfachen Animationen zu Gefahrensituationen statt echtem Videomaterial - insgesamt 250 zusätzliche, selbst verfasste Übungsfragen über beide neuen Formate",
+            "Insgesamt jetzt 1.090 selbst verfasste Übungsfragen im System (vorher 40) - weiterhin Beispielinhalte, kein Ersatz für den amtlichen Fragenkatalog",
+        ] },
     { v: "1.93.0", date: "August 2026", changes: [
             "Aufbewahrung & Löschung (Beweis-Akte, Phase 1): Die Löschfrist eines archivierten Schülers berücksichtigt jetzt getrennt die fünfjährige Frist für Ausbildungsaufzeichnungen (§ 31 FahrlG, ab Archivierung) UND die zehnjährige Frist für Rechnungen (§ 147 Abs. 3 AO, ab der letzten Rechnung) - maßgeblich ist die spätere der beiden Fristen",
             "Bisher wurde nur das Archivierungsdatum betrachtet. Bei Schülern mit Rechnungen aus späteren Jahren zeigte die App dadurch teils ein zu frühes 'aufzubewahren bis'-Datum an, obwohl die Rechnung serverseitig ohnehin vor Löschung schützt",
@@ -3393,6 +3399,33 @@ async function publicTheoryProgress(code, name, pin) {
         return null;
     }
     return data || {};
+}
+// Frage als "gemerkt" markieren/entmarkieren (persistiert im selben theoryProgress-Eintrag).
+async function publicTheoryMarkToggle(code, name, pin, questionId, marked) {
+    const { data, error } = await sb.rpc("public_theory_mark_toggle", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_marked: marked });
+    if (error) {
+        console.error(error);
+        return "error";
+    }
+    return data;
+}
+// Ergebnis einer Probeprüfung speichern (Verlauf unter students.data.theoryMockExams).
+async function publicTheoryExamSubmit(code, name, pin, result) {
+    const { data, error } = await sb.rpc("public_theory_exam_submit", { code, p_name: name, p_pin: pin, p_result: result });
+    if (error) {
+        console.error(error);
+        return "error";
+    }
+    return data;
+}
+// Bisherige Probeprüfungs-Ergebnisse eines eingeloggten Schülers laden.
+async function publicTheoryExamHistory(code, name, pin) {
+    const { data, error } = await sb.rpc("public_theory_exam_history", { code, p_name: name, p_pin: pin });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
 }
 // Buchungs-Code des eingeloggten Fahrlehrers holen/anlegen
 async function fetchBookingCode(uid) {
@@ -15908,18 +15941,152 @@ function BegleitFahrten({ code }) {
             React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))));
 }
 
+// ════════ Selbst gezeichnete Verkehrszeichen-Icons (schematisch, keine amtliche Vorlage) ════════
+// theory_questions.image_url trägt bei diesen Fragen "sign:<key>" statt einer echten URL - so
+// bleibt die Spalte zukunftsfähig für echte Bilder, sobald der amtliche Katalog lizenziert ist.
+const TRAFFIC_SIGNS = {
+    stop: { label: "Stoppschild", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "30,6 70,6 94,30 94,70 70,94 30,94 6,70 6,30", fill: "#C81E1E", stroke: "#fff", strokeWidth: 3 }),
+            React.createElement("text", { x: 50, y: 60, fontSize: 26, fontWeight: 800, fill: "#fff", textAnchor: "middle", fontFamily: "sans-serif" }, "STOP")) },
+    vorfahrt_gewaehren: { label: "Vorfahrt gewähren", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "6,10 94,10 50,92", fill: "#fff", stroke: "#C81E1E", strokeWidth: 9 })) },
+    vorfahrtstrasse: { label: "Vorfahrtstraße", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "50,4 96,50 50,96 4,50", fill: "#fff", stroke: "#8a8a8a", strokeWidth: 2 }),
+            React.createElement("polygon", { points: "50,16 84,50 50,84 16,50", fill: "#F5C400" })) },
+    vorfahrtstrasse_ende: { label: "Vorfahrtstraße endet", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "50,4 96,50 50,96 4,50", fill: "#fff", stroke: "#8a8a8a", strokeWidth: 2 }),
+            React.createElement("polygon", { points: "50,16 84,50 50,84 16,50", fill: "#F5C400" }),
+            React.createElement("line", { x1: 14, y1: 14, x2: 86, y2: 86, stroke: "#6b6b6b", strokeWidth: 5 })) },
+    verbot_einfahrt: { label: "Verbot der Einfahrt", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#C81E1E" }),
+            React.createElement("rect", { x: 18, y: 42, width: 64, height: 16, fill: "#fff" })) },
+    ueberholverbot: { label: "Überholverbot für Kraftfahrzeuge", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("ellipse", { cx: 40, cy: 56, rx: 20, ry: 11, fill: "#111" }),
+            React.createElement("ellipse", { cx: 62, cy: 44, rx: 20, ry: 11, fill: "#C81E1E" })) },
+    ueberholverbot_ende: { label: "Ende des Überholverbots", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#fff", stroke: "#8a8a8a", strokeWidth: 3 }),
+            React.createElement("ellipse", { cx: 40, cy: 56, rx: 16, ry: 9, fill: "#999" }),
+            React.createElement("ellipse", { cx: 62, cy: 44, rx: 16, ry: 9, fill: "#bbb" }),
+            React.createElement("line", { x1: 14, y1: 86, x2: 86, y2: 14, stroke: "#333", strokeWidth: 5 })) },
+    tempolimit_50: { label: "Höchstgeschwindigkeit 50", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("text", { x: 50, y: 63, fontSize: 34, fontWeight: 800, fill: "#111", textAnchor: "middle", fontFamily: "sans-serif" }, "50")) },
+    tempolimit_ende: { label: "Ende einer Geschwindigkeitsbegrenzung", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#fff", stroke: "#8a8a8a", strokeWidth: 3 }),
+            React.createElement("text", { x: 50, y: 63, fontSize: 30, fontWeight: 800, fill: "#999", textAnchor: "middle", fontFamily: "sans-serif" }, "50"),
+            React.createElement("line", { x1: 14, y1: 86, x2: 86, y2: 14, stroke: "#333", strokeWidth: 5 })) },
+    kreisverkehr: { label: "Kreisverkehr", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#1A5FBF" }),
+            React.createElement("path", { d: "M50 24 A26 26 0 1 1 24 50", fill: "none", stroke: "#fff", strokeWidth: 8, strokeLinecap: "round" }),
+            React.createElement("polygon", { points: "50,14 62,26 38,26", fill: "#fff" })) },
+    bahnuebergang: { label: "Bahnübergang (Andreaskreuz)", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("rect", { x: 4, y: 4, width: 92, height: 92, fill: "#fff", stroke: "#ddd", strokeWidth: 2 }),
+            React.createElement("line", { x1: 15, y1: 15, x2: 85, y2: 85, stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("line", { x1: 85, y1: 15, x2: 15, y2: 85, stroke: "#C81E1E", strokeWidth: 8 })) },
+    fussgaengerueberweg: { label: "Fußgängerüberweg", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("rect", { x: 4, y: 4, width: 92, height: 92, fill: "#1A5FBF" }),
+            React.createElement("polygon", { points: "50,20 82,80 18,80", fill: "#fff" }),
+            [0, 1, 2, 3].map(i => React.createElement("rect", { key: i, x: 30 + i * 10, y: 66, width: 6, height: 12, fill: "#1A5FBF" }))) },
+    verbot_fuer_kraftfahrzeuge: { label: "Verbot für Kraftfahrzeuge", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("rect", { x: 24, y: 44, width: 52, height: 18, rx: 4, fill: "#111" }),
+            React.createElement("rect", { x: 30, y: 34, width: 24, height: 14, rx: 3, fill: "#111" })) },
+    gefahrstelle: { label: "Allgemeine Gefahrstelle", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "50,6 96,90 4,90", fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("rect", { x: 46, y: 38, width: 8, height: 28, fill: "#111" }),
+            React.createElement("circle", { cx: 50, cy: 76, r: 5, fill: "#111" })) },
+    autobahn: { label: "Autobahn (Beginn)", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("rect", { x: 4, y: 4, width: 92, height: 92, fill: "#1A5FBF" }),
+            React.createElement("path", { d: "M20 88 L44 12 L56 12 L80 88 Z", fill: "#fff" }),
+            React.createElement("rect", { x: 46, y: 12, width: 8, height: 76, fill: "#1A5FBF" })) },
+    schule: { label: "Kinder / Schule", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "50,6 96,90 4,90", fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("circle", { cx: 38, cy: 52, r: 9, fill: "#111" }),
+            React.createElement("rect", { x: 30, y: 62, width: 16, height: 22, rx: 3, fill: "#111" }),
+            React.createElement("circle", { cx: 62, cy: 58, r: 7, fill: "#111" }),
+            React.createElement("rect", { x: 56, y: 66, width: 12, height: 18, rx: 3, fill: "#111" })) },
+    wildwechsel: { label: "Wildwechsel", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("polygon", { points: "50,6 96,90 4,90", fill: "#fff", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("ellipse", { cx: 52, cy: 70, rx: 22, ry: 10, fill: "#111" }),
+            React.createElement("circle", { cx: 74, cy: 58, r: 9, fill: "#111" }),
+            React.createElement("line", { x1: 34, y1: 76, x2: 30, y2: 88, stroke: "#111", strokeWidth: 5 }),
+            React.createElement("line", { x1: 68, y1: 78, x2: 72, y2: 88, stroke: "#111", strokeWidth: 5 })) },
+    parkverbot: { label: "Parken verboten", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#1A5FBF" }),
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "none", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("line", { x1: 18, y1: 18, x2: 82, y2: 82, stroke: "#C81E1E", strokeWidth: 8 })) },
+    haltverbot: { label: "Halten verboten", render: (s) => React.createElement("svg", { viewBox: "0 0 100 100", width: s, height: s },
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "#1A5FBF" }),
+            React.createElement("circle", { cx: 50, cy: 50, r: 46, fill: "none", stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("line", { x1: 18, y1: 18, x2: 82, y2: 82, stroke: "#C81E1E", strokeWidth: 8 }),
+            React.createElement("line", { x1: 82, y1: 18, x2: 18, y2: 82, stroke: "#C81E1E", strokeWidth: 8 })) },
+};
+function renderTrafficSign(key, size) {
+    const sign = TRAFFIC_SIGNS[key];
+    if (!sign)
+        return null;
+    return React.createElement("div", { style: { display: "flex", justifyContent: "center", margin: "4px 0 14px" }, "aria-label": sign.label }, sign.render(size || 108));
+}
+
+// ════════ Gefahrenerkennungs-Szenarien: leichte CSS-Animation statt Videomaterial ════════
+// Wir können kein echtes Video erzeugen. Diese kurzen, selbst gebauten Animationen simulieren
+// eine dynamische Gefahrensituation im Browser (Verkehrsteilnehmer bewegt sich in die Szene),
+// bewusst schematisch statt fotorealistisch.
+const HAZARD_SCENARIOS = {
+    kind_hinter_auto: { label: "Kind läuft zwischen parkenden Autos hervor", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "#dfe3e6", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_kind{0%,20%{transform:translateX(0)}70%,100%{transform:translateX(70px)}}"),
+            React.createElement("div", { style: { position: "absolute", bottom: 0, left: 0, right: 0, height: 46, background: "#8a8f94" } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 46, left: 20, width: 46, height: 26, background: "#3a5a7a", borderRadius: 4 } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 46, left: 76, width: 46, height: 26, background: "#7a3a3a", borderRadius: 4 } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 46, left: 96, width: 14, height: 22, borderRadius: "50% 50% 0 0", background: "#F5C400", animation: "hz_kind 2.6s ease-in-out infinite" } })) },
+    tuer_radweg: { label: "Autotür öffnet sich in den Radweg", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "#dfe3e6", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_tuer{0%,25%{transform:rotate(0deg)}75%,100%{transform:rotate(-58deg)}}@keyframes hz_rad{0%{transform:translateX(0)}100%{transform:translateX(150px)}}"),
+            React.createElement("div", { style: { position: "absolute", bottom: 0, left: 0, right: 0, height: 30, background: "#c7302b", opacity: .35 } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 30, left: 30, width: 60, height: 30, background: "#33475b", borderRadius: 4 } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 30, left: 88, width: 8, height: 30, background: "#33475b", transformOrigin: "bottom left", animation: "hz_tuer 2.6s ease-in-out infinite" } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 10, left: -20, width: 16, height: 16, borderRadius: "50%", background: "#1A5FBF", animation: "hz_rad 2.6s linear infinite" } })) },
+    lkw_toter_winkel: { label: "LKW biegt ab, Radfahrer im toten Winkel", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "#dfe3e6", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_lkw{0%,20%{transform:rotate(0deg)}80%,100%{transform:rotate(18deg)}}@keyframes hz_zone{0%,100%{opacity:.25}50%{opacity:.55}}"),
+            React.createElement("div", { style: { position: "absolute", top: 20, left: 30, width: 30, height: 90, background: "#C81E1E", opacity: .3, animation: "hz_zone 1.6s ease-in-out infinite" } }),
+            React.createElement("div", { style: { position: "absolute", top: 30, left: 34, width: 80, height: 40, background: "#F5C400", borderRadius: 4, transformOrigin: "left center", animation: "hz_lkw 2.8s ease-in-out infinite" } }),
+            React.createElement("div", { style: { position: "absolute", top: 46, left: 20, width: 12, height: 12, borderRadius: "50%", background: "#1A5FBF" } })) },
+    glatteis_bruecke: { label: "Brücke vereist trotz trockener Straße", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "linear-gradient(90deg,#8a8f94 0 55%,#bfe0f5 55% 100%)", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_auto{0%{transform:translateX(0)}100%{transform:translateX(160px)}}"),
+            React.createElement("div", { style: { position: "absolute", top: 52, left: 10, width: 44, height: 24, background: "#33475b", borderRadius: 4, animation: "hz_auto 2.8s ease-in infinite" } }),
+            React.createElement("div", { style: { position: "absolute", top: 8, right: 10, fontSize: 11, fontWeight: 700, color: "#1A5FBF" } }, "Brücke")) },
+    schulbus_warnblinker: { label: "Schulbus hält mit Warnblinker", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "#dfe3e6", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_blink{0%,49%{opacity:1}50%,100%{opacity:.15}}@keyframes hz_kind2{0%,30%{transform:translate(0,0)}80%,100%{transform:translate(30px,20px)}}"),
+            React.createElement("div", { style: { position: "absolute", bottom: 20, left: 20, width: 90, height: 40, background: "#F5C400", borderRadius: 6 } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 32, left: 106, width: 10, height: 10, borderRadius: "50%", background: "#C81E1E", animation: "hz_blink 1s step-end infinite" } }),
+            React.createElement("div", { style: { position: "absolute", bottom: 20, left: 118, width: 14, height: 22, borderRadius: "50% 50% 0 0", background: "#3a7a4a", animation: "hz_kind2 2.6s ease-in-out infinite" } })) },
+    wildwechsel_wald: { label: "Reh springt aus dem Wald auf die Straße", render: () => React.createElement("div", { style: { position: "relative", width: "100%", height: 130, background: "linear-gradient(90deg,#2f4a33 0 25%,#8a8f94 25% 100%)", borderRadius: 10, overflow: "hidden", marginBottom: 14 } },
+            React.createElement("style", null, "@keyframes hz_reh{0%,20%{transform:translate(0,0)}70%,100%{transform:translate(120px,-12px)}}"),
+            React.createElement("div", { style: { position: "absolute", bottom: 40, left: 10, width: 26, height: 16, borderRadius: 4, background: "#5a4432", animation: "hz_reh 2.4s ease-out infinite" } })) },
+};
+function renderHazardScenario(key) {
+    const sc = HAZARD_SCENARIOS[key];
+    if (!sc)
+        return null;
+    return React.createElement("div", { "aria-label": sc.label }, sc.render(),
+        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: -8, marginBottom: 10 } }, "Vereinfachte Animation – kein echtes Videomaterial"));
+}
+
 // ════════ Theorie üben (öffentlich, per Fahrschul-Code; Fortschritt nur bei Login) ════════
 // Fragen sind Beispielinhalte (is_sample=true in der DB), solange der amtliche Fragenkatalog
 // nicht lizenziert ist (siehe Aufgabenliste) - Struktur ist bereits auf echte Inhalte ausgelegt.
 function TheoryPractice({ code }) {
     const [questions, setQuestions] = React.useState(undefined); // undefined=lädt, null=Fehler, []=leer
-    const [screen, setScreen] = React.useState("themen"); // "themen" | "uebung"
+    const [screen, setScreen] = React.useState("themen"); // themen|uebung|pruefung_intro|pruefung|pruefung_ergebnis
     const [queue, setQueue] = React.useState([]);
     const [qIndex, setQIndex] = React.useState(0);
     const [selected, setSelected] = React.useState([]);
     const [checked, setChecked] = React.useState(false);
     const [sessionRichtig, setSessionRichtig] = React.useState(0);
-    const [progress, setProgress] = React.useState({}); // questionId -> {correct} - vom Server (falls eingeloggt) oder nur diese Sitzung
+    const [progress, setProgress] = React.useState({}); // questionId -> {correct, attempts, marked} - vom Server (falls eingeloggt) oder nur diese Sitzung
+    const [examAnswers, setExamAnswers] = React.useState([]); // {id, points, correct} während einer laufenden Probeprüfung
+    const [examResult, setExamResult] = React.useState(null); // {total, errorPoints, passed, richtig}
+    const [examHistory, setExamHistory] = React.useState([]);
     React.useEffect(() => {
         publicTheoryQuestions(code).then(setQuestions).catch(() => setQuestions(null));
     }, [code]);
@@ -15936,6 +16103,7 @@ function TheoryPractice({ code }) {
             return;
         publicTheoryProgress(code, loggedInName, loggedInPin).then(p => { if (p)
             setProgress(p); });
+        publicTheoryExamHistory(code, loggedInName, loggedInPin).then(setExamHistory);
         /* eslint-disable-next-line */
     }, [code, loggedIn, loggedInName, loggedInPin]);
     if (questions === undefined)
@@ -15957,8 +16125,10 @@ function TheoryPractice({ code }) {
     // Eine gemischte Runde bleibt auf Prüfungslänge begrenzt. Sonst wächst sie mit jedem neuen
     // Thema weiter an und man wird in einer Sitzung nie fertig.
     const MIX_LEN = 20;
-    function startRound(topicKey) {
-        const qs = topicKey ? byTopic[topicKey] : shuffled(questions).slice(0, MIX_LEN);
+    const grundstoffPool = questions.filter(q => GRUNDSTOFF_THEMEN.includes(q.topic_key));
+    const zusatzstoffPool = questions.filter(q => !GRUNDSTOFF_THEMEN.includes(q.topic_key));
+    const markedQs = questions.filter(q => progress[q.id] && progress[q.id].marked);
+    function startRound(qs) {
         setQueue(shuffled(qs));
         setQIndex(0);
         setSelected([]);
@@ -15966,10 +16136,29 @@ function TheoryPractice({ code }) {
         setSessionRichtig(0);
         setScreen("uebung");
     }
+    // 20 Grundstoff + 10 Zusatzstoff B, angelehnt an den Aufbau der echten Klasse-B-Theorieprüfung -
+    // mit eigenen Übungsfragen statt des amtlichen Katalogs, siehe Hinweis im Intro-Screen.
+    function startExam() {
+        const g = shuffled(grundstoffPool).slice(0, Math.min(20, grundstoffPool.length));
+        const z = shuffled(zusatzstoffPool).slice(0, Math.min(10, zusatzstoffPool.length));
+        setQueue(shuffled([...g, ...z]));
+        setQIndex(0);
+        setSelected([]);
+        setChecked(false);
+        setExamAnswers([]);
+        setExamResult(null);
+        setScreen("pruefung");
+    }
     function toggleOption(optId, multi) {
         if (checked)
             return;
         setSelected(prev => multi ? (prev.includes(optId) ? prev.filter(x => x !== optId) : [...prev, optId]) : [optId]);
+    }
+    function toggleMark(q) {
+        const newMarked = !(progress[q.id] && progress[q.id].marked);
+        setProgress(prev => ({ ...prev, [q.id]: { ...(prev[q.id] || {}), marked: newMarked } }));
+        if (loggedIn)
+            publicTheoryMarkToggle(code, loggedInName, loggedInPin, q.id, newMarked);
     }
     function checkAnswer() {
         const q = queue[qIndex];
@@ -15978,7 +16167,7 @@ function TheoryPractice({ code }) {
         setChecked(true);
         if (isCorrect)
             setSessionRichtig(c => c + 1);
-        setProgress(prev => ({ ...prev, [q.id]: { correct: isCorrect } }));
+        setProgress(prev => ({ ...prev, [q.id]: { ...(prev[q.id] || {}), correct: isCorrect } }));
         if (loggedIn)
             publicTheorySubmitAnswer(code, loggedInName, loggedInPin, q.id, isCorrect);
     }
@@ -15992,17 +16181,98 @@ function TheoryPractice({ code }) {
             setScreen("themen");
         }
     }
+    // Probeprüfung: anders als beim Üben gibt es KEINE sofortige Rückmeldung pro Frage - das
+    // entspricht der echten Prüfungssituation. Auswertung erst nach der letzten Frage.
+    function submitExamAnswer() {
+        const q = queue[qIndex];
+        const correctIds = q.options.filter(o => o.correct).map(o => o.id);
+        const isCorrect = correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
+        const nextAnswers = [...examAnswers, { id: q.id, points: q.points, correct: isCorrect }];
+        setExamAnswers(nextAnswers);
+        setProgress(prev => ({ ...prev, [q.id]: { ...(prev[q.id] || {}), correct: isCorrect } }));
+        if (loggedIn)
+            publicTheorySubmitAnswer(code, loggedInName, loggedInPin, q.id, isCorrect);
+        if (qIndex + 1 < queue.length) {
+            setQIndex(i => i + 1);
+            setSelected([]);
+            return;
+        }
+        const errorPoints = nextAnswers.filter(a => !a.correct).reduce((s, a) => s + a.points, 0);
+        const richtig = nextAnswers.filter(a => a.correct).length;
+        const result = { total: nextAnswers.length, errorPoints, passed: errorPoints <= 10, richtig };
+        setExamResult(result);
+        if (loggedIn) {
+            publicTheoryExamSubmit(code, loggedInName, loggedInPin, result);
+            setExamHistory(h => [...h, { date: new Date().toISOString(), ...result }]);
+        }
+        setScreen("pruefung_ergebnis");
+    }
+    function renderQuestionMedia(q) {
+        if (!q.image_url)
+            return null;
+        if (q.image_url.startsWith("sign:"))
+            return renderTrafficSign(q.image_url.slice(5));
+        if (q.image_url.startsWith("scenario:"))
+            return renderHazardScenario(q.image_url.slice(9));
+        return React.createElement("img", { src: q.image_url, style: { width: "100%", borderRadius: 10, marginBottom: 14 } });
+    }
+    function renderMarkButton(q) {
+        const isMarked = !!(progress[q.id] && progress[q.id].marked);
+        return React.createElement("button", { onClick: () => toggleMark(q), style: { background: "none", border: "none", cursor: "pointer", fontSize: 19, color: isMarked ? "var(--orange)" : "var(--muted)", padding: 2, lineHeight: 1, flexShrink: 0 }, title: isMarked ? "Markierung entfernen" : "Frage merken" }, isMarked ? "★" : "☆");
+    }
+    if (screen === "pruefung_intro") {
+        return React.createElement("div", null,
+            React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13, marginBottom: 12 }, onClick: () => setScreen("themen") }, "‹ Themen"),
+            React.createElement("div", { className: "card", style: { padding: "18px 16px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 8 } }, "Probeprüfung Klasse B"),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 10 } }, "30 Fragen (20 Grundstoff + 10 Zusatzstoff B) - angelehnt an den Aufbau der echten Theorieprüfung. Anders als beim Üben gibt es keine sofortige Rückmeldung pro Frage, das Ergebnis siehst du erst am Ende."),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 16 } }, "Bestanden ist die Probeprüfung bei höchstens 10 Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - angelehnt an die echte Prüfungsregel, aber ohne Gewähr, da eigene Übungsfragen statt des amtlichen Katalogs verwendet werden."),
+                examHistory.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "9px 11px", marginBottom: 16 } }, examHistory.length + " Probeprüfung" + (examHistory.length === 1 ? "" : "en") + " absolviert · zuletzt " + (examHistory[examHistory.length - 1].passed ? "bestanden" : "nicht bestanden")),
+                React.createElement("button", { className: "btn btn-primary btn-block", onClick: startExam }, "Probeprüfung starten")));
+    }
+    if (screen === "pruefung_ergebnis" && examResult) {
+        const r = examResult;
+        return React.createElement("div", null,
+            React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", marginBottom: 14, background: r.passed ? "var(--sage-bg)" : "#FDECEA", border: "1.5px solid " + (r.passed ? "var(--sage-deep)" : "#B3362A") } },
+                React.createElement("div", { style: { fontSize: 30, marginBottom: 8 } }, r.passed ? "🎉" : "📚"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 6, color: r.passed ? "var(--sage-deep)" : "#B3362A" } }, r.passed ? "Bestanden" : "Nicht bestanden"),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)" } }, r.richtig + " / " + r.total + " richtig · " + r.errorPoints + " Fehlerpunkte (max. 10 zum Bestehen)")),
+            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_intro") }, "Neue Probeprüfung"),
+            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setScreen("themen") }, "Zurück zu den Themen"));
+    }
+    if (screen === "pruefung") {
+        const q = queue[qIndex];
+        const multi = q.options.filter(o => o.correct).length > 1;
+        return React.createElement("div", null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, "Probeprüfung · Frage " + (qIndex + 1) + " / " + queue.length),
+                renderMarkButton(q)),
+            React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.points + " Punkte" + (multi ? " · Mehrfachauswahl" : "")),
+                renderQuestionMedia(q),
+                React.createElement("div", { style: { fontSize: 15.5, fontWeight: 700, lineHeight: 1.4, marginBottom: 16 } }, q.question),
+                React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 9, marginBottom: 16 } },
+                    q.options.map(o => {
+                        const isSel = selected.includes(o.id);
+                        return React.createElement("button", { key: o.id, onClick: () => toggleOption(o.id, multi), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: isSel ? "var(--orange-soft)" : "var(--field-bg)", border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), cursor: "pointer", fontSize: 14 } },
+                            React.createElement("span", { style: { width: 18, height: 18, borderRadius: multi ? 5 : 99, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0 } }),
+                            React.createElement("span", { style: { flex: 1 } }, o.text));
+                    })),
+                React.createElement("button", { className: "btn btn-primary btn-block", disabled: selected.length === 0, onClick: submitExamAnswer }, qIndex + 1 < queue.length ? "Weiter" : "Prüfung abschließen")));
+    }
     if (screen === "uebung") {
         const q = queue[qIndex];
         const multi = q.options.filter(o => o.correct).length > 1;
         const correctIds = q.options.filter(o => o.correct).map(o => o.id);
         const isCorrect = checked && correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
         return React.createElement("div", null,
-            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 8 } },
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setScreen("themen") }, "‹ Themen"),
-                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, (qIndex + 1) + " / " + queue.length + " · " + sessionRichtig + " richtig")),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, (qIndex + 1) + " / " + queue.length + " · " + sessionRichtig + " richtig"),
+                renderMarkButton(q)),
             React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
                 React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.topic_key + " · " + q.points + " Punkte" + (multi ? " · Mehrfachauswahl" : "")),
+                renderQuestionMedia(q),
                 React.createElement("div", { style: { fontSize: 15.5, fontWeight: 700, lineHeight: 1.4, marginBottom: 16 } }, q.question),
                 React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 9, marginBottom: 16 } },
                     q.options.map(o => {
@@ -16041,12 +16311,22 @@ function TheoryPractice({ code }) {
     const gesamtPct = topicPct(questions);
     return React.createElement("div", null,
         !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Mein Fortschritt“ an, damit dein Übungsfortschritt gespeichert wird. Üben geht auch so schon."),
-        React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }, onClick: () => startRound(null) },
+        React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }, onClick: () => setScreen("pruefung_intro") },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--clay-bg)", color: "var(--clay-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
+            React.createElement("span", { style: { flex: 1 } },
+                React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Probeprüfung"),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "30 Fragen wie in der echten Prüfung, mit Ergebnis am Ende"))),
+        React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }, onClick: () => startRound(shuffled(questions).slice(0, MIX_LEN)) },
             React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
             React.createElement("span", { style: { flex: 1 } },
                 React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Zufällig üben"),
                 React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, Math.min(MIX_LEN, questions.length) + " Fragen aus allen Themen gemischt")),
             gesamtPct !== null && React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "var(--orange-deep)", flexShrink: 0 } }, gesamtPct + "%")),
+        markedQs.length > 0 && React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 14, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }, onClick: () => startRound(markedQs) },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--sky-bg)", color: "var(--sky-deep)", flexShrink: 0 } }, "★"),
+            React.createElement("span", { style: { flex: 1 } },
+                React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Markierte Fragen"),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, markedQs.length + " Frage" + (markedQs.length === 1 ? "" : "n") + " zum Wiederholen gemerkt"))),
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
             topics.map((topic, ti) => {
@@ -16055,7 +16335,7 @@ function TheoryPractice({ code }) {
                 const tone = ["sage", "clay", "sky", "orange"][ti % 4];
                 const bg = "var(--" + tone + (tone === "orange" ? "-soft" : "-bg") + ")";
                 const fg = tone === "orange" ? "var(--orange-deep)" : "var(--" + tone + "-deep)";
-                return React.createElement("button", { key: topic, onClick: () => startRound(topic), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: ti > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
+                return React.createElement("button", { key: topic, onClick: () => startRound(byTopic[topic]), style: { width: "100%", display: "flex", alignItems: "center", gap: 12, background: "none", border: "none", textAlign: "left", padding: "11px 0", borderTop: ti > 0 ? "1px solid var(--line)" : "none", cursor: "pointer" } },
                     React.createElement("span", { className: "home-iconchip", style: { background: bg, color: fg, width: 30, height: 30, flexShrink: 0 } }, React.createElement(IcBook, null)),
                     React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, topic),
                     React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, pct !== null ? (pct + "% · " + qs.length + " Fragen") : (qs.length + " Fragen")));
