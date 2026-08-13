@@ -2,16 +2,39 @@
 // aus und schätzt pro Abschnitt einen Fortschritt in Prozent.
 // Der Schlüssel kommt aus der Netlify-Umgebungsvariable ANTHROPIC_API_KEY.
 
+const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
+// Der öffentliche Anon-Key - dient hier nur zum Prüfen, ob das mitgeschickte Token zu einer
+// echten, angemeldeten Sitzung gehört. Kein Geheimnis, genau wie in index.html.
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
+
 exports.handler = async function (event) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Content-Type": "application/json",
   };
 
   if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers, body: "" };
   if (event.httpMethod !== "POST") return { statusCode: 405, headers, body: JSON.stringify({ error: "Nur POST erlaubt" }) };
+
+  // Nur angemeldete Fahrlehrer dürfen diese Funktion nutzen - sie kostet pro Aufruf echtes
+  // Anthropic-Guthaben und war vorher komplett offen im Internet aufrufbar. Diese Prüfung
+  // kommt bewusst vor dem API-Schlüssel-Check.
+  const requesterToken = (event.headers.authorization || "").replace(/^Bearer\s+/i, "");
+  if (!requesterToken) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: "Nicht angemeldet" }) };
+  }
+  try {
+    const whoResp = await fetch(SUPABASE_URL + "/auth/v1/user", {
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + requesterToken },
+    });
+    if (!whoResp.ok) {
+      return { statusCode: 401, headers, body: JSON.stringify({ error: "Sitzung ungültig oder abgelaufen" }) };
+    }
+  } catch (e) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: "Anmeldung konnte nicht geprüft werden" }) };
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { statusCode: 500, headers, body: JSON.stringify({ error: "Kein API-Schlüssel hinterlegt (ANTHROPIC_API_KEY)." }) };

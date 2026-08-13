@@ -1147,7 +1147,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.99.0";
+const APP_VERSION = "1.100.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1174,6 +1174,19 @@ function theorieVerfuegbar(info, appMode) {
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
 const DEFAULT_KLASSE = "B";
+// Rät die Führerscheinklasse aus einem Freitext (z.B. Fahrschul-Untertitel oder gescannter
+// Antrag). Das deutsche Wort "Klasse" enthält selbst ein "A" - eine reine Substring-Suche
+// würde deshalb jeden Text mit dem Wort "Klasse" fälschlich auf Klasse A raten. Das Wort
+// wird darum vorher entfernt, längere Kürzel (BE, B96) werden vor kürzeren (B) geprüft,
+// und Wortgrenzen verhindern Zufallstreffer in unrelated Wörtern.
+function guessKlasseFromText(text, klassenListe) {
+    if (!text)
+        return null;
+    const bereinigt = String(text).toUpperCase().replace(/\bKLASSE\b/g, " ");
+    const sortiert = [...(klassenListe || LFK_KLASSEN)].sort((a, b) => b.length - a.length);
+    const treffer = sortiert.find(k => new RegExp("\\b" + k + "\\b").test(bereinigt));
+    return treffer || null;
+}
 function emptyTplSlice() { return { adk: [], strecken: [], adkTitel: "", streckenTitel: "" }; }
 // Feste Liste der Leistungsstufen für die Leistungserstellung.
 const LEISTUNGSSTUFEN = ["Grundstufe", "Aufbaustufe", "Leistungsstufe", "Prüfungsvorbereitung"];
@@ -1230,6 +1243,16 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.100.0", date: "August 2026", changes: [
+            "Großes Sicherheits-Update nach einem vollständigen Audit: Die KI-Funktionen (Screenshot-Import, KI-Helfer) sind nur noch angemeldet erreichbar, Schüler-PINs sind gegen Durchprobieren geschützt, und der Terminplan eines Schülers ist ohne PIN nicht mehr abrufbar - auf der öffentlichen Buchungsseite werden bestätigte Termine erst nach Anmeldung unter „Mein Fortschritt“ farbig hervorgehoben, eigene offene Anfragen wie bisher sofort",
+            "Speicherfehler werden nicht mehr verschluckt: Schlägt ein Speichern fehl (z.B. ohne Internet), zeigt die App jetzt eine klare Fehlermeldung statt fälschlich „Gespeichert“",
+            "Vom Schüler selbst gespeicherte Daten (eigene PIN, Theorie-Fortschritt, begleitete Fahrten, Profilbild) werden beim Speichern durch den Fahrlehrer nicht mehr überschrieben. Die Schülerliste lädt außerdem automatisch nach, wenn die App wieder in den Vordergrund kommt - Änderungen von Kollegen an geteilten Schülern erscheinen ohne Neuanmeldung",
+            "Rechnungen: Nummer und Rechnung entstehen jetzt in einem Schritt - eine Nummer kann nicht mehr verloren gehen, wenn das Speichern fehlschlägt (lückenlose Folge nach §14 UStG). Neu: Rechnungen lassen sich stornieren - die Stornorechnung bekommt eine eigene fortlaufende Nummer, die Originalrechnung bleibt erhalten und die Posten werden wieder abrechenbar",
+            "Preisfelder akzeptieren jetzt das deutsche Komma: „55,50“ wird korrekt übernommen statt stumm als 0 € gespeichert - betrifft alle Betrags-Felder (Stundenpreis, Pakete, Posten, Zahlungen, Leistungen, Fahrzeugkosten)",
+            "Steuerberater-Exporte stimmen jetzt mit der Abrechnung überein: Das Fahrtenbuch-CSV rechnet Paketguthaben und „nicht berechnen“ mit ein, und jede Rechnung merkt sich ihren Steuerstatus (§19 UStG) vom Tag der Erstellung - ein späterer Wechsel der Besteuerung ändert Altrechnungen nicht mehr rückwirkend",
+            "Admin-Bereich repariert: Fahrlehrer und Schülerzahlen anderer Fahrschulen werden wieder angezeigt (sie waren durch die neuen Zugriffsrechte unsichtbar geworden)",
+            "Beim Anlegen eines Schülers wird die Führerscheinklasse aus dem gescannten Dokument bzw. dem Text erkannt statt fast immer „A“ vorzuschlagen",
+        ] },
     { v: "1.99.0", date: "August 2026", changes: [
             "Neu: Erinnerung an die Fahrstunden von morgen. Stehen welche an, erscheint auf der Startseite eine Karte mit der Liste - nach Uhrzeit sortiert, ein Tipp je Schüler öffnet WhatsApp mit fertigem Text",
             "Wer angeschrieben wurde, wird gemerkt und nicht doppelt gefragt. Sind alle durch, verschwindet die Karte von selbst. Versehentlich abgehakt? Ein Knopf setzt den Merker zurück",
@@ -2265,6 +2288,16 @@ const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
     auth: { persistSession: true, autoRefreshToken: true, storageKey: "v3-auth" }
 });
+// Authorization-Header der aktuellen Sitzung, für Aufrufe an geschützte Netlify-Funktionen
+// (KI-Helfer, Admin-Funktionen) - die dürfen nicht ohne Anmeldung aufrufbar sein, sonst
+// könnte jeder im Internet auf Kosten des Fahrschul-Kontos Anfragen schicken.
+async function authHeader() {
+    const { data: sess } = await sb.auth.getSession();
+    const token = sess && sess.session && sess.session.access_token;
+    if (!token)
+        throw new Error("Nicht angemeldet");
+    return { Authorization: "Bearer " + token };
+}
 // Local mirror (per user) for instant load + offline safety
 function cacheKey(uid) { return "v3_cache_" + uid; }
 function loadCache(uid) { try {
@@ -2332,11 +2365,17 @@ async function dbInsert(uid, s) {
     }
     return { ...rowToStudent(data), _isMine: true };
 }
+// Schreibt über die RPC students_teacher_update statt direkt per .update({data:...}) - die RPC
+// bewahrt serverseitig die schülereigenen Felder (PIN, Theorie-Fortschritt, begleitete Fahrten
+// usw.), die der Fahrlehrer-Client nie im lokalen Stand hat, weil die Schülerliste nur einmal
+// beim Anmelden geladen wird. Ein reines .update() würde diese sonst mit dem veralteten
+// lokalen Stand überschreiben, sobald der Fahrlehrer irgendetwas an diesem Schüler speichert.
 async function dbUpdate(s) {
-    const { error } = await sb.from("students")
-        .update({ data: cleanData(s), updated_at: new Date().toISOString() }).eq("id", s.id);
-    if (error)
+    const { error } = await sb.rpc("students_teacher_update", { p_id: s.id, p_data: cleanData(s) });
+    if (error) {
         console.error(error);
+        throw new Error(error.message || "Speichern fehlgeschlagen");
+    }
 }
 async function dbDelete(id) {
     const { error } = await sb.from("students").delete().eq("id", id);
@@ -2350,17 +2389,21 @@ async function dbDelete(id) {
 }
 async function dbShare(id, shared) {
     const { error } = await sb.from("students").update({ shared_with: shared }).eq("id", id);
-    if (error)
+    if (error) {
         console.error(error);
+        throw new Error(error.message || "Freigabe fehlgeschlagen");
+    }
 }
-// Resolve an email to a user id via profiles table
+// Resolve an email to a user id, über eine schmale RPC statt direktem Tabellenzugriff -
+// profiles ist seit der Rechte-Einschränkung nur noch für die eigene Fahrschule lesbar,
+// aber zum Einladen/Teilen muss man auch Nutzer anderer Fahrschulen per E-Mail finden können.
 async function findUserByEmail(email) {
-    const { data, error } = await sb.from("profiles").select("id,email").eq("email", email.toLowerCase().trim()).maybeSingle();
+    const { data, error } = await sb.rpc("profile_id_by_email", { p_email: email.toLowerCase().trim() });
     if (error) {
         console.error(error);
         return null;
     }
-    return data;
+    return (data && data[0]) || null;
 }
 // Vorlage laden (oder Default), und bei Bedarf erstmalig anlegen
 // Wandelt eine templates-Zeile in { byKlasse:{...} } um. Erkennt automatisch das alte Format
@@ -2446,8 +2489,10 @@ async function saveTemplate(uid, tpl) {
     });
     const { error } = await sb.from("templates")
         .upsert({ owner: uid, adk, strecken, adk_titel: adkTitel, strecken_titel: streckenTitel, updated_at: new Date().toISOString() });
-    if (error)
+    if (error) {
         console.error(error);
+        throw new Error(error.message || "Speichern fehlgeschlagen");
+    }
 }
 /* ════════ Streckenvorlagen für Städte (Vorschlag → Admin-Prüfung → Übernahme) ════════ */
 // Ein Fahrschul-Admin schlägt eine Streckenvorlage für seine Stadt vor.
@@ -2652,19 +2697,27 @@ async function regenerateInviteCode(schoolId) {
 }
 async function fetchMySchool(uid) {
     // profile -> school_id -> school
-    const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
-    if (pe) {
-        console.error(pe);
+    // Direkt nach der Registrierung setzt signUp() schon die Session (uid), aber assignSchool()
+    // in Auth() schreibt profiles.school_id erst danach - ohne Retry würde hier "keine Fahrschule"
+    // ankommen und der spätere Speicher-Versuch würde mit id=undefined gegen Postgres laufen.
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
+        if (pe) {
+            console.error(pe);
+        }
+        const sid = prof && prof.school_id;
+        if (sid) {
+            const { data, error } = await sb.from("schools").select("*").eq("id", sid).maybeSingle();
+            if (error) {
+                console.error(error);
+                return null;
+            }
+            return data;
+        }
+        if (attempt < 4)
+            await new Promise(r => setTimeout(r, 500));
     }
-    const sid = prof && prof.school_id;
-    if (!sid)
-        return null;
-    const { data, error } = await sb.from("schools").select("*").eq("id", sid).maybeSingle();
-    if (error) {
-        console.error(error);
-        return null;
-    }
-    return data;
+    return null;
 }
 // Liest, ob der aktuelle Fahrlehrer Fahrschul-Admin ist
 async function fetchMyRights(uid) {
@@ -2976,20 +3029,20 @@ async function assignSchool(uid, schoolId, email, makeAdmin) {
     }
 }
 async function saveSchool(school) {
+    if (!school || !school.id) {
+        // Noch keine echte Fahrschule geladen (z.B. Race kurz nach der Registrierung) - nichts
+        // zu speichern statt mit id=undefined gegen Postgres zu laufen.
+        console.warn("saveSchool: fehlende school.id, Speichern übersprungen");
+        return;
+    }
     const payload = { name: school.name, subtitle: school.subtitle, color: school.color, logo: school.logo || "",
         price_hour: (school.price_hour === "" || school.price_hour == null) ? null : Number(school.price_hour),
         packages: school.packages || [], vehicles: school.vehicles || [], klassen: school.klassen || [], arten: school.arten || [],
         locations: school.locations || [], invoice_settings: school.invoice_settings || {} };
-    let { error } = await sb.from("schools").update(payload).eq("id", school.id);
+    const { error } = await sb.from("schools").update(payload).eq("id", school.id);
     if (error) {
-        // Spalte invoice_settings evtl. noch nicht angelegt (SQL-Schritt fehlt) – ohne sie erneut versuchen,
-        // damit die übrigen, bereits bestehenden Einstellungen trotzdem gespeichert werden.
-        const { invoice_settings, ...withoutInvoiceSettings } = payload;
-        const retry = await sb.from("schools").update(withoutInvoiceSettings).eq("id", school.id);
-        if (retry.error)
-            console.error(retry.error);
-        else
-            console.warn("invoice_settings konnte nicht gespeichert werden – Spalte fehlt vermutlich noch in der Tabelle 'schools'.");
+        console.error(error);
+        throw new Error(error.message || "Speichern fehlgeschlagen");
     }
 }
 /* ════════ Admin (nur für Fabian) ════════ */
@@ -3005,24 +3058,21 @@ function isAdmin(session) {
         return true;
     return false;
 }
-// Alle Fahrschulen + Anzahl Fahrlehrer/Schüler laden (nur Admin darf das per DB-Regel)
+// Alle Fahrschulen + Anzahl Fahrlehrer/Schüler laden. Die Zahlen kommen über eine
+// SECURITY-DEFINER-RPC, die selbst prüft, dass nur der zentrale App-Admin sie aufrufen darf -
+// vorher stützte sich das auf einen offenen profiles-Lesezugriff, der auch für alle anderen
+// Nutzer offenstand (siehe my_school_id()-Rechte-Einschränkung).
 async function adminFetchSchools() {
     const { data: schools, error } = await sb.from("schools").select("*").order("created_at", { ascending: true });
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
-    // Fahrlehrer pro Fahrschule
-    const { data: profs } = await sb.from("profiles").select("id,school_id");
-    // Schüler pro owner -> wir brauchen owner->school. profiles liefert id(=owner)->school_id
-    const ownerSchool = {};
-    (profs || []).forEach(p => { ownerSchool[p.id] = p.school_id; });
-    const { data: studs } = await sb.from("students").select("owner");
+    const { data: stats, error: statsError } = await sb.rpc("admin_school_stats");
+    if (statsError)
+        console.error(statsError);
     const teacherCount = {}, studentCount = {};
-    (profs || []).forEach(p => { if (p.school_id)
-        teacherCount[p.school_id] = (teacherCount[p.school_id] || 0) + 1; });
-    (studs || []).forEach(s => { const sid = ownerSchool[s.owner]; if (sid)
-        studentCount[sid] = (studentCount[sid] || 0) + 1; });
+    (stats || []).forEach(row => { teacherCount[row.school_id] = row.teachers; studentCount[row.school_id] = row.students; });
     return (schools || []).map(sc => ({ ...sc, teachers: teacherCount[sc.id] || 0, students: studentCount[sc.id] || 0 }));
 }
 async function adminSaveSchool(sc) {
@@ -3116,6 +3166,37 @@ async function nextDocumentNumber(schoolId, kind) {
     }
     return data;
 }
+// Zieht die Rechnungsnummer UND schreibt die Rechnung in einer einzigen DB-Transaktion (RPC
+// create_invoice) statt in zwei getrennten Schritten. Vorher konnte das Speichern des Schülers
+// nach dem Ziehen der Nummer fehlschlagen (z.B. Netzwerkfehler) - die Nummer war dann trotzdem
+// verbraucht, aber keine Rechnung existierte dafür: eine Lücke in der nach §14 UStG
+// vorgeschriebenen lückenlosen Nummernfolge. Schlägt jetzt einer der beiden Schritte fehl, wird
+// die ganze Transaktion zurückgerollt und die Nummer bleibt unverbraucht.
+async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIdx, note) {
+    const { data, error } = await sb.rpc("create_invoice", {
+        p_student_id: studentId, p_school_id: schoolId, p_items: items,
+        p_lesson_ids: lessonIds, p_cost_idx: costIdx, p_note: note || "",
+    });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Rechnung konnte nicht erstellt werden");
+    }
+    return data;
+}
+// Storniert eine bereits erstellte Rechnung: die ursprüngliche Rechnung bleibt unverändert im
+// Bestand (Belegpflicht), bekommt aber einen Verweis auf die neue Stornorechnung, die selbst eine
+// echte fortlaufende Nummer aus derselben Zählfolge erhält (§14 UStG) und die Beträge negiert.
+// Die dadurch als abgerechnet markierten Fahrstunden/Posten werden wieder als offen markiert.
+async function dbCancelInvoice(studentId, schoolId, invoiceId, reason) {
+    const { data, error } = await sb.rpc("cancel_invoice", {
+        p_student_id: studentId, p_school_id: schoolId, p_invoice_id: invoiceId, p_reason: reason || "",
+    });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Rechnung konnte nicht storniert werden");
+    }
+    return data;
+}
 // Prüfungsversuche aller Schüler einer Fahrschule laden (für den Quotenpilot). Liefert bewusst
 // nur Klasse, Fahrlehrer-E-Mail und die Versuche selbst - keine Namen, siehe RPC-Kommentar.
 async function fetchSchoolExamStats(schoolId) {
@@ -3136,26 +3217,20 @@ async function fetchSchoolOffenePosten(schoolId) {
     }
     return data || [];
 }
-// Fahrlehrer einer Fahrschule laden (E-Mail aus Auth, Schülerzahl aus students)
+// Fahrlehrer einer Fahrschule laden (inkl. Schülerzahl je Fahrlehrer). Läuft über die RPC
+// admin_school_teachers statt direktem profiles-Read: seit der Rechte-Einschränkung liefert
+// profiles für fremde Fahrschulen eine leere Liste - im Admin-Bereich sahen andere Fahrschulen
+// dadurch aus, als hätten sie keine Fahrlehrer mehr. Die RPC prüft selbst, dass nur der
+// zentrale App-Admin (jede Fahrschule) oder Mitglieder der Fahrschule sie aufrufen dürfen,
+// und zählt die Schüler serverseitig - damit stimmt die Zahl auch für Kollegen, deren
+// Schüler man selbst per RLS nicht lesen darf.
 async function adminFetchTeachers(schoolId) {
-    let profs, error;
-    ({ data: profs, error } = await sb.from("profiles").select("id,email,display_name,school_id,school_admin,app_moderator,last_seen").eq("school_id", schoolId));
-    if (error) {
-        // Spalte app_moderator evtl. noch nicht angelegt (SQL-Schritt fehlt) – ohne sie erneut versuchen
-        ({ data: profs, error } = await sb.from("profiles").select("id,email,display_name,school_id,school_admin,last_seen").eq("school_id", schoolId));
-    }
+    const { data, error } = await sb.rpc("admin_school_teachers", { p_school_id: schoolId });
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
-    const ids = (profs || []).map(p => p.id);
-    // Schülerzahl je Fahrlehrer
-    const counts = {};
-    if (ids.length) {
-        const { data: studs } = await sb.from("students").select("owner").in("owner", ids);
-        (studs || []).forEach(s => { counts[s.owner] = (counts[s.owner] || 0) + 1; });
-    }
-    return (profs || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", display_name: p.display_name || "", students: counts[p.id] || 0, school_admin: !!p.school_admin, app_moderator: !!p.app_moderator, last_seen: p.last_seen || null }));
+    return (data || []).map(p => ({ id: p.id, email: p.email || "(keine E-Mail)", display_name: p.display_name || "", students: Number(p.students) || 0, school_admin: !!p.school_admin, app_moderator: !!p.app_moderator, last_seen: p.last_seen || null }));
 }
 // Fahrschul-Admin-Recht setzen oder entziehen
 async function adminSetTeacherAdmin(uid, value) {
@@ -3391,9 +3466,12 @@ async function publicProposeAppointment(code, p_start, p_end, p_name, p_note) {
     }
     return data;
 }
-// Eigene Termine eines Fahrschülers anhand seines Namens (datenschutzfreundlich, nur eigene)
-async function publicMySlots(code, name, von, bis) {
-    const { data, error } = await sb.rpc("public_my_slots", { code, p_name: name, von, bis });
+// Eigene Termine eines Fahrschülers anhand seines Namens (datenschutzfreundlich, nur eigene).
+// Ohne PIN werden nur noch eigene offene Vorschläge erkannt (student_id ist dabei noch nicht
+// gesetzt) - bereits bestätigte Termine eines echten Schülerkontos zeigt der Server nur, wenn
+// der korrekte PIN mitgeschickt wird.
+async function publicMySlots(code, name, von, bis, pin) {
+    const { data, error } = await sb.rpc("public_my_slots", { code, p_name: name, von, bis, p_pin: pin || null });
     if (error) {
         console.error(error);
         return [];
@@ -3764,6 +3842,13 @@ function countStunden(s) {
 function eurFmt(n) {
     const v = Math.round((Number(n) || 0) * 100) / 100;
     return v.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " €";
+}
+// Preis-/Betragsfelder sind type="text" statt type="number", weil ein natives number-Feld ein
+// deutsches Dezimalkomma ("55,50") komplett ablehnt - der Browser liefert dann einen leeren
+// value, und Number()/parseFloat() machen daraus stumm 0, obwohl überall sonst (eurFmt) mit
+// Komma angezeigt wird. Beim Tippen daher sofort Komma zu Punkt normalisieren.
+function normDecimal(v) {
+    return String(v).replace(",", ".");
 }
 // UE-Logik: 1 UE = 45 Minuten. Gefahrene Fahrstunden mit Dauer ergeben die UE.
 function lessonMinutes(s) {
@@ -5844,6 +5929,10 @@ function App() {
     const [saved, setSaved] = useState(true);
     const [syncing, setSyncing] = useState(false);
     const saveTimers = useRef({});
+    // IDs von Schülern mit gerade laufendem (angestoßenem, aber noch nicht abgeschlossenem)
+    // Speichervorgang - verhindert, dass ein Hintergrund-Neuladen der Schülerliste eine eigene,
+    // noch nicht bestätigte Änderung durch den älteren Serverstand ersetzt.
+    const studentWritesRef = useRef(new Set());
     // Auth bootstrap + listener
     useEffect(() => {
         sb.auth.getSession().then(({ data }) => setSession(data.session || null));
@@ -6210,7 +6299,7 @@ function App() {
                                 merged.packages = oldPkg;
                             setSchool(merged);
                             saveSchoolCache(uid, merged);
-                            saveSchool(merged);
+                            saveSchool(merged).catch(() => { });
                         }
                         localStorage.removeItem("v3_price_hour");
                         localStorage.removeItem("v3_packages");
@@ -6285,6 +6374,40 @@ function App() {
             window.removeEventListener("focus", refresh);
         };
     }, [uid]);
+    // Wenn die App wieder in den Vordergrund kommt: Schülerliste neu laden. Die Liste wird sonst
+    // nur einmal beim Anmelden geladen - Änderungen eines Kollegen an einem geteilten Schüler oder
+    // vom Schüler selbst gespeicherte Werte (Theorie-Fortschritt, eigene PIN, begleitete Fahrten)
+    // wären sonst erst nach einem erneuten Login sichtbar, und ein eigener Speichervorgang in der
+    // Zwischenzeit würde sie mit dem veralteten lokalen Stand überschreiben (index.html:2358 bzw.
+    // die RPC students_teacher_update federt das zusätzlich serverseitig ab).
+    useEffect(() => {
+        if (!uid)
+            return;
+        function refresh() {
+            if (document.visibilityState !== "visible")
+                return;
+            fetchStudents(uid).then(list => {
+                const busy = studentWritesRef.current;
+                setStudents(prev => {
+                    const byId = new Map((list || []).map(s => [s.id, s]));
+                    // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
+                    // alle anderen auf den frisch geladenen Serverstand bringen.
+                    const merged = (prev || []).map(s => (busy.has(s.id) || !byId.has(s.id)) ? s : byId.get(s.id));
+                    const knownIds = new Set(merged.map(s => s.id));
+                    const added = (list || []).filter(s => !knownIds.has(s.id));
+                    const arr = [...merged, ...added];
+                    saveCache(uid, arr);
+                    return arr;
+                });
+            }).catch(() => { });
+        }
+        document.addEventListener("visibilitychange", refresh);
+        window.addEventListener("focus", refresh);
+        return () => {
+            document.removeEventListener("visibilitychange", refresh);
+            window.removeEventListener("focus", refresh);
+        };
+    }, [uid]);
     // Vergangene, einem Schüler zugeordnete, noch nicht erfasste Termine finden
     function pendingPastLessons() {
         if (!students || !appts)
@@ -6339,7 +6462,15 @@ function App() {
         setSaved(false);
         if (schoolTimer.current)
             clearTimeout(schoolTimer.current);
-        schoolTimer.current = setTimeout(async () => { await saveSchool(next); setSaved(true); }, 500);
+        schoolTimer.current = setTimeout(async () => {
+            try {
+                await saveSchool(next);
+                setSaved(true);
+            }
+            catch (e) {
+                showToast("Einstellungen konnten nicht gespeichert werden:\n" + e.message);
+            }
+        }, 500);
     }, [uid]);
     // Save template (debounced)
     const tplTimer = useRef(null);
@@ -6350,7 +6481,15 @@ function App() {
         setSaved(false);
         if (tplTimer.current)
             clearTimeout(tplTimer.current);
-        tplTimer.current = setTimeout(async () => { await saveTemplate(uid, next); setSaved(true); }, 500);
+        tplTimer.current = setTimeout(async () => {
+            try {
+                await saveTemplate(uid, next);
+                setSaved(true);
+            }
+            catch (e) {
+                showToast("Vorlage konnte nicht gespeichert werden:\n" + e.message);
+            }
+        }, 500);
     }, [uid]);
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
     // gespeicherte ADK, wird die Standard-ADK angezeigt (V3 die gewohnte Karte, sonst BVF),
@@ -6545,9 +6684,18 @@ function App() {
         const t = saveTimers.current;
         if (t[stu.id])
             clearTimeout(t[stu.id]);
+        studentWritesRef.current.add(stu.id);
         t[stu.id] = setTimeout(async () => {
-            await dbUpdate(stu);
-            setSaved(true);
+            try {
+                await dbUpdate(stu);
+                setSaved(true);
+            }
+            catch (e) {
+                showToast("Änderungen konnten nicht gespeichert werden:\n" + e.message);
+            }
+            finally {
+                studentWritesRef.current.delete(stu.id);
+            }
         }, 500);
     }, []);
     // Update one student in state + cache + cloud
@@ -6615,6 +6763,9 @@ function App() {
             showToast("Schüler nicht gefunden.");
             return;
         }
+        // Termin-Fenster schließen, sonst liegt das Leistungsformular darunter und ist
+        // weder sichtbar noch bedienbar (fehlte bisher komplett).
+        setApptForm(null);
         const startISO = f.start ? combineDT(f.date, f.start) : null;
         const endISO = f.end ? combineDT(f.date, f.end) : null;
         const minutes = Math.max(0, (startISO && endISO) ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
@@ -6624,7 +6775,8 @@ function App() {
             studentId: f.student_id,
             art: f.art || "ÜST",
             vehicleId: (vehicles[0] && vehicles[0].id) || "",
-            klasse: (school && school.subtitle && klassen.find(k => (school.subtitle || "").toUpperCase().includes(k))) || klassen[0] || "B",
+            // Klasse kommt vom Schüler selbst, nicht geraten - der Schüler ist hier bereits bekannt.
+            klasse: stu.klasse || DEFAULT_KLASSE,
             stufe: LEISTUNGSSTUFEN[0],
             date: f.date,
             von: f.start || "",
@@ -6841,6 +6993,10 @@ function App() {
     // isAdmin (zentraler App-Admin) ist von der Sperrung immer ausgenommen, damit er sich selbst
     // niemals aussperren kann.
     const TRIAL_DAYS = 7;
+    // Ein Monatsabo bleibt nur für rund einen Monat ab der letzten Zahlung freigeschaltet -
+    // vorher zählte "schon mindestens einmal bezahlt" für immer, damit hätte eine einzige
+    // Zahlung dauerhaft freigeschaltet.
+    const SUBSCRIPTION_VALID_DAYS = 31;
     function subscriptionGateStatus() {
         if (isAdmin(session))
             return "ok";
@@ -6848,8 +7004,13 @@ function App() {
             return "loading";
         if (!mySubscription.subscription_active)
             return "ok";
-        if (mySubscription.subscription_last_paid)
-            return "ok"; // schon mindestens einmal bezahlt
+        if (mySubscription.subscription_last_paid) {
+            const paidAt = new Date(mySubscription.subscription_last_paid).getTime();
+            const daysSincePaid = Math.floor((Date.now() - paidAt) / 86400000);
+            if (daysSincePaid <= SUBSCRIPTION_VALID_DAYS)
+                return "ok";
+            return "locked"; // Zahlung liegt zu lange zurück, Probezeit ist damit auch verbraucht
+        }
         if (!mySubscription.subscription_accepted_at)
             return "not_accepted";
         const acceptedAt = new Date(mySubscription.subscription_accepted_at).getTime();
@@ -6894,7 +7055,7 @@ function App() {
     };
     // Add a new student (cloud insert, optimistic)
     async function addStudent() {
-        const guessedKlasse = (school && school.subtitle && klassen.find(k => (school.subtitle || "").toUpperCase().includes(k))) || klassen[0] || DEFAULT_KLASSE;
+        const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         const draft = { ...newStudent(), klasse: guessedKlasse, location_id: myLocationId || "" };
         const created = await dbInsert(uid, draft);
         if (!created) {
@@ -6979,7 +7140,7 @@ function App() {
             }
             const resp = await fetch("/.netlify/functions/extract-student", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images }),
             });
             const out = await resp.json();
@@ -7008,7 +7169,7 @@ function App() {
             const today = ymd(new Date());
             const resp = await fetch("/.netlify/functions/extract-calendar", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images, today, students: roster }),
             });
             const out = await resp.json();
@@ -7095,7 +7256,7 @@ function App() {
             ];
             const resp = await fetch("/.netlify/functions/extract-adk", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images, sections }),
             });
             const out = await resp.json();
@@ -7162,7 +7323,10 @@ function App() {
         const deToIso = (s) => { const m = (s || "").match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : ""; };
         const draft = newStudent();
         draft.location_id = myLocationId || "";
-        draft.klasse = (school && school.subtitle && klassen.find(k => (school.subtitle || "").toUpperCase().includes(k))) || klassen[0] || DEFAULT_KLASSE;
+        // Erkannte Klasse aus dem gescannten Antrag hat Vorrang vor der geratenen Klasse aus
+        // dem Fahrschul-Untertitel (vorher wurde die erkannte Klasse nur als Text in die
+        // Bemerkungen geschrieben, aber nie tatsächlich gesetzt).
+        draft.klasse = guessKlasseFromText(d.klasse, klassen) || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         draft.vorname = d.vorname || "";
         draft.name = d.name || "";
         draft.geb = deToIso(d.geburtstag);
@@ -7273,7 +7437,7 @@ function App() {
             });
             const resp = await fetch("/.netlify/functions/assistant", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ message: text, students: roster, today, adk: adkCatalog, strecken: streckenCatalog, currency: "EUR" }),
             });
             const out = await resp.json();
@@ -7800,7 +7964,6 @@ function App() {
         }
         catch (e) {
             showToast("Termin konnte nicht gespeichert werden:\n" + e.message);
-            setSaved(true);
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -7939,7 +8102,6 @@ function App() {
         }
         catch (e) {
             showToast("Änderung fehlgeschlagen:\n" + e.message);
-            setSaved(true);
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -7963,7 +8125,6 @@ function App() {
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Löschen fehlgeschlagen:\n" + e.message);
-            setSaved(true);
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -9469,9 +9630,11 @@ function App() {
         setInvoiceDraft(d => { if (!d)
             return d; const sel = d.selected.indexOf(key) >= 0 ? d.selected.filter(k => k !== key) : [...d.selected, key]; return { ...d, selected: sel }; });
     }
-    // Vergibt die Rechnungsnummer atomar über die Datenbank (next_document_number-RPC), damit sie
-    // schulweit über alle Fahrlehrer hinweg fortlaufend und lückenlos bleibt (§14 UStG) statt nur
-    // unter den für diesen Fahrlehrer sichtbaren Schülern eindeutig zu sein.
+    // Zieht die Rechnungsnummer UND speichert die Rechnung atomar in einer Transaktion (RPC
+    // create_invoice, index.html:3153) statt in zwei getrennten Netzwerk-Aufrufen. Vorher konnte
+    // das Speichern des Schülers nach dem Ziehen der Nummer fehlschlagen - die Nummer war dann
+    // trotzdem verbraucht, aber keine Rechnung existierte dafür: eine Lücke in der nach §14 UStG
+    // vorgeschriebenen lückenlosen Nummernfolge.
     async function confirmInvoice() {
         const d = invoiceDraft;
         if (!d || !active || !school)
@@ -9482,31 +9645,60 @@ function App() {
             return;
         }
         setInvoiceDraft(prev => prev && ({ ...prev, busy: true }));
-        let number;
+        const chosenLessonIds = [];
+        chosen.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => chosenLessonIds.push(id)));
+        const chosenCostIdx = chosen.filter(r => r.kind === "cost").map(r => r.idx);
+        const items = chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" }));
+        let inv;
         try {
-            number = await nextDocumentNumber(school.id, "invoice");
+            inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIdx, d.note || "");
         }
         catch (e) {
             setInvoiceDraft(prev => prev && ({ ...prev, busy: false }));
             showToast("Rechnung konnte nicht erstellt werden:\n" + e.message);
             return;
         }
-        const total = Math.round(chosen.reduce((s, r) => s + r.amount, 0) * 100) / 100;
-        const inv = { id: uniqueId("inv"), number, date: ymd(new Date()),
-            items: chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" })), total, note: d.note || "" };
-        const chosenLessonIds = [];
-        chosen.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => chosenLessonIds.push(id)));
-        const chosenCostIdx = chosen.filter(r => r.kind === "cost").map(r => r.idx);
-        const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: number } : l);
-        const costItems = (active.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: number } : it);
+        // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
+        // nur noch den lokalen Stand nachziehen, ohne einen weiteren Speichervorgang anzustoßen.
+        const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number } : l);
+        const costItems = (active.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: inv.number } : it);
         const invoices = [...(active.invoices || []), inv];
-        updateActive({ drivenLessons, costItems, invoices });
+        setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
         setInvoiceDraft(null);
         setInvoicePreview(inv);
         doPrint("invoice");
     }
     function viewInvoice(inv) {
         setInvoicePreview(inv);
+        doPrint("invoice");
+    }
+    // Storniert eine Rechnung (Stornorechnung mit eigener Nummer, siehe cancel_invoice-RPC) statt
+    // sie zu löschen oder zu bearbeiten - eine einmal vergebene Rechnungsnummer darf nach §14 UStG
+    // nicht verschwinden oder sich rückwirkend ändern.
+    async function cancelInvoice(inv) {
+        if (!active || !school || !inv || inv.cancelledBy || inv.stornoOf)
+            return;
+        const reason = await askPrompt({
+            title: "Rechnung " + inv.number + " stornieren?",
+            message: "Es wird eine Stornorechnung mit eigener Nummer erstellt. Die ursprüngliche Rechnung bleibt erhalten und wird als storniert markiert.",
+            placeholder: "Grund (optional)",
+            confirmLabel: "Stornieren",
+        });
+        if (reason === null)
+            return;
+        let storno;
+        try {
+            storno = await dbCancelInvoice(active.id, school.id, inv.id, reason);
+        }
+        catch (e) {
+            showToast("Stornierung fehlgeschlagen:\n" + e.message);
+            return;
+        }
+        const drivenLessons = (active.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, ...rest } = l; return rest; })() : l);
+        const costItems = (active.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
+        const invoices = (active.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
+        setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
+        setInvoicePreview(storno);
         doPrint("invoice");
     }
     // ── Zahlungsbeleg / Quittung ──
@@ -9771,11 +9963,16 @@ function App() {
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Rechnungen"),
             invoices.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 10 } }, "Noch keine Rechnung erstellt.")
-                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 10 } }, invoices.slice().reverse().map(inv => React.createElement("button", { key: inv.id, onClick: () => viewInvoice(inv), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
-                    React.createElement("div", { style: { flex: 1 } },
-                        React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, inv.number),
-                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "")),
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(inv.total))))),
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 10 } }, invoices.slice().reverse().map(inv => React.createElement("div", { key: inv.id, style: { display: "flex", alignItems: "center", gap: 4, borderBottom: "1px solid var(--line)" } },
+                    React.createElement("button", { onClick: () => viewInvoice(inv), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } },
+                                inv.number,
+                                inv.stornoOf && React.createElement("span", { style: { fontWeight: 500, color: "var(--muted)" } }, " · Storno zu " + inv.stornoOf),
+                                inv.cancelledBy && React.createElement("span", { style: { fontWeight: 500, color: "#B3362A" } }, " · storniert")),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "")),
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(inv.total))),
+                    !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); cancelInvoice(inv); }, "aria-label": "Rechnung stornieren", title: "Rechnung stornieren", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", fontSize: 12, flexShrink: 0 } }, "Stornieren")))),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Ausbildungsvertrag"),
             contracts.length === 0
@@ -10208,7 +10405,7 @@ function App() {
                                                 React.createElement("input", { type: "date", value: vehicleCostForm.date, onChange: e => setVehicleCostForm({ ...vehicleCostForm, date: e.target.value }) })),
                                             React.createElement("div", { className: "field", style: { flex: 1 } },
                                                 React.createElement("label", null, "Betrag (€)"),
-                                                React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", value: vehicleCostForm.amount, onChange: e => setVehicleCostForm({ ...vehicleCostForm, amount: e.target.value }) }))),
+                                                React.createElement("input", { type: "text", inputMode: "decimal", value: vehicleCostForm.amount, onChange: e => setVehicleCostForm({ ...vehicleCostForm, amount: normDecimal(e.target.value) }) }))),
                                         React.createElement("div", { className: "field" },
                                             React.createElement("label", null, "Kategorie"),
                                             React.createElement("select", { value: vehicleCostForm.category, onChange: e => setVehicleCostForm({ ...vehicleCostForm, category: e.target.value }) },
@@ -10413,7 +10610,7 @@ function App() {
                         React.createElement("label", null, "PIN (4 bis 8 Ziffern)"),
                         React.createElement("input", { type: "text", inputMode: "numeric", maxLength: 8, value: isPinHash(active.pin) ? "" : (active.pin || ""), placeholder: isPinHash(active.pin) ? "PIN gesetzt \u00B7 nicht mehr einsehbar" : "z.B. 2468", onChange: e => updateActive({ pin: e.target.value.replace(/\D/g, "").slice(0, 8), pinCustom: "", pinChanged: false }), style: { letterSpacing: "0.2em", fontFamily: "var(--font-d)", fontWeight: 700 } })),
                     React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, onClick: () => updateActive({ pin: String(Math.floor(1000 + Math.random() * 9000)), pinCustom: "", pinChanged: false }) }, "Zuf\u00E4lligen PIN erzeugen"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, onClick: () => updateActive({ pin: String(Math.floor(100000 + Math.random() * 900000)), pinCustom: "", pinChanged: false }) }, "Zuf\u00E4lligen PIN erzeugen"),
                         React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: !(active.pin && active.pin.length >= 4 && !isPinHash(active.pin)), onClick: () => shareStudentAccess(active) }, "Fahrsch\u00FClerbereich teilen")),
                     !active.pin &&
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8 } }, "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben."),
@@ -10513,14 +10710,26 @@ function App() {
                 return;
             }
             const next = [...shared, prof.id];
-            await dbShare(active.id, next);
+            try {
+                await dbShare(active.id, next);
+            }
+            catch (err) {
+                setMsg("Freigabe fehlgeschlagen: " + err.message);
+                return;
+            }
             writeStudent({ ...active, _shared: next });
             setEmail("");
             setMsg("Freigegeben für " + e);
         }
         async function removeShare(uidToRemove) {
             const next = shared.filter(x => x !== uidToRemove);
-            await dbShare(active.id, next);
+            try {
+                await dbShare(active.id, next);
+            }
+            catch (err) {
+                setMsg("Entfernen fehlgeschlagen: " + err.message);
+                return;
+            }
             writeStudent({ ...active, _shared: next });
         }
         return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
@@ -10543,8 +10752,10 @@ function App() {
         const [email, setEmail] = useState("…");
         useEffect(() => {
             let on = true;
-            sb.from("profiles").select("email").eq("id", id).maybeSingle().then(({ data }) => { if (on && data)
-                setEmail(data.email); });
+            // Über eine schmale RPC statt direktem Tabellenzugriff - die geteilte Person kann
+            // einer anderen Fahrschule angehören, profiles ist dafür nicht mehr offen lesbar.
+            sb.rpc("profile_email_by_id", { p_id: id }).then(({ data }) => { if (on && data)
+                setEmail(data); });
             return () => { on = false; };
         }, [id]);
         return React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, email);
@@ -12588,13 +12799,13 @@ function App() {
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Preis pro UE (45 Minuten)"),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                            React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: pricePerHour, onChange: e => savePricePerHour(e.target.value), placeholder: "z.B. 55", style: { flex: 1 } }),
+                            React.createElement("input", { type: "text", inputMode: "decimal", value: pricePerHour, onChange: e => savePricePerHour(normDecimal(e.target.value)), placeholder: "z.B. 55", style: { flex: 1 } }),
                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "\u20AC"))),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                            React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: referralReward, onChange: e => saveReferralReward(e.target.value), style: { flex: 1 } }),
+                            React.createElement("input", { type: "text", inputMode: "decimal", value: referralReward, onChange: e => saveReferralReward(normDecimal(e.target.value)), style: { flex: 1 } }),
                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Betrag, den Werber und geworbener Schüler je als Gutschrift bekommen, wenn eine Empfehlung im Schülerprofil oder bei der Selbstanmeldung eingelöst wird."),
                     React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
@@ -12617,11 +12828,11 @@ function App() {
                             React.createElement("div", { className: "field", style: { flex: 1 } },
                                 React.createElement("label", null, "Preis (Festpreis)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                                    React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: packageEdit.amount, onChange: e => setPackageEdit(f => ({ ...f, amount: e.target.value, error: "" })) }),
+                                    React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.amount, onChange: e => setPackageEdit(f => ({ ...f, amount: normDecimal(e.target.value), error: "" })) }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, color: "var(--muted)" } }, "\u20AC"))),
                             React.createElement("div", { className: "field", style: { flex: 1 } },
                                 React.createElement("label", null, "Enthaltene UE"),
-                                React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: e.target.value })), placeholder: "0" }))),
+                                React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: normDecimal(e.target.value) })), placeholder: "0" }))),
                         packageEdit.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 8 } }, packageEdit.error),
                         React.createElement("div", { style: { display: "flex", gap: 8 } },
                             React.createElement("button", { className: "btn btn-primary", onClick: () => {
@@ -12772,7 +12983,15 @@ function App() {
     function exportFahrtenbuch() {
         try {
             const rows = [];
+            const price = Number(pricePerHour) || 0;
             students.filter(s => s._isMine).forEach(s => {
+                // lessonBillables statt der naiven lessonCost verwenden - sonst weicht die
+                // CSV-Summe von der tatsächlichen Rechnungssumme ab, weil Paketguthaben (bereits
+                // bezahlte, im Paket enthaltene UE) ignoriert würde. Als "nicht berechnen"
+                // markierte Fahrstunden zählen ebenfalls mit 0, da die Fahrschule sie bewusst
+                // nicht abrechnet.
+                const billableById = {};
+                lessonBillables(s, price).forEach(b => { billableById[b.lesson.id] = b.amount; });
                 (s.drivenLessons || []).forEach(l => {
                     rows.push({
                         datum: l.date || "",
@@ -12781,8 +13000,8 @@ function App() {
                         klasse: s.klasse || "",
                         minuten: Number(l.minutes) || 0,
                         ue: Math.round(((Number(l.minutes) || 0) / 45) * 100) / 100,
-                        preis: lessonPricePerUE(l, Number(pricePerHour) || 0),
-                        betrag: lessonCost(l, Number(pricePerHour) || 0),
+                        preis: lessonPricePerUE(l, price),
+                        betrag: l.nichtBerechnen ? 0 : (billableById[l.id] || 0),
                     });
                 });
             });
@@ -12815,10 +13034,16 @@ function App() {
     // Alle Rechnungen (über eigene Schüler hinweg) als CSV exportieren, z.B. für den Steuerberater.
     function exportRechnungen() {
         try {
-            const kUnt = !!((school && school.invoice_settings && school.invoice_settings.kleinunternehmer));
+            // Aktueller Stand nur als Rückfallebene für Altrechnungen von vor diesem Fix, die noch
+            // kein eigenes kleinunternehmer-Feld haben - jede neuere Rechnung trägt ihren
+            // Steuerstatus seit der Erstellung selbst mit sich (siehe create_invoice-RPC), damit
+            // ein späterer Wechsel §19 UStG <-> Regelbesteuerung nicht rückwirkend alle
+            // Altrechnungen im Export falsch ausweist.
+            const kUntFallback = !!((school && school.invoice_settings && school.invoice_settings.kleinunternehmer));
             const rows = [];
             students.filter(s => s._isMine).forEach(s => {
                 (s.invoices || []).forEach(inv => {
+                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
                     const total = Number(inv.total) || 0;
                     const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
                     const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -13467,7 +13692,11 @@ function App() {
             return null;
         const iv = (school && school.invoice_settings) || {};
         const firma = iv.firma || (school && school.name) || "Fahrschule";
-        const kUnt = !!iv.kleinunternehmer;
+        // Steuerstatus der RECHNUNG selbst verwenden (seit ihrer Erstellung fest gespeichert),
+        // nicht den heutigen Stand der Fahrschule - sonst würde ein späterer Wechsel §19 UStG <->
+        // Regelbesteuerung alle bereits gestellten Rechnungen rückwirkend falsch ausweisen. Nur
+        // bei Altrechnungen von vor diesem Fix (Feld fehlt) auf den aktuellen Stand zurückfallen.
+        const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!iv.kleinunternehmer;
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -13488,11 +13717,13 @@ function App() {
                             "IBAN: ",
                             iv.iban))),
                 React.createElement("div", { style: { textAlign: "right" } },
-                    React.createElement("div", { style: { fontSize: "16pt", fontWeight: "bold", letterSpacing: ".03em" } }, "RECHNUNG"),
+                    React.createElement("div", { style: { fontSize: "16pt", fontWeight: "bold", letterSpacing: ".03em" } }, inv.stornoOf ? "STORNORECHNUNG" : "RECHNUNG"),
                     React.createElement("div", { className: "ps-inv-num", style: { marginTop: 4, fontSize: "12pt" } }, inv.number),
                     React.createElement("div", { style: { fontSize: "9.5pt", color: "#444", marginTop: 4 } },
                         "Datum: ",
-                        inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : ""))),
+                        inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : ""),
+                    inv.stornoOf && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert Rechnung " + inv.stornoOf),
+                    inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert durch " + inv.cancelledBy))),
             React.createElement("div", { style: { marginBottom: 18 } },
                 React.createElement("div", { style: { fontSize: "9pt", color: "#777", marginBottom: 2 } }, "Rechnungsempf\u00E4nger"),
                 React.createElement("div", { style: { fontWeight: "bold" } }, dispName(active)),
@@ -14181,7 +14412,7 @@ function App() {
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Preis pro UE f\u00FCr diese Stunde"),
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: lessonForm.price, onChange: e => setLessonForm({ ...lessonForm, price: e.target.value }), placeholder: "Standard", style: { flex: 1 } }),
+                        React.createElement("input", { type: "text", inputMode: "decimal", value: lessonForm.price, onChange: e => setLessonForm({ ...lessonForm, price: normDecimal(e.target.value) }), placeholder: "Standard", style: { flex: 1 } }),
                         React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "\u20AC"))),
                 React.createElement("div", { style: { textAlign: "right", fontSize: 13, color: "var(--muted)", marginBottom: 4 } },
                     "Kosten dieser Stunde: ",
@@ -14199,7 +14430,7 @@ function App() {
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Betrag"),
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: itemForm.amount, onChange: e => setItemForm({ ...itemForm, amount: e.target.value, error: "" }), onKeyDown: e => { if (e.key === "Enter")
+                        React.createElement("input", { type: "text", inputMode: "decimal", value: itemForm.amount, onChange: e => setItemForm({ ...itemForm, amount: normDecimal(e.target.value), error: "" }), onKeyDown: e => { if (e.key === "Enter")
                                     saveItemForm(); }, style: { flex: 1 } }),
                         React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                 itemForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginTop: 8 } }, itemForm.error),
@@ -14216,7 +14447,7 @@ function App() {
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Betrag"),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                            React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: paymentForm.amount, onChange: e => setPaymentForm({ ...paymentForm, amount: e.target.value, error: "" }), autoFocus: true, style: { flex: 1 } }),
+                            React.createElement("input", { type: "text", inputMode: "decimal", value: paymentForm.amount, onChange: e => setPaymentForm({ ...paymentForm, amount: normDecimal(e.target.value), error: "" }), autoFocus: true, style: { flex: 1 } }),
                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Datum"),
@@ -14290,7 +14521,7 @@ function App() {
                                 autoPrice != null ? React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, eurFmt(autoPrice)) : React.createElement("span", { style: { color: "var(--muted)" } }, "Kein Preis pro UE hinterlegt"),
                                 React.createElement("span", { style: { color: "var(--muted)" } }, " \u00B7 berechnet aus Preis pro UE \u00D7 Dauer"))
                             : React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                React.createElement("input", { type: "number", inputMode: "decimal", step: "0.01", min: "0", value: leistungForm.price, onChange: e => setLeistungForm({ ...leistungForm, price: e.target.value }), style: { flex: 1 } }),
+                                React.createElement("input", { type: "text", inputMode: "decimal", value: leistungForm.price, onChange: e => setLeistungForm({ ...leistungForm, price: normDecimal(e.target.value) }), style: { flex: 1 } }),
                                 React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "\u20AC"))),
                     React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                         React.createElement("label", null, "Bemerkung (optional)"),
@@ -14401,7 +14632,8 @@ function App() {
                                 const v = (((_a = document.getElementById("ob-vorname")) === null || _a === void 0 ? void 0 : _a.value) || "").trim();
                                 const n = (((_b = document.getElementById("ob-name2")) === null || _b === void 0 ? void 0 : _b.value) || "").trim();
                                 if (v || n) {
-                                    const draft = { ...newStudent(), vorname: v, name: n, location_id: myLocationId || "" };
+                                    const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
+                                    const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: myLocationId || "" };
                                     const created = await dbInsert(uid, draft);
                                     if (created) {
                                         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
@@ -18096,7 +18328,11 @@ function BookingPage({ code, appMode, onLogout }) {
             .catch(() => { if (on) { setBusy([]); setLoadingBusy(false); } });
         return () => { on = false; };
     }, [info, week, code, done]);
-    // Eigene Termine per Name laden (geräteübergreifende Wiedererkennung)
+    // Eigene Termine per Name laden (geräteübergreifende Wiedererkennung). Bereits bestätigte
+    // Termine zeigt der Server nur, wenn zusätzlich der richtige PIN mitkommt - den lesen wir,
+    // falls vorhanden, aus dem PIN-Login von "Mein Fortschritt" (StudentArea) mit, damit echte
+    // Fahrschüler ohne weiteres Zutun ihre bestätigten Termine sehen. Ohne Login (reiner
+    // Namens-Vorschlag) bleiben wie gehabt nur die eigenen noch offenen Anfragen sichtbar.
     React.useEffect(() => {
         if (!info || !myName.trim()) {
             setNameSlots([]);
@@ -18105,11 +18341,13 @@ function BookingPage({ code, appMode, onLogout }) {
         let on = true;
         const von = startOfWeek(week).toISOString();
         const bis = addDays(startOfWeek(week), 7).toISOString();
-        publicMySlots(code, myName.trim(), von, bis)
+        let myPin = "";
+        try { myPin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
+        publicMySlots(code, myName.trim(), von, bis, myPin)
             .then(rows => { if (on) setNameSlots((rows || []).map(r => r.start_at)); })
             .catch(() => { if (on) setNameSlots([]); });
         return () => { on = false; };
-    }, [info, week, code, myName, done]);
+    }, [info, week, code, myName, done, tab]);
     if (info === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (info === null)
