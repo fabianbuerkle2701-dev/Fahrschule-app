@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.96.0";
+const APP_VERSION = "1.97.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.97.0", date: "August 2026", changes: [
+            "Neu in der Abrechnung: „Zahlungen zuordnen“. Umsätze aus dem Online-Banking einfügen - die App sucht in jeder Zeile nach einer Rechnungsnummer und schlägt die passende Zahlung zur Buchung vor, samt Datum aus der Zeile",
+            "Gebucht wird nichts von allein: Jede Zuordnung muss bestätigt werden. Stehen mehrere Beträge in einer Zeile (z.B. Betrag und Kontostand), fragt die App nach, statt zu raten - nur wenn ein Betrag exakt zur offenen Summe oder zur Rechnungssumme passt, wird er vorgeschlagen",
+            "Bereits vollständig bezahlte Rechnungen werden erkannt und lassen sich nicht erneut buchen - denselben Kontoauszug zweimal einzufügen kann also keine Doppelbuchung erzeugen",
+            "Erkannt werden auch von Hand abgetippte Nummern wie „RE 2026 42“ oder „re-2026-7“. Zeilen ohne Rechnungsnummer werden ignoriert, damit keine falschen Zuordnungen entstehen",
+        ] },
     { v: "1.96.0", date: "August 2026", changes: [
             "Neu in der Abrechnung: „Nicht abgerechnet“. Die Kennzahl „Offene Forderungen“ warf bisher zwei völlig verschiedene Dinge in eine Zahl - Geld, das der Schüler schuldet (Rechnung ist raus), und Leistungen, für die noch gar keine Rechnung geschrieben wurde. Jetzt stehen dort zwei Zahlen: „Berechnet, noch offen“ und „Noch nicht berechnet“",
             "Eine eigene Kachel zeigt erbrachte Fahrstunden und Posten ohne Rechnung, aufgeschlüsselt je Schüler und Position, mit direktem Sprung zum Schüler zum Rechnung erstellen. Durch ein Paket gedeckte Stunden erscheinen dort nicht, weil für sie nichts mehr zu berechnen ist",
@@ -3836,6 +3842,52 @@ function offeneLeistungen(s, stdPrice, abDatum) {
 function offeneLeistungenSumme(s, stdPrice, abDatum) {
     return offeneLeistungen(s, stdPrice, abDatum).reduce((sum, p) => sum + p.betrag, 0);
 }
+/* ════════ Kontoauszug einlesen und Zahlungen den Rechnungen zuordnen ════════ */
+// Banken exportieren in sehr unterschiedlichen Formaten (CSV, CAMT, Copy-Paste aus dem
+// Online-Banking). Deshalb wird bewusst KEIN Spaltenlayout erwartet: je Zeile wird nach einer
+// Rechnungsnummer, Beträgen und einem Datum gesucht. Zeilen ohne Rechnungsnummer werden
+// ignoriert - lieber weniger Treffer als falsche Zuordnungen.
+// Auch ungepolsterte Nummern akzeptieren (RE-2026-7): die App selbst vergibt zwar immer vier
+// Stellen, aber im Verwendungszweck tippen Schüler die Nummer oft von Hand ab.
+function findeRechnungsnummer(zeile) {
+    const m = String(zeile).match(/\bRE[\s\-_]?(\d{4})[\s\-_]?(\d{1,5})\b/i);
+    return m ? ("RE-" + m[1] + "-" + m[2].padStart(4, "0")) : null;
+}
+// Alle Geldbeträge einer Zeile. Deutsche Schreibweise (1.234,56) und einfache Punktschreibweise
+// (1234.56) werden erkannt; reine Ganzzahlen bewusst nicht, sonst würde jede Kontonummer mitzählen.
+// Datumsangaben werden vorher entfernt, weil "13.08.2026" sonst als Betrag 13,08 gelesen würde.
+function findeBetraege(zeile) {
+    const ohneDatum = String(zeile).replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, " ");
+    const out = [];
+    const re = /(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})/g;
+    let m;
+    while ((m = re.exec(ohneDatum))) {
+        const roh = m[1];
+        const norm = roh.indexOf(",") >= 0 ? roh.replace(/\./g, "").replace(",", ".") : roh;
+        const v = parseFloat(norm);
+        if (!isNaN(v) && v > 0)
+            out.push(Math.round(v * 100) / 100);
+    }
+    return out;
+}
+function findeDatum(zeile) {
+    const m = String(zeile).match(/\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b/);
+    if (!m)
+        return "";
+    const jahr = m[3].length === 2 ? ("20" + m[3]) : m[3];
+    return jahr + "-" + String(m[2]).padStart(2, "0") + "-" + String(m[1]).padStart(2, "0");
+}
+function parseKontoauszug(text) {
+    const treffer = [];
+    String(text || "").split(/\r?\n/).forEach(zeile => {
+        const nummer = findeRechnungsnummer(zeile);
+        if (!nummer)
+            return;
+        treffer.push({ text: zeile.trim().slice(0, 160), nummer: nummer,
+            betraege: findeBetraege(zeile), datum: findeDatum(zeile) });
+    });
+    return treffer;
+}
 // Was tatsächlich auf einer Rechnung steht und noch nicht bezahlt ist. Bewusst direkt gerechnet
 // und NICHT als "offener Gesamtbetrag minus nicht berechnet": sonst rutschen Positionen, die per
 // "nicht berechnen" aus der Lückenliste genommen wurden, rechnerisch in diesen Topf und würden
@@ -5404,6 +5456,8 @@ function App() {
     // Abrechnungs-Wächter. stichtag liegt hier (nicht im Modal-State), weil die Kachel in der
     // Abrechnung ihn schon zum Rechnen braucht, bevor das Modal überhaupt geöffnet wurde.
     const [luecken, setLuecken] = useState({ offen: false, busy: false, error: "", raw: null, soloMode: false, stichtag: "", expandedId: null });
+    // Kontoauszug einlesen: Text aus dem Online-Banking einfügen, Zahlungen den Rechnungen zuordnen.
+    const [zahlungsImport, setZahlungsImport] = useState(null); // null | {text, vorschlaege|null}
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
@@ -5791,6 +5845,7 @@ function App() {
             else if (proposalForm) { if (!proposalForm.busy) setProposalForm(null); }
             else if (printChoice) setPrintChoice(false);
             else if (offenePosten) setOffenePosten(null);
+            else if (zahlungsImport) setZahlungsImport(null);
             else if (luecken.offen) setLuecken(l => ({ ...l, offen: false }));
             else if (quotenpilot) setQuotenpilot(null);
             else if (stillOpen) setStillOpen(false);
@@ -5803,7 +5858,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, quotenpilot, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -9677,6 +9732,14 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(nichtBerechnetGesamt) + " noch nicht berechnet"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Erbrachte Leistungen ohne Rechnung – ansehen und abrechnen")),
                 React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, "›")),
+            // Kontoauszug einlesen: erspart das zeilenweise Abgleichen von Zahlungseingängen.
+            allInvoices.length > 0 && React.createElement("button", { onClick: () => setZahlungsImport({ text: "", vorschlaege: null }),
+                className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12, cursor: "pointer" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--sky-bg)", color: "var(--sky-deep)", flexShrink: 0 } }, "⇄"),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Zahlungen zuordnen"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Kontoauszug einfügen – Zahlungen automatisch den Rechnungen zuordnen")),
+                React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, "›")),
             // Überfällige Rechnungen zuoberst: das ist das Geld, das der Fahrschule real fehlt.
             ueberfaellig.length > 0 && React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 8px" } },
@@ -11188,6 +11251,51 @@ function App() {
             }));
             setLuecken(l => ({ ...l, busy: false, error: "", raw: raw }));
         }).catch(e => setLuecken(l => ({ ...l, busy: false, error: e.message || "Fehler beim Laden", raw: [] })));
+    }
+    // Eingefügten Kontoauszug gegen die Rechnungsnummern der eigenen Schüler abgleichen.
+    // Es wird NICHTS automatisch gebucht - jede Zuordnung muss bestätigt werden, weil eine
+    // falsch verbuchte Zahlung eine unberechtigte Mahnung nach sich ziehen würde.
+    function analysiereKontoauszug() {
+        const index = {};
+        (students || []).filter(s => s._isMine).forEach(s => {
+            (s.invoices || []).forEach(inv => {
+                if (inv.number)
+                    index[String(inv.number).toUpperCase()] = { stu: s, inv: inv };
+            });
+        });
+        const vorschlaege = parseKontoauszug(zahlungsImport && zahlungsImport.text).map((t, i) => {
+            const hit = index[t.nummer];
+            if (!hit)
+                return { key: i, ...t, status: "unbekannt" };
+            const offen = invoiceOpen(hit.stu, hit.inv);
+            const total = Number(hit.inv.total) || 0;
+            const basis = { key: i, ...t, studentId: hit.stu.id, studentName: dispName(hit.stu),
+                invoiceId: hit.inv.id, offen: offen, total: total };
+            if (offen <= 0.005)
+                return { ...basis, status: "bezahlt" };
+            // Betrag nur dann vorbelegen, wenn er eindeutig ist: entweder genau einer gefunden,
+            // oder einer passt exakt zum offenen Betrag bzw. zur Rechnungssumme. Sonst muss der
+            // Fahrlehrer wählen - lieber nachfragen als den Kontostand als Zahlung verbuchen.
+            const passend = t.betraege.find(b => Math.abs(b - offen) < 0.005)
+                || t.betraege.find(b => Math.abs(b - total) < 0.005);
+            if (passend != null)
+                return { ...basis, status: "ok", betrag: passend };
+            if (t.betraege.length === 1)
+                return { ...basis, status: "abweichend", betrag: t.betraege[0] };
+            if (t.betraege.length === 0)
+                return { ...basis, status: "kein_betrag" };
+            return { ...basis, status: "mehrdeutig" };
+        });
+        setZahlungsImport(z => ({ ...z, vorschlaege: vorschlaege }));
+    }
+    function bucheZahlung(v, betrag) {
+        const stu = (students || []).find(s => s.id === v.studentId);
+        if (!stu || !(betrag > 0))
+            return;
+        const eintrag = { date: v.datum || ymd(new Date()), amount: Math.round(betrag * 100) / 100,
+            method: "Überweisung", invoiceId: v.invoiceId };
+        writeStudent({ ...stu, payments: [...(stu.payments || []), eintrag] });
+        setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "gebucht", betrag: eintrag.amount } : x) } : z);
     }
     // Aus den Rohdaten die anzuzeigende Liste bauen - mit dem aktuell eingestellten Stichtag.
     function lueckenListe() {
@@ -14436,6 +14544,49 @@ function App() {
                                     React.createElement("b", { style: { color: "var(--ink)" } }, "Was hier steht:"),
                                     " Fahrstunden und Posten, die erbracht, aber auf keiner Rechnung sind. Durch ein Paket gedeckte Stunden erscheinen nicht, weil f\u00FCr sie nichts mehr zu berechnen ist. Mit \u00D7 nimmst du eine Position dauerhaft aus dieser Liste \u2013 sie wird dadurch nicht gel\u00F6scht und der offene Saldo des Sch\u00FClers \u00E4ndert sich nicht.")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setLuecken(l => ({ ...l, offen: false })) }, "Schlie\u00DFen"))),
+        // Kontoauszug einlesen. Bewusst als Einf\u00FCgefeld statt Datei-Upload: Banken exportieren in
+        // sehr unterschiedlichen Formaten, markieren und kopieren funktioniert dagegen \u00FCberall.
+        zahlungsImport && React.createElement("div", { onClick: () => setZahlungsImport(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Zahlungen zuordnen"),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 } },
+                    "Kopiere die Ums\u00E4tze aus deinem Online-Banking und f\u00FCge sie hier ein. Erkannt werden Zeilen, in denen eine Rechnungsnummer steht (z.B. RE-2026-0001). Gebucht wird nichts automatisch \u2013 du best\u00E4tigst jede Zuordnung."),
+                React.createElement("textarea", { value: zahlungsImport.text, rows: 5,
+                    onChange: e => { const v = e.target.value; setZahlungsImport(z => ({ ...z, text: v, vorschlaege: null })); },
+                    placeholder: "13.08.2026;GUTSCHRIFT;Max Mustermann;Rechnung RE-2026-0001;;65,00",
+                    style: { width: "100%", padding: "10px 12px", fontSize: 13, fontFamily: "monospace", marginBottom: 10 } }),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 14 },
+                    disabled: !(zahlungsImport.text || "").trim(), onClick: analysiereKontoauszug }, "Zeilen auswerten"),
+                zahlungsImport.vorschlaege && (zahlungsImport.vorschlaege.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "16px 14px", fontSize: 13.5, color: "var(--muted)", textAlign: "center" } },
+                        "Keine Zeile mit einer Rechnungsnummer gefunden. Steht die Nummer wirklich im Verwendungszweck?")
+                    : React.createElement("div", null, zahlungsImport.vorschlaege.map(v => {
+                        const farbe = v.status === "gebucht" ? "var(--sage-deep)"
+                            : v.status === "ok" ? "var(--sage-deep)"
+                                : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)" : "var(--amber)";
+                        const hinweis = v.status === "gebucht" ? "Gebucht"
+                            : v.status === "unbekannt" ? "Keine Rechnung mit dieser Nummer gefunden"
+                                : v.status === "bezahlt" ? "Diese Rechnung ist bereits vollst\u00E4ndig bezahlt"
+                                    : v.status === "kein_betrag" ? "Kein Betrag in der Zeile erkennbar"
+                                        : v.status === "mehrdeutig" ? "Mehrere Betr\u00E4ge in der Zeile \u2013 bitte w\u00E4hlen"
+                                            : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab" : "";
+                        return React.createElement("div", { key: v.key, className: "card", style: { padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid " + farbe } },
+                            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 700 } }, v.nummer),
+                                v.studentName && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, v.studentName)),
+                            React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", fontFamily: "monospace", margin: "4px 0 6px", wordBreak: "break-all" } }, v.text),
+                            v.status !== "unbekannt" && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 6 } },
+                                "Rechnung " + eurFmt(v.total) + " \u00B7 offen " + eurFmt(v.offen)),
+                            hinweis && React.createElement("div", { style: { fontSize: 12.5, color: farbe, fontWeight: 600, marginBottom: 8 } }, hinweis),
+                            (v.status === "ok" || v.status === "abweichend") && React.createElement("button", { className: "btn btn-primary btn-block", style: { padding: "8px", fontSize: 13.5 },
+                                onClick: () => bucheZahlung(v, v.betrag) }, eurFmt(v.betrag) + " als Zahlung buchen"),
+                            v.status === "mehrdeutig" && React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                                v.betraege.map((b, bi) => React.createElement("button", { key: bi, className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 13 },
+                                    onClick: () => bucheZahlung(v, b) }, eurFmt(b) + " buchen"))));
+                    }))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setZahlungsImport(null) }, "Schlie\u00DFen"))),
         // Quotenpilot: Erfolgsquoten-Cockpit mit Zeitraum-/Klassenfilter, Trend und Monatsverlauf.
         // Reagiert auf die kommende Mobilithek-Meldepflicht - Ziel ist, die eigene Quote zu kennen
         // und steuern zu k\u00F6nnen, bevor sie \u00F6ffentlich einsehbar wird.
