@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.95.0";
+const APP_VERSION = "1.96.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.96.0", date: "August 2026", changes: [
+            "Neu in der Abrechnung: „Nicht abgerechnet“. Die Kennzahl „Offene Forderungen“ warf bisher zwei völlig verschiedene Dinge in eine Zahl - Geld, das der Schüler schuldet (Rechnung ist raus), und Leistungen, für die noch gar keine Rechnung geschrieben wurde. Jetzt stehen dort zwei Zahlen: „Berechnet, noch offen“ und „Noch nicht berechnet“",
+            "Eine eigene Kachel zeigt erbrachte Fahrstunden und Posten ohne Rechnung, aufgeschlüsselt je Schüler und Position, mit direktem Sprung zum Schüler zum Rechnung erstellen. Durch ein Paket gedeckte Stunden erscheinen dort nicht, weil für sie nichts mehr zu berechnen ist",
+            "Ein einstellbarer Stichtag blendet Altbestände aus der Zeit vor der App-Nutzung aus, und einzelne Positionen lassen sich per × dauerhaft aus der Liste nehmen (z.B. Kulanzstunden) - ohne dass sie gelöscht werden oder sich der offene Saldo des Schülers ändert",
+            "Behoben: In der schulweiten Ansicht „Offene Posten der ganzen Fahrschule“ wurde das Paket-Guthaben nicht berücksichtigt. Bei Schülern mit Ausbildungspaket wurden dadurch zu hohe offene Beträge angezeigt - paketgedeckte Fahrstunden zählten dort mit, obwohl sie bereits bezahlt sind",
+        ] },
     { v: "1.95.0", date: "August 2026", changes: [
             "Theorie üben: Fragen sind jetzt nach den echten Sachgebieten des amtlichen Fragenkatalogs sortiert (Gefahrenlehre, Verhalten im Straßenverkehr, Vorfahrt/Vorrang, Verkehrszeichen, Technik, Eignung und Befähigung von Kraftfahrern u.a.) statt nach einer eigenen Themenliste",
             "Fehler behoben: Bei über 1.000 Übungsfragen im System hat die Datenbank-Schnittstelle einen Teil der Fragen nicht mehr ausgeliefert (u.a. eine ganze Themenkategorie fehlte komplett) - jetzt werden zuverlässig alle Fragen geladen, unabhängig von der Gesamtzahl",
@@ -3793,6 +3799,55 @@ function lessonBillables(s, stdPrice) {
 function lessonsCharge(s, stdPrice) {
     return lessonBillables(s, stdPrice).reduce((sum, b) => sum + b.amount, 0);
 }
+/* ════════ Abrechnungs-Wächter: erbracht, aber noch nicht berechnet ════════ */
+// Die Kachel "Offene Forderungen" wirft zwei Zustände in eine Zahl: (a) berechnet, aber nicht
+// bezahlt - da muss der Schüler zahlen - und (b) erbracht, aber nie in Rechnung gestellt - da muss
+// die Fahrschule erst mal eine Rechnung schreiben. Nur (b) ist stiller Umsatzverlust und zugleich
+// das, was eine Betriebsprüfung beim Abgleich Ausbildungsnachweis <-> Einnahmen findet.
+// Diese Funktionen rechnen NUR aus, was ohnehin in den Daten steht - sie verändern die bestehende
+// Rechnungs- und Saldenlogik (sumCharges/lessonBillables) bewusst nicht.
+// Paketgedeckte Stunden haben in lessonBillables bereits amount = 0 und fallen damit von selbst raus.
+function offeneLeistungen(s, stdPrice, abDatum) {
+    const posten = [];
+    lessonBillables(s, stdPrice).forEach(b => {
+        if (b.lesson.invoiced || b.lesson.nichtBerechnen)
+            return;
+        if (b.amount <= 0.005)
+            return; // vollständig im Paket enthalten oder Nullpreis
+        if (abDatum && (b.lesson.date || "") < abDatum)
+            return;
+        posten.push({ art: "fahrstunde", id: b.lesson.id, datum: b.lesson.date || "",
+            betrag: b.amount, text: ueFmt(b.billableUE) + " UE Fahrstunde" });
+    });
+    // Freie Posten (Grundbetrag, Vorstellungsentgelt, Lernmaterial ...). Sie haben kein Datum,
+    // greifen also nicht am Stichtag - dafür zählen negative Posten (z.B. Empfehlungsbonus) als
+    // Gutschrift mit, damit die Summe dem entspricht, was eine Rechnung tatsächlich ergäbe.
+    (s.costItems || []).forEach((it, idx) => {
+        if (it.invoiced || it.nichtBerechnen)
+            return;
+        const betrag = Number(it.amount) || 0;
+        if (Math.abs(betrag) <= 0.005)
+            return;
+        posten.push({ art: "posten", idx: idx, datum: "", betrag: betrag,
+            text: it.label || (betrag < 0 ? "Gutschrift" : "Posten") });
+    });
+    return posten.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+}
+function offeneLeistungenSumme(s, stdPrice, abDatum) {
+    return offeneLeistungen(s, stdPrice, abDatum).reduce((sum, p) => sum + p.betrag, 0);
+}
+// Was tatsächlich auf einer Rechnung steht und noch nicht bezahlt ist. Bewusst direkt gerechnet
+// und NICHT als "offener Gesamtbetrag minus nicht berechnet": sonst rutschen Positionen, die per
+// "nicht berechnen" aus der Lückenliste genommen wurden, rechnerisch in diesen Topf und würden
+// als berechnet ausgewiesen, obwohl für sie nie eine Rechnung geschrieben wurde.
+function fakturiertOffenSumme(s, stdPrice) {
+    let fakturiert = 0;
+    lessonBillables(s, stdPrice).forEach(b => { if (b.lesson.invoiced)
+        fakturiert += b.amount; });
+    (s.costItems || []).forEach(it => { if (it.invoiced)
+        fakturiert += (Number(it.amount) || 0); });
+    return fakturiert - sumPayments(s);
+}
 // UE auf zwei Nachkommastellen, als Komma-Zahl
 function ueFmt(n) {
     const v = Math.round((Number(n) || 0) * 100) / 100;
@@ -5346,6 +5401,9 @@ function App() {
     const [schoolLeistungen, setSchoolLeistungen] = useState(null); // null | {busy,error,list} schulweite Leistungen-Liste
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
     const [quotenpilot, setQuotenpilot] = useState(null); // null | {busy,error,rows,zeitraum,klasse} Erfolgsquoten-Cockpit
+    // Abrechnungs-Wächter. stichtag liegt hier (nicht im Modal-State), weil die Kachel in der
+    // Abrechnung ihn schon zum Rechnen braucht, bevor das Modal überhaupt geöffnet wurde.
+    const [luecken, setLuecken] = useState({ offen: false, busy: false, error: "", raw: null, soloMode: false, stichtag: "", expandedId: null });
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
@@ -5733,6 +5791,7 @@ function App() {
             else if (proposalForm) { if (!proposalForm.busy) setProposalForm(null); }
             else if (printChoice) setPrintChoice(false);
             else if (offenePosten) setOffenePosten(null);
+            else if (luecken.offen) setLuecken(l => ({ ...l, offen: false }));
             else if (quotenpilot) setQuotenpilot(null);
             else if (stillOpen) setStillOpen(false);
             else if (schoolLeistungen) setSchoolLeistungen(null);
@@ -5744,7 +5803,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, quotenpilot, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, quotenpilot, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -9512,6 +9571,14 @@ function App() {
         const openList = mine.filter(s => !s.archived).map(s => ({ s, open: sumCharges(s, price) - sumPayments(s) }))
             .filter(x => x.open > 0.005).sort((a, b) => b.open - a.open);
         const offenGesamt = openList.reduce((s, x) => s + x.open, 0);
+        // Der offene Gesamtbetrag besteht aus zwei Teilen mit völlig unterschiedlicher Konsequenz:
+        // was schon in Rechnung steht (der Schüler muss zahlen) und was noch gar nicht berechnet
+        // wurde (die Fahrschule muss erst eine Rechnung schreiben). Nur Letzteres ist stiller
+        // Umsatzverlust, deshalb wird es hier getrennt ausgewiesen statt in einer Summe zu verschwinden.
+        const nichtBerechnetGesamt = mine.filter(s => !s.archived)
+            .reduce((sum, s) => sum + offeneLeistungenSumme(s, price, luecken.stichtag), 0);
+        const berechnetOffen = mine.filter(s => !s.archived)
+            .reduce((sum, s) => sum + fakturiertOffenSumme(s, price), 0);
         const shownInvoices = abrTab === "monat" ? allInvoices.filter(i => invYear(i) === curYear && invMonth(i) === curMonth)
             : abrTab === "jahr" ? allInvoices.filter(i => invYear(i) === curYear) : allInvoices;
         // Zahlung zu einer konkreten Rechnung erfassen: Restbetrag ist vorbelegt, laesst sich
@@ -9533,8 +9600,10 @@ function App() {
         const kpis = [
             { label: "Umsatz diesen Monat", value: eurFmt(umsatzMonat), color: "var(--ink)" },
             { label: "Umsatz " + curYear, value: eurFmt(umsatzJahr), color: "var(--ink)" },
-            { label: "Offene Forderungen", value: eurFmt(offenGesamt), color: offenGesamt > 0.005 ? "var(--orange-deep)" : "var(--green)" },
-            { label: "Rechnungen gesamt", value: String(allInvoices.length), color: "var(--ink)" },
+            // Bewusst getrennt statt in einer Summe: "berechnet, offen" ist eine Forderung an den
+            // Schüler, "nicht berechnet" ist eine Aufgabe für die Fahrschule. Zwei Zahlen, zwei Handlungen.
+            { label: "Berechnet, noch offen", value: eurFmt(berechnetOffen), color: berechnetOffen > 0.005 ? "var(--orange-deep)" : "var(--green)" },
+            { label: "Noch nicht berechnet", value: eurFmt(nichtBerechnetGesamt), color: nichtBerechnetGesamt > 0.005 ? "#B3362A" : "var(--green)" },
         ];
         // Erfolgsquote aus den erfassten Pruefungsversuchen. Gezaehlt wird je Schueler und
         // Pruefungsart: bestanden im ersten Versuch = Erfolg. Schueler ohne erfassten Versuch
@@ -9598,6 +9667,16 @@ function App() {
                 React.createElement("div", null,
                     React.createElement("div", { className: "home-num", style: { color: k.color, fontSize: 20 } }, k.value),
                     React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, k.label))))),
+            // Erbracht, aber nie in Rechnung gestellt: anders als "berechnet, noch offen" muss hier
+            // nicht der Schüler zahlen, sondern die Fahrschule erst mal eine Rechnung schreiben.
+            // Deshalb eine eigene Aktionskachel statt einer Zeile in der Rechnungsliste.
+            nichtBerechnetGesamt > 0.005 && React.createElement("button", { onClick: openLuecken,
+                className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12, cursor: "pointer", borderLeft: "3px solid #B3362A" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "#FDECEA", color: "#B3362A", flexShrink: 0 } }, "€"),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(nichtBerechnetGesamt) + " noch nicht berechnet"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Erbrachte Leistungen ohne Rechnung – ansehen und abrechnen")),
+                React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, "›")),
             // Überfällige Rechnungen zuoberst: das ist das Geld, das der Fahrschule real fehlt.
             ueberfaellig.length > 0 && React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 8px" } },
@@ -11067,7 +11146,10 @@ function App() {
         fetchSchoolOffenePosten(school.id).then(rows => {
             // Offene Beträge mit derselben Logik wie in der Schüleransicht berechnen
             const list = (rows || []).map(r => {
-                const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [] };
+                // packages muss mit, sonst rechnet lessonBillables() ohne Paket-Guthaben und der
+                // offene Betrag faellt bei Paket-Schuelern zu hoch aus.
+                const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [],
+                    payments: r.payments || [], packages: r.packages || [] };
                 const charges = sumCharges(stu, price);
                 const paid = sumPayments(stu);
                 return {
@@ -11080,6 +11162,64 @@ function App() {
                 .sort((a, b) => b.open - a.open);
             setOffenePosten({ busy: false, error: "", list });
         }).catch(e => setOffenePosten({ busy: false, error: e.message || "Fehler beim Laden", list: [] }));
+    }
+    // Abrechnungs-Wächter: zeigt erbrachte, aber noch nicht in Rechnung gestellte Leistungen.
+    // Gleiches Zugriffsmuster wie Offene Posten - schulweit über die geprüfte RPC, im Solo-Betrieb
+    // direkt aus den ohnehin geladenen eigenen Schülern.
+    // Gespeichert werden die Rohdaten je Schüler, nicht die fertige Liste - der Stichtag-Filter
+    // wird erst beim Rendern angewandt (siehe lueckenListe). Sonst bliebe die Liste stehen, wenn
+    // der Stichtag bei offenem Modal geändert wird, und ein erneuter Netzabruf je Tastendruck
+    // wäre unnötig.
+    function openLuecken() {
+        if (!school || !school.id) {
+            const raw = (students || []).filter(s => !s.archived && s._isMine)
+                .map(s => ({ studentId: s.id, name: dispName(s), teacher: "", stu: s }));
+            setLuecken(l => ({ ...l, offen: true, busy: false, error: "", raw: raw, soloMode: true, expandedId: null }));
+            return;
+        }
+        setLuecken(l => ({ ...l, offen: true, busy: true, error: "", raw: null, soloMode: false, expandedId: null }));
+        fetchSchoolOffenePosten(school.id).then(rows => {
+            const raw = (rows || []).map(r => ({
+                studentId: r.student_id,
+                name: (r.student_name || "").trim() || "Unbekannt",
+                teacher: r.teacher_email || "",
+                stu: { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [],
+                    payments: r.payments || [], packages: r.packages || [] },
+            }));
+            setLuecken(l => ({ ...l, busy: false, error: "", raw: raw }));
+        }).catch(e => setLuecken(l => ({ ...l, busy: false, error: e.message || "Fehler beim Laden", raw: [] })));
+    }
+    // Aus den Rohdaten die anzuzeigende Liste bauen - mit dem aktuell eingestellten Stichtag.
+    function lueckenListe() {
+        const price = Number(pricePerHour) || 0;
+        return (luecken.raw || []).map(r => {
+            const posten = offeneLeistungen(r.stu, price, luecken.stichtag);
+            return { studentId: r.studentId, name: r.name, teacher: r.teacher, posten: posten,
+                anzahl: posten.length, betrag: posten.reduce((sum, p) => sum + p.betrag, 0) };
+        }).filter(x => x.betrag > 0.005).sort((a, b) => b.betrag - a.betrag);
+    }
+    // Eine erbrachte Leistung bewusst von der Abrechnung ausnehmen (Kulanz, extern abgerechnet, Altfall).
+    // Setzt nur eine Markierung auf der Fahrstunde bzw. dem Posten - die Salden- und Rechnungslogik
+    // bleibt unberührt, die Position verschwindet lediglich aus dieser Liste.
+    async function leistungNichtBerechnen(studentId, posten) {
+        const stu = (students || []).find(s => s.id === studentId);
+        if (!stu)
+            return;
+        if (!await askConfirm({ message: "Diese Position dauerhaft aus der Liste „Nicht abgerechnet“ nehmen?\n\nSie wird dadurch nicht gelöscht und der offene Saldo des Schülers ändert sich nicht - sie taucht nur hier nicht mehr auf." }))
+            return;
+        const patch = {};
+        if (posten.art === "fahrstunde")
+            patch.drivenLessons = (stu.drivenLessons || []).map(l => l.id === posten.id ? { ...l, nichtBerechnen: true } : l);
+        else
+            patch.costItems = (stu.costItems || []).map((it, i) => i === posten.idx ? { ...it, nichtBerechnen: true } : it);
+        writeStudent({ ...stu, ...patch });
+        // Auch die Rohdaten des Modals nachziehen: sie halten eine eigene Kopie des Schülers,
+        // die von writeStudent nicht miterfasst wird.
+        setLuecken(l => {
+            if (!l.raw)
+                return l;
+            return { ...l, raw: l.raw.map(r => r.studentId === studentId ? { ...r, stu: { ...r.stu, ...patch } } : r) };
+        });
     }
     async function detachTeacher(uid, email) {
         if (!await askConfirm({ message: 'Fahrlehrer "' + email + '" stilllegen?\n\nSeine Fahrschul-Zuordnung wird entfernt. Er kann sich noch anmelden, sieht aber keine Fahrschule mehr. Seine Schülerdaten bleiben erhalten.' }))
@@ -14230,6 +14370,72 @@ function App() {
                                     React.createElement("b", { style: { color: "var(--ink)" } }, "Hinweis zum Sammelversand:"),
                                     " Ein automatischer Rechnungsversand an alle offenen Posten auf einmal ist noch nicht m\u00F6glich, weil daf\u00FCr jedem Sch\u00FCler eine E-Mail-Adresse oder Telefonnummer sicher zugeordnet und ein Versandweg eingerichtet sein m\u00FCsste. Diese \u00DCbersicht hilft dir aber, gezielt nachzufassen. Ein echter Sammelversand l\u00E4sst sich als eigener Schritt einbauen, wenn die Kontaktdaten daf\u00FCr gepflegt sind.")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOffenePosten(null) }, "Schlie\u00DFen"))),
+        // Abrechnungs-W\u00E4chter: erbrachte Leistungen, f\u00FCr die noch keine Rechnung existiert.
+        // Bewusst getrennt von "Offene Posten" - dort schuldet der Sch\u00FCler Geld, hier fehlt die Rechnung.
+        luecken.offen && React.createElement("div", { onClick: () => setLuecken(l => ({ ...l, offen: false })), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Nicht abgerechnet"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } },
+                    luecken.soloMode ? "Deine Sch\u00FCler" : (((school && school.name) || "") + " \u00B7 alle Fahrlehrer")),
+                // Stichtag: ohne ihn zieht die Liste Altbest\u00E4nde aus der Zeit vor der App-Nutzung mit
+                // und geht nie auf null - eine Liste, die nie leer wird, sieht sich niemand mehr an.
+                React.createElement("div", { className: "card", style: { padding: "11px 13px", marginBottom: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" } },
+                    React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", flex: 1, minWidth: 120 } }, "Nur Fahrstunden ab"),
+                    React.createElement("input", { type: "date", value: luecken.stichtag || "",
+                        onChange: e => { const v = e.target.value; setLuecken(l => ({ ...l, stichtag: v })); },
+                        style: { padding: "6px 8px", fontSize: 13 } }),
+                    luecken.stichtag && React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 9px", fontSize: 12 },
+                        onClick: () => setLuecken(l => ({ ...l, stichtag: "" })) }, "zur\u00FCcksetzen")),
+                luecken.busy
+                    ? React.createElement("div", { style: { textAlign: "center", padding: "20px", color: "var(--muted)" } }, "L\u00E4dt\u2026")
+                    : luecken.error
+                        ? React.createElement("div", { className: "card", style: { padding: "16px 14px", fontSize: 13.5, color: "#B3362A" } }, luecken.error)
+                        : lueckenListe().length === 0
+                            ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Alles abgerechnet \u2013 keine offenen Leistungen. \uD83C\uDF89")
+                            : React.createElement("div", null,
+                                (() => {
+                                    const liste = lueckenListe();
+                                    const total = liste.reduce((s, x) => s + x.betrag, 0);
+                                    const posten = liste.reduce((s, x) => s + x.anzahl, 0);
+                                    return React.createElement("div", { className: "card", style: { padding: "14px", marginBottom: 12, borderLeft: "3px solid #B3362A" } },
+                                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: ".08em" } }, "Erbracht, aber ohne Rechnung"),
+                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 30, letterSpacing: "-.02em", margin: "3px 0 1px" } }, eurFmt(total)),
+                                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                            posten + " " + (posten === 1 ? "Position" : "Positionen") + " bei " + liste.length + " " + (liste.length === 1 ? "Sch\u00FCler" : "Sch\u00FClern")));
+                                })(),
+                                lueckenListe().map(x => {
+                                    const offen = luecken.expandedId === x.studentId;
+                                    // Eigene Sch\u00FCler lassen sich direkt ansteuern und bearbeiten. Sch\u00FCler
+                                    // anderer Fahrlehrer erscheinen schulweit nur informativ.
+                                    const eigener = (students || []).some(s => s.id === x.studentId);
+                                    return React.createElement("div", { key: x.studentId, className: "card", style: { padding: "12px 14px", marginBottom: 8 } },
+                                        React.createElement("button", { onClick: () => setLuecken(l => ({ ...l, expandedId: offen ? null : x.studentId })),
+                                            style: { width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, background: "none", border: "none", textAlign: "left", cursor: "pointer", padding: 0 } },
+                                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                                React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, x.name),
+                                                x.teacher && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.teacher),
+                                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
+                                                    x.anzahl + " " + (x.anzahl === 1 ? "Position" : "Positionen"))),
+                                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, color: "#B3362A", whiteSpace: "nowrap" } }, eurFmt(x.betrag)),
+                                            React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, offen ? "\u2039" : "\u203A")),
+                                        offen && React.createElement("div", { style: { marginTop: 10, borderTop: "1px solid var(--line)", paddingTop: 8 } },
+                                            x.posten.map((p, pi) => React.createElement("div", { key: pi, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", fontSize: 13 } },
+                                                React.createElement("span", { style: { color: "var(--muted)", fontSize: 12, minWidth: 74 } }, p.datum ? new Date(p.datum).toLocaleDateString("de-DE") : "\u2013"),
+                                                React.createElement("span", { style: { flex: 1, minWidth: 0 } }, p.text),
+                                                React.createElement("span", { style: { fontWeight: 700, whiteSpace: "nowrap" } }, eurFmt(p.betrag)),
+                                                eigener && React.createElement("button", { onClick: () => leistungNichtBerechnen(x.studentId, p),
+                                                    title: "Nicht berechnen \u2013 aus dieser Liste nehmen",
+                                                    style: { background: "none", border: "none", cursor: "pointer", color: "var(--muted)", fontSize: 16, lineHeight: 1, padding: "0 2px" } }, "\u00D7"))),
+                                            eigener && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10, padding: "9px", fontSize: 13.5 },
+                                                onClick: () => { setActiveId(x.studentId); setLuecken(l => ({ ...l, offen: false })); setView("tagebuch"); } },
+                                                "Zu " + x.name + " \u2013 Rechnung erstellen")));
+                                }),
+                                React.createElement("div", { style: { marginTop: 14, padding: "13px 14px", borderRadius: 12, background: "var(--field-bg)", fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 } },
+                                    React.createElement("b", { style: { color: "var(--ink)" } }, "Was hier steht:"),
+                                    " Fahrstunden und Posten, die erbracht, aber auf keiner Rechnung sind. Durch ein Paket gedeckte Stunden erscheinen nicht, weil f\u00FCr sie nichts mehr zu berechnen ist. Mit \u00D7 nimmst du eine Position dauerhaft aus dieser Liste \u2013 sie wird dadurch nicht gel\u00F6scht und der offene Saldo des Sch\u00FClers \u00E4ndert sich nicht.")),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setLuecken(l => ({ ...l, offen: false })) }, "Schlie\u00DFen"))),
         // Quotenpilot: Erfolgsquoten-Cockpit mit Zeitraum-/Klassenfilter, Trend und Monatsverlauf.
         // Reagiert auf die kommende Mobilithek-Meldepflicht - Ziel ist, die eigene Quote zu kennen
         // und steuern zu k\u00F6nnen, bevor sie \u00F6ffentlich einsehbar wird.
