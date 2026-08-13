@@ -1144,7 +1144,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.97.0";
+const APP_VERSION = "1.98.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1227,6 +1227,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.98.0", date: "August 2026", changes: [
+            "„Termin löschen“ steht jetzt direkt im ersten Fenster, das beim Antippen eines Termins aufgeht. Vorher musste man erst den Terminplaner öffnen und ihn danach von Hand wieder wegklicken",
+            "Beim Start der App erscheint das Logo nur noch einmal. Der native Startbildschirm ist jetzt einfarbig und geht nahtlos in den Ladebildschirm über (wirkt erst nach einer Neuinstallation der App)",
+            "Neu in den Einstellungen: „Bitte um eine Bewertung“. Hinterlegst du deinen Bewertungslink, fragt die App beim Archivieren eines bestandenen Schülers, ob du ihm eine kurze Bitte um eine Bewertung per WhatsApp schicken möchtest - Text frei anpassbar, gesendet wird erst auf deinen Druck",
+        ] },
     { v: "1.97.0", date: "August 2026", changes: [
             "Neu in der Abrechnung: „Zahlungen zuordnen“. Umsätze aus dem Online-Banking einfügen - die App sucht in jeder Zeile nach einer Rechnungsnummer und schlägt die passende Zahlung zur Buchung vor, samt Datum aus der Zeile",
             "Gebucht wird nichts von allein: Jede Zuordnung muss bestätigt werden. Stehen mehrere Beträge in einer Zeile (z.B. Betrag und Kontostand), fragt die App nach, statt zu raten - nur wenn ein Betrag exakt zur offenen Summe oder zur Rechnungssumme passt, wird er vorgeschlagen",
@@ -2775,6 +2780,40 @@ async function saveBookingMessage(uid, text) {
     if (error)
         throw new Error(error.message || "Nachricht konnte nicht gespeichert werden");
 }
+// Bewertungslink der Fahrschule und eigener Text für die Bitte um eine Bewertung.
+// Bewusst zusammen geladen, weil beides nur an einer Stelle gebraucht wird.
+async function fetchReviewSettings(uid) {
+    const { data, error } = await sb.from("profiles").select("review_url, review_message").eq("id", uid).maybeSingle();
+    if (error) {
+        console.error(error);
+        return { url: "", message: "" };
+    }
+    return { url: (data && data.review_url) || "", message: (data && data.review_message) || "" };
+}
+async function saveReviewSettings(uid, patch) {
+    if (!uid)
+        return;
+    const { data: sess } = await sb.auth.getSession();
+    const email = sess && sess.session && sess.session.user && sess.session.user.email;
+    const row = { id: uid, email };
+    if (patch.url !== undefined)
+        row.review_url = patch.url || null;
+    if (patch.message !== undefined)
+        row.review_message = patch.message || null;
+    const { error } = await sb.from("profiles").upsert(row, { onConflict: "id" });
+    if (error)
+        throw new Error(error.message || "Bewertungs-Einstellungen konnten nicht gespeichert werden");
+}
+// Text der Bewertungs-Bitte zusammenbauen. {NAME} und {LINK} werden ersetzt; fehlt {LINK} im
+// eigenen Text, wird der Link ans Ende gehängt, damit er nie fehlt.
+function buildReviewText(vorlage, name, schule, url) {
+    const standard = "Hallo " + (name || "") + ",\n\nherzlichen Glückwunsch zur bestandenen Prüfung! 🎉\n\n"
+        + "Wenn du mit deiner Ausbildung bei " + (schule || "uns") + " zufrieden warst, würdest du uns mit einer kurzen Bewertung sehr helfen – das dauert nur eine Minute:\n{LINK}\n\nAllzeit gute Fahrt!";
+    let text = (vorlage && vorlage.trim()) ? vorlage : standard;
+    text = text.split("{NAME}").join(name || "");
+    text = text.indexOf("{LINK}") >= 0 ? text.split("{LINK}").join(url || "") : (text.trim() + (url ? ("\n\n" + url) : ""));
+    return text;
+}
 // Eigener Standort des Fahrlehrers. Neue Schüler bekommen diesen Standort automatisch vorbelegt.
 async function fetchMyLocation(uid) {
     const { data, error } = await sb.from("profiles").select("default_location_id").eq("id", uid).maybeSingle();
@@ -4037,17 +4076,17 @@ function ToastConfirmHost() {
         return () => document.removeEventListener("keydown", onEsc, true);
     }, [confirmState, promptState]);
     return React.createElement(React.Fragment, null,
-        toast && React.createElement("div", { key: toast.key, style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 400,
+        toast && React.createElement("div", { key: toast.key, style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
                 background: toast.tone === "error" ? "#B3362A" : "#181512", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
                 boxShadow: "0 10px 30px rgba(0,0,0,.35)", textAlign: "center", lineHeight: 1.4, whiteSpace: "pre-line" } }, toast.msg),
-        confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 400, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 confirmState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, confirmState.title),
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 18, whiteSpace: "pre-line" } }, confirmState.message),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: confirmState.danger ? { background: "#B3362A", color: "#fff" } : null, onClick: () => resolve(true) }, confirmState.confirmLabel || "Ja"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"))),
-        promptState && React.createElement("div", { onClick: () => resolvePrompt(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 400, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        promptState && React.createElement("div", { onClick: () => resolvePrompt(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 promptState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, promptState.title),
@@ -5975,6 +6014,26 @@ function App() {
                 .catch(e => { console.error("Buchungsnachricht speichern fehlgeschlagen:", e); setBookingMessageError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); });
         }, 500);
     }
+    // Bewertungslink + eigener Text für die Bitte um eine Bewertung nach bestandener Prüfung.
+    const [reviewSettings, setReviewSettings] = useState(null); // null solange nicht geladen
+    const [reviewSettingsError, setReviewSettingsError] = useState("");
+    useEffect(() => {
+        if (!uid)
+            return;
+        fetchReviewSettings(uid).then(setReviewSettings).catch(() => setReviewSettings({ url: "", message: "" }));
+    }, [uid]);
+    const reviewTimer = useRef(null);
+    function writeReviewSettings(patch) {
+        setReviewSettings(prev => ({ ...(prev || { url: "", message: "" }), ...patch }));
+        if (reviewTimer.current)
+            clearTimeout(reviewTimer.current);
+        reviewTimer.current = setTimeout(() => {
+            if (!uid)
+                return;
+            saveReviewSettings(uid, patch).then(() => setReviewSettingsError(""))
+                .catch(e => { console.error("Bewertungs-Einstellungen speichern fehlgeschlagen:", e); setReviewSettingsError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); });
+        }, 500);
+    }
     // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
     const limitSyncReady = useRef(false);
     useEffect(() => {
@@ -7348,6 +7407,27 @@ function App() {
     }
     const updateActive = (patch) => { if (active)
         writeStudent({ ...active, ...patch }); };
+    // Archivieren/Zurückholen. Beim Archivieren (= Prüfung bestanden) wird gefragt, ob die Bitte
+    // um eine Bewertung verschickt werden soll - nur wenn ein Bewertungslink hinterlegt ist.
+    async function archivierenUmschalten(s) {
+        if (s.archived) {
+            updateActive({ archived: false });
+            return;
+        }
+        updateActive({ archived: true, archivedAt: s.archivedAt || ymd(new Date()) });
+        const url = reviewSettings && reviewSettings.url;
+        if (!url)
+            return;
+        const num = s.tel ? waNumber(s.tel) : "";
+        if (!num) {
+            showToast("Bewertungs-Bitte: keine Telefonnummer hinterlegt.");
+            return;
+        }
+        const text = buildReviewText(reviewSettings.message, s.vorname || "", (school && school.name) || "", url);
+        if (!(await askConfirm({ title: "Bitte um eine Bewertung", message: "Möchtest du " + (s.vorname || "dem Schüler") + " jetzt die Bitte um eine Bewertung per WhatsApp schicken?", confirmLabel: "WhatsApp öffnen" })))
+            return;
+        window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+    }
     // Übungsfragen für den Theorie-Fortschritt in den Schülerdaten - einmalig laden, dann cachen
     // (globale Übungsfragen, nicht pro Schüler unterschiedlich).
     const loadTheoryQuestions = () => {
@@ -10297,7 +10377,7 @@ function App() {
                 active._isMine
                     ? React.createElement(ShareBox, null)
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Sch\u00FCler wurde mit dir geteilt. Du kannst Eintr\u00E4ge bearbeiten, aber die Freigabe verwaltet der Besitzer."),
-                active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => updateActive(active.archived ? { archived: false } : { archived: true, archivedAt: active.archivedAt || ymd(new Date()) }) }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren")));
+                active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => archivierenUmschalten(active) }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren")));
     }
     /* ── Teilen ── */
     function ShareBox() {
@@ -11895,6 +11975,29 @@ function App() {
                             React.createElement("textarea", { value: bookingMessage, onChange: e => writeBookingMessage(e.target.value), placeholder: "Hier kannst du einen Fahrstunden-Termin vorschlagen:\n{LINK}\n\nSo geht's: ...", rows: 6, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16, fontFamily: "inherit", resize: "vertical" } }),
                             bookingMessage.trim() && React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 9, fontSize: 12.5, padding: "8px 12px" }, onClick: async () => { if (await askConfirm({ message: "Eigenen Text löschen und zur Standard-Nachricht zurückkehren?" }))
                                     writeBookingMessage(""); } }, "Zur\u00FCcksetzen auf Standard"))),
+                React.createElement("div", { className: "eyebrow" }, "Bitte um eine Bewertung"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
+                        "Hinterlege hier den Link zu deinem Bewertungsprofil (z.B. Google). Archivierst du danach einen Sch\u00FCler als bestanden, fragt dich die App, ob du ihm eine kurze Bitte um eine Bewertung schicken m\u00F6chtest \u2013 verschickt wird per WhatsApp, du dr\u00FCckst selbst auf Senden."),
+                    reviewSettings === null
+                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 2px" } }, "L\u00E4dt\u2026")
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("input", { type: "url", value: reviewSettings.url, placeholder: "https://g.page/r/... oder dein Bewertungslink",
+                                onChange: e => writeReviewSettings({ url: e.target.value }),
+                                style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16, fontFamily: "inherit", marginBottom: 10 } }),
+                            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 8px" } },
+                                "Eigener Text (optional). Leer lassen = eingebauter Standardtext. ",
+                                "{NAME}",
+                                " wird durch den Namen ersetzt, ",
+                                "{LINK}",
+                                " durch den Bewertungslink."),
+                            React.createElement("textarea", { value: reviewSettings.message, rows: 5,
+                                onChange: e => writeReviewSettings({ message: e.target.value }),
+                                placeholder: "Hallo {NAME},\n\nGl\u00FCckwunsch zur bestandenen Pr\u00FCfung! Wenn du zufrieden warst, freuen wir uns \u00FCber eine kurze Bewertung:\n{LINK}",
+                                style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16, fontFamily: "inherit", resize: "vertical" } }),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "9px 0 0" } },
+                                "Bitte alle Sch\u00FCler gleicherma\u00DFen um eine Bewertung und biete keine Gegenleistung daf\u00FCr an \u2013 beides ist sonst wettbewerbsrechtlich problematisch und versto\u00DFt gegen die Richtlinien der Bewertungsportale."),
+                            reviewSettingsError && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", background: "#FDECEA", borderRadius: 10, padding: "10px 12px", marginTop: 10 } }, reviewSettingsError))),
                 React.createElement("div", { className: "eyebrow" }, "Sch\u00FClerliste"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, marginBottom: 9 } }, "Sortierung"),
@@ -14960,6 +15063,20 @@ function App() {
                         React.createElement("rect", { x: "9", y: "3", width: "6", height: "4", rx: "1" }),
                         React.createElement("path", { d: "M9 12h6M9 16h4" })),
                     "Fahrstunde anlegen"),
+                // Löschen direkt hier statt erst im Terminplaner: bei einer Absage will man den
+                // Termin nur loswerden und nicht vorher durch die Bearbeitungsmaske.
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "#B3362A" },
+                        onClick: async () => { const a = apptChoice;
+                            // Erst diese Auswahl schließen, dann fragen: die Sicherheitsabfrage liegt
+                            // sonst hinter dem Auswahlfenster und ist nicht bedienbar.
+                            setApptChoice(null);
+                            if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true }))
+                                removeAppt(a.id); } },
+                    React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M3 6h18" }),
+                        React.createElement("path", { d: "M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" }),
+                        React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" })),
+                    "Termin löschen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptChoice(null) }, "Abbrechen"))),
         apptForm && React.createElement("div", { onClick: () => { if (!apptForm.busy) setApptForm(null); }, className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
