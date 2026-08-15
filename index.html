@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.103.0";
+const APP_VERSION = "1.104.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1247,6 +1247,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.104.0", date: "August 2026", changes: [
+            "Neu: Fristen-Radar auf der Startseite. Fasst TÜV/HU-Termine der Fahrzeuge und Löschfristen archivierter Schüler zusammen, sobald etwas innerhalb der nächsten 60 Tage fällig wird oder bereits überfällig ist - statt das in einer separaten Liste von Hand nachzuhalten",
+            "Ein Tippen auf die Karte öffnet eine nach Dringlichkeit sortierte Übersicht; von dort geht's mit einem Klick direkt zu den Fahrzeugen bzw. zur Löschfristen-Übersicht",
+        ] },
     { v: "1.103.0", date: "August 2026", changes: [
             "Neu: Chat-Assistent auf der öffentlichen Buchungsseite (Knopf unten rechts). Beantwortet Standardfragen von Interessenten automatisch - Preise, angebotene Klassen, Ablauf der Anmeldung - ohne dass jemand ans Telefon muss",
             "Der Assistent antwortet ausschließlich anhand der hinterlegten Fahrschul-Daten, erfindet keine Preise oder Zusagen und verweist bei allem anderen aufs Anmeldeformular oder den direkten Kontakt",
@@ -5673,6 +5677,7 @@ function App() {
     const [zahlungsImport, setZahlungsImport] = useState(null); // null | {text, vorschlaege|null}
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [erinnerungen, setErinnerungen] = useState(false); // Liste "Erinnerungen für morgen" auf der Startseite
+    const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
     const [practiceLogEnabled, setPracticeLogEnabled] = useState(false); // persönliche Einstellung: Übungs-Verlauf-Feature an/aus
@@ -6068,6 +6073,7 @@ function App() {
             else if (quotenpilot) setQuotenpilot(null);
             else if (erinnerungen) setErinnerungen(false);
             else if (stillOpen) setStillOpen(false);
+            else if (fristenOpen) setFristenOpen(false);
             else if (schoolLeistungen) setSchoolLeistungen(null);
             else if (adminEdit) setAdminEdit(null);
             else if (adminTeachers) setAdminTeachers(null);
@@ -6077,7 +6083,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -7019,6 +7025,34 @@ function App() {
         }).filter(x => x.letzte && x.letzte < stillVorher && x.letzte < Date.now())
             .sort((a, b) => a.letzte - b.letzte);
     }, [appts, students]);
+    // Fristen-Radar: fasst alle terminlich gebundenen Ablauffristen zusammen, die sonst per Hand
+    // in einer Extra-Liste nachgehalten werden müssten - TÜV/HU je Fahrzeug (nur für den
+    // Fahrschul-Admin sichtbar, da nur der die Fahrzeugverwaltung öffnen kann) und Löschfristen
+    // archivierter, eigener Schüler (aus derselben Berechnung wie die Datenschutz-Seite, siehe
+    // aufbewahrungsfristen/loeschDatum). Schwelle 60 Tage, deckt sich mit der bestehenden
+    // Amber-Farbe im Fuhrpark.
+    const fristenRadar = React.useMemo(() => {
+        const items = [];
+        const heuteMs = new Date(ymd(new Date()) + "T00:00:00").getTime();
+        if (isAdmin(session) || isSchoolAdmin) {
+            (vehicles || []).filter(v => !v.inactive).forEach(v => {
+                const days = tuvDaysLeft(v);
+                if (days == null || days > 60)
+                    return;
+                items.push({ key: "tuv-" + v.id, kind: "tuv", label: v.name || "Fahrzeug", sub: "TÜV/HU", days, onClick: () => setView("fahrzeuge") });
+            });
+        }
+        (students || []).filter(s => s.archived && s._isMine).forEach(s => {
+            const d = loeschDatum(s);
+            if (!d)
+                return;
+            const days = Math.round((d.getTime() - heuteMs) / 86400000);
+            if (days > 60)
+                return;
+            items.push({ key: "loesch-" + s.id, kind: "loesch", label: dispName(s), sub: "Löschfrist", days, onClick: () => setView("datenschutz") });
+        });
+        return items.sort((a, b) => a.days - b.days);
+    }, [vehicles, students, session, isSchoolAdmin]);
     if (session === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (session === null)
@@ -8873,6 +8907,16 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
                         stillList.length === 1 ? "1 Schüler lange nicht gefahren" : stillList.length + " Schüler lange nicht gefahren"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Seit über " + STILL_TAGE + " Tagen kein Termin")),
+                chev),
+            // Fristen-Radar: TÜV/HU + Löschfristen an einer Stelle statt in einer separaten Liste
+            fristenRadar.length > 0 && React.createElement("button", { onClick: () => setFristenOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: fristenRadar[0].days < 0 ? "#FDECEA" : "var(--field-bg)", color: fristenRadar[0].days < 0 ? "#B3362A" : "var(--ink-2)" } },
+                    icClock({ width: 19, height: 19 })),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
+                        fristenRadar.length === 1 ? "1 Frist läuft bald ab" : fristenRadar.length + " Fristen laufen bald ab"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
+                        fristenRadar[0].label + " · " + fristenRadar[0].sub + " · " + (fristenRadar[0].days < 0 ? "überfällig seit " + Math.abs(fristenRadar[0].days) + " Tagen" : fristenRadar[0].days === 0 ? "heute fällig" : "in " + fristenRadar[0].days + " Tagen"))),
                 chev),
             // Erinnerungen an die Fahrstunden von morgen. Erscheint nur, solange noch jemand
             // offen ist - sind alle angeschrieben, verschwindet die Karte von selbst.
@@ -15322,6 +15366,25 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        fristenOpen && React.createElement("div", { onClick: () => setFristenOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Fristen-Radar"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "T\u00DCV/HU-Termine und L\u00F6schfristen, sortiert nach Dringlichkeit"),
+                fristenRadar.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell l\u00E4uft nichts in den n\u00E4chsten 60 Tagen ab.")
+                    : fristenRadar.map(f => {
+                        const tone = f.days < 0 ? "#B3362A" : f.days <= 14 ? "var(--amber)" : "var(--ink-2)";
+                        const zeitText = f.days < 0 ? "\u00FCberf\u00E4llig seit " + Math.abs(f.days) + " Tagen" : f.days === 0 ? "heute f\u00E4llig" : "in " + f.days + " Tagen";
+                        return React.createElement("button", { key: f.key, onClick: () => { setFristenOpen(false); f.onClick(); }, className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, textAlign: "left" } },
+                            React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: tone, flexShrink: 0 } }),
+                            React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("span", { style: { display: "block", fontSize: 14.5, fontWeight: 700 } }, f.label),
+                                React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, f.sub)),
+                            React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0, textAlign: "right" } }, zeitText));
+                    }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setFristenOpen(false) }, "Schlie\u00DFen"))),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85vh", overflowY: "auto" } },
