@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.101.0";
+const APP_VERSION = "1.102.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1247,6 +1247,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.102.0", date: "August 2026", changes: [
+            "Neu: Warteliste für freie Fahrstunden. Schüler tragen in ihrem Bereich einmalig ein, an welchen Wochentagen und in welchem Zeitfenster sie früher dran sein möchten. Löscht der Fahrlehrer eine bestätigte Stunde (z.B. weil ein Schüler abgesagt hat), zeigt die App sofort, welche wartenden Schüler zur freigewordenen Zeit passen (gleiche Klasse, Zeitfenster, kein eigener Terminkonflikt)",
+            "Ein Klick genügt, um die Stunde auf der Warteliste anzubieten - passende Schüler sehen sie beim nächsten Öffnen der App ganz oben, mit optionalem WhatsApp-Direktlink zum Anschreiben",
+            "Wer zuerst zusagt, bekommt den Termin: Das entscheidet die Datenbank atomar, ein zweiter Versuch bekommt zuverlässig \"schon vergeben\" zurückgemeldet statt eines Doppel-Termins",
+        ] },
     { v: "1.101.0", date: "August 2026", changes: [
             "Deaktivierte Knöpfe sehen jetzt auch so aus: vorher gab es dafür keine Regel, ein deaktivierter Knopf wirkte optisch genauso klickbar wie ein aktiver - z.B. beim Ausfüllen der eigenen Angaben nach der ersten Anmeldung, wenn noch ein Pflichtfeld fehlte",
             "Das Geburtsdatum bei den eigenen Angaben nach der ersten Anmeldung akzeptiert kein Datum in der Zukunft mehr",
@@ -3289,7 +3294,7 @@ async function fetchAppointments(uid) {
 async function dbInsertAppt(uid, appt) {
     const row = { owner: uid, student_id: appt.student_id || null, title: appt.title || "",
         start_at: appt.start_at, end_at: appt.end_at || null, status: appt.status || "confirmed", note: appt.note || "",
-        art: appt.art || "ÜST" };
+        art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null };
     const { data, error } = await sb.from("appointments").insert(row).select().single();
     if (error) {
         console.error(error);
@@ -3540,6 +3545,27 @@ async function publicStudentSetAvatar(code, name, pin, dataUrl) {
     if (error) {
         console.error(error);
         throw new Error(error.message);
+    }
+    return data;
+}
+/* ════════ Warteliste: freie Stunde automatisch an passende Schüler anbieten ════════ */
+// Schüler trägt ein/aktualisiert, wann er/sie früher dran sein möchte. Gibt true bei Erfolg.
+async function publicStudentSetWunschliste(code, name, pin, active, weekdays, von, bis) {
+    const { data, error } = await sb.rpc("public_student_set_wunschliste", { code, p_name: name, p_pin: pin, p_active: active, p_weekdays: weekdays, p_von: von, p_bis: bis });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data === "ok";
+}
+// Schüler nimmt ein angebotenes, frei gewordenes Zeitfenster an. "wer zuerst zusagt" - die RPC
+// entscheidet das atomar in der DB, hier kommt nur noch das Ergebnis an:
+// "ok" | "taken" (schon vergeben) | "conflict" (eigener Terminkonflikt) | "error"
+async function publicClaimAppointmentOffer(code, name, pin, offerId) {
+    const { data, error } = await sb.rpc("public_claim_appointment_offer", { code, p_name: name, p_pin: pin, p_id: offerId });
+    if (error) {
+        console.error(error);
+        return "error";
     }
     return data;
 }
@@ -5575,6 +5601,7 @@ function App() {
     const apptWritesRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
+    const [waitlistOffer, setWaitlistOffer] = useState(null); // { appt, candidates } | null - Warteliste (Task #68)
     // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
     function applyFetchedAppts(list) {
         const gone = apptDeletedRef.current;
@@ -8418,8 +8445,12 @@ function App() {
     }
     // Storno-Anfrage eines Fahrschülers: bestätigen (Termin löschen) oder ablehnen (Termin behalten).
     async function confirmCancel(id) {
-        if (await askConfirm({ message: "Stornierung bestätigen? Der Termin wird damit endgültig gelöscht." }))
+        if (await askConfirm({ message: "Stornierung bestätigen? Der Termin wird damit endgültig gelöscht." })) {
+            const freed = (appts || []).find(a => a.id === id);
             await removeAppt(id, { label: "Termin storniert" });
+            if (freed)
+                maybeOfferWaitlist({ ...freed, status: "confirmed" });
+        }
     }
     async function rejectCancel(id) {
         if (await askConfirm({ message: "Stornierung ablehnen? Der Termin bleibt bestehen (Status: bestätigt)." })) {
@@ -8746,7 +8777,7 @@ function App() {
         const h = new Date().getHours();
         const gruss = h < 11 ? "Guten Morgen" : (h < 18 ? "Guten Tag" : "Guten Abend");
         const vorname = (teacherName || "").trim().split(/\s+/)[0] || "";
-        const heute = (appts || []).filter(a => a.status !== "pending" && isToday(a.start_at))
+        const heute = (appts || []).filter(a => a.status !== "pending" && a.status !== "offered" && isToday(a.start_at))
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
         const jetzt = new Date().toISOString();
         const naechster = heute.find(a => (a.end_at || a.start_at) >= jetzt);
@@ -10787,6 +10818,57 @@ function App() {
         const s = students.find(x => x.id === a.student_id);
         return s ? dispName(s) : "";
     }
+    // Warteliste (Task #68): passende Kandidaten für einen frei gewordenen Termin - gleiche
+    // Klasse, Wochentag/Zeitfenster passt zur eingetragenen Wunschliste, kein Terminkonflikt.
+    function waitlistCandidates(freedAppt) {
+        if (!freedAppt || !freedAppt.student_id)
+            return [];
+        const freedStudent = students.find(x => x.id === freedAppt.student_id);
+        const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
+        const d = new Date(freedAppt.start_at);
+        const weekday = d.getDay();
+        const hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+        const freedEnd = new Date(freedAppt.end_at || freedAppt.start_at);
+        return (students || []).filter(s => {
+            if (s.archived || s.id === freedAppt.student_id)
+                return false;
+            const wl = s.wunschliste;
+            if (!wl || !wl.active || !Array.isArray(wl.weekdays) || !wl.weekdays.includes(weekday))
+                return false;
+            if (!wl.von || !wl.bis || hhmm < wl.von || hhmm >= wl.bis)
+                return false;
+            if ((s.klasse || DEFAULT_KLASSE) !== klasse)
+                return false;
+            return !(appts || []).some(a => a.student_id === s.id && (a.status === "pending" || a.status === "confirmed")
+                && new Date(a.start_at) < freedEnd && new Date(a.end_at || a.start_at) > d);
+        });
+    }
+    function maybeOfferWaitlist(freedAppt) {
+        if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id)
+            return;
+        const candidates = waitlistCandidates(freedAppt);
+        if (candidates.length)
+            setWaitlistOffer({ appt: freedAppt, candidates });
+    }
+    async function createWaitlistOffer() {
+        if (!waitlistOffer)
+            return;
+        const { appt } = waitlistOffer;
+        const freedStudent = students.find(x => x.id === appt.student_id);
+        const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
+        try {
+            const created = await dbInsertAppt(uid, {
+                start_at: appt.start_at, end_at: appt.end_at, art: appt.art,
+                status: "offered", offer_klasse: klasse, offered_at: new Date().toISOString()
+            });
+            setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
+            showToast("Auf der Warteliste angeboten – passende Schüler sehen die Stunde jetzt in ihrer App.");
+        }
+        catch (e) {
+            showToast("Anbieten fehlgeschlagen:\n" + e.message);
+        }
+        setWaitlistOffer(null);
+    }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
     function openNewAppt(dateStr, startHM) {
         const s = startHM || "09:00";
@@ -11059,20 +11141,23 @@ function App() {
                                 React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(a)));
                         }
                         const pend = a.status === "pending";
+                        const offered = a.status === "offered";
                         const name = apptStudentName(a);
-                        const hasLeist = !pend && apptHasLeistung(a);
+                        const hasLeist = !pend && !offered && apptHasLeistung(a);
                         const aColor = artColor(apptArt(a));
-                        const accent = pend ? "var(--amber)" : (hasLeist ? "#1B8F4D" : aColor);
-                        const tint = pend ? "var(--amber-bg)" : (hasLeist ? "#E3F4E9" : softBg(aColor));
+                        const accent = offered ? "var(--sage)" : (pend ? "var(--amber)" : (hasLeist ? "#1B8F4D" : aColor));
+                        const tint = offered ? "var(--sage-bg)" : (pend ? "var(--amber-bg)" : (hasLeist ? "#E3F4E9" : softBg(aColor)));
                         return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", textAlign: "left",
-                                borderRadius: 12, marginTop: 4, background: tint } },
+                                borderRadius: 12, marginTop: 4, background: tint, border: offered ? "1.5px dashed var(--sage)" : "none" } },
                             React.createElement("div", { style: { minWidth: 50, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13, fontVariantNumeric: "tabular-nums", color: accent,
                                     background: "var(--card)", borderRadius: 9, padding: "6px 0", flexShrink: 0, boxShadow: "0 1px 4px rgba(0,0,0,.05)" } },
                                 hm(a.start_at),
                                 a.end_at ? React.createElement("div", { style: { fontWeight: 600, fontSize: 10.5, color: "var(--muted)", marginTop: 1 } }, hm(a.end_at)) : null),
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                                React.createElement("div", { style: { fontWeight: 600, fontSize: 14.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, name || a.title || "Termin"),
+                                React.createElement("div", { style: { fontWeight: 600, fontSize: 14.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, offered ? "Warteliste-Angebot" : (name || a.title || "Termin")),
                                 noteText(a) && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, noteText(a))),
+                            offered && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--sage-deep)",
+                                    background: "var(--card)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase" } }, "Warteliste"),
                             pend && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--amber)",
                                     background: "var(--card)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase" } }, "offen"),
                             !pend && isSonstige(a) && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 700, color: "var(--muted)",
@@ -15460,7 +15545,7 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
                     padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)" } },
                 React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
-                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, apptStudentName(apptChoice) || "Termin"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, apptChoice.status === "offered" ? "Warteliste-Angebot" : (apptStudentName(apptChoice) || "Termin")),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 3, marginBottom: 18 } },
                     fmtDLong(apptChoice.start_at) + ", " + hm(apptChoice.start_at) + " Uhr"),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, gap: 8 },
@@ -15483,14 +15568,42 @@ function App() {
                             // Erst diese Auswahl schließen, dann fragen: die Sicherheitsabfrage liegt
                             // sonst hinter dem Auswahlfenster und ist nicht bedienbar.
                             setApptChoice(null);
-                            if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true }))
-                                removeAppt(a.id); } },
+                            if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true })) {
+                                await removeAppt(a.id);
+                                maybeOfferWaitlist(a);
+                            } } },
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M3 6h18" }),
                         React.createElement("path", { d: "M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" }),
                         React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" })),
                     "Termin löschen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptChoice(null) }, "Abbrechen"))),
+        waitlistOffer && React.createElement("div", { onClick: () => setWaitlistOffer(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1250, display: "flex",
+                alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
+                    padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)", maxHeight: "85vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
+                    waitlistOffer.candidates.length + " Schüler warten auf einen früheren Termin"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                    fmtDLong(waitlistOffer.appt.start_at) + ", " + hm(waitlistOffer.appt.start_at) + " Uhr ist frei geworden. Passt das für die Warteliste?"),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
+                    "Auf der Warteliste anbieten"),
+                React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } },
+                    "Wartende Schüler (optional direkt anschreiben)"),
+                waitlistOffer.candidates.map(s => {
+                    const num = s.tel ? waNumber(s.tel) : "";
+                    const waText = "Hallo " + (s.vorname || s.name) + ", bei uns ist eine frühere Fahrstunde am "
+                        + fmtDLong(waitlistOffer.appt.start_at) + " um " + hm(waitlistOffer.appt.start_at) + " Uhr frei geworden. "
+                        + "Schau in der App vorbei, wenn du sie dir sichern möchtest – wer zuerst zusagt, bekommt sie.";
+                    return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, dispName(s)),
+                        num
+                            ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waText), target: "_blank", rel: "noopener noreferrer",
+                                    style: { flexShrink: 0, padding: "6px 12px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12, fontWeight: 700, textDecoration: "none" } }, "WhatsApp")
+                            : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "keine Nummer"));
+                }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setWaitlistOffer(null) }, "Nicht anbieten"))),
         apptForm && React.createElement("div", { onClick: () => { if (!apptForm.busy) setApptForm(null); }, className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
@@ -17598,6 +17711,11 @@ function StudentArea({ code, info, appMode }) {
             }
             setData(d);
             setName(n);
+            const w = (d.student && d.student.wunschliste) || {};
+            setWlActive(!!w.active);
+            setWlWeekdays(Array.isArray(w.weekdays) ? w.weekdays : []);
+            setWlVon(w.von || "");
+            setWlBis(w.bis || "");
             publicStudentLessons(code, n, p).then(ls => setData(cur => cur ? { ...cur, lessons: ls } : cur));
             try {
                 localStorage.setItem(LS_NAME, n);
@@ -17747,6 +17865,64 @@ function StudentArea({ code, info, appMode }) {
         }
         setAvatarBusy(false);
     }
+    // Warteliste: "ich will früher dran" - stehende Angabe statt spontanem Springer-Pool
+    // (siehe Begründung bei Task #68). wlWeekdays: 0=So .. 6=Sa, wie JS Date.getDay().
+    const [wlActive, setWlActive] = React.useState(false);
+    const [wlWeekdays, setWlWeekdays] = React.useState([]);
+    const [wlVon, setWlVon] = React.useState("");
+    const [wlBis, setWlBis] = React.useState("");
+    const [wlBusy, setWlBusy] = React.useState(false);
+    const [wlErr, setWlErr] = React.useState("");
+    const [wlSaved, setWlSaved] = React.useState(false);
+    function toggleWlWeekday(d) {
+        setWlWeekdays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort());
+        setWlSaved(false);
+    }
+    async function saveWunschliste() {
+        setWlErr("");
+        if (wlActive && (!wlWeekdays.length || !wlVon || !wlBis)) {
+            setWlErr("Bitte mindestens einen Wochentag und ein Zeitfenster angeben.");
+            return;
+        }
+        setWlBusy(true);
+        try {
+            const ok = await publicStudentSetWunschliste(code, name.trim(), pin.trim(), wlActive, wlWeekdays, wlVon, wlBis);
+            if (!ok)
+                throw new Error();
+            setWlSaved(true);
+            setData(cur => cur ? { ...cur, student: { ...cur.student, wunschliste: { active: wlActive, weekdays: wlWeekdays, von: wlVon, bis: wlBis } } } : cur);
+        }
+        catch (e) {
+            setWlErr("Speichern fehlgeschlagen. Bitte erneut versuchen.");
+        }
+        setWlBusy(false);
+    }
+    const [claimBusy, setClaimBusy] = React.useState("");
+    const [claimMsg, setClaimMsg] = React.useState("");
+    async function claimOffer(offerId) {
+        setClaimBusy(offerId);
+        setClaimMsg("");
+        try {
+            const res = await publicClaimAppointmentOffer(code, name.trim(), pin.trim(), offerId);
+            if (res === "ok") {
+                setData(cur => cur ? { ...cur, offers: (cur.offers || []).filter(o => o.id !== offerId) } : cur);
+                const d = await publicStudentOverview(code, name.trim(), pin.trim());
+                if (d)
+                    setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
+                setClaimMsg("ok");
+            }
+            else if (res === "taken")
+                setClaimMsg("Schade, dieser Termin wurde gerade eben von jemand anderem gesichert.");
+            else if (res === "conflict")
+                setClaimMsg("Das passt leider nicht - du hast zu dieser Zeit schon einen Termin.");
+            else
+                setClaimMsg("Das hat nicht geklappt. Bitte erneut versuchen.");
+        }
+        catch (e) {
+            setClaimMsg("Das hat nicht geklappt. Bitte erneut versuchen.");
+        }
+        setClaimBusy("");
+    }
     const inp = { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--field-bg)", color: "var(--ink)" };
     // ── Nicht eingeloggt: Login-Maske ──
     if (!data) {
@@ -17806,6 +17982,7 @@ function StudentArea({ code, info, appMode }) {
     const strecken = Array.isArray(data.strecken) ? data.strecken : [];
     const stu = data.student || {};
     const appts = Array.isArray(data.appointments) ? data.appointments : [];
+    const offers = Array.isArray(data.offers) ? data.offers : [];
     const lessonsFehler = data.lessons === null; // Server-Funktion fehlt oder meldet Fehler
     const myLessons = (Array.isArray(data.lessons) ? data.lessons : [])
         .slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
@@ -17890,6 +18067,18 @@ function StudentArea({ code, info, appMode }) {
             : React.createElement("div", { className: "card", style: { padding: "12px 16px", marginBottom: 14, display: "flex", alignItems: "center", gap: 11, background: "var(--field-bg)" } },
                 React.createElement("span", { style: { fontSize: 18, flexShrink: 0 } }, "🗓️"),
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.4 } }, "Aktuell ist keine Fahrstunde für dich eingetragen. Unter „Termine“ kannst du deinem Fahrlehrer einen Wunschtermin vorschlagen.")),
+        // Frei gewordene Termine ganz oben, direkt unter der nächsten Fahrstunde: "wer zuerst
+        // zusagt, bekommt den Slot" - das lohnt sich nur, wenn es sofort ins Auge fällt.
+        offers.map(o => React.createElement("div", { key: o.id, className: "card", style: { padding: "14px 16px", marginBottom: 14, borderLeft: "4px solid var(--sage)" } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 } },
+                React.createElement("span", { style: { fontSize: 20, flexShrink: 0 } }, "🎉"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, "Ein früherer Termin ist frei geworden!")),
+            React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginBottom: 10 } },
+                fmtDLong(o.start_at) + " · " + hm(o.start_at) + " Uhr"),
+            claimMsg && claimBusy === "" && React.createElement("div", { style: { fontSize: 12.5, color: claimMsg === "ok" ? "var(--sage-deep)" : "#B3362A", marginBottom: 10 } },
+                claimMsg === "ok" ? "Gesichert! Der Termin steht jetzt fest." : claimMsg),
+            React.createElement("button", { className: "btn btn-primary btn-block", disabled: claimBusy === o.id, onClick: () => claimOffer(o.id) },
+                claimBusy === o.id ? "Wird gesichert…" : "Jetzt sichern"))),
         React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Meine Erfolge"),
@@ -18035,6 +18224,30 @@ function StudentArea({ code, info, appMode }) {
                 kommend.map((a, i) => React.createElement(ApptRow, { key: "k" + i, a: a, onCancel: askCancel, cancelBusy: cancelBusy }))),
             vergangen.length > 0 && React.createElement("div", { style: { marginTop: 12 } },
                 React.createElement(Collapsible, { title: "Verlauf", subtitle: vergangen.length + " vergangene Termine" }, vergangen.map((a, i) => React.createElement(ApptRow, { key: "v" + i, a: a, past: true }))))),
+        React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Warteliste"),
+                React.createElement("button", { onClick: () => { setWlActive(v => !v); setWlSaved(false); }, style: { flexShrink: 0, width: 44, height: 26, borderRadius: 99, border: "none", position: "relative",
+                        background: wlActive ? "var(--sage)" : "var(--line)", transition: "background .15s" } },
+                    React.createElement("span", { style: { position: "absolute", top: 3, left: wlActive ? 21 : 3, width: 20, height: 20, borderRadius: "50%", background: "#fff", transition: "left .15s", boxShadow: "var(--sh-1)" } }))),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: wlActive ? 12 : 0 } },
+                "Trag ein, wann du früher dran sein möchtest. Wird eine passende Fahrstunde frei, siehst du sie sofort hier oben – wer zuerst zusagt, bekommt sie."),
+            wlActive && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 } },
+                    ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"].map((lbl, d) => React.createElement("button", { key: d, onClick: () => toggleWlWeekday(d), style: { padding: "7px 12px", borderRadius: 99,
+                            border: "1.5px solid " + (wlWeekdays.includes(d) ? "var(--orange)" : "var(--line)"),
+                            background: wlWeekdays.includes(d) ? "var(--orange-soft)" : "var(--field-bg)",
+                            color: wlWeekdays.includes(d) ? "var(--orange-deep)" : "var(--muted)", fontSize: 12.5, fontWeight: 700 } }, lbl))),
+                React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
+                    React.createElement("div", { className: "field", style: { flex: 1, marginBottom: 0 } },
+                        React.createElement("label", null, "Von"),
+                        React.createElement("input", { type: "time", value: wlVon, onChange: e => { setWlVon(e.target.value); setWlSaved(false); }, style: inp })),
+                    React.createElement("div", { className: "field", style: { flex: 1, marginBottom: 0 } },
+                        React.createElement("label", null, "Bis"),
+                        React.createElement("input", { type: "time", value: wlBis, onChange: e => { setWlBis(e.target.value); setWlSaved(false); }, style: inp })))),
+            wlErr && React.createElement("div", { style: { background: "#FDECEA", color: "#B3362A", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 10 } }, wlErr),
+            React.createElement("button", { className: "btn btn-primary btn-block", disabled: wlBusy, onClick: saveWunschliste },
+                wlBusy ? "Speichert…" : (wlSaved ? "✓ Gespeichert" : "Speichern"))),
         confirmCancel && React.createElement("div", { onClick: () => setConfirmCancel(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
