@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.104.2";
+const APP_VERSION = "1.104.3";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1178,6 +1178,24 @@ function theorieVerfuegbar(info, appMode) {
 const LFK_KLASSEN = ["AM", "A1", "A2", "A", "B", "BE", "B96", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "L", "T"];
 // Führerscheinklasse, auf die ohne eigene Auswahl zurückgefallen wird (bestehende Schüler/Vorlagen vor der Klassen-Funktion waren faktisch Klasse B)
 const DEFAULT_KLASSE = "B";
+// Fällt wie tplFor() (App()-intern, für den Fahrlehrer) auf die eingebauten Standard-ADK/
+// Strecken-Karten zurück, wenn für diese Klasse noch keine eigene Vorlage in der DB liegt -
+// public_student_overview liefert in dem Fall ein leeres Array, weil die RPC (anders als
+// tplFor() im Fahrlehrer-Dashboard) keine Standardkarten kennt. Ohne diesen Fallback sehen
+// Schüler im Buchungslink/der Schüler-App gar keinen Ausbildungsstand mehr, obwohl ihr
+// Fahrlehrer im eigenen Dashboard dieselben Standardkarten längst angezeigt bekommt (Bug #89).
+// Bewusst top-level statt App()-intern, weil StudentArea/SchuelerStart eigene, nicht in App()
+// verschachtelte Komponenten sind, die nur die RPC-Rohdaten kennen, kein tpl-State.
+function publicTplFallback(rawAdk, rawStrecken, klasse, schoolName) {
+    if (Array.isArray(rawAdk) && rawAdk.length) {
+        return { adk: rawAdk, strecken: Array.isArray(rawStrecken) ? rawStrecken : [] };
+    }
+    const isV3 = (schoolName || "").trim().toLowerCase() === "fahrschule v3";
+    if ((klasse || DEFAULT_KLASSE) === "BE") {
+        return { adk: deepCopy(BE_ADK), strecken: [] };
+    }
+    return { adk: deepCopy(isV3 ? DEFAULT_ADK : BVF_ADK), strecken: isV3 ? deepCopy(DEFAULT_STRECKEN) : [] };
+}
 // Rät die Führerscheinklasse aus einem Freitext (z.B. Fahrschul-Untertitel oder gescannter
 // Antrag). Das deutsche Wort "Klasse" enthält selbst ein "A" - eine reine Substring-Suche
 // würde deshalb jeden Text mit dem Wort "Klasse" fälschlich auf Klasse A raten. Das Wort
@@ -1247,6 +1265,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.104.3", date: "August 2026", changes: [
+            "Fehler behoben (Task #89): Schüler ohne eine vom Fahrlehrer eigens angepasste ADK/Strecken-Vorlage sahen im Buchungslink und in der Fahrschüler-App plötzlich gar keinen Ausbildungsstand mehr - dabei zeigt das Fahrlehrer-Dashboard in diesem Fall längst die eingebauten Standardkarten an. Der Buchungslink kennt diesen Rückfall jetzt ebenfalls, Schüler sehen wieder ihren echten Fortschritt",
+        ] },
     { v: "1.104.2", date: "August 2026", changes: [
             "Fehler behoben: Das Fristen-Radar (v1.104.0) konnte die Startseite komplett zum Absturz bringen, sobald ein archivierter Schüler vorhanden war - betroffene Konstanten und Hilfsfunktionen sind jetzt sauber vor jeder Verwendung initialisiert",
         ] },
@@ -18069,9 +18090,8 @@ function StudentArea({ code, info, appMode }) {
             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: changeBusy, onClick: () => { setChanging(false); setNp1(""); setNp2(""); setChangeErr(""); } }, t("pin_later"))));
     }
     // ── Eingeloggt: Überblick ──
-    const adk = Array.isArray(data.adk) ? data.adk : [];
-    const strecken = Array.isArray(data.strecken) ? data.strecken : [];
     const stu = data.student || {};
+    const { adk, strecken } = publicTplFallback(data.adk, data.strecken, stu.klasse, info && info.school_name);
     const appts = Array.isArray(data.appointments) ? data.appointments : [];
     const offers = Array.isArray(data.offers) ? data.offers : [];
     const lessonsFehler = data.lessons === null; // Server-Funktion fehlt oder meldet Fehler
@@ -18470,8 +18490,7 @@ function SchuelerStart({ code, info, onGoTab }) {
     const gruss = stunde < 11 ? "Guten Morgen" : (stunde < 18 ? "Guten Tag" : "Guten Abend");
     const stu = (data && data.student) || {};
     const vorname = (stu.vorname || "").trim();
-    const adk = (data && Array.isArray(data.adk)) ? data.adk : [];
-    const strecken = (data && Array.isArray(data.strecken)) ? data.strecken : [];
+    const { adk, strecken } = publicTplFallback(data && data.adk, data && data.strecken, stu.klasse, info && info.school_name);
     const adkPct = adk.length ? calcLern(stu.items || {}, adk, stu) : 0;
     const strPct = strecken.length ? calcBack(stu, strecken) : 0;
     const pct = Math.max(adkPct, strPct);
