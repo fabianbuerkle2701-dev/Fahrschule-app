@@ -1,4 +1,4 @@
-// Netlify Function: Chat-Assistent auf der öffentlichen Buchungsseite.
+// Netlify Function: Chat-Assistent auf der öffentlichen Buchungsseite UND in der Fahrschüler-App.
 // Beantwortet Standardfragen von Interessenten (Preise, Klassen, Anmeldung) automatisch,
 // ohne dass jemand ans Telefon muss. Antwortet ausschließlich anhand der über public_chat_facts
 // geladenen, für diese eine Fahrschule hinterlegten Fakten - keine erfundenen Preise, keine
@@ -8,6 +8,14 @@
 // und haben keinen Login). Genau das war bei den anderen KI-Functions vor Task #76 die
 // Sicherheitslücke - hier wird stattdessen über den Buchungscode + ein Tageslimit
 // (public_chat_rate_limit) geschützt, damit die Function nicht zur offenen Kostenfalle wird.
+//
+// Ist ein Schüler eingeloggt, schickt der Client zusätzlich Name+PIN mit (Phase 1 des
+// "Verwaltung ersetzen"-Fahrplans). Diese werden HIER serverseitig über dieselbe
+// public_student_overview-RPC verifiziert, die auch StudentArea nutzt - dem Client wird
+// nie vertraut, genau wie bei jeder anderen public_student_*-RPC in dieser App. Schlägt die
+// Verifikation fehl (falscher PIN, kein Login), läuft der Chat einfach als anonymer
+// Schulfakten-Chat weiter, ohne einen Fehler zurückzugeben - so lässt sich von außen nicht
+// durch Fehlermeldungen erraten, ob ein Name/PIN existiert.
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
 
@@ -31,6 +39,8 @@ exports.handler = async function (event) {
 
   const code = (body.code || "").toString().trim();
   const message = (body.message || "").toString().trim().slice(0, 800);
+  const studentName = (body.name || "").toString().trim().slice(0, 200);
+  const pin = (body.pin || "").toString().trim().slice(0, 50);
   // Nur die letzten paar Runden mitschicken - reicht für Rückfragen im Kontext, hält die
   // Anfrage aber klein (jede Runde kostet, und die Fragen sind kurze Standardthemen).
   const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
@@ -53,7 +63,9 @@ exports.handler = async function (event) {
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Unbekannter Buchungslink" }) };
   }
 
-  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 40 });
+  // Erhöht gegenüber v1.103.0 (40), weil jetzt auch eingeloggte Schüler mitzählen, nicht nur
+  // Interessenten - beide teilen sich weiterhin ein gemeinsames Tageslimit pro Fahrschule.
+  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 60 });
   if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute sind schon viele Fragen gestellt worden. Bitte versuch es morgen wieder oder nutze das Anmeldeformular." }) };
   }
@@ -64,16 +76,48 @@ exports.handler = async function (event) {
     ? packages.map((p) => "- " + (p.name || p.label || "Paket") + (p.price != null ? ": " + p.price + " €" : "")).join("\n")
     : "keine Pakete hinterlegt";
 
-  const system = `Du bist der automatische Chat-Assistent auf der Buchungsseite der Fahrschule "${facts.school_name}". Interessenten und Fahrschüler stellen dir Fragen. Antworte kurz, freundlich, auf Deutsch, in 2-4 Sätzen.
+  // Persönlicher Block: nur wenn Name+PIN mitgeschickt wurden UND die Verifikation hier
+  // serverseitig erfolgreich war (dieselbe RPC + derselbe PIN-Check wie beim normalen Login
+  // in StudentArea). Bewusst OHNE Finanzdaten/Prozent-Fortschritt - die Berechnung dafür lebt
+  // clientseitig (sumCharges/calcLern) und würde serverseitig dupliziert schnell auseinanderlaufen;
+  // stattdessen verweist der Assistent bei solchen Fragen ehrlich auf "Mein Fortschritt" in der App.
+  let personalBlock = "";
+  if (studentName && pin) {
+    const overviewRows = await rpc("public_student_overview", { code, p_name: studentName, p_pin: pin });
+    const overview = Array.isArray(overviewRows) ? overviewRows[0] : null;
+    const vorname = overview && overview.student && overview.student.vorname;
+    if (vorname) {
+      const appts = Array.isArray(overview.appointments) ? overview.appointments : [];
+      const jetzt = new Date().toISOString();
+      const kommend = appts
+        .filter((a) => a && a.status === "confirmed" && (a.end_at || a.start_at) >= jetzt)
+        .sort((a, b) => a.start_at.localeCompare(b.start_at));
+      const naechster = kommend[0];
+      const naechsterText = naechster
+        ? new Date(naechster.start_at).toLocaleString("de-DE", { weekday: "long", day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" }) + " Uhr"
+        : "kein bestätigter Termin eingetragen";
+      const offers = Array.isArray(overview.offers) ? overview.offers.length : 0;
+      personalBlock = `
 
-Das sind die EINZIGEN Fakten, die du verwenden darfst:
+Zusätzlich bist du gerade mit ${vorname} verbunden (eingeloggt, PIN geprüft) - nutze das NUR, wenn die Frage erkennbar die eigene Person betrifft, sonst antworte wie gewohnt allgemein:
+- Nächster bestätigter Termin: ${naechsterText}
+- Anzahl bestätigter, künftiger Termine: ${kommend.length}
+- Offene Warteliste-Angebote: ${offers > 0 ? offers + " (im Reiter Termine sichtbar)" : "keine"}
+- Theorie laut Fahrlehrer bestanden: ${overview.student.theorie ? "ja" : "nein"}
+Für genauen Ausbildungsstand in Prozent oder offene Beträge hast du keine Daten - verweise dafür freundlich auf den Reiter "Mein Fortschritt" bzw. direkt auf den Fahrlehrer, rate niemals eine Zahl.`;
+    }
+  }
+
+  const system = `Du bist der automatische Chat-Assistent der Fahrschule "${facts.school_name}", erreichbar auf der Buchungsseite und in der Fahrschüler-App. Interessenten und Fahrschüler stellen dir Fragen. Antworte kurz, freundlich, auf Deutsch, in 2-4 Sätzen.
+
+Das sind die EINZIGEN allgemeinen Fakten, die du verwenden darfst:
 - Fahrschule: ${facts.school_name}${facts.subtitle ? " (" + facts.subtitle + ")" : ""}
 - Standort: ${facts.city || "nicht hinterlegt"}
 - Angebotene Klassen: ${klassen}
 - Preis pro Fahrstunde: ${facts.price_hour != null ? facts.price_hour + " €" : "nicht hinterlegt"}
 - Pakete:
 ${packagesText}
-- Anmeldung: über den Reiter "Neu anmelden" auf dieser Seite, unverbindlich, die Fahrschule meldet sich dann
+- Anmeldung: über den Reiter "Neu anmelden" auf dieser Seite, unverbindlich, die Fahrschule meldet sich dann${personalBlock}
 
 Regeln, unbedingt einhalten:
 1. Erfinde NIEMALS Preise, Zeiten, Erfolgsquoten oder Aussagen, die oben nicht stehen.
