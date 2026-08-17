@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.105.0";
+const APP_VERSION = "1.105.1";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1168,6 +1168,13 @@ const THEORY_UEBEN_APP_VORSCHAU = true;
 // nicht an Interessenten, die den Buchungslink weitergereicht bekommen haben.
 const BEGLEITFAHRTEN_APP = true;
 function begleitungVerfuegbar(appMode) { return !!(BEGLEITFAHRTEN_APP && appMode); }
+// Master-Schalter für die gestaffelte Zahlungserinnerung (3 Eskalationsstufen statt einem
+// einzelnen Text). Bleibt false, bis die Abrechnung tatsächlich im echten Betrieb genutzt wird -
+// vorher gibt es keine belastbaren Erfahrungswerte, ob der Ton der Stufen passt. Bei false
+// verhält sich die bestehende "Überfällig"-Karte in renderAbrechnung() exakt wie bisher (ein
+// einzelner freundlicher Text ab Überfälligkeit, kein Stufen-Badge). Auf true stellen, sobald
+// Fabian das für den produktiven Einsatz freigibt.
+const ZAHLUNGSERINNERUNG_STUFEN_RELEASED = false;
 // Einzige Stelle, die entscheidet, ob "Theorie üben" sichtbar ist. appMode = native Fahrschüler-App.
 function theorieVerfuegbar(info, appMode) {
     if (THEORY_UEBEN_RELEASED)
@@ -1265,6 +1272,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.105.1", date: "August 2026", changes: [
+            "Hinweis für Fabian: Die \"Überfällig\"-Erinnerung in der Abrechnung kann jetzt gestaffelt eskalieren (sanft ab 7 Tagen, bestimmter ab 21, Hinweis auf Mahnung ab 45) statt nur einen einzelnen Text zu zeigen - bleibt aber hinter ZAHLUNGSERINNERUNG_STUFEN_RELEASED versteckt, bis die Abrechnung im echten Betrieb läuft. Bei false verhält sich alles exakt wie bisher, kein sichtbarer Unterschied für dich",
+        ] },
     { v: "1.105.0", date: "August 2026", changes: [
             "Neu: Der KI-Chat-Assistent (\"Frag uns\") ist jetzt auch in der Fahrschüler-App erreichbar, nicht mehr nur auf der öffentlichen Buchungsseite - und kennt eingeloggte Schüler persönlich: nächster Termin, offene Warteliste-Angebote und ob die Theorie schon bestanden ist, alles serverseitig über denselben PIN-Login geprüft wie beim normalen Anmelden",
             "Bei Finanz- oder genauen Prozent-Fragen verweist der Assistent bewusst auf \"Mein Fortschritt\" bzw. den Fahrlehrer, statt eine Zahl zu raten",
@@ -4174,6 +4184,41 @@ function invoiceStatus(s, inv) {
     const paid = invoicePaid(s, inv.id), total = Number(inv.total) || 0;
     if (paid <= 0.005) return "offen";
     return paid + 0.005 >= total ? "bezahlt" : "teil";
+}
+// Eskalationsstufe der gestaffelten Zahlungserinnerung (siehe ZAHLUNGSERINNERUNG_STUFEN_RELEASED),
+// abhängig von den Tagen ÜBER das Zahlungsziel hinaus - demselben "tage"-Wert, den die
+// "Überfällig"-Karte in renderAbrechnung() ohnehin schon berechnet, keine zweite Zeitrechnung.
+// 0 = überfällig, aber noch keine eigene Stufe; 1 = sanfte Erinnerung; 2 = bestimmter Ton;
+// 3 = Hinweis auf eine bevorstehende förmliche Mahnung.
+function mahnstufe(tageUeberfaellig) {
+    if (tageUeberfaellig >= 45) return 3;
+    if (tageUeberfaellig >= 21) return 2;
+    if (tageUeberfaellig >= 7) return 1;
+    return 0;
+}
+function mahnstufeLabel(stufe) {
+    return stufe >= 3 ? "Mahnhinweis" : stufe === 2 ? "2. Erinnerung" : "Erinnerung";
+}
+// Eskalierender Text je Stufe - bewusst wie das bestehende erinnerungText() OHNE Mahngebühren
+// oder Verzugszinsen (das ist eine Geschäfts-/Rechtsentscheidung, kein Text, den sich die App
+// ausdenkt). Stufe 3 KÜNDIGT eine förmliche Mahnung nur an, sie IST keine. Nimmt Name/Beträge als
+// fertige Werte statt dispName()/eurFmt() aus App() zu schließen - bewusst Modul-Top-Level ohne
+// Bezug auf Component-State (siehe Fristen-Radar-Crash-Hotfix v1.104.2 zur selben Falle).
+function mahnstufeText(x, schoolName) {
+    const name = [((x.stu.vorname || "").trim()), ((x.stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler";
+    const vorname = (x.stu.vorname || "").trim() || name;
+    const datum = x.inv.date ? new Date(x.inv.date).toLocaleDateString("de-DE") : "";
+    const schule = schoolName || "";
+    if (x.stufe >= 3) {
+        return "Hallo " + vorname + ", die Rechnung " + x.inv.number + " vom " + datum + " über " + eurFmt(x.offen)
+            + " ist jetzt seit " + x.tage + " Tagen überfällig. Bitte gleiche sie kurzfristig aus, sonst müssen wir dir eine förmliche Mahnung schicken. Bei Fragen melde dich gerne. " + schule;
+    }
+    if (x.stufe === 2) {
+        return "Hallo " + vorname + ", die Rechnung " + x.inv.number + " vom " + datum + " über " + eurFmt(x.offen)
+            + " ist seit " + x.tage + " Tagen offen. Bitte gleiche sie zeitnah aus oder melde dich, falls es ein Problem gibt - dann finden wir eine Lösung. " + schule;
+    }
+    return "Hallo " + vorname + ", kleine Erinnerung: die Rechnung " + x.inv.number + " vom " + datum + " über " + eurFmt(x.offen)
+        + " ist noch offen. Magst du das bei Gelegenheit erledigen? Danke dir! " + schule;
 }
 // Effective box count: per-student override, else template default
 // Kästchen-Anzahl eines Punkts. Seit 1.56.0 gilt einheitlich die Anzahl aus der
@@ -10248,7 +10293,7 @@ function App() {
             const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
             if (tage <= 0)
                 return null;
-            return { inv, stu, tage, offen: invoiceOpen(stu, inv) };
+            return { inv, stu, tage, offen: invoiceOpen(stu, inv), stufe: mahnstufe(tage) };
         }).filter(Boolean).sort((a, b) => b.tage - a.tage);
         const ueberfaelligSumme = ueberfaellig.reduce((sum, x) => sum + x.offen, 0);
         // Freundlicher, konkreter Erinnerungstext. Bewusst ohne Mahngebuehren-Drohung:
@@ -10267,7 +10312,8 @@ function App() {
                 showToast("Für " + dispName(x.stu) + " ist keine Telefonnummer hinterlegt.");
                 return;
             }
-            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(erinnerungText(x)), "_blank", "noopener");
+            const text = ZAHLUNGSERINNERUNG_STUFEN_RELEASED ? mahnstufeText(x, school && school.name) : erinnerungText(x);
+            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
         }
         return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Abrechnung"),
@@ -10303,7 +10349,11 @@ function App() {
                 React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 8, borderLeft: "3px solid var(--amber)" } },
                     ueberfaellig.slice(0, 10).map(x => React.createElement("div", { key: x.inv.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--line)" } },
                         React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, dispName(x.stu)),
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, dispName(x.stu)),
+                                ZAHLUNGSERINNERUNG_STUFEN_RELEASED && x.stufe > 0 && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, letterSpacing: ".02em", padding: "2px 7px", borderRadius: 99,
+                                        background: x.stufe >= 3 ? "#FDECEA" : x.stufe === 2 ? "var(--orange-soft)" : "var(--field-bg)",
+                                        color: x.stufe >= 3 ? "#B3362A" : x.stufe === 2 ? "var(--orange-deep)" : "var(--muted)" } }, mahnstufeLabel(x.stufe))),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
                                 x.inv.number,
                                 " · ",
