@@ -5801,6 +5801,7 @@ function App() {
     // Kontoauszug einlesen: Text aus dem Online-Banking einfügen, Zahlungen den Rechnungen zuordnen.
     const [zahlungsImport, setZahlungsImport] = useState(null); // null | {text, vorschlaege|null}
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
+    const [abbruchOpen, setAbbruchOpen] = useState(false); // Liste "Abbruch-Risiko" auf der Startseite (Verwaltung-ersetzen-Fahrplan, Phase 2)
     const [erinnerungen, setErinnerungen] = useState(false); // Liste "Erinnerungen für morgen" auf der Startseite
     const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
@@ -6199,6 +6200,7 @@ function App() {
             else if (erinnerungen) setErinnerungen(false);
             else if (stillOpen) setStillOpen(false);
             else if (fristenOpen) setFristenOpen(false);
+            else if (abbruchOpen) setAbbruchOpen(false);
             else if (schoolLeistungen) setSchoolLeistungen(null);
             else if (adminEdit) setAdminEdit(null);
             else if (adminTeachers) setAdminTeachers(null);
@@ -6208,7 +6210,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -7179,6 +7181,17 @@ function App() {
         });
         return items.sort((a, b) => a.days - b.days);
     }, [vehicles, students, session, isSchoolAdmin]);
+    // Abbruch-Risiko: kombiniert zwei Signale, die einzeln schon als eigene Karte laufen -
+    // "lange nicht gefahren" (stillList) und "offener Betrag". Jedes für sich kann harmlos sein
+    // (Urlaub; Rechnung erst frisch gestellt), aber zusammen (kein Termin UND unbezahlt) ist es
+    // ein deutlich stärkeres Warnsignal für einen drohenden, stillen Abbruch - verdient eine
+    // eigene, dringlichere Kachel statt in zwei getrennten Listen unterzugehen.
+    const abbruchRisiko = React.useMemo(() => {
+        const price = Number(pricePerHour) || 0;
+        return stillList
+            .map(x => ({ ...x, offen: sumCharges(x.s, price) - sumPayments(x.s) }))
+            .filter(x => x.offen > 0.005);
+    }, [stillList, pricePerHour]);
     if (session === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (session === null)
@@ -9038,13 +9051,24 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
                         (recSession.studentName ? recSession.studentName + "  \u00B7  " : "") + rmapFmtDist(recUi.dist) + "  \u00B7  " + rmapFmtDur(recUi.dur))),
                 chev),
-            // Lange nicht gefahren: leise Abbrecher, bevor sie ganz weg sind
-            stillList.length > 0 && React.createElement("button", { onClick: () => setStillOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+            // Abbruch-Risiko: lange nicht gefahren UND offener Betrag zusammen - dringlicher als
+            // beide Signale einzeln, deshalb eigene, auffälligere Kachel vor "Lange nicht gefahren".
+            abbruchRisiko.length > 0 && React.createElement("button", { onClick: () => setAbbruchOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left", background: "#FDECEA", border: "1px solid #F3C6C0" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "#fff", color: "#B3362A" } },
+                    icClock({ width: 19, height: 19 })),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, color: "#B3362A" } },
+                        abbruchRisiko.length === 1 ? "1 Schüler mit erhöhtem Abbruch-Risiko" : abbruchRisiko.length + " Schüler mit erhöhtem Abbruch-Risiko"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Lange kein Termin und noch offener Betrag")),
+                chev),
+            // Lange nicht gefahren: leise Abbrecher, bevor sie ganz weg sind - ohne die, die schon
+            // in der dringlicheren Abbruch-Risiko-Kachel oben stehen (sonst doppelt gezählt).
+            (stillList.length - abbruchRisiko.length) > 0 && React.createElement("button", { onClick: () => setStillOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--field-bg)", color: "var(--ink-2)" } },
                     icClock({ width: 19, height: 19 })),
                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
-                        stillList.length === 1 ? "1 Schüler lange nicht gefahren" : stillList.length + " Schüler lange nicht gefahren"),
+                        (stillList.length - abbruchRisiko.length) === 1 ? "1 Schüler lange nicht gefahren" : (stillList.length - abbruchRisiko.length) + " Schüler lange nicht gefahren"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, "Seit über " + STILL_TAGE + " Tagen kein Termin")),
                 chev),
             // Fristen-Radar: TÜV/HU + Löschfristen an einer Stelle statt in einer separaten Liste
@@ -15457,9 +15481,10 @@ function App() {
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Lange nicht gefahren"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Seit \u00FCber " + STILL_TAGE + " Tagen kein best\u00E4tigter Termin"),
-                stillList.length === 0
+                // Wer schon in der Abbruch-Risiko-Kachel steht, taucht hier nicht doppelt auf.
+                (stillList.filter(x => !abbruchRisiko.some(r => r.s.id === x.s.id))).length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Alle Sch\u00FCler waren k\u00FCrzlich da. \uD83C\uDF89")
-                    : stillList.map(({ s, letzte }) => {
+                    : stillList.filter(x => !abbruchRisiko.some(r => r.s.id === x.s.id)).map(({ s, letzte }) => {
                         const tage = Math.floor((Date.now() - letzte) / 86400000);
                         function erinnern() {
                             const num = waNumber(s.tel);
@@ -15478,6 +15503,33 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        abbruchOpen && React.createElement("div", { onClick: () => setAbbruchOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Abbruch-Risiko"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Seit \u00FCber " + STILL_TAGE + " Tagen kein Termin, und noch ein offener Betrag - beides zusammen ist ein deutlich st\u00E4rkeres Signal als jedes f\u00FCr sich."),
+                abbruchRisiko.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell kein erh\u00F6htes Abbruch-Risiko. \uD83C\uDF89")
+                    : abbruchRisiko.map(({ s, letzte, offen }) => {
+                        const tage = Math.floor((Date.now() - letzte) / 86400000);
+                        function erinnern() {
+                            const num = waNumber(s.tel);
+                            const text = "Hallo " + ((s.vorname || "").trim() || dispName(s)) + ", sch\u00F6n l\u00E4nger nichts von dir geh\u00F6rt \u2013 sollen wir mal wieder einen Fahrtermin ausmachen? Meld dich gern, wenn's passt!";
+                            if (!num) {
+                                showToast("F\u00FCr " + dispName(s) + " ist keine Telefonnummer hinterlegt.");
+                                return;
+                            }
+                            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+                        }
+                        return React.createElement("div", { key: s.id, className: "card", style: { display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid #B3362A" } },
+                            React.createElement("div", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, "seit " + tage + " Tagen kein Termin \u00B7 " + eurFmt(offen) + " offen")),
+                            React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
+                    }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAbbruchOpen(false) }, "Schlie\u00DFen"))),
         fristenOpen && React.createElement("div", { onClick: () => setFristenOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
