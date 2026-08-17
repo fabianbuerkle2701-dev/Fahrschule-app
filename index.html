@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.105.4";
+const APP_VERSION = "1.106.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1272,6 +1272,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.106.0", date: "August 2026", changes: [
+            "Neu: Sonderfahrten-Automatik. Fahrstunden mit der Art Überland/Autobahn/Dämmerung (bei Termin oder \"Fahrstunde erfassen\" wählbar) zählen jetzt automatisch zu den Pflicht-UE der Klasse zusammen - in der Übersicht jedes Schülers erscheint dafür eine neue Kachel mit Fortschrittsbalken je Sonderfahrt-Art, inklusive Hinweis, wenn noch keine einzelne Fahrt mit mindestens 90 Minuten dabei war. Das Pflicht-UE-Soll je Klasse lässt sich unter Einstellungen, Adminbereich, Sonderfahrten-Soll eintragen - vorausgefüllt ist nur Klasse B mit den gesetzlichen Werten (5/4/3 UE), alle anderen Klassen bitte selbst eintragen",
+        ] },
     { v: "1.105.4", date: "August 2026", changes: [
             "Neu: Die Kachel \"Noch nicht berechnet\" (erbrachte Leistungen ohne Rechnung) erscheint jetzt auch direkt auf der Startseite, nicht mehr nur in der Abrechnung - damit fällige Rechnungen nicht in Vergessenheit geraten, nur weil man gerade nicht in der Abrechnung war",
         ] },
@@ -3909,6 +3912,43 @@ function secBack(stu, sec) {
     sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); });
     return soll ? Math.round(done / soll * 100) : 0;
 }
+/* ════════ Sonderfahrten-Automatik ════════ */
+// Summiert die dokumentierten Fahrstunden-Minuten je Sonderfahrt-Art (drivenLessons[].art, dieselben
+// Kürzel wie bei Ausbildungsfahrt-Arten/APPT_ART) automatisch zu Pflicht-UE auf, statt sie von Hand
+// mitzählen zu lassen.
+const SONDERFAHRT_ARTEN = [
+    { code: "ÜL", key: "ueberland", label: "Überland" },
+    { code: "AB", key: "autobahn", label: "Autobahn" },
+    { code: "NF", key: "daemmerung", label: "Dämmerung/Dunkelheit" },
+];
+// Einzige Klasse, für die hier ein Pflicht-UE-Soll fest hinterlegt ist (FahrschAusbO Anlage 1,
+// Klasse B: 5 Überland-/4 Autobahn-/3 Dämmerungs-UE) - für alle anderen Klassen trägt die Fahrschule
+// das Soll selbst ein (Einstellungen, Adminbereich). Lieber gar keine Zahl zeigen als eine
+// ungeprüfte, die als amtliche Vorgabe missverstanden werden könnte.
+const DEFAULT_SONDERFAHRTEN_SOLL = { B: { ueberland: 5, autobahn: 4, daemmerung: 3 } };
+// Ohne für die Klasse hinterlegtes Soll liefert diese Funktion ein leeres Array - die Karte bleibt
+// dann unsichtbar, statt eine falsche "0 von 0 erfüllt" zu zeigen.
+// Feldweise mit den Defaults zusammengeführt (nicht das ganze Objekt ersetzt): sobald die Fahrschule
+// nur EIN Feld einer Klasse einträgt, sollen die anderen, noch nicht angefassten Felder weiter ihren
+// Standardwert zeigen statt plötzlich zu verschwinden.
+function sonderfahrtenBilanz(stu, klasse, sollMap) {
+    const defaults = DEFAULT_SONDERFAHRTEN_SOLL[klasse] || {};
+    const overrides = (sollMap && sollMap[klasse]) || {};
+    const soll = { ...defaults, ...overrides };
+    if (Object.keys(soll).length === 0)
+        return [];
+    const lessons = stu.drivenLessons || [];
+    return SONDERFAHRT_ARTEN.map(a => {
+        const sollUe = Number(soll[a.key]) || 0;
+        if (sollUe <= 0)
+            return null;
+        const treffer = lessons.filter(l => l.art === a.code);
+        const minuten = treffer.reduce((sum, l) => sum + (Number(l.minutes) || 0), 0);
+        const ue = Math.round((minuten / 45) * 100) / 100;
+        return { ...a, ue, sollUe, anzahl: treffer.length, erfuellt: ue >= sollUe,
+            langeFahrtDabei: treffer.some(l => (Number(l.minutes) || 0) >= 90) };
+    }).filter(Boolean);
+}
 function lastActivity(s) {
     let max = "";
     // Nur echte Datums-Zeichenketten berücksichtigen (Format YYYY-MM-DD). Andere, z.B. defekte
@@ -5929,6 +5969,11 @@ function App() {
         writeSchool({ ...school, klassen: list }); }
     function saveArten(list) { if (school)
         writeSchool({ ...school, arten: list }); }
+    // Sonderfahrten-Soll je Klasse (Überland-/Autobahn-/Dämmerungs-UE) - überschreibt/ergänzt
+    // DEFAULT_SONDERFAHRTEN_SOLL, siehe sonderfahrtenBilanz().
+    const sonderfahrtenSoll = (school && school.sonderfahrtenSoll) || {};
+    function saveSonderfahrtenSoll(klasse, patch) { if (school)
+        writeSchool({ ...school, sonderfahrtenSoll: { ...sonderfahrtenSoll, [klasse]: { ...(sonderfahrtenSoll[klasse] || {}), ...patch } } }); }
     function saveArtEdit() {
         const f = artEdit;
         if (!f || !f.code.trim()) {
@@ -6939,7 +6984,7 @@ function App() {
                 time = new Date(appt.start_at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" });
             }
             catch (e) { }
-            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price: (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)), apptId: appt.id, fromAppt: true }];
+            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price: (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)), apptId: appt.id, fromAppt: true, art: appt.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven });
         }
         advanceLessonPrompt();
@@ -7092,12 +7137,12 @@ function App() {
         if (lessonForm.id) {
             // bestehende Fahrstunde bearbeiten
             const driven = (stu.drivenLessons || []).map(l => l.id === lessonForm.id
-                ? { ...l, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal } : l);
+                ? { ...l, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal, art: lessonForm.art || "" } : l);
             writeStudent({ ...stu, drivenLessons: driven });
         }
         else {
             const id = "L" + Date.now() + Math.random().toString(36).slice(2, 6);
-            const driven = [...(stu.drivenLessons || []), { id, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal }];
+            const driven = [...(stu.drivenLessons || []), { id, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal, art: lessonForm.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven });
         }
         setLessonForm(null);
@@ -9708,6 +9753,7 @@ function App() {
     function renderUebersicht() {
         const vk = active.klasse || DEFAULT_KLASSE;
         const adkPct = calcLern(active.items, tplFor(vk).adk, active), strPct = calcBack(active, tplFor(vk).strecken);
+        const sfBilanz = sonderfahrtenBilanz(active, vk, sonderfahrtenSoll);
         const showAdk = ueberTab === "adk" || ueberTab === "beide";
         const showStr = ueberTab === "strecken" || ueberTab === "beide";
         const showReife = ueberTab === "reife";
@@ -9761,6 +9807,21 @@ function App() {
                     React.createElement(Bar, { pct: adkPct, color: "var(--green)", h: 6 })),
                 React.createElement("div", { className: "ueb-grid" }, tplFor(vk).adk.map(sec => uebRow(sec.title, sec.color, secLern(active, sec), sec.id)))),
             showStr && React.createElement("div", null,
+                sfBilanz.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Sonderfahrten"),
+                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)" } }, "automatisch aus den Fahrstunden")),
+                    sfBilanz.map(x => React.createElement("div", { key: x.code, style: { marginBottom: 12 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 } },
+                            React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600 } }, x.label),
+                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: x.erfuellt ? "var(--green)" : "var(--ink)" } },
+                                x.ue.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " / " + x.sollUe + " UE")),
+                        React.createElement(Bar, { pct: Math.min(100, Math.round(x.ue / x.sollUe * 100)), color: x.erfuellt ? "var(--green)" : "var(--blue)", h: 6 }))),
+                    (() => {
+                        const fehlt = sfBilanz.filter(x => !x.erfuellt && !x.langeFahrtDabei).map(x => x.label);
+                        return fehlt.length > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--amber)", marginTop: 2, lineHeight: 1.5 } },
+                            "Hinweis: Noch keine einzelne Fahrt mit mindestens 90 Minuten bei " + fehlt.join(", ") + " – bei manchen Klassen (z.B. B bei Überland) ist eine durchgehende 90-Minuten-Fahrt vorgeschrieben.");
+                    })()),
                 React.createElement("div", { className: "card hero" },
                     React.createElement("div", { className: "label" }, tplFor(vk).streckenTitel || "Strecken & Sonderfahrten"),
                     React.createElement("div", { className: "num" },
@@ -10179,7 +10240,7 @@ function App() {
         }
         function addLesson() {
             const now = new Date();
-            setLessonForm({ date: ymd(now), time: "", minutes: 45, price: (pricePerHour || "") });
+            setLessonForm({ date: ymd(now), time: "", minutes: 45, price: (pricePerHour || ""), art: "" });
         }
         function removeLesson(id) {
             updateActive({ drivenLessons: lessons.filter(l => l.id !== id) });
@@ -10222,7 +10283,7 @@ function App() {
                         const lc = lessonCost(l, price);
                         const isLeist = !!l.leistung;
                         return React.createElement("div", { key: l.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderBottom: "1px solid var(--line)" } },
-                            React.createElement("div", { style: { flex: 1, cursor: isLeist ? "default" : "pointer" }, onClick: isLeist ? undefined : () => setLessonForm({ id: l.id, date: l.date || ymd(new Date()), time: l.time || "", minutes: l.minutes, price: (l.price != null ? l.price : (pricePerHour || "")) }) },
+                            React.createElement("div", { style: { flex: 1, cursor: isLeist ? "default" : "pointer" }, onClick: isLeist ? undefined : () => setLessonForm({ id: l.id, date: l.date || ymd(new Date()), time: l.time || "", minutes: l.minutes, price: (l.price != null ? l.price : (pricePerHour || "")), art: l.art || "" }) },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 } },
                                     l.minutes,
                                     " Min \u00B7 ",
@@ -13121,6 +13182,19 @@ function App() {
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, a.label.includes("·") ? a.label.split("·")[1].trim() : a.label)))),
                     React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } }, "Die Arten-Liste pflegt ein Fahrschul-Admin. Du kannst die Arten ausw\u00E4hlen, aber nicht \u00E4ndern."))),
                 ),
+                React.createElement(Collapsible, { title: "Sonderfahrten-Soll", subtitle: "Pflicht-UE je Klasse" }, canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Trägt fest, wie viele UE Überland-, Autobahn- und Dämmerungsfahrten je Klasse mindestens vorgeschrieben sind. Fahrstunden mit passender Art (Termin oder Fahrstunde erfassen) zählen automatisch dagegen - in der Übersicht jedes Schülers erscheint dann eine Sonderfahrten-Kachel. Ohne Eintrag hier bleibt die Kachel für diese Klasse unsichtbar. Nur Klasse B ist mit den gesetzlichen Werten vorausgefüllt (5/4/3 UE nach FahrschAusbO) - für alle anderen Klassen bitte selbst eintragen."),
+                    klassen.map((k, idx) => {
+                        const s = { ...(DEFAULT_SONDERFAHRTEN_SOLL[k] || {}), ...(sonderfahrtenSoll[k] || {}) };
+                        return React.createElement("div", { key: k, style: { padding: "10px 0", borderBottom: (idx < klassen.length - 1 ? "1px solid var(--line)" : "none") } },
+                            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-d)", marginBottom: 7 } }, "Klasse " + k),
+                            React.createElement("div", { style: { display: "flex", gap: 8 } }, SONDERFAHRT_ARTEN.map(a => React.createElement("div", { key: a.code, style: { flex: 1 } },
+                                React.createElement("label", { style: { fontSize: 10.5, color: "var(--muted)", display: "block", marginBottom: 3 } }, a.label),
+                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", value: s[a.key] != null ? s[a.key] : "",
+                                    placeholder: "0", onChange: e => saveSonderfahrtenSoll(k, { [a.key]: e.target.value === "" ? 0 : Number(e.target.value) }),
+                                    style: { width: "100%", padding: "7px 8px", fontSize: 13.5 } })))));
+                    })) : React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Das Sonderfahrten-Soll pflegt ein Fahrschul-Admin."))),
                 React.createElement(Collapsible, { title: "Fuhrpark & Auswertung", subtitle: "Kalender, Leistungen, offene Beträge" },
                 React.createElement("div", { className: "eyebrow" }, "Fahrzeug-Kalender"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: openCalendar },
@@ -14767,6 +14841,12 @@ function App() {
                         "Min \u00B7 ",
                         ((Number(lessonForm.minutes) || 0) / 45).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                         " UE")),
+                React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                    React.createElement("label", null, "Art"),
+                    React.createElement("select", { value: lessonForm.art || "", onChange: e => setLessonForm({ ...lessonForm, art: e.target.value }) },
+                        React.createElement("option", { value: "" }, "Normale Fahrstunde"),
+                        SONDERFAHRT_ARTEN.map(a => React.createElement("option", { key: a.code, value: a.code }, a.label))),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Bei \u00DCberland/Autobahn/D\u00E4mmerung z\u00E4hlt diese Stunde automatisch zu den Sonderfahrten in der \u00DCbersicht des Sch\u00FClers.")),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Preis pro UE f\u00FCr diese Stunde"),
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
