@@ -1151,7 +1151,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.105.2";
+const APP_VERSION = "1.105.3";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1272,6 +1272,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.105.3", date: "August 2026", changes: [
+            "Neu: Tages-Briefing auf der Startseite - ein Klick auf \"Tages-Briefing erstellen\" fasst die heutigen Termine, offenen Anfragen, das Abbruch-Risiko und anstehende Fristen als kurzen, KI-geschriebenen Text zusammen, statt sie nur als Kacheln nebeneinander zu zeigen",
+        ] },
     { v: "1.105.2", date: "August 2026", changes: [
             "Fehler behoben: Eine stornierte, nie bezahlte Rechnung tauchte in der Abrechnung weiter als \"überfällig\" mit vollem Betrag auf und ließ sich sogar per WhatsApp anmahnen. Stornierte Rechnungen und Stornorechnungen selbst zählen jetzt nicht mehr als überfällig",
         ] },
@@ -5739,6 +5742,37 @@ function App() {
     const apptSavingRef = useRef(false);
     const [waitlistOffer, setWaitlistOffer] = useState(null); // { appt, candidates } | null - Warteliste (Task #68)
     const [welcomeOffer, setWelcomeOffer] = useState(null); // Schüler | null - Willkommensnachricht nach Übernahme einer Anmeldung (Verwaltung-ersetzen-Fahrplan, Phase 1)
+    const [briefing, setBriefing] = useState(null); // { busy, text, err } | null - Tages-Briefing (Verwaltung-ersetzen-Fahrplan, Phase 2)
+    // Tages-Briefing: schickt die im Dashboard ohnehin schon berechneten Zahlen an die KI, die
+    // daraus einen kurzen Fließtext macht. Erzeugt selbst keine Daten, nur eine Zusammenfassung.
+    async function ladeBriefing(facts) {
+        setBriefing({ busy: true, text: null, err: null });
+        try {
+            let code = bookingCode;
+            if (!code) {
+                code = await fetchBookingCode(uid);
+                if (code) setBookingCode(code);
+            }
+            if (!code) {
+                setBriefing({ busy: false, text: null, err: "Kein Buchungscode vorhanden." });
+                return;
+            }
+            const resp = await fetch("/.netlify/functions/morning-briefing", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ code, facts }),
+            });
+            const data = await resp.json().catch(() => null);
+            if (!resp.ok || !data || !data.text) {
+                setBriefing({ busy: false, text: null, err: (data && data.error) || "Briefing konnte nicht erzeugt werden." });
+                return;
+            }
+            setBriefing({ busy: false, text: data.text, err: null });
+        }
+        catch (e) {
+            setBriefing({ busy: false, text: null, err: "Serverfehler: " + (e.message || "unbekannt") });
+        }
+    }
     // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
     function applyFetchedAppts(list) {
         const gone = apptDeletedRef.current;
@@ -9044,6 +9078,35 @@ function App() {
                     (profileData && profileData.avatar_url)
                         ? React.createElement("img", { src: profileData.avatar_url, alt: "Profilbild", style: { width: 46, height: 46, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--line)", display: "block" } })
                         : React.createElement("div", { style: { width: 46, height: 46, borderRadius: "50%", border: "2px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
+            // Tages-Briefing: fasst die Kacheln/Karten unten (Heute, offene Anfragen, Abbruch-
+            // Risiko, Fristen-Radar, offene Beträge) in 2-3 Sätzen zusammen. Lädt erst auf
+            // Knopfdruck (keine automatische KI-Anfrage bei jedem Dashboard-Aufruf).
+            React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
+                !briefing && React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing({
+                            heuteAnzahl: heute.length,
+                            heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
+                            pendingAnzahl: pendingCount,
+                            abbruchAnzahl: abbruchRisiko.length,
+                            abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
+                            fristenAnzahl: fristenRadar.length,
+                            offenAnzahl,
+                        }) }, "✨ Tages-Briefing erstellen"),
+                briefing && briefing.busy && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Briefing wird erstellt…"),
+                briefing && !briefing.busy && briefing.err && React.createElement("div", null,
+                    React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 8 } }, briefing.err),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing({
+                                heuteAnzahl: heute.length,
+                                heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
+                                pendingAnzahl: pendingCount,
+                                abbruchAnzahl: abbruchRisiko.length,
+                                abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
+                                fristenAnzahl: fristenRadar.length,
+                                offenAnzahl,
+                            }) }, "Erneut versuchen")),
+                briefing && !briefing.busy && briefing.text && React.createElement("div", null,
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 } },
+                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5 } }, "✨ Tages-Briefing")),
+                    React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55 } }, briefing.text))),
             // 2) Live-Aufzeichnung (nur wenn aktiv)
             recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),
