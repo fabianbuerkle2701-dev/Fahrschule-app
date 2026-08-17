@@ -735,7 +735,7 @@ const FZK_STUFEN = [
     { v: 0, label: "Offen" }, { v: 1, label: "Eingeführt" }, { v: 2, label: "In Übung" },
     { v: 3, label: "Festigen" }, { v: 4, label: "Reif" },
 ];
-const FAHRZEUGKUNDE_ADK = { id: "fahrzeugkunde", title: "Fahrzeugkunde", color: "#5B7B9A", items: [
+const FAHRZEUGKUNDE_ADK = { id: "fahrzeugkunde", title: "Fahrzeugkunde", color: "#5B7B9A", usesAdkStore: true, items: [
         { id: "fzk_reifen_profiltiefe", label: "Profiltiefe", group: "Reifen", count: 4 },
         { id: "fzk_reifen_art", label: "Art des Reifens", group: "Reifen", count: 4 },
         { id: "fzk_reifen_zustand", label: "Zustand (Beschädigungen, Druck)", group: "Reifen", count: 4 },
@@ -756,13 +756,16 @@ const FAHRZEUGKUNDE_ADK = { id: "fahrzeugkunde", title: "Fahrzeugkunde", color: 
         { id: "fzk_fas_ein", label: "Ein-/Ausschalten", group: "Fahrassistenzsysteme", count: 4 },
         { id: "fzk_fas_anwenden", label: "Anwenden", group: "Fahrassistenzsysteme", count: 4 },
     ] };
-// Stellt sicher, dass Fahrzeugkunde als erster Abschnitt in der ADK auftaucht - auch bei Schulen,
-// die schon lange vor dieser Funktion eine eigene Vorlage gespeichert haben. Ohne diese
-// Absicherung würde die Standardwert-Logik in tplFor()/publicTplFallback() nur bei komplett
-// neuen, noch nie gespeicherten Vorlagen greifen - nicht bei bestehenden Schulen.
+// Stellt sicher, dass Fahrzeugkunde als erster Abschnitt in ADK UND Strecken auftaucht - auch
+// bei Schulen, die schon lange vor dieser Funktion eine eigene Vorlage gespeichert haben. Ohne
+// diese Absicherung würde die Standardwert-Logik in tplFor()/publicTplFallback() nur bei
+// komplett neuen, noch nie gespeicherten Vorlagen greifen - nicht bei bestehenden Schulen.
+// Beide Stellen zeigen dasselbe Abschnittsobjekt (usesAdkStore) mit gemeinsamem Fortschritt -
+// keine zwei unabhängigen Kopien, die auseinanderlaufen könnten.
 function withFahrzeugkunde(t) {
     const adk = Array.isArray(t.adk) && t.adk[0] && t.adk[0].id === "fahrzeugkunde" ? t.adk : [deepCopy(FAHRZEUGKUNDE_ADK), ...(t.adk || [])];
-    return { ...t, adk, strecken: t.strecken || [] };
+    const strecken = Array.isArray(t.strecken) && t.strecken[0] && t.strecken[0].id === "fahrzeugkunde" ? t.strecken : [deepCopy(FAHRZEUGKUNDE_ADK), ...(t.strecken || [])];
+    return { ...t, adk, strecken };
 }
 // ADK-Stufen
 const DEFAULT_ADK = [
@@ -1196,7 +1199,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.109.0";
+const APP_VERSION = "1.110.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1317,6 +1320,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.110.0", date: "August 2026", changes: [
+            "Fahrzeugkunde erscheint jetzt wieder als fester erster Abschnitt auch in Strecken (nicht nur in der ADK) - mit demselben Lernstand wie in der ADK, ein Bearbeiten an einer Stelle wirkt sich sofort auf die andere aus, kein doppelter Fortschritt",
+        ] },
     { v: "1.109.0", date: "August 2026", changes: [
             "Fahrzeugkunde korrigiert: Statt Sitz-/Spiegel-/Lenkradeinstellung (das war Grundstufe) zeigt der Abschnitt jetzt die echte technische Fahrzeugkontrolle - Reifen, Beleuchtungseinrichtung, Motorraum, weitere Kontrollen, Bremsprüfung, Fahrassistenzsysteme. Jeder Punkt hat einen 5-stufigen Lernstand (Offen/Eingeführt/In Übung/Festigen/Reif) statt eines einfachen Hakens",
             "Fahrzeugkunde nur noch in der ADK, nicht mehr in Strecken - die Punkte sind Wissens-/Fertigkeitskontrollen ohne Streckenbezug",
@@ -3954,7 +3960,7 @@ function calcLern(items, adk, stu) {
 function calcBack(stu, strecken) {
     const str = stu.strecken || {};
     let soll = 0, done = 0;
-    strecken.forEach(sec => sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); }));
+    strecken.forEach(sec => sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(sec.usesAdkStore ? adkDone(stu, it) : (str[it.id] || 0), c); }));
     return soll ? Math.round(done / soll * 100) : 0;
 }
 function secLern(stu, sec) {
@@ -3962,10 +3968,13 @@ function secLern(stu, sec) {
     sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(adkDone(stu, it), c); });
     return soll ? Math.round(done / soll * 100) : 0;
 }
+// usesAdkStore: Fahrzeugkunde erscheint identisch in ADK und Strecken (ein einziger, geteilter
+// Fortschritt statt zwei unabhängiger Kopien) - der Punkt-Status liegt darum immer in
+// stu.items (wie bei der ADK), nicht in stu.strecken, egal von welchem Screen aus bearbeitet.
 function secBack(stu, sec) {
     const str = stu.strecken || {};
     let soll = 0, done = 0;
-    sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(str[it.id] || 0, c); });
+    sec.items.forEach(it => { const c = effCount(stu, it); soll += c; done += Math.min(sec.usesAdkStore ? adkDone(stu, it) : (str[it.id] || 0), c); });
     return soll ? Math.round(done / soll * 100) : 0;
 }
 /* ════════ Sonderfahrten-Automatik ════════ */
@@ -4586,12 +4595,14 @@ function pruefungsreife(stu, adk, strecken) {
             offeneADK.push({ sec: sec.title, label: it.label, done, soll: c });
     }));
     const offeneStrecken = []; // Stationen mit weniger Durchgängen als gefordert
-    strecken.forEach(sec => sec.items.forEach(it => {
+    strecken.forEach(sec => { if (sec.usesAdkStore)
+        return; // schon oben über offeneADK erfasst - selber Fortschritt, keine Dopplung
+    sec.items.forEach(it => {
         const c = effCount(stu, it);
         const done = (stu.strecken && stu.strecken[it.id]) || 0;
         if (done < c)
             offeneStrecken.push({ sec: sec.title, label: it.label, done, soll: c });
-    }));
+    }); });
     const theorieOffen = !stu.theorie;
     const total = offeneADK.length + offeneStrecken.length + (theorieOffen ? 1 : 0);
     return { offeneADK, offeneStrecken, theorieOffen, total };
@@ -7731,11 +7742,11 @@ function App() {
                 if (!sec || !item)
                     return null;
                 const c = effCount(active, item);
-                const currentDone = kind === "adk" ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0);
+                const currentDone = kind === "adk" || sec.usesAdkStore ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0);
                 const doneRaw = Math.max(0, Math.min(c, Math.round(Number(p.done)) || 0));
                 return { idx, kind, sectionId: secId, sectionTitle: sec.title, pointId: item.id, label: item.label,
                     count: c, currentDone, targetDone: doneRaw, confidence: p.confidence || "mittel",
-                    take: doneRaw !== currentDone };
+                    usesAdkStore: !!sec.usesAdkStore, take: doneRaw !== currentDone };
             }).filter(Boolean);
             setAdkImport({ busy: false, error: "", results, note: out.note || "" });
         }
@@ -7755,7 +7766,7 @@ function App() {
         let items = { ...active.items }, strecken = { ...(active.strecken || {}) }, adkDates = { ...(active.adkDates || {}) };
         const today = ymd(new Date());
         chosen.forEach(r => {
-            if (r.kind === "adk") {
+            if (r.kind === "adk" || r.usesAdkStore) {
                 items[r.pointId] = r.targetDone;
                 if (r.targetDone > 0) {
                     const arr = adkDates[r.pointId] || [];
@@ -9114,19 +9125,35 @@ function App() {
     }
     // Bulk: fill or clear a whole strecken section
     function bulkStreckenSection(sec, fill) {
+        if (sec.usesAdkStore) { bulkADKSection(sec, fill); return; }
         const strecken = { ...active.strecken };
         sec.items.forEach(it => { strecken[it.id] = fill ? effCount(active, it) : 0; });
         updateActive({ strecken });
     }
-    // Bulk: fill or clear ALL strecken
+    // Bulk: fill or clear ALL strecken. Abschnitte mit usesAdkStore (Fahrzeugkunde) schreiben in
+    // active.items statt active.strecken - gleicher Fortschritt wie in der ADK.
     function bulkStreckenAll(fill) {
         const strecken = { ...active.strecken };
-        tplFor(active.klasse).strecken.forEach(sec => sec.items.forEach(it => { strecken[it.id] = fill ? effCount(active, it) : 0; }));
-        updateActive({ strecken });
+        const items = { ...active.items };
+        const today = ymd(new Date());
+        const adkDates = { ...(active.adkDates || {}) };
+        tplFor(active.klasse).strecken.forEach(sec => sec.items.forEach(it => {
+            if (sec.usesAdkStore) {
+                items[it.id] = fill ? effCount(active, it) : 0;
+                if (fill) {
+                    const arr = adkDates[it.id] || [];
+                    if (arr.indexOf(today) === -1)
+                        adkDates[it.id] = [...arr, today];
+                }
+            }
+            else
+                strecken[it.id] = fill ? effCount(active, it) : 0;
+        }));
+        updateActive({ strecken, items, adkDates });
     }
     // Is a section fully done?
     function adkSectionFull(sec) { return sec.items.every(it => Math.min(adkDone(active, it), effCount(active, it)) >= effCount(active, it)); }
-    function streckenSectionFull(sec) { return sec.items.every(it => ((active.strecken && active.strecken[it.id]) || 0) >= effCount(active, it)); }
+    function streckenSectionFull(sec) { return sec.items.every(it => (sec.usesAdkStore ? adkDone(active, it) : ((active.strecken && active.strecken[it.id]) || 0)) >= effCount(active, it)); }
     /* ── Schüler ── */
     // Nächster anstehender Termin je Schüler, siehe nextApptByStudent-useMemo weiter oben
     // (musste vor die bedingten Returns verschoben werden, siehe Kommentar dort).
@@ -9834,7 +9861,7 @@ function App() {
                         pct,
                         "%"),
                     React.createElement(IcChev, { open: isOpen }))),
-            editCounts && sec.items.length > 0 && (() => {
+            editCounts && sec.id !== "fahrzeugkunde" && sec.items.length > 0 && (() => {
                 const counts = sec.items.map(it => effCount(active, it));
                 const uniform = counts.every(c => c === counts[0]) ? counts[0] : null;
                 const base = uniform !== null ? uniform : Math.max.apply(null, counts);
@@ -9846,7 +9873,7 @@ function App() {
                         React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 11px", fontSize: 16 }, onClick: () => setSectionCount("strecken", sec, base + 1) }, "+")));
             })(),
             isOpen && React.createElement("div", null,
-                editCounts && sec.items.length > 0 && (() => {
+                editCounts && sec.id !== "fahrzeugkunde" && sec.items.length > 0 && (() => {
                     const counts = sec.items.map(it => effCount(active, it));
                     const dones = sec.items.map((it, i) => Math.min((active.strecken && active.strecken[it.id]) || 0, counts[i]));
                     const maxC = counts.length ? Math.max.apply(null, counts) : 0;
@@ -9864,8 +9891,23 @@ function App() {
                         ? React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" zurücksetzen?' }))
                                 bulkStreckenSection(sec, false); } }, "Abschnitt zurücksetzen")
                         : React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5 }, onClick: async () => { if (await askConfirm({ message: 'Ganzen Abschnitt "' + sec.title + '" abhaken?' }))
-                                bulkStreckenSection(sec, true); } }, "Alles abhaken")),
-                sec.items.map(item => {
+                                bulkStreckenSection(sec, true); } }, sec.id === "fahrzeugkunde" ? "Alle auf „Reif“" : "Alles abhaken")),
+                sec.id === "fahrzeugkunde"
+                    ? sec.items.map((item, idx) => {
+                        const val = Math.min(adkDone(active, item), 4);
+                        const showGroupHeader = idx === 0 || sec.items[idx - 1].group !== item.group;
+                        return React.createElement(React.Fragment, { key: item.id },
+                            showGroupHeader && React.createElement("div", { style: { padding: "10px 12px 4px", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 11, letterSpacing: ".07em",
+                                    textTransform: "uppercase", color: "var(--muted)", borderTop: idx === 0 ? "none" : "1px solid var(--line)" } }, item.group),
+                            React.createElement("div", { className: "row", style: { flexDirection: "column", alignItems: "stretch", gap: 8, paddingTop: 8 } },
+                                React.createElement("div", { className: "row-label" },
+                                    React.createElement("span", null, item.label),
+                                    React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 2 } }, "Lernstand: " + (val === 0 ? "Noch offen" : FZK_STUFEN[val].label))),
+                                React.createElement("div", { style: { display: "flex", gap: 5, flexWrap: "wrap" } },
+                                    FZK_STUFEN.map(st => React.createElement("button", { key: st.v, className: "btn " + (st.v === val ? "btn-primary" : "btn-ghost"),
+                                            style: { flex: "1 1 auto", padding: "7px 6px", fontSize: 11.5 }, onClick: () => setADK(item.id, st.v) }, st.label)))));
+                    })
+                    : sec.items.map(item => {
                     const cnt = effCount(active, item);
                     const done = (active.strecken && active.strecken[item.id]) || 0;
                     const complete = done >= cnt;
@@ -14244,7 +14286,7 @@ function App() {
                                 secBack(active, sec),
                                 "%)"),
                             sec.items.map(item => {
-                                const done = (active.strecken && active.strecken[item.id]) || 0;
+                                const done = sec.usesAdkStore ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0);
                                 return React.createElement("div", { key: item.id, className: "ps-row" },
                                     React.createElement("span", { className: "l" }, item.label),
                                     React.createElement("span", { className: "r" },
@@ -14284,7 +14326,7 @@ function App() {
             return { ...sec, done: done.length, all };
         }).filter(sec => sec.all > 0);
         const streckenSections = tplFor(active.klasse).strecken.map(sec => {
-            const done = sec.items.filter(it => (active.strecken && active.strecken[it.id] || 0) >= effCount(active, it));
+            const done = sec.items.filter(it => (sec.usesAdkStore ? adkDone(active, it) : (active.strecken && active.strecken[it.id] || 0)) >= effCount(active, it));
             return { ...sec, done: done.length, all: sec.items.length };
         }).filter(sec => sec.all > 0);
         return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10pt", lineHeight: 1.5 } },
