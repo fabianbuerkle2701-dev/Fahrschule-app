@@ -1199,7 +1199,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.111.0";
+const APP_VERSION = "1.112.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1320,6 +1320,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.112.0", date: "August 2026", changes: [
+            "Prüfungssimulation intuitiver: Fahraufgabe und Kompetenzbereich stehen jetzt als Chips auf einem gemeinsamen Screen (vorher zwei getrennte Listen-Screens) - aus 3 Klicks werden 2 Screens",
+            "Neu: ✨ KI-Schnelleintrag in der Prüfungssimulation. Kurz in eigenen Worten beschreiben, was passiert ist - die KI ordnet Fahraufgabe, Kompetenzbereich und Schweregrad automatisch zu, als Vorschlag zum Bestätigen auf dem gewohnten Fehler-Screen (nie automatisch gespeichert, benötigt Netlify-Funktion pruefungssim-classify)",
+        ] },
     { v: "1.111.0", date: "August 2026", changes: [
             "Prüfungssimulation hat jetzt einen eigenen Reiter unter Ausbildung (neben ADK, Strecken, Fahrstunden) statt nur als Karte in der Übersicht versteckt zu sein - mit Start-Button und Verlauf aller bisherigen Simulationen",
         ] },
@@ -8273,7 +8277,8 @@ function App() {
         if (!stu)
             return;
         setPruefungssim({ studentId, studentName: dispName(stu), startedAt: Date.now(), step: "running",
-            draft: { fahraufgabe: null, kompetenzbereich: null }, freitextValue: "", entries: [] });
+            draft: { fahraufgabe: null, kompetenzbereich: null }, freitextValue: "", entries: [],
+            kiInput: "", kiBusy: false, kiError: "", kiVorschlag: null });
         setView("pruefungssim");
     }
     function cancelPruefungssim() {
@@ -8285,13 +8290,45 @@ function App() {
             return p;
         const entry = { id: "PS" + Date.now().toString(36), type: "fehler", at: Date.now(),
             fahraufgabe: p.draft.fahraufgabe, kompetenzbereich: p.draft.kompetenzbereich, schweregrad, text };
-        return { ...p, step: "running", draft: { fahraufgabe: null, kompetenzbereich: null }, entries: [...p.entries, entry] }; });
+        return { ...p, step: "running", draft: { fahraufgabe: null, kompetenzbereich: null }, kiVorschlag: null, entries: [...p.entries, entry] }; });
     }
     function pruefungssimAddFreitext() {
         setPruefungssim(p => { if (!p || !p.freitextValue.trim())
             return p;
         const entry = { id: "PS" + Date.now().toString(36), type: "freitext", at: Date.now(), text: p.freitextValue.trim() };
         return { ...p, step: "running", freitextValue: "", entries: [...p.entries, entry] }; });
+    }
+    // KI-Schnelleintrag: kurzer Freitext statt Chip-Auswahl - die KI ordnet Fahraufgabe,
+    // Kompetenzbereich und Schweregrad automatisch zu. Landet danach ganz normal auf dem
+    // Fehler-Screen mit dem Vorschlag oben drauf - nie automatisch gespeichert, weil der
+    // Schweregrad direkt entscheidet, ob die Prüfung bestanden ist.
+    async function submitPruefungssimKI() {
+        const text = (pruefungssim && pruefungssim.kiInput || "").trim();
+        if (!text)
+            return;
+        setPruefungssim(p => p && ({ ...p, kiBusy: true, kiError: "" }));
+        try {
+            const resp = await fetch("/.netlify/functions/pruefungssim-classify", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ text, fahraufgaben: PRUEFUNGS_FAHRAUFGABEN, kompetenzbereiche: PRUEFUNGS_KOMPETENZBEREICHE,
+                    schweregrade: PRUEFUNGS_SCHWEREGRADE.map(s => ({ id: s.id, label: s.label })) }),
+            });
+            const r = await resp.json();
+            if (!resp.ok)
+                throw new Error((r && r.error) || "KI-Anfrage fehlgeschlagen");
+            const validFa = PRUEFUNGS_FAHRAUFGABEN.some(f => f.id === r.fahraufgabe);
+            const validKb = PRUEFUNGS_KOMPETENZBEREICHE.some(k => k.id === r.kompetenzbereich);
+            const validSg = PRUEFUNGS_SCHWEREGRADE.some(s => s.id === r.schweregrad);
+            if (!validFa || !validKb || !validSg)
+                throw new Error("Konnte nicht eindeutig zugeordnet werden - bitte manuell auswählen.");
+            setPruefungssim(p => p && ({ ...p, kiBusy: false, step: "fehler",
+                draft: { fahraufgabe: r.fahraufgabe, kompetenzbereich: r.kompetenzbereich },
+                kiVorschlag: { schweregrad: r.schweregrad, text: (r.text || text).trim() } }));
+        }
+        catch (e) {
+            setPruefungssim(p => p && ({ ...p, kiBusy: false, kiError: e.message || "KI-Anfrage fehlgeschlagen" }));
+        }
     }
     // Speichert die abgeschlossene Simulation im Fahrtenbuch des Schülers (examSims) und beendet
     // die Sitzung. clean=true entspricht "Alles unauffällig" - Simulation ohne einen einzigen
@@ -9955,9 +9992,10 @@ function App() {
         const s = Math.max(0, Math.round(sec));
         return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
     }
-    function pruefungssimStepDots(n) {
+    function pruefungssimStepDots(n, total) {
+        const t = total || 2;
         return React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginBottom: 18 } },
-            [1, 2, 3].map(i => React.createElement(React.Fragment, { key: i },
+            Array.from({ length: t }, (_, idx) => idx + 1).map(i => React.createElement(React.Fragment, { key: i },
                 i > 1 && React.createElement("span", { style: { width: 22, height: 2, background: "var(--line)" } }),
                 React.createElement("span", { style: { width: 26, height: 26, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center",
                         fontSize: 12.5, fontWeight: 800, fontFamily: "var(--font-d)",
@@ -10036,33 +10074,62 @@ function App() {
                                 React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 2 } }, l))))),
                 React.createElement("button", { className: "btn btn-primary btn-block", onClick: closePruefungssim }, "Fertig"));
         }
-        if (p.step === "fahraufgabe") {
+        if (p.step === "fehlerkontext") {
+            // Fahraufgabe und Kompetenzbereich zusammen auf einem Screen als Chips statt zwei
+            // getrennter Vollbild-Listen - man tippt beide an (wie einen Satz ausfüllen:
+            // "Bei [Kreuzung] → [Verkehrsbeobachtung]"), sobald beide gewählt sind, geht's
+            // automatisch weiter zum Fehler-Screen.
+            const faSel = p.draft.fahraufgabe, kbSel = p.draft.kompetenzbereich;
+            const selectFa = id => setPruefungssim(prev => { if (!prev)
+                return prev;
+            const next = { ...prev, draft: { ...prev.draft, fahraufgabe: id } };
+            return (next.draft.fahraufgabe && next.draft.kompetenzbereich) ? { ...next, step: "fehler" } : next; });
+            const selectKb = id => setPruefungssim(prev => { if (!prev)
+                return prev;
+            const next = { ...prev, draft: { ...prev.draft, kompetenzbereich: id } };
+            return (next.draft.fahraufgabe && next.draft.kompetenzbereich) ? { ...next, step: "fehler" } : next; });
             return React.createElement("div", { className: "pad" },
-                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "running" })) }, "‹ Zurück"),
+                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "running", kiVorschlag: null })) }, "‹ Zurück"),
                 pruefungssimStepDots(1),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, textAlign: "center", marginBottom: 4 } }, "Fahraufgabe"),
-                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", textAlign: "center", marginBottom: 16 } }, "Wähle den Prüfungskontext."),
-                PRUEFUNGS_FAHRAUFGABEN.map(f => React.createElement("button", { key: f.id, className: "btn btn-ghost btn-block", style: { justifyContent: "flex-start", textAlign: "left", padding: "13px 15px", marginBottom: 8 },
-                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "kompetenz", draft: { ...prev.draft, fahraufgabe: f.id } })) }, f.label)));
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, textAlign: "center", marginBottom: 4 } }, "Wo ist es passiert?"),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", textAlign: "center", marginBottom: 18 } }, "Fahraufgabe und Kompetenzbereich wählen."),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Fahraufgabe"),
+                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 20 } },
+                    PRUEFUNGS_FAHRAUFGABEN.map(f => React.createElement("button", { key: f.id, className: "btn " + (faSel === f.id ? "btn-primary" : "btn-ghost"),
+                            style: { padding: "9px 13px", fontSize: 13 }, onClick: () => selectFa(f.id) }, f.label))),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Kompetenzbereich"),
+                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 7 } },
+                    PRUEFUNGS_KOMPETENZBEREICHE.map(k => React.createElement("button", { key: k.id, className: "btn " + (kbSel === k.id ? "btn-primary" : "btn-ghost"),
+                            style: { padding: "9px 13px", fontSize: 13 }, onClick: () => selectKb(k.id) }, k.label))));
         }
-        if (p.step === "kompetenz") {
+        if (p.step === "ki_eingabe") {
             return React.createElement("div", { className: "pad" },
-                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "fahraufgabe" })) }, "‹ Zurück"),
-                pruefungssimStepDots(2),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, textAlign: "center", marginBottom: 4 } }, "Kompetenzbereich"),
-                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", textAlign: "center", marginBottom: 16 } }, pruefungssimFahraufgabeLabel(p.draft.fahraufgabe)),
-                PRUEFUNGS_KOMPETENZBEREICHE.map(k => React.createElement("button", { key: k.id, className: "btn btn-ghost btn-block", style: { justifyContent: "flex-start", textAlign: "left", padding: "13px 15px", marginBottom: 8 },
-                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "fehler", draft: { ...prev.draft, kompetenzbereich: k.id } })) }, k.label)));
+                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "running", kiError: "" })) }, "‹ Zurück"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "✨ KI-Schnelleintrag"),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, "Kurz beschreiben, was passiert ist - die KI ordnet Fahraufgabe, Kompetenzbereich und Schweregrad automatisch zu. Du bestätigst den Vorschlag danach noch."),
+                React.createElement("textarea", { rows: 4, value: p.kiInput, autoFocus: true, placeholder: "z.B. „Schulterblick vergessen beim Abbiegen, war aber ungefährlich“",
+                    onChange: e => { const v = e.target.value; setPruefungssim(prev => prev && ({ ...prev, kiInput: v })); },
+                    style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 12, padding: "12px 13px", fontSize: 15, background: "var(--field-bg)", resize: "vertical", marginBottom: 10 } }),
+                p.kiError && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 10 } }, p.kiError),
+                React.createElement("button", { className: "btn btn-primary btn-block", disabled: !p.kiInput.trim() || p.kiBusy, onClick: submitPruefungssimKI }, p.kiBusy ? "Wird analysiert…" : "Analysieren"));
         }
         if (p.step === "fehler") {
             const kb = p.draft.kompetenzbereich;
             const texte = PRUEFUNGS_FEHLERTEXTE[kb] || {};
+            const kiSg = p.kiVorschlag && pruefungssimSchweregradInfo(p.kiVorschlag.schweregrad);
             return React.createElement("div", { className: "pad" },
-                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "kompetenz" })) }, "‹ Zurück"),
-                pruefungssimStepDots(3),
+                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "fehlerkontext", kiVorschlag: null })) }, "‹ Zurück"),
+                pruefungssimStepDots(2),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, textAlign: "center", marginBottom: 4 } }, "Fehler auswählen"),
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", textAlign: "center", marginBottom: 16 } },
                     pruefungssimFahraufgabeLabel(p.draft.fahraufgabe) + " · " + pruefungssimKompetenzLabel(kb)),
+                p.kiVorschlag && kiSg && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 18, border: "1.5px solid var(--orange)" } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--orange-deep)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 9 } }, "✨ KI-Vorschlag"),
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 7 } },
+                        React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: kiSg.color } }),
+                        React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, kiSg.label)),
+                    React.createElement("div", { style: { fontSize: 14.5, marginBottom: 13 } }, p.kiVorschlag.text),
+                    React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => pruefungssimAddFehler(p.kiVorschlag.schweregrad, p.kiVorschlag.text) }, "Übernehmen")),
                 PRUEFUNGS_SCHWEREGRADE.map(sg => React.createElement("div", { key: sg.id, style: { marginBottom: 16 } },
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginBottom: 8 } },
                         React.createElement("span", { style: { width: 9, height: 9, borderRadius: "50%", background: sg.color } }),
@@ -10088,12 +10155,18 @@ function App() {
                     React.createElement("span", { style: { width: 8, height: 8, borderRadius: "50%", background: "#B3362A", animation: "rmapPulse 1.6s ease-out infinite" } }),
                     pruefungssimFmtZeit(elapsedSec))),
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21, margin: "6px 0 16px" } }, "Was ist passiert?"),
+            React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, borderLeft: "3px solid var(--orange)" },
+                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "ki_eingabe", kiInput: "", kiError: "" })) },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)" } }, "✨"),
+                React.createElement("span", { style: { flex: 1 } },
+                    React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 15 } }, "KI-Schnelleintrag"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, "Kurz beschreiben, KI ordnet automatisch zu"))),
             React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12 },
-                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "fahraufgabe" })) },
+                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "fehlerkontext" })) },
                 React.createElement("span", { className: "home-iconchip", style: { background: "#FDECEA", color: "#B3362A" } }, "!"),
                 React.createElement("span", { style: { flex: 1 } },
                     React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 15 } }, "Auffälligkeit / Fehler"),
-                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, "In 3 Schritten erfassen"))),
+                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, "Manuell in 2 Schritten erfassen"))),
             React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12 },
                     onClick: finishPruefungssim },
                 React.createElement("span", { className: "home-iconchip", style: { background: "#E4F3E9", color: "#1E7A46" } }, "✓"),
