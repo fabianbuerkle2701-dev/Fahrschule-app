@@ -1199,7 +1199,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.112.0";
+const APP_VERSION = "1.113.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1320,6 +1320,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.113.0", date: "August 2026", changes: [
+            "Streckenaufzeichnung hat jetzt einen Zwischenspeicher: Wird die App während einer laufenden GPS-Aufzeichnung geschlossen oder beendet, bietet die App beim nächsten Öffnen an, die bereits aufgezeichnete Strecke fortzusetzen, statt sie kommentarlos zu verlieren",
+        ] },
     { v: "1.112.0", date: "August 2026", changes: [
             "Prüfungssimulation intuitiver: Fahraufgabe und Kompetenzbereich stehen jetzt als Chips auf einem gemeinsamen Screen (vorher zwei getrennte Listen-Screens) - aus 3 Klicks werden 2 Screens",
             "Neu: ✨ KI-Schnelleintrag in der Prüfungssimulation. Kurz in eigenen Worten beschreiben, was passiert ist - die KI ordnet Fahraufgabe, Kompetenzbereich und Schweregrad automatisch zu, als Vorschlag zum Bestätigen auf dem gewohnten Fehler-Screen (nie automatisch gespeichert, benötigt Netlify-Funktion pruefungssim-classify)",
@@ -2442,6 +2445,10 @@ async function authHeader() {
         throw new Error("Nicht angemeldet");
     return { Authorization: "Bearer " + token };
 }
+// Zwischenspeicher für eine laufende Streckenaufzeichnung (Live-GPS) - überlebt App-Kill/
+// Tab-Schließen mitten in der Aufnahme, weil recPtsRef/recSession sonst nur im JS-Heap lebten
+// und beim nächsten Start komplett weg waren (Bug: gesamte Streckenaufzeichnung verloren).
+function recBufferKey(uid) { return "v3_recbuf_" + uid; }
 // Local mirror (per user) for instant load + offline safety
 function cacheKey(uid) { return "v3_cache_" + uid; }
 function loadCache(uid) { try {
@@ -4479,6 +4486,22 @@ function askConfirm(opts) {
     else
         resolve(true); });
 }
+// Wartet darauf, dass <ToastConfirmHost> gemountet ist (siehe _confirmSetter), bevor askConfirm
+// aufgerufen wird - ruft man askConfirm auf, während der Host noch nicht da ist (z. B. weil App()
+// noch mit einem Splash-Screen gated ist, während dieser Aufrufer schon früher feuert), löst
+// askConfirm sich selbst kommentarlos mit "true" auf, ohne den Nutzer je zu fragen.
+function waitForConfirmHost(maxMs) {
+    return new Promise(resolve => {
+        if (_confirmSetter) { resolve(true); return; }
+        const start = Date.now();
+        const t = setInterval(() => {
+            if (_confirmSetter || Date.now() - start > (maxMs || 8000)) {
+                clearInterval(t);
+                resolve(!!_confirmSetter);
+            }
+        }, 150);
+    });
+}
 // Ersatz für den nativen Text-Eingabedialog: opts = {title, message, defaultValue, placeholder, numeric, confirmLabel}.
 // Löst mit dem eingegebenen Text auf, oder null bei Abbrechen (wie beim nativen Dialog).
 function askPrompt(opts) {
@@ -6353,6 +6376,60 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    // Einmal pro Sitzung prüfen, ob eine Streckenaufzeichnung durch App-Kill/Tab-Schließen
+    // unterbrochen wurde (siehe recBufferKey) - falls ja, anbieten, sie fortzusetzen, statt die
+    // bereits aufgezeichneten Punkte kommentarlos zu verlieren.
+    const recRestoreCheckedRef = useRef(false);
+    // Zeigt immer auf eine Funktion aus dem zuletzt VOLLSTÄNDIG durchgelaufenen Render (wird
+    // erst nach der Definition von startRecording/dispName weiter unten gesetzt). Direkt
+    // startRecording/dispName aus diesem frühen Effekt heraus aufzurufen wäre ein TDZ-Risiko:
+    // dieser Effekt kann schon feuern, während App() wegen "students"/"tpl" noch früh mit dem
+    // Splash-Screen returnt, also bevor startRecording in diesem Funktionsdurchlauf je
+    // initialisiert wurde (siehe Fristen-Radar-TDZ-Hotfix für dasselbe Muster).
+    const recResumeExecRef = useRef(null);
+    useEffect(() => {
+        if (!uid || !Array.isArray(students) || recRestoreCheckedRef.current || recSession)
+            return;
+        recRestoreCheckedRef.current = true;
+        let buf = null;
+        try {
+            buf = JSON.parse(localStorage.getItem(recBufferKey(uid)) || "null");
+        }
+        catch (_) { }
+        if (!buf || !Array.isArray(buf.pts) || buf.pts.length === 0)
+            return;
+        const stu = students.find(s => s.id === buf.studentId);
+        const lesson = stu && (stu.lessons || []).find(l => l.id === buf.lessonId);
+        if (!stu || !lesson) {
+            try {
+                localStorage.removeItem(recBufferKey(uid));
+            }
+            catch (_) { }
+            return;
+        }
+        (async () => {
+            // Erst warten, bis der Dialog-Host wirklich gemountet ist (siehe waitForConfirmHost) -
+            // sonst würde askConfirm sich selbst automatisch mit "true" beantworten, ohne dass der
+            // Nutzer den Dialog je zu sehen bekommt.
+            const hostReady = await waitForConfirmHost();
+            if (!hostReady) return;
+            const min = Math.max(0, Math.round((Date.now() - buf.startedAt) / 60000));
+            // Name lokal berechnet statt über dispName() - dispName wird erst weiter unten im
+            // Funktionskörper definiert und wäre hier aus demselben TDZ-Grund riskant.
+            const stuName = [((stu.vorname || "").trim()), ((stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler";
+            const ok = await askConfirm({ title: "Unterbrochene Streckenaufzeichnung gefunden",
+                message: "Für " + (buf.studentName || stuName) + " liegen noch " + buf.pts.length + " aufgezeichnete Punkte aus einer nicht beendeten Aufzeichnung vor (Start vor " + (min < 1 ? "weniger als einer Minute" : min + (min === 1 ? " Minute" : " Minuten")) + "). Jetzt fortsetzen und weiter aufzeichnen?",
+                confirmLabel: "Fortsetzen" });
+            if (ok)
+                recResumeExecRef.current && recResumeExecRef.current(buf, stu);
+            else {
+                try {
+                    localStorage.removeItem(recBufferKey(uid));
+                }
+                catch (_) { }
+            }
+        })();
+    }, [uid, students]);
     // Eigene Profildaten (Name, Adresse, Telefon, Geburtsdatum), müssen beim ersten Login vollständig sein.
     // "complete" bewusst true bei Ladefehler, damit niemand fälschlich blockiert wird. Steht hier (statt weiter
     // unten) und VOR myCity, weil myCity als Fallback auf profileData.city zurückgreift.
@@ -8168,7 +8245,9 @@ function App() {
     };
     // ── App-weite Streckenaufzeichnung (läuft weiter beim Navigieren) ──
     // Hooks dafür stehen oben bei den übrigen Hooks (vor den frühen returns).
-    const startRecording = (studentId, lessonId, studentName) => {
+    // resumeBuf (optional): {studentId,lessonId,studentName,startedAt,pts} aus dem Zwischenspeicher,
+    // wenn eine unterbrochene Aufzeichnung fortgesetzt wird statt neu zu starten.
+    const startRecording = (studentId, lessonId, studentName, resumeBuf) => {
         if (recSession) {
             showToast("Es läuft bereits eine Aufzeichnung. Bitte zuerst stoppen.");
             return;
@@ -8177,11 +8256,24 @@ function App() {
             showToast("Dieses Gerät unterstützt keine Standortermittlung.");
             return;
         }
-        recPtsRef.current = [];
-        recStartRef.current = Date.now();
+        if (resumeBuf) {
+            recPtsRef.current = resumeBuf.pts.slice();
+            recStartRef.current = resumeBuf.startedAt;
+        }
+        else {
+            recPtsRef.current = [];
+            recStartRef.current = Date.now();
+        }
         recLastUiRef.current = 0;
-        setRecUi({ dist: 0, dur: 0, n: 0, tick: 0 });
+        setRecUi({ dist: rmapPathLen(recPtsRef.current), dur: (Date.now() - recStartRef.current) / 1000, n: recPtsRef.current.length, tick: 0 });
         setRecSession({ studentId, lessonId, studentName });
+        // Zwischenspeicher: überlebt App-Kill/Tab-Schließen mitten in der Aufnahme. Ohne das
+        // war die gesamte Streckenaufzeichnung weg, sobald die Seite/App neu geladen wurde,
+        // weil recPtsRef/recSession nur im JS-Heap lebten.
+        try {
+            localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, pts: recPtsRef.current }));
+        }
+        catch (_) { }
         const onPoint = (lat, lng) => {
             const p = [lat, lng], arr = recPtsRef.current;
             if (arr.length === 0 || rmapDist(arr[arr.length - 1], p) > 8) {
@@ -8190,6 +8282,10 @@ function App() {
                 if (now - recLastUiRef.current > 1200) {
                     recLastUiRef.current = now;
                     setRecUi(u => ({ dist: rmapPathLen(arr), dur: (now - recStartRef.current) / 1000, n: arr.length, tick: u.tick + 1 }));
+                    try {
+                        localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, pts: arr }));
+                    }
+                    catch (_) { }
                 }
             }
         };
@@ -8226,6 +8322,9 @@ function App() {
         }
         acquireRecWakeLock();
     };
+    // Jeden Render, der hier ankommt, mit der aktuellen startRecording-Funktion befüllen - siehe
+    // recResumeExecRef weiter oben für den TDZ-Hintergrund.
+    recResumeExecRef.current = (buf, stu) => startRecording(buf.studentId, buf.lessonId, buf.studentName || [((stu.vorname || "").trim()), ((stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler", buf);
     const stopRecording = (save) => {
         if (recWatchRef.current != null) {
             try {
@@ -8263,6 +8362,10 @@ function App() {
         else if (save && sess) {
             showToast("Zu wenige Punkte aufgezeichnet – Strecke nicht gespeichert.");
         }
+        try {
+            localStorage.removeItem(recBufferKey(uid));
+        }
+        catch (_) { }
         recPtsRef.current = [];
         setRecSession(null);
         setRecUi({ dist: 0, dur: 0, n: 0, tick: 0 });
