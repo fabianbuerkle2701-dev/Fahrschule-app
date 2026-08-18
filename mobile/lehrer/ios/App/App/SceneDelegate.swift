@@ -8,7 +8,11 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        window?.rootViewController = CAPBridgeViewController()
+        // MainViewController statt der reinen CAPBridgeViewController-Basisklasse - sonst
+        // greift unser gesamter Anpassungscode in MainViewController.swift (Bounce-Fix,
+        // Print-Bridge) nie, egal was im Storyboard als customClass hinterlegt ist, weil diese
+        // Zeile den Root-View-Controller direkt überschreibt.
+        window?.rootViewController = MainViewController()
         window?.makeKeyAndVisible()
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)
