@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.124.0";
+const APP_VERSION = "1.125.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.125.0", date: "August 2026", changes: [
+            "Neu: Lücken-Radar unter Mehr - findet proaktiv freie Termine der nächsten 7 Tage, die zu einem wartenden Schüler passen (Wunschliste im Fahrschülerbereich), statt nur wie bisher zu reagieren, wenn du selbst einen bestätigten Termin löschst. Ein Klick legt das Fenster als Warteliste-Angebot an, passende Schüler sehen es sofort in ihrer App",
+        ] },
     { v: "1.124.0", date: "August 2026", changes: [
             "Neu: FAQ & Hilfe (Mehr - Einstellungen - Konto) - häufige Fragen zur Bedienung antippen (z.B. „Wie füge ich einen Schüler hinzu?\", „Wie sage ich einen Termin krankheitsbedingt ab?\"), der KI-Helfer erklärt direkt in einer kurzen Schritt-für-Schritt-Anleitung, wo es langgeht",
         ] },
@@ -9982,6 +9985,7 @@ function App() {
             { id: "statistik", label: "Statistik", group: "Seite", action: () => setView("statistik") },
             { id: "tagesabschluss", label: "Tagesabschluss", group: "Seite", action: () => setView("tagesabschluss") },
             { id: "pruefungsplanung", label: "Prüfungsplanung", group: "Seite", action: () => setView("pruefungsplanung") },
+            { id: "lueckenradar", label: "Lücken-Radar", group: "Seite", action: () => setView("lueckenradar") },
             { id: "interessenten", label: "Interessenten", group: "Seite", action: () => setView("interessenten") },
             { id: "fahrlehrer-krank", label: "Fahrlehrer krank - Termine absagen", group: "Aktion", action: () => setSickModal({ date: ymd(new Date()) }) },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
@@ -11947,6 +11951,28 @@ function App() {
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
                 "Prüfungsreif = grüne Ampel (Theorie bestanden, ADK/Strecken komplett). Ein Klick öffnet den Führerschein-Reiter, um „Praxisprüfung angemeldet\" zu setzen oder einen Termin unter Prüfungsversuche einzutragen."));
     }
+    function renderLueckenRadar() {
+        const found = lueckenRadar();
+        const byDay = {};
+        found.forEach(f => { (byDay[f.dateKey] = byDay[f.dateKey] || []).push(f); });
+        const days = Object.keys(byDay).sort();
+        return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Lücken-Radar"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } },
+                "Freie Termine der nächsten 7 Tage, die zu einem wartenden Schüler passen (Wunschliste im Fahrschülerbereich). Ein Klick legt das Fenster als Warteliste-Angebot an."),
+            found.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } },
+                    "Aktuell keine passenden Lücken - entweder ist niemand auf der Wunschliste aktiv, oder alle Wunschfenster sind schon belegt.")
+                : days.map(dateKey => React.createElement("div", { key: dateKey, style: { marginBottom: 16 } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } },
+                        new Date(dateKey + "T12:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit" })),
+                    React.createElement("div", { className: "card", style: { padding: "6px 14px" } },
+                        byDay[dateKey].map((f, i) => React.createElement("div", { key: f.stu.id + "-" + f.from, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, dispName(f.stu)),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, f.from + " – " + f.to + " Uhr")),
+                            React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 }, onClick: () => offerLueckenSlot(f) }, "Anbieten")))))));
+    }
     /* ── Abrechnung: schulweites Dashboard über Umsatz, offene Forderungen & Rechnungen ── */
     function renderAbrechnung() {
         const price = Number(pricePerHour) || 0;
@@ -12811,6 +12837,81 @@ function App() {
             showToast("Anbieten fehlgeschlagen:\n" + e.message);
         }
         setWaitlistOffer(null);
+    }
+    /* ── Lücken-Radar: proaktiv freie Zeitfenster in den nächsten 7 Tagen finden, die zu einem
+       wartenden Schüler (Wunschliste) passen - im Unterschied zu maybeOfferWaitlist/
+       createWaitlistOffer, die nur reagieren, wenn der Fahrlehrer selbst einen Termin löscht.
+       Nutzt dieselbe Wunschliste (s.wunschliste) und dasselbe Angebots-Prinzip (status
+       "offered"), damit ein gefundenes Fenster genau wie ein freigewordener Termin angeboten
+       werden kann. ── */
+    const LUECKEN_DOW = ["so", "mo", "di", "mi", "do", "fr", "sa"]; // Date.getDay(): 0=So..6=Sa
+    function toMin(hhmm) { const p = (hhmm || "00:00").split(":"); return (parseInt(p[0], 10) || 0) * 60 + (parseInt(p[1], 10) || 0); }
+    function fromMin(min) { const m = Math.max(0, Math.min(23 * 60 + 59, min)); return String(Math.floor(m / 60)).padStart(2, "0") + ":" + String(m % 60).padStart(2, "0"); }
+    // Erste freie Lücke von mindestens minMinutes innerhalb [vonHHMM, bisHHMM] an einem Tag -
+    // "belegt" zählt jeder Termin, der nicht storniert/abgesagt ist, egal welcher Schüler.
+    function findFreeWindow(dateKey, vonHHMM, bisHHMM, minMinutes) {
+        const busy = (appts || []).filter(a => ymd(a.start_at) === dateKey && (a.status === "confirmed" || a.status === "pending" || a.status === "offered"))
+            .map(a => ({ from: hm(a.start_at), to: a.end_at ? hm(a.end_at) : fromMin(toMin(hm(a.start_at)) + 45) }))
+            .sort((a, b) => a.from.localeCompare(b.from));
+        let cursor = vonHHMM;
+        for (const b of busy) {
+            if (b.from > cursor && toMin(b.from) - toMin(cursor) >= minMinutes)
+                return { from: cursor, to: fromMin(toMin(cursor) + minMinutes) };
+            if (b.to > cursor)
+                cursor = b.to;
+        }
+        if (toMin(bisHHMM) - toMin(cursor) >= minMinutes)
+            return { from: cursor, to: fromMin(toMin(cursor) + minMinutes) };
+        return null;
+    }
+    // Für die nächsten 7 Tage: je wartendem Schüler (aktive Wunschliste, noch kein Termin an
+    // dem Tag) das erste freie 45-Minuten-Fenster innerhalb seines Wunschfensters UND der
+    // Arbeitszeit des Fahrlehrers an dem Wochentag suchen.
+    function lueckenRadar() {
+        const own = (students || []).filter(s => s._isMine && !s.archived && s.wunschliste && s.wunschliste.active
+            && Array.isArray(s.wunschliste.weekdays) && s.wunschliste.von && s.wunschliste.bis);
+        if (own.length === 0)
+            return [];
+        const found = [];
+        for (let i = 0; i < 7; i++) {
+            const day = addDays(new Date(), i);
+            const dateKey = ymd(day);
+            const weekday = day.getDay();
+            const wh = workHours && typeof workHours === "object" ? workHours[LUECKEN_DOW[weekday]] : null;
+            if (weekday === 0 || (wh && wh.blocked))
+                continue;
+            const dayVon = (wh && wh.von) || "08:00", dayBis = (wh && wh.bis) || "20:00";
+            own.forEach(s => {
+                if (!s.wunschliste.weekdays.includes(weekday))
+                    return;
+                const already = (appts || []).some(a => a.student_id === s.id && (a.status === "confirmed" || a.status === "pending") && ymd(a.start_at) === dateKey);
+                if (already)
+                    return;
+                const von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
+                const bis = s.wunschliste.bis < dayBis ? s.wunschliste.bis : dayBis;
+                if (toMin(bis) - toMin(von) < 45)
+                    return;
+                const slot = findFreeWindow(dateKey, von, bis, 45);
+                if (slot)
+                    found.push({ stu: s, dateKey, ...slot });
+            });
+        }
+        return found;
+    }
+    // Ein gefundenes Fenster als Warteliste-Angebot anlegen - exakt dasselbe Prinzip wie
+    // createWaitlistOffer, nur ohne vorher einen bestehenden Termin gelöscht zu haben.
+    async function offerLueckenSlot(f) {
+        try {
+            const created = await dbInsertAppt(uid, {
+                start_at: combineDT(f.dateKey, f.from), end_at: combineDT(f.dateKey, f.to), art: "ÜST",
+                status: "offered", offer_klasse: f.stu.klasse || DEFAULT_KLASSE, offered_at: new Date().toISOString()
+            });
+            setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
+            showToast("Als Warteliste-Angebot angelegt – passende Schüler sehen es jetzt in ihrer App.");
+        }
+        catch (e) {
+            showToast("Anbieten fehlgeschlagen:\n" + e.message);
+        }
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
     function openNewAppt(dateStr, startHM) {
@@ -16234,7 +16335,7 @@ function App() {
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z" })),
                         "Fahrlehrer krank"),
-                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["tagesabschluss", "Tagesabschluss", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M9 11l3 3L22 4" }), React.createElement("path", { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" }))], ["pruefungsplanung", "Prüfungsplanung", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" }), React.createElement("path", { d: "M4 22V3" }))], ["interessenten", "Interessenten", React.createElement(IcUsers, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["tagesabschluss", "Tagesabschluss", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M9 11l3 3L22 4" }), React.createElement("path", { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" }))], ["pruefungsplanung", "Prüfungsplanung", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" }), React.createElement("path", { d: "M4 22V3" }))], ["lueckenradar", "Lücken-Radar", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("circle", { cx: "11", cy: "11", r: "8" }), React.createElement("path", { d: "M21 21l-4.35-4.35" }))], ["interessenten", "Interessenten", React.createElement(IcUsers, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
             React.createElement("div", { className: "shell", style: fontScale !== 1 ? { zoom: fontScale } : null },
@@ -16275,11 +16376,12 @@ function App() {
                 view === "statistik" && renderStatistik(),
                 view === "tagesabschluss" && renderTagesabschluss(),
                 view === "pruefungsplanung" && renderPruefungsplanung(),
+                view === "lueckenradar" && renderLueckenRadar(),
                 view === "interessenten" && renderInteressenten(),
                 view === "fahrzeuge" && renderFahrzeuge(),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "statistik" && view !== "tagesabschluss" && view !== "pruefungsplanung" && view !== "interessenten" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "statistik" && view !== "tagesabschluss" && view !== "pruefungsplanung" && view !== "lueckenradar" && view !== "interessenten" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -16408,6 +16510,12 @@ function App() {
                                             React.createElement("path", { d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" }),
                                             React.createElement("path", { d: "M4 22V3" }))),
                                     "Prüfungsplanung"),
+                                React.createElement("button", { className: "tabpop-item" + (view === "lueckenradar" ? " on" : ""), onClick: () => { setView("lueckenradar"); setTabMenu(null); setMehrGroup(null); } },
+                                    React.createElement("span", { className: "tabpop-ic" },
+                                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                            React.createElement("circle", { cx: "11", cy: "11", r: "8" }),
+                                            React.createElement("path", { d: "M21 21l-4.35-4.35" }))),
+                                    "Lücken-Radar"),
                                 React.createElement("button", { className: "tabpop-item" + (view === "interessenten" ? " on" : ""), onClick: () => { setView("interessenten"); setTabMenu(null); setMehrGroup(null); } },
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcUsers, null)),
