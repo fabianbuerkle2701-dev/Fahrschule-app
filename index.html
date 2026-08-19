@@ -1224,7 +1224,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.116.1";
+const APP_VERSION = "1.116.2";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1345,6 +1345,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.116.2", date: "August 2026", changes: [
+            "Der Netzwerk-Retry von eben gilt jetzt auch fürs Schüler-Speichern - ADK-Haken, Streckenpunkte und Fahrstunden-Bewertungen (Emojis) versuchen bei einem kurzen Verbindungsabbruch ebenfalls bis zu 3x automatisch erneut, statt sofort „Änderungen konnten nicht gespeichert werden\" zu melden",
+        ] },
     { v: "1.116.1", date: "August 2026", changes: [
             "Fehlerbehebung: Termine speichern/verschieben/löschen versucht es jetzt bis zu 3x automatisch erneut, wenn die Verbindung nur kurz weg war (z. B. während der Fahrstunde im Auto) - vorher kam sofort „Änderung fehlgeschlagen: TypeError: Load failed\", obwohl die Verbindung Sekunden später schon wieder da war",
         ] },
@@ -2551,42 +2554,53 @@ function cleanData(s) {
     return rest;
 }
 async function dbInsert(uid, s) {
-    const { data, error } = await sb.from("students")
-        .insert({ owner: uid, data: cleanData(s), shared_with: [] }).select().single();
-    if (error) {
-        console.error(error);
-        return null;
-    }
-    return { ...rowToStudent(data), _isMine: true };
+    return await withNetworkRetry(async () => {
+        const { data, error } = await sb.from("students")
+            .insert({ owner: uid, data: cleanData(s), shared_with: [] }).select().single();
+        if (error) {
+            console.error(error);
+            return null;
+        }
+        return { ...rowToStudent(data), _isMine: true };
+    });
 }
 // Schreibt über die RPC students_teacher_update statt direkt per .update({data:...}) - die RPC
 // bewahrt serverseitig die schülereigenen Felder (PIN, Theorie-Fortschritt, begleitete Fahrten
 // usw.), die der Fahrlehrer-Client nie im lokalen Stand hat, weil die Schülerliste nur einmal
 // beim Anmelden geladen wird. Ein reines .update() würde diese sonst mit dem veralteten
 // lokalen Stand überschreiben, sobald der Fahrlehrer irgendetwas an diesem Schüler speichert.
+// Läuft über withNetworkRetry (siehe dbUpdateAppt) - dieselbe RPC speichert ADK-Haken,
+// Streckenpunkte und Fahrstunden-Bewertungen (alles liegt in derselben data-Spalte), ein
+// kurzer Verbindungsabbruch (z.B. im Auto) betrifft also alle drei gleichermaßen.
 async function dbUpdate(s) {
-    const { error } = await sb.rpc("students_teacher_update", { p_id: s.id, p_data: cleanData(s) });
-    if (error) {
-        console.error(error);
-        throw new Error(error.message || "Speichern fehlgeschlagen");
-    }
+    await withNetworkRetry(async () => {
+        const { error } = await sb.rpc("students_teacher_update", { p_id: s.id, p_data: cleanData(s) });
+        if (error) {
+            console.error(error);
+            throw new Error(error.message || "Speichern fehlgeschlagen");
+        }
+    });
 }
 async function dbDelete(id) {
-    const { error } = await sb.from("students").delete().eq("id", id);
-    if (error) {
-        console.error(error);
-        // Wichtig: den Fehler weiterreichen statt nur zu loggen. Ein DB-Trigger blockt das Löschen
-        // von Schülern mit vorhandenen Rechnungen (Audit-Trail-Schutz) – ohne throw würde die App
-        // den Schüler trotzdem optimistisch aus der UI entfernen, obwohl die Zeile in der DB bleibt.
-        throw new Error(error.message || "Löschen fehlgeschlagen");
-    }
+    await withNetworkRetry(async () => {
+        const { error } = await sb.from("students").delete().eq("id", id);
+        if (error) {
+            console.error(error);
+            // Wichtig: den Fehler weiterreichen statt nur zu loggen. Ein DB-Trigger blockt das Löschen
+            // von Schülern mit vorhandenen Rechnungen (Audit-Trail-Schutz) – ohne throw würde die App
+            // den Schüler trotzdem optimistisch aus der UI entfernen, obwohl die Zeile in der DB bleibt.
+            throw new Error(error.message || "Löschen fehlgeschlagen");
+        }
+    });
 }
 async function dbShare(id, shared) {
-    const { error } = await sb.from("students").update({ shared_with: shared }).eq("id", id);
-    if (error) {
-        console.error(error);
-        throw new Error(error.message || "Freigabe fehlgeschlagen");
-    }
+    await withNetworkRetry(async () => {
+        const { error } = await sb.from("students").update({ shared_with: shared }).eq("id", id);
+        if (error) {
+            console.error(error);
+            throw new Error(error.message || "Freigabe fehlgeschlagen");
+        }
+    });
 }
 // Resolve an email to a user id, über eine schmale RPC statt direktem Tabellenzugriff -
 // profiles ist seit der Rechte-Einschränkung nur noch für die eigene Fahrschule lesbar,
