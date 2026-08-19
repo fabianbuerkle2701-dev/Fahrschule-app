@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.117.1";
+const APP_VERSION = "1.118.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.118.0", date: "August 2026", changes: [
+            "Neu: Die Prüfungssimulation zeigt jetzt auch, welche Fahraufgabe oder welcher Kompetenzbereich über mehrere Simulationen hinweg wiederholt mit „erheblich\" oder „Gefährdung\" auffällt - als eigene Karte über der Liste der bisherigen Simulationen, sobald mindestens 2 Simulationen vorliegen",
+        ] },
     { v: "1.117.1", date: "August 2026", changes: [
             "Die KI-Übergabe-Einschätzung lässt sich jetzt auch als PDF drucken - im gleichen Design wie die anderen Allindrive-Dokumente (Logo, Fahrschulname, Schaltkompetenz-Optik)",
         ] },
@@ -4251,6 +4254,33 @@ function pruefungssimSummary(entries) {
     else if (out[e.schweregrad] != null)
         out[e.schweregrad]++; });
     return out;
+}
+// Über mehrere Prüfungssimulationen hinweg: welche Fahraufgabe/welcher Kompetenzbereich fällt
+// wiederholt mit "erheblich"/"Gefährdung" auf - statt wie in der einzelnen Simulationskarte nur
+// die Zahlen der letzten Übung zu zeigen. Schwelle >=2 Nennungen, gleiche Logik wie die
+// wiederkehrenden Schwächen aus dem Fahrtenbuch (siehe askAssistant oben) - ein einzelner
+// Ausrutscher soll nicht schon als Muster gelten.
+function pruefungssimRecurringIssues(examSims) {
+    const byFahraufgabe = {}, byKompetenz = {};
+    (examSims || []).forEach(sim => {
+        (sim.entries || []).forEach(e => {
+            if (e.type !== "fehler" || (e.schweregrad !== "erheblich" && e.schweregrad !== "gefaehrdung"))
+                return;
+            if (e.fahraufgabe) {
+                const b = byFahraufgabe[e.fahraufgabe] || (byFahraufgabe[e.fahraufgabe] = { erheblich: 0, gefaehrdung: 0 });
+                b[e.schweregrad]++;
+            }
+            if (e.kompetenzbereich) {
+                const b = byKompetenz[e.kompetenzbereich] || (byKompetenz[e.kompetenzbereich] = { erheblich: 0, gefaehrdung: 0 });
+                b[e.schweregrad]++;
+            }
+        });
+    });
+    const toList = (map, labelFn) => Object.entries(map)
+        .map(([id, c]) => ({ id, label: labelFn(id), erheblich: c.erheblich, gefaehrdung: c.gefaehrdung, total: c.erheblich + c.gefaehrdung }))
+        .filter(x => x.total >= 2)
+        .sort((a, b) => (b.gefaehrdung - a.gefaehrdung) || (b.total - a.total));
+    return { fahraufgaben: toList(byFahraufgabe, pruefungssimFahraufgabeLabel), kompetenzbereiche: toList(byKompetenz, pruefungssimKompetenzLabel) };
 }
 /* ════════ Schaltkompetenz-Pilot ════════ */
 // Fester Prüfpunkte-Katalog (kein Vorlagen-Editor wie bei ADK/Strecken) - jeder Punkt wird pro
@@ -10496,6 +10526,10 @@ function App() {
     // Eigener Reiter unter Ausbildung (neben ADK/Strecken/Fahrstunden) statt nur als Karte in
     // der Übersicht versteckt - Start-Button + Verlauf der letzten Simulationen.
     function renderPruefungssimUebersicht() {
+        // Nur ab 2 Simulationen sinnvoll ("wiederkehrend" braucht einen Vergleich) - siehe
+        // pruefungssimRecurringIssues oben, gleiche >=2-Schwelle wie bei den Fahrtenbuch-Mustern.
+        const recurring = (active.examSims || []).length >= 2 ? pruefungssimRecurringIssues(active.examSims) : { fahraufgaben: [], kompetenzbereiche: [] };
+        const recurringItems = [...recurring.fahraufgaben, ...recurring.kompetenzbereiche];
         return React.createElement("div", { className: "pad" },
             studentHeader(),
             React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 16, display: "flex", alignItems: "center", gap: 12, borderLeft: "3px solid var(--orange)" },
@@ -10508,6 +10542,13 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Prüfungssimulation starten"),
                     React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, "Fahraufgaben, Kompetenzbereiche und Fehler wie in der echten Prüfung erfassen")),
                 React.createElement("span", { style: { color: "var(--muted)", fontSize: 20, flexShrink: 0 } }, "›")),
+            recurringItems.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16, borderLeft: "3px solid #C0392B" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 8, color: "#C0392B" } }, "Wiederkehrend auffällig"),
+                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 10 } }, "Über alle bisherigen Simulationen hinweg"),
+                recurringItems.map(x => React.createElement("div", { key: x.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 0", borderTop: "1px solid var(--line)" } },
+                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600 } }, x.label),
+                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#C0392B", flexShrink: 0 } },
+                        [x.gefaehrdung > 0 ? x.gefaehrdung + "× Gefährdung" : null, x.erheblich > 0 ? x.erheblich + "× erheblich" : null].filter(Boolean).join(" · "))))),
             (active.examSims || []).length > 0
                 ? React.createElement("div", null,
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 12, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Bisherige Simulationen"),
