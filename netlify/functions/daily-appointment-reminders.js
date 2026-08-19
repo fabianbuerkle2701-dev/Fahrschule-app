@@ -1,11 +1,15 @@
-// Netlify Function: wird stuendlich vom pg_cron-Job "hourly-reminder-check" aufgerufen und
-// feuert nur tatsaechlich, wenn es gerade 18 Uhr Europe/Berlin ist (No-op sonst) - das
-// vermeidet die Sommer-/Winterzeit-Verschiebung, die eine feste UTC-Cron-Zeit haette. Fasst
-// pro Fahrlehrer die morgigen bestaetigten Fahrstunden zu einer Push zusammen - gleiche
-// Ausschluss-Logik wie erinnerungsKandidaten() in index.html (kein §SONST§/§URLAUB§-Termin,
-// keine PRIVAT-Termine), nur serverseitig statt im Browser.
+// Netlify Function: wird stuendlich vom pg_cron-Job "hourly-reminder-check" aufgerufen.
+// Macht bei JEDEM Aufruf zwei Dinge:
+// 1. Nachhol-Lauf fuer verpasste Termin-Pushes (siehe catchUpMissedPushes) - faengt Faelle ab,
+//    bei denen der direkte Postgres-Trigger aus irgendeinem Grund keine erfolgreiche Zustellung
+//    hinbekommen hat (fehlendes Vault-Secret, Netzwerkausfall, tote Function).
+// 2. Nur um 18 Uhr Europe/Berlin (No-op sonst, vermeidet die Sommer-/Winterzeit-Verschiebung
+//    einer festen UTC-Cron-Zeit): fasst pro Fahrlehrer die morgigen bestaetigten Fahrstunden zu
+//    einer Push zusammen - gleiche Ausschluss-Logik wie erinnerungsKandidaten() in index.html
+//    (kein §SONST§/§URLAUB§-Termin, keine PRIVAT-Termine), nur serverseitig statt im Browser.
 
 const { sendApnsPush } = require("./lib/apns");
+const { notifyAppointmentEvent } = require("./lib/appointment-push");
 
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SONST_MARK = "§SONST§";
@@ -20,6 +24,33 @@ function berlinHour(date) {
   return h ? parseInt(h.value, 10) : null;
 }
 
+// Termine mit offener Push-Zustellung (push_pending_since gesetzt), die vor mindestens 10 Min.
+// (Anlaufzeit fuer den normalen Trigger-Pfad) und hoechstens 24h passiert sind - alles Aeltere
+// ist vermutlich laengst anderweitig bemerkt worden und wuerde nur unnoetig nachtraeglich stoeren.
+async function catchUpMissedPushes(sbFetch, serviceKey) {
+  const cutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  const notTooOld = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+  const resp = await sbFetch(
+    "appointments?push_pending_since=not.is.null" +
+      "&push_pending_since=lte." + encodeURIComponent(cutoff) +
+      "&push_pending_since=gte." + encodeURIComponent(notTooOld) +
+      "&status=in.(pending,cancel_requested)&select=id,owner,status"
+  );
+  if (!resp.ok) return { checked: 0, recovered: 0 };
+  const rows = (await resp.json()) || [];
+  let recovered = 0;
+  for (const row of rows) {
+    const evt = row.status === "pending" ? "new_request" : "cancel_requested";
+    try {
+      const result = await notifyAppointmentEvent({ evt, appointmentId: row.id, owner: row.owner, serviceKey });
+      if (result && result.sent > 0) recovered++;
+    } catch (e) {
+      // naechster Versuch beim naechsten stuendlichen Aufruf
+    }
+  }
+  return { checked: rows.length, recovered };
+}
+
 exports.handler = async function (event) {
   const headers = { "Content-Type": "application/json" };
 
@@ -32,11 +63,6 @@ exports.handler = async function (event) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Nicht autorisiert" }) };
   }
 
-  const now = new Date();
-  if (berlinHour(now) !== 18) {
-    return { statusCode: 200, headers, body: JSON.stringify({ skipped: "not_18_berlin" }) };
-  }
-
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!serviceKey) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Kein Service-Role-Key hinterlegt." }) };
@@ -44,12 +70,24 @@ exports.handler = async function (event) {
   const sbFetch = (path) =>
     fetch(SUPABASE_URL + "/rest/v1/" + path, { headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey } });
 
+  let catchUp;
+  try {
+    catchUp = await catchUpMissedPushes(sbFetch, serviceKey);
+  } catch (e) {
+    catchUp = { error: e.message || "Nachhol-Lauf fehlgeschlagen" };
+  }
+
+  const now = new Date();
+  if (berlinHour(now) !== 18) {
+    return { statusCode: 200, headers, body: JSON.stringify({ skipped: "not_18_berlin", catchUp }) };
+  }
+
   try {
     const ownersResp = await sbFetch("device_tokens?select=owner");
     if (!ownersResp.ok) throw new Error("Geraeteliste konnte nicht geladen werden (" + ownersResp.status + ")");
     const ownerRows = (await ownersResp.json()) || [];
     const owners = [...new Set(ownerRows.map((r) => r.owner))];
-    if (!owners.length) return { statusCode: 200, headers, body: JSON.stringify({ owners: 0 }) };
+    if (!owners.length) return { statusCode: 200, headers, body: JSON.stringify({ owners: 0, catchUp }) };
 
     const tomorrowStr = berlinDateStr(new Date(now.getTime() + 24 * 3600 * 1000));
     // Grosszuegiges UTC-Fenster (heute bis +3 Tage), exakter Tagesvergleich passiert unten in JS
@@ -87,8 +125,8 @@ exports.handler = async function (event) {
       results.push({ owner, count, sent: sendResult.sent });
     }
 
-    return { statusCode: 200, headers, body: JSON.stringify({ processed: results.length, results }) };
+    return { statusCode: 200, headers, body: JSON.stringify({ processed: results.length, results, catchUp }) };
   } catch (e) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: e.message || "Serverfehler" }) };
+    return { statusCode: 500, headers, body: JSON.stringify({ error: e.message || "Serverfehler", catchUp }) };
   }
 };
