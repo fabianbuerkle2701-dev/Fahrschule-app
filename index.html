@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.119.0";
+const APP_VERSION = "1.119.1";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.119.1", date: "August 2026", changes: [
+            "Neu: Terminserien - beim Anlegen eines neuen Termins jetzt \"Terminserie anlegen\" wählbar (wöchentlich oder alle 2 Wochen, bis zu 52 Termine auf einmal). Überschneidende oder das Limit überschreitende Termine werden automatisch übersprungen, am Ende gibt es eine Übersicht",
+        ] },
     { v: "1.119.0", date: "August 2026", changes: [
             "Neu: Statistik-Seite unter Mehr - Umsatz pro Monat (letzte 6 Monate), Prüfungs-Erfolgsquote Theorie/Praxis, Anzahl prüfreifer Schüler und durchschnittliche Fahrstunden bis zur bestandenen Praxisprüfung, alles auf einen Blick",
         ] },
@@ -12632,6 +12635,72 @@ function App() {
             apptSavingRef.current = false;
         }
     }
+    // Terminserie: derselbe Termin automatisch mehrfach anlegen (wöchentlich/alle 2 Wochen).
+    // Kollidierende Termine (Überschneidung oder Tages-/Wochenlimit) werden übersprungen statt
+    // wie beim Einzeltermin einzeln nachzufragen - bei z.B. 12 Terminen wären 12 Bestätigungs-
+    // Dialoge genau das Gegenteil von Zeitersparnis. Am Ende gibt es eine Übersicht.
+    async function saveApptSerie() {
+        const f = apptForm;
+        if (!f || !f.serie || !f.serie.on)
+            return;
+        if (apptSavingRef.current)
+            return;
+        if (!f.date || !f.start) {
+            showToast("Bitte Datum und Startzeit angeben.");
+            return;
+        }
+        if (f.end && f.end <= f.start) {
+            showToast("Die Endzeit (" + f.end + " Uhr) muss nach der Startzeit (" + f.start + " Uhr) liegen.");
+            return;
+        }
+        const anzahl = Math.max(2, Math.min(52, parseInt(f.serie.anzahl, 10) || 2));
+        const stepDays = f.serie.wiederholung === "biweekly" ? 14 : 7;
+        const dates = [];
+        for (let i = 0; i < anzahl; i++) {
+            const d = new Date(f.date + "T00:00:00");
+            d.setDate(d.getDate() + i * stepDays);
+            dates.push(ymd(d));
+        }
+
+        apptSavingRef.current = true;
+        setApptForm({ ...f, busy: true });
+        const skipped = [];
+        let createdCount = 0;
+        try {
+            for (const date of dates) {
+                const startISO = combineDT(date, f.start);
+                const endISO = f.end ? combineDT(date, f.end) : null;
+                if (!f.sonstige) {
+                    const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
+                    const lp = limitProblem(date, mins, null);
+                    if (lp) {
+                        skipped.push({ date, reason: "Limit" });
+                        continue;
+                    }
+                }
+                const clash = findOverlaps(appts, startISO, endISO, null);
+                if (clash.length) {
+                    skipped.push({ date, reason: "Überschneidung" });
+                    continue;
+                }
+                const payload = { start_at: startISO, end_at: endISO, student_id: f.student_id || null,
+                    note: makeNote(f.sonstige, f.note || ""), title: f.title || "", status: "confirmed", art: f.art || "ÜST" };
+                const c = await addAppt(payload);
+                if (c)
+                    createdCount++;
+                else
+                    skipped.push({ date, reason: "Speichern fehlgeschlagen" });
+            }
+            setApptForm(null);
+            const skipText = skipped.length
+                ? " – übersprungen: " + skipped.map(s => new Date(s.date + "T00:00:00").toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }) + " (" + s.reason + ")").join(", ")
+                : "";
+            showFlash("✓ " + createdCount + " von " + dates.length + " Terminen angelegt" + skipText);
+        }
+        finally {
+            apptSavingRef.current = false;
+        }
+    }
     function renderKalender() {
         // Sonntag ist grundsätzlich frei und wird in der Wochenansicht nicht angezeigt (Montag bis Samstag)
         const days = [0, 1, 2, 3, 4, 5].map(i => addDays(calWeek, i));
@@ -17428,7 +17497,30 @@ function App() {
                     React.createElement("div", { style: { flex: 1 } },
                         React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, "Sonstige T\u00E4tigkeit"),
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 } }, "Z\u00E4hlt nicht zum Ausbildungslimit. F\u00FCr alles, was keine praktische Ausbildung ist."))),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: apptForm.busy ? 0.6 : 1 }, disabled: !!apptForm.busy, onClick: saveApptForm }, apptForm.busy ? "Wird gespeichert\u2026" : (apptForm.id ? "Speichern" : "Termin anlegen")),
+                !apptForm.id && React.createElement("div", { onClick: () => setApptForm({ ...apptForm, serie: (apptForm.serie && apptForm.serie.on) ? { ...apptForm.serie, on: false } : { on: true, wiederholung: (apptForm.serie && apptForm.serie.wiederholung) || "weekly", anzahl: (apptForm.serie && apptForm.serie.anzahl) || 8 } }),
+                        style: { display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 13px", marginBottom: (apptForm.serie && apptForm.serie.on) ? 10 : 16, borderRadius: 11, cursor: "pointer",
+                            border: "1.5px solid " + ((apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "var(--line)"), background: (apptForm.serie && apptForm.serie.on) ? "var(--orange-soft)" : "transparent" } },
+                    React.createElement("div", { style: { width: 22, height: 22, borderRadius: 6, flexShrink: 0, marginTop: 1, border: "2px solid " + ((apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "var(--muted)"),
+                            background: (apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" } }, (apptForm.serie && apptForm.serie.on) && React.createElement("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: "3.5", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("polyline", { points: "20 6 9 17 4 12" }))),
+                    React.createElement("div", { style: { flex: 1 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, "Terminserie anlegen"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 } }, "Legt denselben Termin automatisch mehrfach an - z.B. jede Woche zur gleichen Zeit."))),
+                apptForm.serie && apptForm.serie.on && React.createElement("div", { style: { marginBottom: 16 } },
+                    React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
+                        React.createElement("div", { className: "field", style: { flex: 1 } },
+                            React.createElement("label", null, "Wiederholung"),
+                            React.createElement("select", { value: apptForm.serie.wiederholung, onChange: e => setApptForm({ ...apptForm, serie: { ...apptForm.serie, wiederholung: e.target.value } }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                                React.createElement("option", { value: "weekly" }, "W\u00F6chentlich"),
+                                React.createElement("option", { value: "biweekly" }, "Alle 2 Wochen"))),
+                        React.createElement("div", { className: "field", style: { flex: 1 } },
+                            React.createElement("label", null, "Anzahl Termine"),
+                            React.createElement("input", { type: "number", min: 2, max: 52, value: apptForm.serie.anzahl, onChange: e => setApptForm({ ...apptForm, serie: { ...apptForm.serie, anzahl: e.target.value } }) }))),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5 } },
+                        "Termine, die sich mit bestehenden \u00FCberschneiden oder dein Tages-/Wochenlimit \u00FCberschreiten, werden automatisch \u00FCbersprungen - danach gibt es eine \u00DCbersicht.")),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: apptForm.busy ? 0.6 : 1 }, disabled: !!apptForm.busy,
+                        onClick: () => (apptForm.serie && apptForm.serie.on) ? saveApptSerie() : saveApptForm() },
+                    apptForm.busy ? "Wird gespeichert\u2026" : (apptForm.id ? "Speichern" : ((apptForm.serie && apptForm.serie.on) ? "Serie anlegen" : "Termin anlegen"))),
                 apptForm.student_id && (() => {
                     const existing = apptForm.id ? (students.find(s => s.id === apptForm.student_id) || {}).drivenLessons || [] : [];
                     const already = apptForm.id && existing.some(l => l.leistung && l.apptId === apptForm.id);
