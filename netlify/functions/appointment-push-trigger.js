@@ -32,13 +32,6 @@ exports.handler = async function (event) {
   }
 
   const secret = process.env.CRON_SECRET;
-  if (event.queryStringParameters && event.queryStringParameters.debug === "1") {
-    return { statusCode: 200, headers, body: JSON.stringify({
-      secretPresent: !!secret, secretLen: secret ? secret.length : 0,
-      headerKeys: Object.keys(event.headers || {}), headerVal: event.headers && event.headers["x-cron-secret"],
-      headerLen: event.headers && event.headers["x-cron-secret"] ? event.headers["x-cron-secret"].length : 0,
-    }) };
-  }
   if (!secret || event.headers["x-cron-secret"] !== secret) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Nicht autorisiert" }) };
   }
