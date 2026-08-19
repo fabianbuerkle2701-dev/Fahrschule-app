@@ -33,7 +33,7 @@ exports.handler = async function (event) {
 
   const code = (body.code || "").toString().trim();
   const facts = body.facts && typeof body.facts === "object" ? body.facts : null;
-  const kind = ["morning", "evening", "statistik"].includes(body.kind) ? body.kind : "morning";
+  const kind = ["morning", "evening", "statistik", "interessent"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
 
@@ -109,6 +109,25 @@ Regeln, unbedingt einhalten:
 
 Die Zahlen:
 ${datenText}`;
+  } else if (kind === "interessent") {
+    // Anders als die anderen drei "kind"s: kein Bericht AN den Fahrlehrer über etwas, sondern
+    // eine Nachricht, die der Fahrlehrer 1:1 an den Interessenten weiterschicken kann (WhatsApp-
+    // Tap-Link, wie überall sonst in der App - der Fahrlehrer sieht den Text vor dem Senden).
+    system = `Du schreibst EINE kurze, freundliche WhatsApp-Nachricht des Fahrlehrers der Fahrschule "${schoolFacts.school_name}" an einen Interessenten, der noch kein Schüler ist. Schreib die Nachricht direkt in der du-Form, ADRESSIERT AN DEN INTERESSENTEN - nicht als Bericht an den Fahrlehrer.
+
+Regeln, unbedingt einhalten:
+1. Nutze AUSSCHLIESSLICH die unten stehenden Angaben. Erfinde keine Zusagen, Termine, Preise oder Kursinhalte, die dort nicht stehen.
+2. Kurz (2-4 Sätze), locker-freundlich, keine steife Anrede wie "Sehr geehrte/r".
+3. Je nach Status: bei "offen" der erste Kontakt (kurz vorstellen, fragen ob noch Interesse an einem Termin besteht); bei "kontaktiert" eine sanfte, unaufdringliche Erinnerung/Nachfrage.
+4. Ist eine Notiz vorhanden, nimm konkret darauf Bezug (z.B. gewünschter Start, bereits absolvierter Kurs) statt sie zu ignorieren.
+5. Keine Grußformel am Ende wie "Viele Grüße, [Name]" - die App hängt nichts automatisch an, das wirkt sonst wie ein Platzhalter.
+6. Gib NUR den Nachrichtentext zurück, ohne Anführungszeichen drumherum, ohne Erklärung davor oder danach.
+
+Angaben:
+Name: ${facts.vorname || "unbekannt"}
+Klasse (Interesse): ${facts.klasse || "unbekannt"}
+Status: ${facts.status || "offen"}
+Notiz: ${facts.notiz || "keine"}`;
   } else {
     const zeilen = [];
     if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
