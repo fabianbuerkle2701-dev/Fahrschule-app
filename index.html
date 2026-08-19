@@ -1224,7 +1224,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.116.3";
+const APP_VERSION = "1.117.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1345,6 +1345,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.117.0", date: "August 2026", changes: [
+            "Neu: KI-Übergabe-Einschätzung im Profil-Reiter eines Schülers - fasst Ausbildungsstand (ADK/Strecken), Fahrtenbuch-Notizen, Prüfungssimulation/Schaltkompetenz-Ergebnisse und Besonderheiten (Sehhilfe, Lenkrad-/Kopfstützenposition, Notizen) zu einem Text zusammen, praktisch bei Übergabe an eine andere Lehrkraft oder Fahrschulwechsel - bewusst ohne Kosten/Zahlungen",
+        ] },
     { v: "1.116.3", date: "August 2026", changes: [
             "„Lange nicht gefahren\" merkt sich jetzt, wenn du über den „Erinnern\"-Button schon eine Nachricht verschickt hast - der Schüler verschwindet danach aus der Liste und dem Badge auf der Startseite, bis entweder wieder eine Fahrstunde stattfindet oder er danach erneut länger nicht da war",
         ] },
@@ -8219,6 +8222,94 @@ function App() {
             setAssistant(a => ({ ...(a || {}), busy: false, error: "Fehler: " + (e.message || "unbekannt") + "\n\nLäuft die App über Netlify mit eingerichteter Funktion?", proposal: null }));
         }
     }
+    // KI-Übergabe-Einschätzung: fasst Ausbildungsstand, Fahrtenbuch-Notizen, Prüfungssimulation/
+    // Schaltkompetenz und Besonderheiten (Sehhilfe, Lenkrad-/Kopfstützenposition, Notizen) zu
+    // einem Text zusammen - für die Übergabe an eine andere Lehrkraft oder beim Fahrschulwechsel.
+    // Bewusst OHNE Kosten/Zahlungen (siehe student-handover-summary.js) - das ist eine fachliche
+    // Einschätzung, keine Abrechnung.
+    function buildHandoverPayload(stu) {
+        const tplS = tplFor(stu.klasse);
+        const abschnitte = [
+            ...(tplS.adk || []).map(sec => ({ art: "ADK", titel: sec.title, prozent: secLern(stu, sec) })),
+            ...(tplS.strecken || []).map(sec => ({ art: "Strecken", titel: sec.title, prozent: secBack(stu, sec) })),
+        ];
+        // Gleiche Mustererkennung wie im KI-Helfer (askAssistant oben) - hier bewusst dupliziert
+        // statt geteilt, da dort zusätzlich Kosten/Zahlungen mit in den Datensatz einfließen,
+        // die in diese Übergabe-Einschätzung nicht hineinsollen.
+        const diaryRecent = (stu.lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
+        const wiederkehrendeSchwaechen = LESSON_FIELDS.map(f => {
+            const vals = diaryRecent.map(l => l.ratings && l.ratings[f.id]).filter(v => v);
+            if (vals.length < 2)
+                return null;
+            const schlechtCount = vals.filter(v => v === 1).length;
+            const schnitt = Math.round((vals.reduce((a, v) => a + v, 0) / vals.length) * 10) / 10;
+            if (schlechtCount < 2 && schnitt > 1.6)
+                return null;
+            return { feld: f.label, schnitt, schlechtCount, bewertungen: vals.length };
+        }).filter(Boolean).sort((a, b) => a.schnitt - b.schnitt);
+        const letzteNotizen = diaryRecent.slice(0, 6)
+            .filter(l => l.thema || l.gut || l.schlecht)
+            .map(l => ({ datum: l.date, thema: l.thema || "", gut: l.gut || "", schlecht: l.schlecht || "" }));
+        const streckenNotizen = Object.values(stu.streckenNotes || {}).map(n => (n || "").trim()).filter(Boolean);
+        const examSims = stu.examSims || [];
+        const pruefungssimulation = examSims.length ? {
+            anzahl: examSims.length,
+            letzteAm: examSims[examSims.length - 1].date || null,
+            gesamt: examSims.reduce((acc, sim) => {
+                const s = sim.summary || pruefungssimSummary(sim.entries);
+                acc.leicht += s.leicht || 0;
+                acc.erheblich += s.erheblich || 0;
+                acc.gefaehrdung += s.gefaehrdung || 0;
+                return acc;
+            }, { leicht: 0, erheblich: 0, gefaehrdung: 0 }),
+        } : null;
+        const skTests = stu.schaltkompetenzTests || [];
+        const letzterSk = skTests.length ? skTests[skTests.length - 1] : null;
+        const schaltkompetenz = letzterSk ? { letzteAm: letzterSk.date || null, ...schaltkompetenzSummary(letzterSk.items), notiz: letzterSk.notiz || "" } : null;
+        return {
+            name: dispName(stu),
+            klasse: stu.klasse || "",
+            theorie: !!stu.theorie,
+            adkProzent: Math.round(calcLern(stu.items, tplS.adk, stu)),
+            streckenProzent: Math.round(calcBack(stu, tplS.strecken)),
+            gesamtProzent: Math.round(gesamtPct(stu)),
+            abschnitte,
+            fahrstunden: (stu.drivenLessons || []).length,
+            gefahreneMinuten: (stu.drivenLessons || []).reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0),
+            besonderheiten: {
+                sehhilfe: !!stu.sehhilfe,
+                lenkradPosition: stu.lenkrad || null,
+                kopfstuetzePosition: stu.kopfstuetze || null,
+                bemerkungen: stu.bemerkungen || "",
+                letzteNotizZumStand: stu.lastNote || "",
+                streckenNotizen,
+            },
+            wiederkehrendeSchwaechen,
+            letzteFahrstundenNotizen: letzteNotizen,
+            pruefungssimulation,
+            schaltkompetenz,
+        };
+    }
+    const [handoverModal, setHandoverModal] = useState(null); // null | {busy, text, error, name}
+    async function generateHandoverSummary(stu) {
+        setHandoverModal({ busy: true, text: "", error: "", name: dispName(stu) });
+        try {
+            const resp = await fetch("/.netlify/functions/student-handover-summary", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ student: buildHandoverPayload(stu) }),
+            });
+            const out = await resp.json();
+            if (!resp.ok) {
+                setHandoverModal(m => ({ ...(m || {}), busy: false, error: (out && out.error) || "Anfrage fehlgeschlagen" }));
+                return;
+            }
+            setHandoverModal(m => ({ ...(m || {}), busy: false, text: out.text || "", error: "" }));
+        }
+        catch (e) {
+            setHandoverModal(m => ({ ...(m || {}), busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+        }
+    }
     // Vorgeschlagene Aktion nach Bestätigung ausführen
     function runAssistantAction(p) {
         if (!p) {
@@ -11997,6 +12088,7 @@ function App() {
                     ? React.createElement(ShareBox, null)
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Sch\u00FCler wurde mit dir geteilt. Du kannst Eintr\u00E4ge bearbeiten, aber die Freigabe verwaltet der Besitzer."),
                 active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => archivierenUmschalten(active) }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren"),
+                active._isMine && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => generateHandoverSummary(active) }, "KI-Übergabe-Einschätzung erstellen"),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10 }, onClick: () => setPrintChoice(true) }, "Als PDF drucken")));
     }
     /* ── Teilen ── */
@@ -16737,6 +16829,26 @@ function App() {
                             React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0, textAlign: "right" } }, zeitText));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setFristenOpen(false) }, "Schlie\u00DFen"))),
+        handoverModal && React.createElement("div", { onClick: () => setHandoverModal(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "KI-\u00DCbergabe-Einsch\u00E4tzung"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, handoverModal.name || ""),
+                handoverModal.busy
+                    ? React.createElement("div", { style: { padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Erstellt Einsch\u00E4tzung\u2026")
+                    : handoverModal.error
+                        ? React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 13.5, color: "#B3362A" } }, handoverModal.error)
+                        : React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, handoverModal.text),
+                !handoverModal.busy && !handoverModal.error && handoverModal.text && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 },
+                        onClick: async () => { try {
+                            await navigator.clipboard.writeText(handoverModal.text);
+                            showFlash("\u2713 In die Zwischenablage kopiert");
+                        }
+                        catch (e) {
+                            showToast("Kopieren nicht m\u00F6glich - bitte Text von Hand markieren.");
+                        } } }, "Text kopieren"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setHandoverModal(null) }, "Schlie\u00DFen"))),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85vh", overflowY: "auto" } },
