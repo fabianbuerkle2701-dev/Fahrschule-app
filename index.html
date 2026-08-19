@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.118.2";
+const APP_VERSION = "1.119.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.119.0", date: "August 2026", changes: [
+            "Neu: Statistik-Seite unter Mehr - Umsatz pro Monat (letzte 6 Monate), Prüfungs-Erfolgsquote Theorie/Praxis, Anzahl prüfreifer Schüler und durchschnittliche Fahrstunden bis zur bestandenen Praxisprüfung, alles auf einen Blick",
+        ] },
     { v: "1.118.2", date: "August 2026", changes: [
             "Hinweis für Fabian: Push-Benachrichtigungen (neue Anfrage/Storno) werden jetzt nachverfolgt - schlägt die direkte Zustellung fehl (z. B. kurzer Netzwerkausfall), holt der stündliche Cron-Lauf es automatisch nach, statt dass die Benachrichtigung stillschweigend verloren geht. Rein serverseitig, kein sichtbarer Unterschied für dich in der App",
         ] },
@@ -9772,6 +9775,7 @@ function App() {
             { id: "daten", label: "Schülerdaten", group: "Seite", action: () => setView("daten") },
             { id: "fahrzeuge", label: "Fahrzeuge", group: "Seite", action: () => setView("fahrzeuge") },
             { id: "abrechnung", label: "Abrechnung", group: "Seite", action: () => setView("abrechnung") },
+            { id: "statistik", label: "Statistik", group: "Seite", action: () => setView("statistik") },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
             { id: "videos", label: "Videos", group: "Seite", action: () => setView("videos") },
         ].filter(Boolean);
@@ -11478,6 +11482,107 @@ function App() {
                 })),
             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 20, color: "var(--orange-deep)" }, onClick: createContract }, "+ Ausbildungsvertrag erstellen"),
             price === 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } }, "Tipp: Hinterlege deinen Preis pro UE unter Mehr, Einstellungen, Kosten, dann werden die Fahrstunden automatisch berechnet."));
+    }
+    /* ── Statistik: schulweite Kennzahlen aus bereits vorhandenen Schülerdaten (payments,
+       exams, licenseSteps/pruefungsreife, drivenLessons) - keine neuen Datenfelder nötig. ── */
+    function schoolStats() {
+        const own = (students || []).filter(s => s._isMine && !s.archived);
+        const allOwn = (students || []).filter(s => s._isMine); // inkl. archiviert, für Umsatz/Erfolgsquote über die Zeit
+        const monthKeyOf = (iso) => (iso || "").slice(0, 7); // "YYYY-MM" aus einem ISO-Datum
+
+        const now = new Date();
+        const months = [];
+        for (let i = 5; i >= 0; i--) {
+            const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+            months.push({ key: d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"),
+                label: d.toLocaleDateString("de-DE", { month: "short" }) });
+        }
+        const revenueByMonth = {};
+        months.forEach(m => { revenueByMonth[m.key] = 0; });
+        allOwn.forEach(s => (s.payments || []).forEach(p => {
+            const k = monthKeyOf(p.date);
+            if (revenueByMonth[k] != null)
+                revenueByMonth[k] += Number(p.amount) || 0;
+        }));
+        const monthlyRevenue = months.map(m => ({ ...m, amount: revenueByMonth[m.key] }));
+
+        const examStats = { theorie: { attempts: 0, passed: 0 }, praxis: { attempts: 0, passed: 0 } };
+        allOwn.forEach(s => (s.exams || []).forEach(e => {
+            const bucket = examStats[e.art];
+            if (!bucket)
+                return;
+            bucket.attempts++;
+            if (e.passed)
+                bucket.passed++;
+        }));
+
+        let ready = 0, notReady = 0;
+        own.forEach(s => {
+            const vk = s.klasse || DEFAULT_KLASSE;
+            const r = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken);
+            if (r.total === 0)
+                ready++;
+            else
+                notReady++;
+        });
+
+        const passedPraxis = allOwn.filter(s => (s.exams || []).some(e => e.art === "praxis" && e.passed));
+        const avgUE = passedPraxis.length
+            ? passedPraxis.reduce((sum, s) => sum + ((s.drivenLessons || []).reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0) / 45), 0) / passedPraxis.length
+            : null;
+
+        const thisMonthKey = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
+        const newThisMonth = allOwn.filter(s => s._createdAt && monthKeyOf(s._createdAt) === thisMonthKey).length;
+
+        return { monthlyRevenue, examStats, ready, notReady, avgUE, passedPraxisCount: passedPraxis.length,
+            activeCount: own.length, newThisMonth };
+    }
+    function statTile(value, label, color) {
+        return React.createElement("div", { className: "card", style: { padding: "14px 10px", textAlign: "center" } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, color: color } }, value),
+            React.createElement("div", { style: { fontSize: 10.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.3 } }, label));
+    }
+    function renderStatistik() {
+        const st = schoolStats();
+        const maxRevenue = Math.max(1, ...st.monthlyRevenue.map(m => m.amount));
+        const theoriePct = st.examStats.theorie.attempts ? Math.round(st.examStats.theorie.passed / st.examStats.theorie.attempts * 100) : null;
+        const praxisPct = st.examStats.praxis.attempts ? Math.round(st.examStats.praxis.passed / st.examStats.praxis.attempts * 100) : null;
+        return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Statistik"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Umsatz, Prüfungserfolg und Prüfreife deiner Fahrschule auf einen Blick."),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 } },
+                statTile(st.activeCount, "Aktive Schüler", "var(--ink)"),
+                statTile(st.ready, "Prüfreif", "var(--green)"),
+                statTile(st.newThisMonth, "Neu diesen Monat", "var(--orange-deep)")),
+            React.createElement("div", { className: "card", style: { padding: "16px 15px", marginBottom: 16 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Umsatz pro Monat"),
+                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginBottom: 14 } }, "Nach Zahlungseingang, letzte 6 Monate"),
+                React.createElement("div", { style: { display: "flex", alignItems: "flex-end", gap: 10, height: 110 } },
+                    st.monthlyRevenue.map(m => React.createElement("div", { key: m.key, style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 6, height: "100%", justifyContent: "flex-end" } },
+                        React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: "var(--muted)", fontVariantNumeric: "tabular-nums" } },
+                            m.amount > 0 ? Math.round(m.amount) : ""),
+                        React.createElement("div", { style: { width: "100%", maxWidth: 30, borderRadius: 6, background: "var(--orange)",
+                                height: Math.max(3, Math.round((m.amount / maxRevenue) * 78)) + "px" } }),
+                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", fontWeight: 600 } }, m.label)))),
+                React.createElement("div", { style: { marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--line)", display: "flex", justifyContent: "space-between", fontSize: 13 } },
+                    React.createElement("span", { style: { color: "var(--muted)" } }, "Summe letzte 6 Monate"),
+                    React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)" } }, eurFmt(st.monthlyRevenue.reduce((a, m) => a + m.amount, 0))))),
+            React.createElement("div", { className: "card", style: { padding: "16px 15px", marginBottom: 16 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 12 } }, "Prüfungs-Erfolgsquote"),
+                [["theorie", "Theorie", theoriePct, st.examStats.theorie], ["praxis", "Praxis", praxisPct, st.examStats.praxis]].map(([key, label, pct, data]) =>
+                    React.createElement("div", { key: key, style: { marginBottom: 12 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 } },
+                            React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600 } }, label),
+                            React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } },
+                                pct == null ? "Noch keine Versuche erfasst" : data.passed + " von " + data.attempts + " bestanden (" + pct + "%)")),
+                        pct != null && React.createElement(Bar, { pct: pct, color: pct >= 70 ? "var(--green)" : pct >= 40 ? "var(--amber)" : "#C0392B", h: 6 }))),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "8px 2px 0" } },
+                    "Basiert auf allen unter „Prüfungsversuche“ im Führerschein-Reiter erfassten Versuchen.")),
+            st.avgUE != null && React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 4 } }, "Ø Fahrstunden bis zur bestandenen Praxisprüfung"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 28, color: "var(--orange-deep)" } }, ueFmt(st.avgUE) + " UE"),
+                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
+                    "Über " + st.passedPraxisCount + (st.passedPraxisCount === 1 ? " Schüler mit bestandener Praxisprüfung" : " Schüler mit bestandener Praxisprüfung"))));
     }
     /* ── Abrechnung: schulweites Dashboard über Umsatz, offene Forderungen & Rechnungen ── */
     function renderAbrechnung() {
@@ -15541,7 +15646,7 @@ function App() {
                     React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); openCalendar(); } },
                         React.createElement(IcCalendar, null),
                         "Fahrzeug-Kalender"),
-                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
             React.createElement("div", { className: "shell", style: fontScale !== 1 ? { zoom: fontScale } : null },
@@ -15579,10 +15684,11 @@ function App() {
                 view === "videos" && renderVideos(),
                 view === "kalender" && renderKalender(),
                 view === "abrechnung" && renderAbrechnung(),
+                view === "statistik" && renderStatistik(),
                 view === "fahrzeuge" && renderFahrzeuge(),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "statistik" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -15695,6 +15801,10 @@ function App() {
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcCarIcon, null)),
                                     "Fahrzeuge"),
+                                React.createElement("button", { className: "tabpop-item" + (view === "statistik" ? " on" : ""), onClick: () => { setView("statistik"); setTabMenu(null); setMehrGroup(null); } },
+                                    React.createElement("span", { className: "tabpop-ic" },
+                                        React.createElement(IcChart, null)),
+                                    "Statistik"),
                                 React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setMehrGroup(null); openCalendar(); } },
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcCalendar, null)),
