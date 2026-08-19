@@ -33,7 +33,7 @@ exports.handler = async function (event) {
 
   const code = (body.code || "").toString().trim();
   const facts = body.facts && typeof body.facts === "object" ? body.facts : null;
-  const kind = ["morning", "evening", "statistik", "interessent"].includes(body.kind) ? body.kind : "morning";
+  const kind = ["morning", "evening", "statistik", "interessent", "pruefung", "abrechnung"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
 
@@ -128,6 +128,46 @@ Name: ${facts.vorname || "unbekannt"}
 Klasse (Interesse): ${facts.klasse || "unbekannt"}
 Status: ${facts.status || "offen"}
 Notiz: ${facts.notiz || "keine"}`;
+  } else if (kind === "pruefung") {
+    const zeilen = [];
+    if (typeof facts.anstehendAnzahl === "number" && facts.anstehendAnzahl > 0) {
+      zeilen.push("Anstehende Prüfungstermine: " + facts.anstehendAnzahl
+        + (Array.isArray(facts.anstehendListe) && facts.anstehendListe.length ? " (" + facts.anstehendListe.join(", ") + ")" : ""));
+    }
+    if (typeof facts.bereitAnzahl === "number" && facts.bereitAnzahl > 0) {
+      zeilen.push("Prüfungsreif, aber noch nicht zur Praxisprüfung angemeldet: " + facts.bereitAnzahl
+        + (Array.isArray(facts.bereitNamen) && facts.bereitNamen.length ? " (" + facts.bereitNamen.join(", ") + ")" : ""));
+    }
+    datenText = zeilen.length ? zeilen.join("\n") : "Aktuell nichts Besonderes in der Prüfungsplanung.";
+    system = `Du gibst kurz eine Einschätzung der Prüfungsplanung der Fahrschule "${schoolFacts.school_name}" für den Fahrlehrer. Er sieht diese Daten bereits als Liste in seinem Dashboard - du fasst sie nur in 1-2 knappen Sätzen auf Deutsch zusammen, mit Fokus darauf, was er als Nächstes tun sollte.
+
+Regeln, unbedingt einhalten:
+1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Namen, Termine oder Zahlen, die dort nicht stehen.
+2. Priorisiere: prüfungsreife, aber nicht angemeldete Schüler zuerst (das kostet sonst unnötig Zeit bis zur Prüfung), anstehende Termine danach.
+3. Wenn "nichts Besonderes" dabeisteht, schreib einen kurzen, entspannten Satz dazu.
+4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
+5. Keine rechtlichen Ratschläge zur Prüfungsordnung erfinden.
+
+Die Daten:
+${datenText}`;
+  } else if (kind === "abrechnung") {
+    const zeilen = [];
+    if (typeof facts.umsatzMonat === "number") zeilen.push("Umsatz diesen Monat: " + facts.umsatzMonat + " €");
+    if (typeof facts.umsatzJahr === "number") zeilen.push("Umsatz dieses Jahr: " + facts.umsatzJahr + " €");
+    if (typeof facts.berechnetOffen === "number" && facts.berechnetOffen > 0) zeilen.push("Berechnet, noch offen (Schüler muss zahlen): " + facts.berechnetOffen + " €");
+    if (typeof facts.nichtBerechnet === "number" && facts.nichtBerechnet > 0) zeilen.push("Erbracht, aber noch nicht berechnet (Fahrschule muss Rechnung schreiben): " + facts.nichtBerechnet + " €");
+    datenText = zeilen.length ? zeilen.join("\n") : "Noch nicht genug Daten für eine Einordnung.";
+    system = `Du gibst kurz eine Einordnung der Abrechnungslage der Fahrschule "${schoolFacts.school_name}" für den Fahrlehrer. Er sieht diese Daten bereits als Zahlen in seinem Dashboard - du gibst nur in 1-2 knappen Sätzen auf Deutsch eine Einordnung.
+
+Regeln, unbedingt einhalten:
+1. Nutze AUSSCHLIESSLICH die unten stehenden Zahlen. Erfinde niemals Zahlen oder Vergleiche, die sich nicht direkt aus ihnen ableiten.
+2. Priorisiere "noch nicht berechnet" zuerst, falls > 0 - das ist stiller Umsatzverlust, den nur der Fahrlehrer selbst beheben kann (Rechnung schreiben).
+3. Wenn "noch nicht genug Daten" dabeisteht, sag das kurz und ehrlich statt etwas zu erfinden.
+4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
+5. Keine Mahnungen, Zahlungsfristen oder rechtlichen Schritte erfinden oder vorschlagen - das ist nicht Teil dieser Zahlen.
+
+Die Zahlen:
+${datenText}`;
   } else {
     const zeilen = [];
     if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
