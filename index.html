@@ -1224,7 +1224,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.115.0";
+const APP_VERSION = "1.116.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1345,6 +1345,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.116.0", date: "August 2026", changes: [
+            "Neu: Echte Push-Benachrichtigungen in der Fahrlehrer-App (iPhone) - bei einer neuen Anfrage, einer Stornierung durch einen Schüler oder wenn eine freie Stunde von der Warteliste übernommen wird, kommt jetzt sofort eine Benachrichtigung statt erst beim nächsten Öffnen der App",
+            "Neu: Tägliche Erinnerung um 18 Uhr, wie viele Fahrstunden am nächsten Tag anstehen (als Benachrichtigung, ergänzend zur bisherigen WhatsApp-Erinnerungsliste)",
+            "Neu: Homescreen-Widget „Heutiger Tag\" - zeigt die heutigen Fahrstunden direkt auf dem iPhone-Homescreen, ohne die App zu öffnen (lange auf den Homescreen drücken, „Widget hinzufügen\", Allindrive auswählen)",
+            "Aktivierbar unter Einstellungen → Konto → Benachrichtigungen",
+        ] },
     { v: "1.115.0", date: "August 2026", changes: [
             "Neu: Schaltkompetenz-Pilot unter Ausbildung. Testet gezielt Anfahren, Bremsen, Schalten (hoch/runter/überspringen), Tastgeschwindigkeit, Rückwärtsfahren, Einfädeln und weitere Streckenelemente - jeden Punkt einzeln als „Gut\" oder „Schlecht\" bewerten, dazu eine freie Notiz",
             "Am Ende eines Schaltkompetenz-Tests lässt sich das Ergebnis direkt als PDF ausdrucken - im Design der anderen Allindrive-Dokumente mit Logo, Fahrschulname und einer Tabelle aller Prüfpunkte samt Bewertung, ideal zur Dokumentation für die Fahrschule",
@@ -3080,6 +3086,33 @@ async function saveReminderMessage(uid, text) {
     const { error } = await sb.from("profiles").upsert({ id: uid, email, reminder_message: text || null }, { onConflict: "id" });
     if (error)
         throw new Error(error.message || "Erinnerungstext konnte nicht gespeichert werden");
+}
+/* ════════ Push-Benachrichtigungen (APNs) + Widget ════════ */
+// Speichert/aktualisiert den APNs-Gerätetoken dieses Geräts. Läuft nur nativ (siehe Aufrufer),
+// mehrere Geräte pro Fahrlehrer sind möglich (primary key ist owner+token).
+async function saveDeviceToken(uid, token) {
+    const { error } = await sb.from("device_tokens").upsert({ owner: uid, token, platform: "ios", updated_at: new Date().toISOString() }, { onConflict: "owner,token" });
+    if (error)
+        console.error(error);
+}
+// Beim Abmelden den eigenen Gerätetoken wieder entfernen, damit kein Ex-Nutzer mehr Pushes
+// für dieses Konto bekommt, falls sich später jemand anderes auf demselben Gerät anmeldet.
+async function removeDeviceToken(uid, token) {
+    if (!uid || !token)
+        return;
+    const { error } = await sb.from("device_tokens").delete().eq("owner", uid).eq("token", token);
+    if (error)
+        console.error(error);
+}
+// Liefert (und legt bei Bedarf an) den langlebigen Token, den das Home-Screen-Widget zum
+// eigenständigen Abfragen der heutigen Termine braucht (Muster wie calendar_feeds/das ICS-Abo).
+async function ensureWidgetToken() {
+    const { data, error } = await sb.rpc("ensure_widget_token");
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data || null;
 }
 // "Freitag, 14.08." - ausgeschrieben, damit in der Nachricht kein Zweifel am Tag bleibt.
 const WOCHENTAGE_LANG = ["Sonntag", "Montag", "Dienstag", "Mittwoch", "Donnerstag", "Freitag", "Samstag"];
@@ -6453,6 +6486,7 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    const [deviceToken, setDeviceToken] = useState(null); // aktueller APNs-Token dieses Geräts (nur nativ)
     // Einmal pro Sitzung prüfen, ob eine Streckenaufzeichnung durch App-Kill/Tab-Schließen
     // unterbrochen wurde (siehe recBufferKey) - falls ja, anbieten, sie fortzusetzen, statt die
     // bereits aufgezeichneten Punkte kommentarlos zu verlieren.
@@ -6975,6 +7009,52 @@ function App() {
         return () => {
             document.removeEventListener("visibilitychange", refresh);
             window.removeEventListener("focus", refresh);
+        };
+    }, [uid]);
+    // Push-Benachrichtigungen (neue Anfrage/Storno/Erinnerung) + Widget-Token: beides nur nativ,
+    // beides nach dem Login einmalig anstoßen. Für Push nutzen wir das offizielle Capacitor-
+    // Plugin (kein eigener Bridge-Hack wie beim PDF-Druck nötig, dafür gibt es schon eins).
+    useEffect(() => {
+        if (!uid)
+            return;
+        if (!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()))
+            return;
+        let cancelled = false;
+        let regHandle = null, errHandle = null;
+        const push = window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+        if (push) {
+            (async () => {
+                try {
+                    const perm = await push.requestPermissions();
+                    if (cancelled || perm.receive !== "granted")
+                        return;
+                    regHandle = await push.addListener("registration", token => {
+                        if (cancelled)
+                            return;
+                        setDeviceToken(token.value);
+                        saveDeviceToken(uid, token.value);
+                    });
+                    errHandle = await push.addListener("registrationError", err => console.error("Push-Registrierung fehlgeschlagen", err));
+                    await push.register();
+                }
+                catch (e) {
+                    console.error(e);
+                }
+            })();
+        }
+        ensureWidgetToken().then(token => {
+            if (cancelled || !token)
+                return;
+            const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativeWidgetToken;
+            if (bridge)
+                bridge.postMessage(token);
+        }).catch(() => { });
+        return () => {
+            cancelled = true;
+            if (regHandle)
+                regHandle.remove();
+            if (errHandle)
+                errHandle.remove();
         };
     }, [uid]);
     // Vergangene, einem Schüler zugeordnete, noch nicht erfasste Termine finden
@@ -14145,9 +14225,23 @@ function App() {
                         sharedStudents > 0 ? " · " + sharedStudents + " geteilt" : ""),
                     React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
                             if (await askConfirm({ message: "Wirklich abmelden? Du musst dich danach neu anmelden." })) {
+                                if (deviceToken)
+                                    await removeDeviceToken(uid, deviceToken);
                                 await sb.auth.signOut();
                             }
                         } }, "Abmelden")),
+                window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() && React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "eyebrow" }, "Benachrichtigungen"),
+                    React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                        deviceToken
+                            ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13.5, fontWeight: 600, color: "var(--ink)" } },
+                                React.createElement("span", { style: { width: 8, height: 8, borderRadius: "50%", background: "#2E9E5B", flexShrink: 0 } }),
+                                "Aktiv - neue Anfragen, Stornos und die Erinnerung morgen kommen als Benachrichtigung")
+                            : React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5 } },
+                                "Noch nicht aktiv. Falls du iOS-Benachrichtigungen für Allindrive abgelehnt hast, kannst du das in den iPhone-Einstellungen unter „Allindrive“ wieder erlauben.")),
+                    React.createElement("div", { className: "eyebrow" }, "Widget"),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "0 4px 14px", lineHeight: 1.5 } },
+                        "Lange auf dem Homescreen gedrückt halten → „Widget hinzufügen“ → Allindrive auswählen, um die heutigen Termine direkt anzuzeigen.")),
                 canModerateApp && React.createElement("div", null,
                     React.createElement("div", { className: "eyebrow" }, "Administration"),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: () => { setView("admin"); } },

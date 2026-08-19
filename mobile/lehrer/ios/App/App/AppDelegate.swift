@@ -1,4 +1,5 @@
 import UIKit
+import UserNotifications
 import Capacitor
 
 @UIApplicationMain
@@ -12,6 +13,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         // WebView statt der App-Farbe - sieht wie ein schwarzer Balken aus.
         UIScrollView.appearance().bounces = false
         return true
+    }
+
+    // Von @capacitor/push-notifications so gefordert: reicht das Ergebnis der APNs-
+    // Registrierung an die Capacitor-Bridge weiter, die es dann als "registration"/
+    // "registrationError"-Event an den JS-Listener in index.html durchreicht.
+    func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        NotificationCenter.default.post(name: .capacitorDidRegisterForRemoteNotifications, object: deviceToken)
+    }
+
+    func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        NotificationCenter.default.post(name: .capacitorDidFailToRegisterForRemoteNotifications, object: error)
     }
 
     func applicationWillResignActive(_ application: UIApplication) {

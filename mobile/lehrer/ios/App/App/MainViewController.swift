@@ -1,5 +1,6 @@
 import UIKit
 import WebKit
+import WidgetKit
 import Capacitor
 
 // Deaktiviert den elastischen Overscroll-Bounce der WebView direkt an der Quelle.
@@ -19,12 +20,26 @@ class MainViewController: CAPBridgeViewController, WKScriptMessageHandler {
         super.viewDidLoad()
         webView?.scrollView.bounces = false
         webView?.configuration.userContentController.add(self, name: "nativePrint")
+        webView?.configuration.userContentController.add(self, name: "nativeWidgetToken")
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard message.name == "nativePrint", let webView = webView else { return }
-        let printController = UIPrintInteractionController.shared
-        printController.printFormatter = webView.viewPrintFormatter()
-        printController.present(animated: true, completionHandler: nil)
+        guard let webView = webView else { return }
+        switch message.name {
+        case "nativePrint":
+            let printController = UIPrintInteractionController.shared
+            printController.printFormatter = webView.viewPrintFormatter()
+            printController.present(animated: true, completionHandler: nil)
+        case "nativeWidgetToken":
+            // Token in der geteilten App-Group ablegen, damit die separate Widget-Extension
+            // (eigener Prozess, keine eigene Supabase-Session) ihn lesen und damit direkt die
+            // RPC widget_today_appointments aufrufen kann (siehe ensureWidgetToken() in index.html).
+            if let token = message.body as? String {
+                UserDefaults(suiteName: "group.com.allindrive.lehrer")?.set(token, forKey: "widgetToken")
+                WidgetCenter.shared.reloadAllTimelines()
+            }
+        default:
+            break
+        }
     }
 }
