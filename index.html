@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.119.1";
+const APP_VERSION = "1.119.2";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.119.2", date: "August 2026", changes: [
+            "Neu: Tagesabschluss-Seite unter Mehr - abendlicher Überblick über noch zu bestätigende Fahrstunden (mit Ein-Klick-Bestätigung), heutige Zahlungseingänge und die für morgen geplanten Fahrstunden, alles an einem Ort statt einzeln zusammengesucht",
+        ] },
     { v: "1.119.1", date: "August 2026", changes: [
             "Neu: Terminserien - beim Anlegen eines neuen Termins jetzt \"Terminserie anlegen\" wählbar (wöchentlich oder alle 2 Wochen, bis zu 52 Termine auf einmal). Überschneidende oder das Limit überschreitende Termine werden automatisch übersprungen, am Ende gibt es eine Übersicht",
         ] },
@@ -9779,6 +9782,7 @@ function App() {
             { id: "fahrzeuge", label: "Fahrzeuge", group: "Seite", action: () => setView("fahrzeuge") },
             { id: "abrechnung", label: "Abrechnung", group: "Seite", action: () => setView("abrechnung") },
             { id: "statistik", label: "Statistik", group: "Seite", action: () => setView("statistik") },
+            { id: "tagesabschluss", label: "Tagesabschluss", group: "Seite", action: () => setView("tagesabschluss") },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
             { id: "videos", label: "Videos", group: "Seite", action: () => setView("videos") },
         ].filter(Boolean);
@@ -11586,6 +11590,67 @@ function App() {
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 28, color: "var(--orange-deep)" } }, ueFmt(st.avgUE) + " UE"),
                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
                     "Über " + st.passedPraxisCount + (st.passedPraxisCount === 1 ? " Schüler mit bestandener Praxisprüfung" : " Schüler mit bestandener Praxisprüfung"))));
+    }
+    /* ── Tagesabschluss: abendlicher Verwaltungs-Überblick - was heute noch zu bestätigen ist,
+       was heute reinkam, und was morgen ansteht. Nutzt bewusst dieselben Funktionen wie die
+       bestehenden Einzel-Flows (pendingPastLessons/confirmPastLesson/skipPastLesson), damit
+       eine Bestätigung hier exakt dasselbe tut wie anderswo in der App. ── */
+    function renderTagesabschluss() {
+        const todayStr = ymd(new Date());
+        const tomorrowStr = ymd(new Date(Date.now() + 86400000));
+        const todos = pendingPastLessons().filter(a => ymd(a.start_at) === todayStr);
+        const mine = (students || []).filter(s => s._isMine);
+
+        const paymentsToday = [];
+        mine.forEach(s => (s.payments || []).forEach(p => { if (p.date === todayStr)
+            paymentsToday.push({ stu: s, amount: Number(p.amount) || 0 }); }));
+        const paymentsSum = paymentsToday.reduce((a, p) => a + p.amount, 0);
+
+        const drivenTodayMinutes = mine.reduce((sum, s) => sum + (s.drivenLessons || []).filter(l => l.date === todayStr)
+            .reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0), 0);
+
+        const tomorrowAppts = (appts || []).filter(a => a.status === "confirmed" && ymd(a.start_at) === tomorrowStr && !isSonstige(a) && !isUrlaub(a) && apptArt(a) !== "PRIVAT")
+            .sort((a, b) => a.start_at.localeCompare(b.start_at));
+
+        function plannedMinutes(a) {
+            return a.end_at ? Math.max(1, Math.round((new Date(a.end_at).getTime() - new Date(a.start_at).getTime()) / 60000)) : 45;
+        }
+
+        return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
+            React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Tagesabschluss"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px", textTransform: "capitalize" } },
+                new Date().toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "long" })),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 } },
+                statTile(ueFmt(drivenTodayMinutes / 45), "UE heute", "var(--ink)"),
+                statTile(eurFmt(paymentsSum), "Eingenommen heute", "var(--green)"),
+                statTile(todos.length, "Noch zu bestätigen", todos.length ? "#C0392B" : "var(--green)")),
+            todos.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16, borderLeft: "3px solid #C0392B" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 10 } }, "Noch zu bestätigen"),
+                todos.map(a => {
+                    const stu = students.find(s => s.id === a._matchedStudentId);
+                    const mins = plannedMinutes(a);
+                    return React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 140 } },
+                            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700 } }, stu ? dispName(stu) : (a.title || "Termin")),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, hm(a.start_at) + " Uhr · " + mins + " Min geplant")),
+                        React.createElement("button", { className: "btn btn-primary", style: { padding: "8px 12px", fontSize: 12.5 }, onClick: () => confirmPastLesson(a, mins) }, "✓ " + mins + " Min"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 10px", fontSize: 12.5, color: "var(--muted)" }, onClick: () => skipPastLesson(a) }, "Nicht gefahren"));
+                })),
+            paymentsToday.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 10 } }, "Zahlungen heute"),
+                paymentsToday.map((p, i) => React.createElement("div", { key: i, style: { display: "flex", justifyContent: "space-between", padding: "7px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                    React.createElement("span", { style: { fontSize: 13.5 } }, dispName(p.stu)),
+                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, color: "var(--green)" } }, eurFmt(p.amount))))),
+            React.createElement("div", { className: "card", style: { padding: "14px 15px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Morgen"),
+                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginBottom: 10 } },
+                    tomorrowAppts.length === 0 ? "Noch keine Fahrstunden geplant" : tomorrowAppts.length + (tomorrowAppts.length === 1 ? " Fahrstunde" : " Fahrstunden")),
+                tomorrowAppts.map(a => {
+                    const stu = a.student_id ? students.find(s => s.id === a.student_id) : null;
+                    return React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--orange-deep)", minWidth: 44 } }, hm(a.start_at)),
+                        React.createElement("span", { style: { fontSize: 13.5 } }, stu ? dispName(stu) : (a.title || "Termin")));
+                })));
     }
     /* ── Abrechnung: schulweites Dashboard über Umsatz, offene Forderungen & Rechnungen ── */
     function renderAbrechnung() {
@@ -15715,7 +15780,7 @@ function App() {
                     React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); openCalendar(); } },
                         React.createElement(IcCalendar, null),
                         "Fahrzeug-Kalender"),
-                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
+                    [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["tagesabschluss", "Tagesabschluss", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M9 11l3 3L22 4" }), React.createElement("path", { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" }))], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
             React.createElement("div", { className: "shell", style: fontScale !== 1 ? { zoom: fontScale } : null },
@@ -15754,10 +15819,11 @@ function App() {
                 view === "kalender" && renderKalender(),
                 view === "abrechnung" && renderAbrechnung(),
                 view === "statistik" && renderStatistik(),
+                view === "tagesabschluss" && renderTagesabschluss(),
                 view === "fahrzeuge" && renderFahrzeuge(),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "statistik" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "abrechnung" && view !== "statistik" && view !== "tagesabschluss" && view !== "fahrzeuge" && view !== "admin" && view !== "datenschutz" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -15874,6 +15940,12 @@ function App() {
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcChart, null)),
                                     "Statistik"),
+                                React.createElement("button", { className: "tabpop-item" + (view === "tagesabschluss" ? " on" : ""), onClick: () => { setView("tagesabschluss"); setTabMenu(null); setMehrGroup(null); } },
+                                    React.createElement("span", { className: "tabpop-ic" },
+                                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                            React.createElement("path", { d: "M9 11l3 3L22 4" }),
+                                            React.createElement("path", { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" }))),
+                                    "Tagesabschluss"),
                                 React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setMehrGroup(null); openCalendar(); } },
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcCalendar, null)),
