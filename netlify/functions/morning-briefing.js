@@ -161,7 +161,9 @@ ${datenText}`;
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 250, system, messages: [{ role: "user", content: "Schreib das Briefing." }] }),
+      // 250 war bei "statistik" (bis zu 7 einzelne Kennzahlen) manchmal zu knapp und schnitt den
+      // letzten Satz mitten im Wort ab - 350 gibt Luft, ohne dass die Texte spürbar länger werden.
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 350, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
     });
     const data = await resp.json();
     if (!resp.ok) {
