@@ -1,9 +1,9 @@
-// Netlify Function: Tages-Briefing für die Startseite des Fahrlehrer-Dashboards
-// (Verwaltung-ersetzen-Fahrplan, Phase 2). Der Client hat alle Zahlen bereits geladen und
-// berechnet (heute, offene Anfragen, Abbruch-Risiko, Fristen-Radar) - diese Function bekommt
-// nur die fertigen Zahlen/Namen als JSON und lässt Claude daraus einen kurzen, freundlichen
-// Fließtext statt trockener Kennzahlen machen. Erzeugt selbst KEINE neuen Daten und trifft
-// keine Aussagen über Dinge, die nicht im "facts"-Objekt stehen.
+// Netlify Function: kurze KI-Zusammenfassungen für verschiedene Dashboard-Seiten des
+// Fahrlehrers (Tages-Briefing morgens, Tages-Rückblick abends, Statistik-Einordnung). Der
+// Client hat alle Zahlen bereits geladen und berechnet - diese Function bekommt nur die
+// fertigen Zahlen/Namen als JSON (facts) plus ein "kind"-Feld, das steuert, welche Zeilen
+// daraus gebaut werden und welchen Rahmen der Prompt bekommt. Erzeugt selbst KEINE neuen
+// Daten und trifft keine Aussagen über Dinge, die nicht im "facts"-Objekt stehen.
 //
 // Erreichbar ohne Login (wie booking-chat.js), weil der Client seine Session nicht als Bearer-
 // Token mitschickt - stattdessen wie dort über den Buchungscode + Tageslimit geschützt
@@ -33,6 +33,7 @@ exports.handler = async function (event) {
 
   const code = (body.code || "").toString().trim();
   const facts = body.facts && typeof body.facts === "object" ? body.facts : null;
+  const kind = ["morning", "evening", "statistik"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
 
@@ -61,19 +62,66 @@ exports.handler = async function (event) {
   }
 
   // Rohdaten so, wie sie im Dashboard ohnehin stehen - nur als Text statt als Kacheln.
-  const zeilen = [];
-  if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
-  if (Array.isArray(facts.heuteNamen) && facts.heuteNamen.length) zeilen.push("Davon mit: " + facts.heuteNamen.join(", "));
-  if (typeof facts.pendingAnzahl === "number") zeilen.push("Offene Terminanfragen: " + facts.pendingAnzahl);
-  if (typeof facts.abbruchAnzahl === "number" && facts.abbruchAnzahl > 0) {
-    zeilen.push("Schüler mit erhöhtem Abbruch-Risiko (lange kein Termin + offener Betrag): " + facts.abbruchAnzahl
-      + (Array.isArray(facts.abbruchNamen) && facts.abbruchNamen.length ? " (" + facts.abbruchNamen.join(", ") + ")" : ""));
-  }
-  if (typeof facts.fristenAnzahl === "number" && facts.fristenAnzahl > 0) zeilen.push("Bald ablaufende Fristen (TÜV/Löschfristen): " + facts.fristenAnzahl);
-  if (typeof facts.offenAnzahl === "number" && facts.offenAnzahl > 0) zeilen.push("Schüler mit offenem Betrag: " + facts.offenAnzahl);
-  const datenText = zeilen.length ? zeilen.join("\n") : "Keine besonderen Punkte für heute.";
+  // Je "kind" ein eigener Satz Zeilen, weil jede Seite andere Kacheln zeigt.
+  let datenText = "Keine besonderen Punkte.";
+  let system = "";
 
-  const system = `Du schreibst ein kurzes Tages-Briefing für den Fahrlehrer der Fahrschule "${schoolFacts.school_name}". Er sieht diese Daten bereits als Kacheln in seinem Dashboard - du fasst sie nur in 2-3 freundlichen, natürlich klingenden Sätzen auf Deutsch zusammen, als würde ein Kollege kurz Bescheid geben.
+  if (kind === "evening") {
+    const zeilen = [];
+    if (typeof facts.ueHeute === "number") zeilen.push("Gefahrene UE heute: " + facts.ueHeute);
+    if (typeof facts.eingenommenHeute === "number" && facts.eingenommenHeute > 0) zeilen.push("Eingenommen heute: " + facts.eingenommenHeute.toFixed(2).replace(".", ",") + " €");
+    if (typeof facts.nochZuBestaetigen === "number" && facts.nochZuBestaetigen > 0) zeilen.push("Noch zu bestätigende Fahrstunden von heute: " + facts.nochZuBestaetigen);
+    if (typeof facts.morgenAnzahl === "number") {
+      zeilen.push("Fahrstunden morgen: " + facts.morgenAnzahl
+        + (Array.isArray(facts.morgenNamen) && facts.morgenNamen.length ? " (" + facts.morgenNamen.join(", ") + ")" : ""));
+    }
+    if (Array.isArray(facts.geburtstage) && facts.geburtstage.length) zeilen.push("Geburtstage diese Woche: " + facts.geburtstage.join(", "));
+    datenText = zeilen.length ? zeilen.join("\n") : "Heute war ein ruhiger Tag ohne besondere Punkte.";
+    system = `Du schreibst einen kurzen Tages-Rückblick für den Fahrlehrer der Fahrschule "${schoolFacts.school_name}" am Abend. Er sieht diese Daten bereits als Kacheln in seinem Dashboard - du fasst sie nur in 2-3 freundlichen, natürlich klingenden Sätzen auf Deutsch zusammen, als würde ein Kollege beim Feierabend kurz Bescheid geben.
+
+Regeln, unbedingt einhalten:
+1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Namen, Zahlen oder Ereignisse, die dort nicht stehen.
+2. Wenn "ruhiger Tag" dabeisteht, schreib einen kurzen, entspannten Satz dazu.
+3. Priorisiere: noch zu bestätigende Fahrstunden zuerst (die brauchen am ehesten eine Reaktion), dann morgen, dann der Rest.
+4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
+5. Keine Ratschläge zu Rechtsfragen oder Prüfungen erfinden.
+
+Die Daten von heute:
+${datenText}`;
+  } else if (kind === "statistik") {
+    const zeilen = [];
+    if (Array.isArray(facts.umsatzVerlauf) && facts.umsatzVerlauf.length) zeilen.push("Umsatz letzte Monate, älteste zuerst, in Euro: " + facts.umsatzVerlauf.join(", "));
+    if (typeof facts.theorieQuote === "number") zeilen.push("Theorie-Erfolgsquote: " + facts.theorieQuote + "%");
+    if (typeof facts.praxisQuote === "number") zeilen.push("Praxis-Erfolgsquote: " + facts.praxisQuote + "%");
+    if (typeof facts.pruefreif === "number") zeilen.push("Aktuell prüfungsreife Schüler: " + facts.pruefreif);
+    if (typeof facts.notReady === "number") zeilen.push("Schüler noch in Ausbildung: " + facts.notReady);
+    if (typeof facts.avgUE === "number") zeilen.push("Ø Fahrstunden bis zur bestandenen Praxisprüfung: " + facts.avgUE + " UE");
+    if (typeof facts.neueSchueler === "number") zeilen.push("Neue Schüler diesen Monat: " + facts.neueSchueler);
+    datenText = zeilen.length ? zeilen.join("\n") : "Noch nicht genug Daten für eine Einordnung.";
+    system = `Du ordnest kurz die Monatsstatistik der Fahrschule "${schoolFacts.school_name}" für den Fahrlehrer ein. Er sieht diese Daten bereits als Zahlen/Diagramme in seinem Dashboard - du gibst nur in 2-3 knappen, konkreten Sätzen auf Deutsch eine Einordnung, was auffällt oder wo er ansetzen könnte.
+
+Regeln, unbedingt einhalten:
+1. Nutze AUSSCHLIESSLICH die unten stehenden Zahlen. Erfinde niemals Zahlen, Vergleiche oder Trends, die sich nicht direkt aus ihnen ableiten.
+2. Wenn "noch nicht genug Daten" dabeisteht, sag das kurz und ehrlich statt etwas zu erfinden.
+3. Bleib konkret bei den Zahlen (z.B. "die Erfolgsquote bei X% ist stark" statt allgemeiner Motivation).
+4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
+5. Keine rechtlichen oder pädagogischen Ratschläge erfinden, die nicht direkt aus den Zahlen folgen.
+
+Die Zahlen:
+${datenText}`;
+  } else {
+    const zeilen = [];
+    if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
+    if (Array.isArray(facts.heuteNamen) && facts.heuteNamen.length) zeilen.push("Davon mit: " + facts.heuteNamen.join(", "));
+    if (typeof facts.pendingAnzahl === "number") zeilen.push("Offene Terminanfragen: " + facts.pendingAnzahl);
+    if (typeof facts.abbruchAnzahl === "number" && facts.abbruchAnzahl > 0) {
+      zeilen.push("Schüler mit erhöhtem Abbruch-Risiko (lange kein Termin + offener Betrag): " + facts.abbruchAnzahl
+        + (Array.isArray(facts.abbruchNamen) && facts.abbruchNamen.length ? " (" + facts.abbruchNamen.join(", ") + ")" : ""));
+    }
+    if (typeof facts.fristenAnzahl === "number" && facts.fristenAnzahl > 0) zeilen.push("Bald ablaufende Fristen (TÜV/Löschfristen): " + facts.fristenAnzahl);
+    if (typeof facts.offenAnzahl === "number" && facts.offenAnzahl > 0) zeilen.push("Schüler mit offenem Betrag: " + facts.offenAnzahl);
+    datenText = zeilen.length ? zeilen.join("\n") : "Keine besonderen Punkte für heute.";
+    system = `Du schreibst ein kurzes Tages-Briefing für den Fahrlehrer der Fahrschule "${schoolFacts.school_name}". Er sieht diese Daten bereits als Kacheln in seinem Dashboard - du fasst sie nur in 2-3 freundlichen, natürlich klingenden Sätzen auf Deutsch zusammen, als würde ein Kollege kurz Bescheid geben.
 
 Regeln, unbedingt einhalten:
 1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Namen, Zahlen oder Ereignisse, die dort nicht stehen.
@@ -84,6 +132,7 @@ Regeln, unbedingt einhalten:
 
 Die Daten von heute:
 ${datenText}`;
+  }
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {

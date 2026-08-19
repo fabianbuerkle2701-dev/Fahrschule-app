@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.127.0";
+const APP_VERSION = "1.128.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.128.0", date: "August 2026", changes: [
+            "Neu: „✨ Tages-Rückblick\" im Tagesabschluss und „✨ KI-Einordnung\" in der Statistik - wie das bestehende Tages-Briefing auf der Startseite fasst die KI die schon berechneten Zahlen in 2-3 Sätzen zusammen, auf Wunsch per Klick",
+            "Verbessert: Schüler aus Screenshot/Foto anlegen erkennt jetzt beliebige Schülerdokumente (Anmeldeformular, andere Verwaltungssoftware, Karteikarte), nicht mehr nur you-drive-Screenshots",
+        ] },
     { v: "1.127.0", date: "August 2026", changes: [
             "Neu: Dokumente je Schüler im Führerschein-Reiter - Sehtest, Erste-Hilfe-Nachweis, Passfoto & Co. als Foto oder PDF direkt beim Schüler hinterlegen, statt nur als Häkchen abzuhaken. Eigener, privater Speicher, nur für dich sichtbar",
         ] },
@@ -6343,10 +6347,15 @@ function App() {
     const [waitlistOffer, setWaitlistOffer] = useState(null); // { appt, candidates } | null - Warteliste (Task #68)
     const [welcomeOffer, setWelcomeOffer] = useState(null); // Schüler | null - Willkommensnachricht nach Übernahme einer Anmeldung (Verwaltung-ersetzen-Fahrplan, Phase 1)
     const [briefing, setBriefing] = useState(null); // { busy, text, err } | null - Tages-Briefing (Verwaltung-ersetzen-Fahrplan, Phase 2)
+    const [eveningBriefing, setEveningBriefing] = useState(null); // { busy, text, err } | null - Tages-Rückblick im Tagesabschluss
+    const [statBriefing, setStatBriefing] = useState(null); // { busy, text, err } | null - KI-Einordnung in der Statistik
     // Tages-Briefing: schickt die im Dashboard ohnehin schon berechneten Zahlen an die KI, die
     // daraus einen kurzen Fließtext macht. Erzeugt selbst keine Daten, nur eine Zusammenfassung.
-    async function ladeBriefing(facts) {
-        setBriefing({ busy: true, text: null, err: null });
+    // setter, facts und kind ("morning" | "evening" | "statistik") generisch, damit dieselbe
+    // Netlify-Function (morning-briefing.js, generalisiert) von mehreren Seiten aus fertige
+    // Zahlen in einen kurzen KI-Text verwandeln kann, ohne die Logik zu duplizieren.
+    async function ladeBriefing(setter, facts, kind) {
+        setter({ busy: true, text: null, err: null });
         try {
             let code = bookingCode;
             if (!code) {
@@ -6354,24 +6363,40 @@ function App() {
                 if (code) setBookingCode(code);
             }
             if (!code) {
-                setBriefing({ busy: false, text: null, err: "Kein Buchungscode vorhanden." });
+                setter({ busy: false, text: null, err: "Kein Buchungscode vorhanden." });
                 return;
             }
             const resp = await fetch("/.netlify/functions/morning-briefing", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ code, facts }),
+                body: JSON.stringify({ code, facts, kind: kind || "morning" }),
             });
             const data = await resp.json().catch(() => null);
             if (!resp.ok || !data || !data.text) {
-                setBriefing({ busy: false, text: null, err: (data && data.error) || "Briefing konnte nicht erzeugt werden." });
+                setter({ busy: false, text: null, err: (data && data.error) || "Konnte nicht erzeugt werden." });
                 return;
             }
-            setBriefing({ busy: false, text: data.text, err: null });
+            setter({ busy: false, text: data.text, err: null });
         }
         catch (e) {
-            setBriefing({ busy: false, text: null, err: "Serverfehler: " + (e.message || "unbekannt") });
+            setter({ busy: false, text: null, err: "Serverfehler: " + (e.message || "unbekannt") });
         }
+    }
+    // Wiederverwendbarer Button-plus-Ergebnis-Block für ladeBriefing (Knopf → "wird erstellt…"
+    // → Text, mit "Erneut versuchen" bei Fehler). Nutzt dasselbe Muster wie das bestehende
+    // Tages-Briefing auf der Startseite, hier für Tagesabschluss/Statistik ausgelagert, damit
+    // die drei Stellen nicht denselben Code dreifach tragen.
+    function renderBriefingBlock(state, setter, facts, kind, buttonLabel, resultLabel) {
+        return React.createElement(React.Fragment, null,
+            !state && React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing(setter, facts, kind) }, buttonLabel),
+            state && state.busy && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Wird erstellt…"),
+            state && !state.busy && state.err && React.createElement("div", null,
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 8 } }, state.err),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing(setter, facts, kind) }, "Erneut versuchen")),
+            state && !state.busy && state.text && React.createElement("div", null,
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 } },
+                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5 } }, resultLabel)),
+                React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55 } }, state.text)));
     }
     // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
     function applyFetchedAppts(list) {
@@ -10252,7 +10277,7 @@ function App() {
             // Risiko, Fristen-Radar, offene Beträge) in 2-3 Sätzen zusammen. Lädt erst auf
             // Knopfdruck (keine automatische KI-Anfrage bei jedem Dashboard-Aufruf).
             React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
-                !briefing && React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing({
+                !briefing && React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing(setBriefing, {
                             heuteAnzahl: heute.length,
                             heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
                             pendingAnzahl: pendingCount,
@@ -10260,11 +10285,11 @@ function App() {
                             abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
                             fristenAnzahl: fristenRadar.length,
                             offenAnzahl,
-                        }) }, "✨ Tages-Briefing erstellen"),
+                        }, "morning") }, "✨ Tages-Briefing erstellen"),
                 briefing && briefing.busy && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Briefing wird erstellt…"),
                 briefing && !briefing.busy && briefing.err && React.createElement("div", null,
                     React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 8 } }, briefing.err),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing({
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => ladeBriefing(setBriefing, {
                                 heuteAnzahl: heute.length,
                                 heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
                                 pendingAnzahl: pendingCount,
@@ -10272,7 +10297,7 @@ function App() {
                                 abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
                                 fristenAnzahl: fristenRadar.length,
                                 offenAnzahl,
-                            }) }, "Erneut versuchen")),
+                            }, "morning") }, "Erneut versuchen")),
                 briefing && !briefing.busy && briefing.text && React.createElement("div", null,
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6 } },
                         React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5 } }, "✨ Tages-Briefing")),
@@ -11903,6 +11928,16 @@ function App() {
         return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Statistik"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Umsatz, Prüfungserfolg und Prüfreife deiner Fahrschule auf einen Blick."),
+            React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 16 } },
+                renderBriefingBlock(statBriefing, setStatBriefing, {
+                    umsatzVerlauf: st.monthlyRevenue.map(m => Math.round(m.amount)),
+                    theorieQuote: theoriePct,
+                    praxisQuote: praxisPct,
+                    pruefreif: st.ready,
+                    notReady: st.notReady,
+                    avgUE: st.avgUE != null ? Math.round(st.avgUE * 10) / 10 : null,
+                    neueSchueler: st.newThisMonth,
+                }, "statistik", "✨ KI-Einordnung erstellen", "✨ KI-Einordnung")),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 } },
                 statTile(st.activeCount, "Aktive Schüler", "var(--ink)"),
                 statTile(st.ready, "Prüfreif", "var(--green)"),
@@ -11982,6 +12017,15 @@ function App() {
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Tagesabschluss"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px", textTransform: "capitalize" } },
                 new Date().toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "long" })),
+            React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 16 } },
+                renderBriefingBlock(eveningBriefing, setEveningBriefing, {
+                    ueHeute: Math.round((drivenTodayMinutes / 45) * 10) / 10,
+                    eingenommenHeute: paymentsSum,
+                    nochZuBestaetigen: todos.length,
+                    morgenAnzahl: tomorrowAppts.length,
+                    morgenNamen: tomorrowAppts.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
+                    geburtstage: birthdaysUpcoming.map(b => dispName(b.stu)).slice(0, 5),
+                }, "evening", "✨ Tages-Rückblick erstellen", "✨ Tages-Rückblick")),
             React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 } },
                 statTile(ueFmt(drivenTodayMinutes / 45), "UE heute", "var(--ink)"),
                 statTile(eurFmt(paymentsSum), "Eingenommen heute", "var(--green)"),
@@ -17038,7 +17082,7 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88vh", overflowY: "auto" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6 } }, "Sch\u00FCler aus Screenshot"),
                 !importState.data && !importState.busy && React.createElement("div", null,
-                    React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, "Lade einen oder mehrere you-drive-Screenshots des Sch\u00FClers hoch. Die Daten werden automatisch ausgelesen und du kannst sie vor dem Speichern pr\u00FCfen."),
+                    React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, "Lade ein oder mehrere Fotos oder Screenshots eines Sch\u00FClerdokuments hoch. Die Daten werden automatisch ausgelesen und du kannst sie vor dem Speichern pr\u00FCfen."),
                     React.createElement("label", { className: "btn btn-primary btn-block", style: { cursor: "pointer", marginBottom: 10 } },
                         "Screenshots ausw\u00E4hlen",
                         React.createElement("input", { type: "file", accept: "image/*", multiple: true, style: { display: "none" }, onChange: e => { const fs = Array.from(e.target.files || []); e.target.value = ""; handleImportFiles(fs); } })),

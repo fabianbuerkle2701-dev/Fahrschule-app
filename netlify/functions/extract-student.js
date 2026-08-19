@@ -67,7 +67,7 @@ exports.handler = async function (event) {
     return { type: "image", source: { type: "base64", media_type: media, data } };
   });
 
-  const instruction = `Du erhältst einen oder mehrere Screenshots aus der Fahrschul-Software you-drive für einen einzelnen Fahrschüler. Lies die sichtbaren Daten sorgfältig aus und gib AUSSCHLIESSLICH ein JSON-Objekt zurück, ohne Erklärung, ohne Markdown, ohne Backticks.
+  const instruction = `Du erhältst ein oder mehrere Fotos oder Screenshots eines Schülerdokuments für einen einzelnen Fahrschüler (z.B. ein Anmeldeformular, eine Karteikarte oder ein Screenshot aus einer anderen Fahrschul-Verwaltungssoftware). Lies die sichtbaren Daten sorgfältig aus und gib AUSSCHLIESSLICH ein JSON-Objekt zurück, ohne Erklärung, ohne Markdown, ohne Backticks.
 
 Das JSON hat genau diese Felder (fehlende Werte als leerer String "" bzw. 0 bei Zahlen, niemals raten):
 {
