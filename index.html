@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.122.0";
+const APP_VERSION = "1.123.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.123.0", date: "August 2026", changes: [
+            "Neu: Limit je Fahrschüler (Einstellungen, Mein Bereich, Arbeit & Ausbildung) - stell ein, wie viele Minuten Fahrstunden sich ein einzelner Schüler höchstens pro Tag bzw. Woche über den Buchungslink sichern kann. Verhindert, dass ein Schüler versehentlich zu viele Termine auf einmal blockt, während andere leer ausgehen. Gilt auch, wenn du selbst einen Termin für einen Schüler anlegst",
+            "Neu: „Fahrlehrer krank\" unter Mehr - sagt mit einem Tipp alle bestätigten Fahrstunden eines Tages auf einmal ab. Danach öffnet sich für jeden betroffenen Schüler eine fertige WhatsApp-Nachricht zum Verschicken, du siehst sie vor dem Senden und tippst sie einzeln durch",
+        ] },
     { v: "1.122.0", date: "August 2026", changes: [
             "Neu: Prüfungsplanung unter Mehr - eine Übersicht über alle anstehenden Prüfungstermine deiner Schüler (aus den Prüfungsversuchen) und wer laut Prüfreife-Ampel bereit für die Praxisprüfung ist, aber noch nicht dafür angemeldet wurde. Ein Klick auf einen Eintrag öffnet direkt den Führerschein-Reiter des Schülers",
         ] },
@@ -3114,13 +3118,14 @@ async function touchLastSeen(uid) {
     catch (e) { }
 }
 // Persönliches Limit am Profil speichern, damit die Buchungsseite es lesen kann
-async function saveLimitsToProfile(uid, dayLim, weekLim) {
+async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentWeekLim) {
     if (!uid)
         return;
     try {
         const { data: sess } = await sb.auth.getSession();
         const email = sess && sess.session && sess.session.user && sess.session.user.email;
-        await sb.from("profiles").upsert({ id: uid, email, day_limit: dayLim, week_limit: weekLim }, { onConflict: "id" });
+        await sb.from("profiles").upsert({ id: uid, email, day_limit: dayLim, week_limit: weekLim,
+            student_day_limit: studentDayLim, student_week_limit: studentWeekLim }, { onConflict: "id" });
     }
     catch (e) {
         console.error("Limits speichern fehlgeschlagen:", e);
@@ -3378,7 +3383,9 @@ async function saveSchool(school) {
     const payload = { name: school.name, subtitle: school.subtitle, color: school.color, logo: school.logo || "",
         price_hour: (school.price_hour === "" || school.price_hour == null) ? null : Number(school.price_hour),
         packages: school.packages || [], vehicles: school.vehicles || [], klassen: school.klassen || [], arten: school.arten || [],
-        locations: school.locations || [], invoice_settings: school.invoice_settings || {} };
+        locations: school.locations || [], invoice_settings: school.invoice_settings || {},
+        sonderfahrten_soll: school.sonderfahrten_soll || {},
+        referral_reward: (school.referral_reward == null) ? null : Number(school.referral_reward) };
     const { error } = await sb.from("schools").update(payload).eq("id", school.id);
     if (error) {
         console.error(error);
@@ -3830,8 +3837,8 @@ async function publicBusyTimes(code, von, bis) {
     }
     return data || [];
 }
-async function publicProposeAppointment(code, p_start, p_end, p_name, p_note) {
-    const { data, error } = await sb.rpc("public_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null });
+async function publicProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin) {
+    const { data, error } = await sb.rpc("public_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6448,9 +6455,9 @@ function App() {
         writeSchool({ ...school, arten: list }); }
     // Sonderfahrten-Soll je Klasse (Überland-/Autobahn-/Dämmerungs-UE) - überschreibt/ergänzt
     // DEFAULT_SONDERFAHRTEN_SOLL, siehe sonderfahrtenBilanz().
-    const sonderfahrtenSoll = (school && school.sonderfahrtenSoll) || {};
+    const sonderfahrtenSoll = (school && school.sonderfahrten_soll) || {};
     function saveSonderfahrtenSoll(klasse, patch) { if (school)
-        writeSchool({ ...school, sonderfahrtenSoll: { ...sonderfahrtenSoll, [klasse]: { ...(sonderfahrtenSoll[klasse] || {}), ...patch } } }); }
+        writeSchool({ ...school, sonderfahrten_soll: { ...sonderfahrtenSoll, [klasse]: { ...(sonderfahrtenSoll[klasse] || {}), ...patch } } }); }
     function saveArtEdit() {
         const f = artEdit;
         if (!f || !f.code.trim()) {
@@ -6588,6 +6595,24 @@ function App() {
     catch (e) {
         return 0;
     } });
+    // Limit je Fahrschüler (nicht zu verwechseln mit dayLimit/weekLimit oben, die die
+    // Gesamt-Auslastung des Fahrlehrers begrenzen): verhindert, dass ein einzelner Schüler
+    // sich über den öffentlichen Buchungslink mehr UE pro Tag/Woche sichert, als andere
+    // Schüler dann noch abbekommen. 0 = kein Limit.
+    const [studentDayLimit, setStudentDayLimit] = useState(() => { try {
+        const v = localStorage.getItem("v3_student_day_limit");
+        return v === null ? 0 : (parseInt(v, 10) || 0);
+    }
+    catch (e) {
+        return 0;
+    } });
+    const [studentWeekLimit, setStudentWeekLimit] = useState(() => { try {
+        const v = localStorage.getItem("v3_student_week_limit");
+        return v === null ? 0 : (parseInt(v, 10) || 0);
+    }
+    catch (e) {
+        return 0;
+    } });
     const [teacherName, setTeacherName] = useState(() => { try {
         return localStorage.getItem("v3_teacher_name") || "";
     }
@@ -6621,6 +6646,14 @@ function App() {
         localStorage.setItem("v3_week_limit", String(weekLimit));
     }
     catch (e) { } }, [weekLimit]);
+    useEffect(() => { try {
+        localStorage.setItem("v3_student_day_limit", String(studentDayLimit));
+    }
+    catch (e) { } }, [studentDayLimit]);
+    useEffect(() => { try {
+        localStorage.setItem("v3_student_week_limit", String(studentWeekLimit));
+    }
+    catch (e) { } }, [studentWeekLimit]);
     const [fontScale, setFontScale] = useState(() => { try {
         // Auf 90–140% begrenzen wie die A−/A+-Knöpfe – ein alter gespeicherter Wert außerhalb
         // dieser Spanne (z. B. aus einer früheren Version mit anderem Wertebereich) würde sonst
@@ -6683,6 +6716,8 @@ function App() {
     // session bereits ein echtes Objekt ist, und die Hook-Anzahl weicht zwischen den Renders
     // ab (React-Fehler #310 "Rendered more hooks than during the previous render").
     const [handoverModal, setHandoverModal] = useState(null); // null | {busy, text, error, name, stu}
+    // "Fahrlehrer krank": Termine eines Tages auf einen Schlag absagen, siehe renderSickModal.
+    const [sickModal, setSickModal] = useState(null); // null | {date, cancelled: []}
     // Interessenten-Warteliste (Leads vor der Einschreibung, siehe sql/2026-08-19_interessenten.sql).
     // interessentenMissing=true heißt: die SQL-Datei wurde noch nicht ausgeführt - die Seite
     // zeigt dann nur einen Hinweis statt Daten, die App läuft ansonsten unverändert weiter.
@@ -6844,12 +6879,13 @@ function App() {
             else if (handoverModal) setHandoverModal(null);
             else if (interessentForm) { if (!interessentForm.busy)
                 setInteressentForm(null); }
+            else if (sickModal) setSickModal(null);
             else return;
             e.stopPropagation();
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -7039,8 +7075,8 @@ function App() {
             limitSyncReady.current = true;
             return;
         }
-        saveLimitsToProfile(uid, dayLimit, weekLimit);
-    }, [uid, dayLimit, weekLimit]);
+        saveLimitsToProfile(uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit);
+    }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
     const nameSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
@@ -9392,7 +9428,7 @@ function App() {
             // Limit-Prüfung beim Bestätigen (nur bestätigte zählen, dieser kommt dazu)
             const dKey = ymd(appt.start_at);
             const mins = apptMin(appt);
-            const lp = limitProblem(dKey, mins, id);
+            const lp = limitProblem(dKey, mins, id, appt.student_id);
             if (lp) {
                 showToast(lp + "\n\nDieser Vorschlag kann nicht bestätigt werden. Lehne ihn ab oder passe einen anderen Termin an.");
                 return;
@@ -9931,6 +9967,7 @@ function App() {
             { id: "tagesabschluss", label: "Tagesabschluss", group: "Seite", action: () => setView("tagesabschluss") },
             { id: "pruefungsplanung", label: "Prüfungsplanung", group: "Seite", action: () => setView("pruefungsplanung") },
             { id: "interessenten", label: "Interessenten", group: "Seite", action: () => setView("interessenten") },
+            { id: "fahrlehrer-krank", label: "Fahrlehrer krank - Termine absagen", group: "Aktion", action: () => setSickModal({ date: ymd(new Date()) }) },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
             { id: "videos", label: "Videos", group: "Seite", action: () => setView("videos") },
         ].filter(Boolean);
@@ -12875,13 +12912,98 @@ function App() {
             return false;
         return (stu.drivenLessons || []).some(l => l.leistung && l.apptId === a.id);
     }
+    // "Fahrlehrer krank": bestätigte Fahrstunden eines Tages, die bei Absage einen Schüler
+    // betreffen würden (Sonstige Tätigkeit und Urlaub zählen nicht als "Ausfall für jemanden").
+    function sickDayAppts(dateKey) {
+        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey)
+            .sort((a, b) => a.start_at.localeCompare(b.start_at));
+    }
+    // WhatsApp-Text für eine krankheitsbedingte Absage - ohne Ersatztermin, der wird separat
+    // vereinbart (Fahrlehrer weiß bei der Absage selbst oft noch nicht, wann Ersatz möglich ist).
+    function waSickCancelText(appt, stu) {
+        const name = (stu && stu.vorname) ? stu.vorname : (apptStudentName(appt) || appt.title || "");
+        const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
+        return greet + "leider muss deine Fahrstunde am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
+    }
+    // Bestätigte Termine eines Tages absagen (Fahrlehrer krank). Gibt die abgesagten Termine
+    // samt Schüler zurück, damit die Benachrichtigungsliste danach angezeigt werden kann - die
+    // Termine selbst sind zu diesem Zeitpunkt bereits aus appts entfernt (removeAppt).
+    async function cancelSickDay(dateKey) {
+        const list = sickDayAppts(dateKey);
+        const cancelled = list.map(a => ({ appt: a, stu: a.student_id ? students.find(s => s.id === a.student_id) : null }));
+        for (const a of list) {
+            await removeAppt(a.id, { noUndo: true, label: "Termin krankheitsbedingt abgesagt" });
+        }
+        return cancelled;
+    }
+    // "Fahrlehrer krank"-Modal: eigene Funktion statt inline in der großen JSX-Rückgabe von
+    // App(), damit die Verschachtelung überschaubar bleibt (siehe Changelog-Fehler durch
+    // verzählte Klammern bei ähnlich tief verschachtelten Modals).
+    function renderSickModal() {
+        const busy = !!sickModal.busy;
+        const list = sickModal.cancelled ? [] : sickDayAppts(sickModal.date);
+        async function doCancelAll() {
+            setSickModal({ ...sickModal, busy: true });
+            const cancelled = await cancelSickDay(sickModal.date);
+            setSickModal({ date: sickModal.date, cancelled });
+        }
+        const selectStep = React.createElement(React.Fragment, null,
+            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Fahrlehrer krank"),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
+                "Sagt alle bestätigten Fahrstunden des gewählten Tages auf einmal ab. Für jeden betroffenen Schüler öffnet sich danach eine fertige WhatsApp-Nachricht zum Verschicken - du siehst sie vor dem Senden und tippst sie einzeln durch."),
+            React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                React.createElement("label", null, "Tag"),
+                React.createElement("input", { type: "date", value: sickModal.date, onChange: e => setSickModal({ ...sickModal, date: e.target.value }) })),
+            list.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Keine bestätigten Fahrstunden an diesem Tag.")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
+                    list.map((a, i) => React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                        React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, apptStudentName(a) || a.title || "Termin"),
+                        React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, hm(a.start_at) + " Uhr")))),
+            list.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doCancelAll },
+                busy ? "Sagt ab…" : ("Alle " + list.length + (list.length === 1 ? " Fahrstunde absagen" : " Fahrstunden absagen"))),
+            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setSickModal(null) }, "Abbrechen"));
+        const notifyRows = sickModal.cancelled ? sickModal.cancelled.map((c, i) => {
+            const num = c.stu ? waNumber(c.stu.tel) : "";
+            const waLink = num ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waSickCancelText(c.appt, c.stu)), target: "_blank", rel: "noopener noreferrer",
+                    className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: "#128C3E" } }, "WhatsApp")
+                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, "keine Nummer");
+            return React.createElement("div", { key: c.appt.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, apptStudentName(c.appt) || c.appt.title || "Schüler"),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, hm(c.appt.start_at) + " Uhr")),
+                waLink);
+        }) : [];
+        const notifyStep = React.createElement(React.Fragment, null,
+            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } },
+                "✓ " + (sickModal.cancelled ? sickModal.cancelled.length : 0) + ((sickModal.cancelled && sickModal.cancelled.length === 1) ? " Fahrstunde abgesagt" : " Fahrstunden abgesagt")),
+            notifyRows.length > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
+                "Jetzt noch Bescheid geben - ein Tipp öffnet WhatsApp mit fertigem Text, du siehst ihn vor dem Senden."),
+            React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
+                notifyRows.length === 0 ? React.createElement("div", { style: { padding: "10px 0", fontSize: 13.5, color: "var(--muted)" } }, "Keine Schüler zu benachrichtigen.") : notifyRows),
+            React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setSickModal(null) }, "Fertig"));
+        return React.createElement("div", { onClick: () => { if (!busy)
+                    setSickModal(null); }, className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "88vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                sickModal.cancelled ? notifyStep : selectStep));
+    }
     // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
     function confirmedMinutesOnDay(dateKey, exceptId) {
         return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
+    // Bestätigte praktische Minuten eines einzelnen Schülers an einem Tag bzw. in einer Woche -
+    // für das Schüler-Limit (im Unterschied zu confirmedMinutesOnDay, das über alle Schüler summiert).
+    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId) {
+        return (appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
+            .reduce((sum, a) => sum + apptMin(a), 0);
+    }
     // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
-    function limitProblem(dateKey, minutes, exceptId) {
+    // studentId ist optional - ohne ihn wird nur das Gesamtlimit des Fahrlehrers geprüft, nicht
+    // das Limit je Schüler (z.B. bei „Sonstige Tätigkeit" ohne verknüpften Schüler).
+    function limitProblem(dateKey, minutes, exceptId, studentId) {
         if (dayLimit > 0) {
             const used = confirmedMinutesOnDay(dateKey, exceptId);
             if (used + minutes > dayLimit) {
@@ -12896,6 +13018,25 @@ function App() {
                 .reduce((sum, a) => sum + apptMin(a), 0);
             if (usedW + minutes > weekLimit) {
                 return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits " + usedW + " von " + weekLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (usedW + minutes) + " Minuten führen.";
+            }
+        }
+        if (studentId) {
+            const stu = students.find(s => s.id === studentId);
+            const name = stu ? dispName(stu) : "Dieser Schüler";
+            if (studentDayLimit > 0) {
+                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId);
+                if (used + minutes > studentDayLimit) {
+                    return name + " hat an diesem Tag bereits " + used + " von " + studentDayLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
+                }
+            }
+            if (studentWeekLimit > 0) {
+                const d = new Date(dateKey + "T12:00:00");
+                const ws = ymd(startOfWeek(d));
+                const we = ymd(addDays(startOfWeek(d), 6));
+                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId);
+                if (usedW + minutes > studentWeekLimit) {
+                    return name + " hat in dieser Woche bereits " + usedW + " von " + studentWeekLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
+                }
             }
         }
         return "";
@@ -12921,7 +13062,7 @@ function App() {
         // Limit-Prüfung nur für praktische Ausbildung (nicht bei sonstiger Tätigkeit)
         if (!f.sonstige) {
             const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
-            const lp = limitProblem(f.date, mins, f.id);
+            const lp = limitProblem(f.date, mins, f.id, f.student_id);
             if (lp) {
                 showToast(lp);
                 return;
@@ -13004,7 +13145,7 @@ function App() {
                 const endISO = f.end ? combineDT(date, f.end) : null;
                 if (!f.sonstige) {
                     const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
-                    const lp = limitProblem(date, mins, null);
+                    const lp = limitProblem(date, mins, null, f.student_id);
                     if (lp) {
                         skipped.push({ date, reason: "Limit" });
                         continue;
@@ -14284,6 +14425,24 @@ function App() {
                             "Entspricht ",
                             (weekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }),
                             " UE pro Woche."))),
+                React.createElement("div", { className: "eyebrow" }, "Limit je Fahrschüler"),
+                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } },
+                        "Begrenzt, wie viele Minuten Fahrstunden sich ein einzelner Schüler höchstens pro Tag bzw. Woche sichern kann - über den Buchungslink oder wenn du selbst einen Termin für ihn anlegst. Verhindert, dass ein Schüler versehentlich (oder absichtlich) zu viele Termine auf einmal blockt, während andere leer ausgehen. 0 bedeutet kein Limit."),
+                    React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                        React.createElement("label", null, "Tageslimit je Schüler in Minuten (0 = aus)"),
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentDayLimit, onChange: e => setStudentDayLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) }),
+                        studentDayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
+                            "Entspricht ",
+                            (studentDayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }),
+                            " UE pro Tag und Schüler.")),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Wochenlimit je Schüler in Minuten (0 = aus)"),
+                        React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentWeekLimit, onChange: e => setStudentWeekLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) }),
+                        studentWeekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
+                            "Entspricht ",
+                            (studentWeekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }),
+                            " UE pro Woche und Schüler."))),
                 React.createElement("div", { className: "eyebrow" }, "Übungs-Verlauf ADK/Strecken"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                     React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 10, cursor: "pointer" } },
@@ -16047,6 +16206,10 @@ function App() {
                     React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); openCalendar(); } },
                         React.createElement(IcCalendar, null),
                         "Fahrzeug-Kalender"),
+                    React.createElement("button", { className: "sb-item", onClick: () => { setTabMenu(null); setSickModal({ date: ymd(new Date()) }); } },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z" })),
+                        "Fahrlehrer krank"),
                     [["daten", "Schülerdaten", React.createElement(IcGear, null)], ["fahrzeuge", "Fahrzeuge", React.createElement(IcCarIcon, null)], ["abrechnung", "Abrechnung", React.createElement(IcEuro, null)], ["statistik", "Statistik", React.createElement(IcChart, null)], ["tagesabschluss", "Tagesabschluss", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M9 11l3 3L22 4" }), React.createElement("path", { d: "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" }))], ["pruefungsplanung", "Prüfungsplanung", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, React.createElement("path", { d: "M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z" }), React.createElement("path", { d: "M4 22V3" }))], ["interessenten", "Interessenten", React.createElement(IcUsers, null)], ["einstellungen", "Einstellungen", React.createElement(IcSettings, null)], ["videos", "Videos", React.createElement(IcBook, null)]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl)))),
@@ -16225,6 +16388,11 @@ function App() {
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcUsers, null)),
                                     "Interessenten"),
+                                React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setMehrGroup(null); setSickModal({ date: ymd(new Date()) }); } },
+                                    React.createElement("span", { className: "tabpop-ic" },
+                                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                            React.createElement("path", { d: "M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.29 1.51 4.04 3 5.5l7 7Z" }))),
+                                    "Fahrlehrer krank"),
                                 React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setMehrGroup(null); openCalendar(); } },
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement(IcCalendar, null)),
@@ -17533,6 +17701,7 @@ function App() {
                 interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "var(--green)" }, onClick: () => convertInteressentToStudent(interessentForm) }, "Als Sch\u00FCler \u00FCbernehmen"),
                 interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "#B3362A" }, onClick: () => removeInteressent(interessentForm) }, "L\u00F6schen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setInteressentForm(null) }, "Abbrechen"))),
+        sickModal && renderSickModal(),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85vh", overflowY: "auto" } },
@@ -21026,10 +21195,12 @@ function BookingPage({ code, appMode, onLogout }) {
         const fullName = (form.vorname.trim() + " " + form.nachname.trim()).trim();
         const results = []; // sammelt Erfolg/Fehler je Termin
         const newMine = []; // erfolgreich vorgeschlagene eigene Termine (Startzeit)
+        let myPin = "";
+        try { myPin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
         for (const s of form.slots) {
             try {
                 const startISO = combineDT(s.date, s.start);
-                await publicProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "");
+                await publicProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin);
                 results.push({ ok: true, s });
                 newMine.push(startISO);
             }
@@ -21040,6 +21211,10 @@ function BookingPage({ code, appMode, onLogout }) {
                     reason = "schon belegt oder angefragt";
                 else if (/NOPAST/i.test(msg))
                     reason = "liegt in der Vergangenheit";
+                else if (/DAYLIMIT/i.test(msg))
+                    reason = "Tageslimit für dich erreicht";
+                else if (/WEEKLIMIT/i.test(msg))
+                    reason = "Wochenlimit für dich erreicht";
                 results.push({ ok: false, s, reason });
             }
         }
