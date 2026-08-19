@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.126.0";
+const APP_VERSION = "1.127.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.127.0", date: "August 2026", changes: [
+            "Neu: Dokumente je Schüler im Führerschein-Reiter - Sehtest, Erste-Hilfe-Nachweis, Passfoto & Co. als Foto oder PDF direkt beim Schüler hinterlegen, statt nur als Häkchen abzuhaken. Eigener, privater Speicher, nur für dich sichtbar",
+        ] },
     { v: "1.126.0", date: "August 2026", changes: [
             "Neu: Karte „Paket-Guthaben knapp\" auf der Startseite - zeigt Schüler mit einem übernommenen UE-Paket, dessen Guthaben zur Neige geht oder schon aufgebraucht ist. Guter Moment für ein Anschlusspaket, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird. Ein Klick öffnet direkt Fahrten & Kosten des Schülers",
         ] },
@@ -3754,6 +3757,64 @@ async function deleteStaffFile(f) {
 // Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
 async function staffFileSignedUrl(path) {
     const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 3600);
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data && data.signedUrl;
+}
+/* ════════ Dokumente je Schüler (Sehtest, Erste-Hilfe, Passfoto, ...) ════════
+   Gleiches Muster wie staff_files oben, nur mit student_id statt instructor_uid und
+   owner statt school-weiter Admin-Sichtbarkeit - ein Dokument gehört demselben Fahrlehrer
+   wie der Schüler selbst (owner = auth.uid()), keine geteilte Sichtbarkeit nötig. */
+const STUDENT_FILE_CATEGORIES = [
+    { id: "sehtest", label: "Sehtest" },
+    { id: "erstehilfe", label: "Erste-Hilfe-Kurs" },
+    { id: "passfoto", label: "Biometrisches Passfoto" },
+    { id: "antrag", label: "Antrag/Sonstige Unterlagen" },
+    { id: "sonstiges", label: "Sonstiges" },
+];
+async function fetchStudentFiles(studentId) {
+    const { data, error } = await sb.from("student_files").select("*").eq("student_id", studentId).order("created_at", { ascending: false });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    const list = data || [];
+    await Promise.all(list.map(async (f) => { f.signedUrl = await studentFileSignedUrl(f.storage_path); }));
+    return list;
+}
+async function uploadStudentFile(studentId, ownerUid, file, category) {
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const path = ownerUid + "/" + studentId + "/" + uniqueId("stf") + "-" + safeName;
+    const { error: upErr } = await sb.storage.from("student-files").upload(path, file, { upsert: false, contentType: file.type || undefined });
+    if (upErr) {
+        console.error(upErr);
+        throw new Error(upErr.message);
+    }
+    const row = { student_id: studentId, owner: ownerUid, category: category || "sonstiges", filename: file.name, storage_path: path, size_bytes: file.size || null };
+    const { data, error } = await sb.from("student_files").insert(row).select().single();
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data;
+}
+async function deleteStudentFile(f) {
+    try {
+        await sb.storage.from("student-files").remove([f.storage_path]);
+    }
+    catch (e) {
+        console.error(e);
+    }
+    const { error } = await sb.from("student_files").delete().eq("id", f.id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+async function studentFileSignedUrl(path) {
+    const { data, error } = await sb.storage.from("student-files").createSignedUrl(path, 3600);
     if (error) {
         console.error(error);
         return null;
@@ -6438,6 +6499,13 @@ function App() {
     useEffect(() => { setAdkFilter(""); setStreckenFilter(""); }, [activeId]);
     const [referralRedeemCode, setReferralRedeemCode] = useState("");
     useEffect(() => { setReferralRedeemCode(""); }, [activeId]);
+    // Dokumente (Sehtest, Erste-Hilfe, ...) des aktiven Schülers - lazy geladen im
+    // Führerschein-Reiter, siehe renderLicenseSteps. Bei Schülerwechsel zurücksetzen, sonst
+    // blieben kurz die Dateien des vorherigen Schülers sichtbar.
+    const [studentFiles, setStudentFiles] = useState(null);
+    const [studentFileCategory, setStudentFileCategory] = useState("sehtest");
+    const [studentFileUploading, setStudentFileUploading] = useState(false);
+    useEffect(() => { setStudentFiles(null); }, [activeId]);
     const [view, setView] = useState("home");
     const [videos, setVideos] = useState(null); // null=noch nicht geladen
     const [videoUpload, setVideoUpload] = useState(null); // {file,title,category,busy,error}
@@ -7555,6 +7623,40 @@ function App() {
     function loadMyStaffFiles() {
         setMyStaffFiles(null);
         fetchStaffFiles(uid).then(list => setMyStaffFiles(list));
+    }
+    function loadStudentFiles() {
+        if (!active)
+            return;
+        setStudentFiles(null);
+        fetchStudentFiles(active.id).then(list => setStudentFiles(list));
+    }
+    async function handleStudentFileUpload(file) {
+        if (!file || !active)
+            return;
+        setStudentFileUploading(true);
+        try {
+            await uploadStudentFile(active.id, uid, file, studentFileCategory);
+            const list = await fetchStudentFiles(active.id);
+            setStudentFiles(list);
+            showFlash("✓ Hochgeladen");
+        }
+        catch (e) {
+            showToast("Hochladen fehlgeschlagen:\n" + (e.message || e));
+        }
+        finally {
+            setStudentFileUploading(false);
+        }
+    }
+    async function handleStudentFileDelete(f) {
+        if (!await askConfirm({ message: "Datei \"" + f.filename + "\" endgültig löschen?" }))
+            return;
+        try {
+            await deleteStudentFile(f);
+            setStudentFiles(list => (list || []).filter(x => x.id !== f.id));
+        }
+        catch (e) {
+            showToast("Löschen fehlgeschlagen:\n" + (e.message || e));
+        }
     }
     async function openCityTplModal() {
         if (!myCity) {
@@ -12282,8 +12384,44 @@ function App() {
                         done && React.createElement("input", { type: "date", value: date, onChange: e => setStepDate(st.key, e.target.value), style: { border: "1.5px solid var(--line)", borderRadius: 9, padding: "6px 8px", fontSize: 16, width: 142, flexShrink: 0 } }));
                 })),
             renderPruefungsversuche(),
+            renderStudentFiles(),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
                 "Rein informell für deinen Überblick – ersetzt keine offiziellen Unterlagen der Führerscheinstelle."));
+    }
+    // Dokumente eines Schülers (Sehtest, Erste-Hilfe-Nachweis, Passfoto, ...) - lazy geladen,
+    // eigener privater Speicher (student-files), nur der eigene Fahrlehrer sieht sie.
+    function renderStudentFiles() {
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Dokumente"),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Sehtest, Erste-Hilfe-Nachweis, Passfoto & Co. als Foto oder PDF hinterlegen."),
+            studentFiles === null
+                ? React.createElement("button", { className: "btn btn-ghost", onClick: loadStudentFiles }, "Dokumente laden")
+                : React.createElement(React.Fragment, null,
+                    studentFiles.length === 0
+                        ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } }, "Noch keine Dokumente hinterlegt.")
+                        : STUDENT_FILE_CATEGORIES.map(c => {
+                            const files = studentFiles.filter(f => f.category === c.id);
+                            if (!files.length)
+                                return null;
+                            return React.createElement("div", { key: c.id, style: { marginBottom: 10 } },
+                                React.createElement("div", { className: "home-eyebrow", style: { marginBottom: 6 } }, c.label),
+                                files.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0" } },
+                                    React.createElement("a", { href: f.signedUrl || undefined, target: "_blank", rel: "noopener noreferrer",
+                                            style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8, textDecoration: "none", fontSize: 13.5, fontWeight: 600, color: f.signedUrl ? "var(--orange-deep)" : "var(--muted)" } },
+                                        React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", style: { flexShrink: 0 } },
+                                            React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                                            React.createElement("path", { d: "M14 2v6h6" })),
+                                        React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)),
+                                    React.createElement("button", { onClick: () => handleStudentFileDelete(f), "aria-label": "Löschen", style: { color: "#B3362A", fontSize: 15, padding: "2px 6px", flexShrink: 0 } }, "×"))));
+                        }),
+                    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" } },
+                        React.createElement("select", { value: studentFileCategory, onChange: e => setStudentFileCategory(e.target.value),
+                                style: { flex: "1 1 160px", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 11px", fontSize: 15, background: "var(--card)" } },
+                            STUDENT_FILE_CATEGORIES.map(c => React.createElement("option", { key: c.id, value: c.id }, c.label))),
+                        React.createElement("label", { className: "btn btn-primary", style: { flexShrink: 0, textAlign: "center", cursor: studentFileUploading ? "default" : "pointer", opacity: studentFileUploading ? .6 : 1 } },
+                            studentFileUploading ? "Lädt hoch…" : "+ Datei",
+                            React.createElement("input", { type: "file", style: { display: "none" }, disabled: studentFileUploading, onChange: e => { const file = e.target.files && e.target.files[0]; e.target.value = ""; if (file)
+                                        handleStudentFileUpload(file); } })))));
     }
     /* ── Prüfungsversuche je Schüler.
        Die App speicherte bisher nur, OB eine Prüfung bestanden wurde – nicht, wie viele
