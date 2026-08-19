@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.125.1";
+const APP_VERSION = "1.126.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.126.0", date: "August 2026", changes: [
+            "Neu: Karte „Paket-Guthaben knapp\" auf der Startseite - zeigt Schüler mit einem übernommenen UE-Paket, dessen Guthaben zur Neige geht oder schon aufgebraucht ist. Guter Moment für ein Anschlusspaket, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird. Ein Klick öffnet direkt Fahrten & Kosten des Schülers",
+        ] },
     { v: "1.125.1", date: "August 2026", changes: [
             "Tagesabschluss zeigt jetzt auch Geburtstage der nächsten 7 Tage, mit fertigem WhatsApp-Glückwunsch zum Antippen. Der heutige Geburtstag bleibt wie gewohnt als eigenes Popup beim Öffnen der App",
         ] },
@@ -4531,6 +4534,17 @@ function lessonCost(l, stdPrice) {
 function packageCreditUE(s) {
     return (s.packages || []).reduce((sum, p) => sum + (Number(p.includedUE) || 0), 0);
 }
+// Verbleibendes Paket-Guthaben in UE - null, wenn der Schüler nie ein Paket mit UE-Umfang
+// übernommen hat (dann gibt es kein Guthaben, das "knapp" werden könnte, im Unterschied zu 0,
+// was ein aufgebrauchtes Paket bedeutet). Zieht einfach alle gefahrenen UE vom Gesamt-Guthaben
+// ab, dieselbe Rechnung wie lessonBillables, nur ohne die einzelnen Stunden aufzuschlüsseln.
+function packageRemainingUE(s) {
+    const credit = packageCreditUE(s);
+    if (credit <= 0)
+        return null;
+    const drivenUE = (s.drivenLessons || []).reduce((sum, l) => sum + (Number(l.minutes) || 0) / 45, 0);
+    return Math.max(0, credit - drivenUE);
+}
 // Rechnet das Paket-Guthaben chronologisch gegen die gefahrenen Stunden auf: die frühesten
 // Stunden gelten zuerst als "im Paket enthalten", der Rest wird normal (ggf. mit eigenem
 // Stundenpreis) berechnet. Eine Fahrstunde kann teils gedeckt, teils berechnet sein.
@@ -6390,6 +6404,7 @@ function App() {
     const [abbruchOpen, setAbbruchOpen] = useState(false); // Liste "Abbruch-Risiko" auf der Startseite (Verwaltung-ersetzen-Fahrplan, Phase 2)
     const [erinnerungen, setErinnerungen] = useState(false); // Liste "Erinnerungen für morgen" auf der Startseite
     const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
+    const [paketKnappOpen, setPaketKnappOpen] = useState(false); // Liste "Paket-Guthaben knapp" auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
     const [practiceLogEnabled, setPracticeLogEnabled] = useState(false); // persönliche Einstellung: Übungs-Verlauf-Feature an/aus
@@ -7942,6 +7957,14 @@ function App() {
             .map(x => ({ ...x, offen: sumCharges(x.s, price) - sumPayments(x.s) }))
             .filter(x => x.offen > 0.005);
     }, [stillList, pricePerHour]);
+    // Paket-Guthaben knapp: Schüler mit einem übernommenen UE-Paket, deren Guthaben zur Neige
+    // geht (<=2 UE) oder schon aufgebraucht ist (0) - guter Moment, ein Anschlusspaket
+    // anzubieten, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird.
+    const paketKnapp = React.useMemo(() => {
+        return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s) }))
+            .filter(x => x.remaining != null && x.remaining <= 2)
+            .sort((a, b) => a.remaining - b.remaining);
+    }, [students]);
     if (session === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (session === null)
@@ -10191,6 +10214,19 @@ function App() {
                         fristenRadar.length === 1 ? "1 Frist läuft bald ab" : fristenRadar.length + " Fristen laufen bald ab"),
                     React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
                         fristenRadar[0].label + " · " + fristenRadar[0].sub + " · " + (fristenRadar[0].days < 0 ? "überfällig seit " + Math.abs(fristenRadar[0].days) + " Tagen" : fristenRadar[0].days === 0 ? "heute fällig" : "in " + fristenRadar[0].days + " Tagen"))),
+                chev),
+            // Paket-Guthaben knapp: guter Moment für ein Anschlusspaket, bevor der Schüler es
+            // selbst merkt (oder die nächste Stunde ungeplant zum Einzelpreis wird).
+            paketKnapp.length > 0 && React.createElement("button", { onClick: () => setPaketKnappOpen(true), className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+                React.createElement("span", { className: "home-iconchip", style: { background: paketKnapp[0].remaining <= 0 ? "#FDECEA" : "var(--field-bg)", color: paketKnapp[0].remaining <= 0 ? "#B3362A" : "var(--ink-2)" } },
+                    React.createElement("svg", { width: "19", height: "19", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z" }),
+                        React.createElement("path", { d: "M3.3 7 12 12l8.7-5M12 22V12" }))),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } },
+                        paketKnapp.length === 1 ? "1 Paket-Guthaben knapp" : paketKnapp.length + " Paket-Guthaben knapp"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
+                        dispName(paketKnapp[0].s) + " · " + (paketKnapp[0].remaining <= 0 ? "aufgebraucht" : "noch " + ueFmt(paketKnapp[0].remaining) + " UE"))),
                 chev),
             // Erinnerungen an die Fahrstunden von morgen. Erscheint nur, solange noch jemand
             // offen ist - sind alle angeschrieben, verschwindet die Karte von selbst.
@@ -17802,6 +17838,23 @@ function App() {
                             React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0, textAlign: "right" } }, zeitText));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setFristenOpen(false) }, "Schlie\u00DFen"))),
+        paketKnappOpen && React.createElement("div", { onClick: () => setPaketKnappOpen(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Paket-Guthaben knapp"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Sch\u00FCler mit \u00FCbernommenem UE-Paket, dessen Guthaben bald aufgebraucht ist"),
+                paketKnapp.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell ist kein Paket-Guthaben knapp.")
+                    : paketKnapp.map(x => {
+                        const tone = x.remaining <= 0 ? "#B3362A" : "var(--amber)";
+                        return React.createElement("button", { key: x.s.id, onClick: () => { setPaketKnappOpen(false); setActiveId(x.s.id); setView("daten"); setStudentTab("fahrten"); },
+                                className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, textAlign: "left" } },
+                            React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: tone, flexShrink: 0 } }),
+                            React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: 700 } }, dispName(x.s)),
+                            React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0 } }, x.remaining <= 0 ? "aufgebraucht" : "noch " + ueFmt(x.remaining) + " UE"));
+                    }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setPaketKnappOpen(false) }, "Schlie\u00DFen"))),
         handoverModal && React.createElement("div", { onClick: () => setHandoverModal(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
