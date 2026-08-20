@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.134.0";
+const APP_VERSION = "1.135.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.135.0", date: "August 2026", changes: [
+            "Neu: „Auslastung\" im Fuhrpark - zeigt je Fahrzeug die gebuchten Stunden im Fahrzeug-Kalender der letzten 30 Tage. Hilft einzuschätzen, welches Fahrzeug knapp wird, bevor eine Anschaffung ansteht",
+        ] },
     { v: "1.134.0", date: "August 2026", changes: [
             "Neu: Beim Melden eines Nichterscheinens optional direkt eine Ausfallgebühr aufs Konto des Schülers buchen - Betrag mit Vorschlag (halber Stundenpreis), lässt sich frei anpassen oder ganz weglassen",
         ] },
@@ -12694,7 +12697,10 @@ function App() {
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "0 2px 10px" } }, "Verwaltung"),
                     renderFahrzeugVerwaltungBody(),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Kosten & Service"),
-                    renderFahrzeugeBody())
+                    renderFahrzeugeBody(),
+                    vehicles.filter(v => !v.inactive).length > 0 && React.createElement(React.Fragment, null,
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Auslastung"),
+                        React.createElement(FahrzeugAuslastung, { code: school && school.cal_code, vehicles: vehicles })))
                 : React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16 } }, "Nur für den Fahrschul-Admin"),
                     React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginTop: 8 } }, "Fahrzeuge, Kosten und Wartungstermine pflegt der Admin deiner Fahrschule.")));
@@ -22218,6 +22224,46 @@ function colorForName(name) {
 // Gemeinsame Kalender-Ansicht, genutzt vom öffentlichen Link (CalendarPage)
 // und in der App (Kalender-Tab). code = cal_code der Fahrschule.
 // activeVehicleIds = optionale Einschränkung, welche Fahrzeuge auswählbar sind.
+// Fahrzeug-Auslastung: gebuchte Stunden je Fahrzeug der letzten 30 Tage aus dem Fahrzeug-Kalender.
+// Eigene Komponente mit eigenem State (wie VehicleCalendar selbst), statt zusätzliche Hooks in
+// App() einzuschieben - so bleibt dessen bestehende Hook-Reihenfolge unangetastet.
+function FahrzeugAuslastung({ code, vehicles }) {
+    const [rows, setRows] = React.useState(null); // null=lädt, sonst Liste
+    React.useEffect(() => {
+        if (!code) { setRows([]); return; }
+        let on = true;
+        const bis = new Date();
+        const von = new Date(bis.getTime() - 30 * 86400000);
+        calBookings(code, von.toISOString(), bis.toISOString())
+            .then(r => { if (on) setRows(r || []); })
+            .catch(() => { if (on) setRows([]); });
+        return () => { on = false; };
+    }, [code]);
+    if (!code)
+        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Öffne einmal den Fahrzeug-Kalender oben, danach kann die Auslastung berechnet werden."));
+    if (rows === null)
+        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0 } }, "Lädt…"));
+    const byVeh = {};
+    rows.forEach(b => {
+        const mins = (new Date(b.end_at).getTime() - new Date(b.start_at).getTime()) / 60000;
+        if (mins > 0)
+            byVeh[b.vehicle_id] = (byVeh[b.vehicle_id] || 0) + mins;
+    });
+    const list = (vehicles || []).filter(v => !v.inactive).map(v => ({ v, hours: (byVeh[v.id] || 0) / 60 })).sort((a, b) => b.hours - a.hours);
+    if (list.length === 0)
+        return null;
+    const maxHours = Math.max(1, ...list.map(x => x.hours));
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+        list.map((x, i) => React.createElement("div", { key: x.v.id, style: { marginTop: i > 0 ? 12 : 0 } },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, gap: 8 } },
+                React.createElement("span", { style: { fontSize: 13, fontWeight: 600 } }, x.v.name || "Fahrzeug"),
+                React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", flexShrink: 0 } }, x.hours.toFixed(1).replace(".", ",") + " Std.")),
+            React.createElement("div", { style: { height: 7, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
+                React.createElement("div", { style: { height: "100%", width: (x.hours / maxHours * 100) + "%", background: "var(--orange)", borderRadius: 99 } })))),
+        React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "14px 0 0", lineHeight: 1.5 } }, "Gebuchte Stunden im Fahrzeug-Kalender, letzte 30 Tage. Hilft einzuschätzen, ob ein Fahrzeug knapp wird."));
+}
 function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
     const [info, setInfo] = React.useState(undefined); // undefined=lädt, null=ungültig
     const [day, setDay] = React.useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; });
