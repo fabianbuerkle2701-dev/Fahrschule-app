@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.141.0";
+const APP_VERSION = "1.142.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.142.0", date: "August 2026", changes: [
+            "Profilbild auf der Startseite größer",
+            "Tages-Briefing analysiert jetzt die Schüler mit Termin heute (Ausbildungsstand, Theorie, offener Betrag, Notiz von der letzten Stunde) und schließt mit einer konkreten Handlungsempfehlung statt nur die Namen aufzuzählen",
+        ] },
     { v: "1.141.0", date: "August 2026", changes: [
             "Startseite neu geordnet: bis zu 6 eigenständige Alarm-Karten standen bisher vor Kennzahlen und heutigem Tag - jetzt gibt es nur noch „Dringend\" (Abbruch-Risiko + akute Fristen) direkt nach der Begrüßung, dann Kennzahlen und Heute, und ganz unten „Diese Woche\" für alles Routinemäßige (Fristen, Paket-Guthaben, lange nicht gefahren, Fahrstunde morgen, offene Terminvorschläge). Tages-Briefing ist jetzt ein Link statt einer eigenen Karte. Kein Klickziel geht dabei verloren",
         ] },
@@ -10336,6 +10340,21 @@ function App() {
         // Für "Diese Woche" weiter unten: einmal berechnet statt mehrfach verstreut.
         const stillCount = stillList.length - abbruchRisiko.length;
         const erinnerungOffen = erinnerungsKandidaten().filter(x => !x.erinnert).length;
+        // Für das Tages-Briefing: nicht nur die Namen von heute, sondern je Schüler Ausbildungsstand,
+        // Prüfreife und offener Betrag - sonst hat die KI kein Material für eine echte Einschätzung
+        // zu den heutigen Terminen, nur eine Namensliste zum Nachplappern.
+        const heuteSchueler = heute.map(a => {
+            const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
+            if (!stu)
+                return null;
+            const amp = ampel(stu, tplFor(stu.klasse).adk, tplFor(stu.klasse).strecken);
+            const balance = sumCharges(stu, stdPrice) - sumPayments(stu);
+            return {
+                name: dispName(stu), zeit: hm(a.start_at), fortschritt: gesamtPct(stu), stand: amp.text,
+                theorie: !!stu.theorie, offenerBetrag: balance > 0.005 ? Math.round(balance * 100) / 100 : 0,
+                notiz: (stu.lastNote || "").trim().slice(0, 160),
+            };
+        }).filter(Boolean).slice(0, 6);
 
         /* ── Redesign (zweiter Anlauf): die Startseite wirkte trotz der ersten Konsolidierung
            weiterhin "überlaufen", weil bis zu sechs eigenständig gerahmte Alarm-Karten (Briefing,
@@ -10367,7 +10386,7 @@ function App() {
                     React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } }, metaLine),
                     !briefing && React.createElement("button", { onClick: () => ladeBriefing(setBriefing, {
                                 heuteAnzahl: heute.length,
-                                heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
+                                heuteSchueler,
                                 pendingAnzahl: pendingCount,
                                 abbruchAnzahl: abbruchRisiko.length,
                                 abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
@@ -10379,7 +10398,7 @@ function App() {
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 4 } }, briefing.err),
                         React.createElement("button", { onClick: () => ladeBriefing(setBriefing, {
                                     heuteAnzahl: heute.length,
-                                    heuteNamen: heute.map(a => a.student_id ? dispName(students.find(x => x.id === a.student_id) || {}) : (a.title || "")).filter(Boolean).slice(0, 5),
+                                    heuteSchueler,
                                     pendingAnzahl: pendingCount,
                                     abbruchAnzahl: abbruchRisiko.length,
                                     abbruchNamen: abbruchRisiko.map(x => dispName(x.s)).slice(0, 5),
@@ -10391,8 +10410,8 @@ function App() {
                         React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5 } }, briefing.text))),
                 React.createElement("button", { onClick: () => { setSettingsTab("fahrlehrer"); setView("einstellungen"); }, "aria-label": "Profilbild ändern", style: { flexShrink: 0, padding: 0, border: "none", background: "none", cursor: "pointer" } },
                     (profileData && profileData.avatar_url)
-                        ? React.createElement("img", { src: profileData.avatar_url, alt: "Profilbild", style: { width: 46, height: 46, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--line)", display: "block" } })
-                        : React.createElement("div", { style: { width: 46, height: 46, borderRadius: "50%", border: "2px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
+                        ? React.createElement("img", { src: profileData.avatar_url, alt: "Profilbild", style: { width: 58, height: 58, borderRadius: "50%", objectFit: "cover", border: "2px solid var(--line)", display: "block" } })
+                        : React.createElement("div", { style: { width: 58, height: 58, borderRadius: "50%", border: "2px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
             // 2) Live-Aufzeichnung (nur wenn aktiv)
             recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),

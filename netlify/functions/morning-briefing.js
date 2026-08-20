@@ -171,7 +171,18 @@ ${datenText}`;
   } else {
     const zeilen = [];
     if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
-    if (Array.isArray(facts.heuteNamen) && facts.heuteNamen.length) zeilen.push("Davon mit: " + facts.heuteNamen.join(", "));
+    if (Array.isArray(facts.heuteSchueler) && facts.heuteSchueler.length) {
+      zeilen.push("Schüler mit Termin heute, je mit Ausbildungsstand:");
+      facts.heuteSchueler.forEach((s) => {
+        const teile = [];
+        if (typeof s.fortschritt === "number") teile.push("ADK/Strecken " + s.fortschritt + "%");
+        teile.push("Theorie " + (s.theorie ? "bestanden" : "offen"));
+        if (s.stand) teile.push(s.stand);
+        if (s.offenerBetrag > 0) teile.push("offener Betrag " + s.offenerBetrag.toFixed(2).replace(".", ",") + " €");
+        if (s.notiz) teile.push("Notiz von der letzten Stunde: \"" + s.notiz + "\"");
+        zeilen.push("- " + s.zeit + " " + s.name + ": " + teile.join(", "));
+      });
+    }
     if (typeof facts.pendingAnzahl === "number") zeilen.push("Offene Terminanfragen: " + facts.pendingAnzahl);
     if (typeof facts.abbruchAnzahl === "number" && facts.abbruchAnzahl > 0) {
       zeilen.push("Schüler mit erhöhtem Abbruch-Risiko (lange kein Termin + offener Betrag): " + facts.abbruchAnzahl
@@ -180,14 +191,16 @@ ${datenText}`;
     if (typeof facts.fristenAnzahl === "number" && facts.fristenAnzahl > 0) zeilen.push("Bald ablaufende Fristen (TÜV/Löschfristen): " + facts.fristenAnzahl);
     if (typeof facts.offenAnzahl === "number" && facts.offenAnzahl > 0) zeilen.push("Schüler mit offenem Betrag: " + facts.offenAnzahl);
     datenText = zeilen.length ? zeilen.join("\n") : "Keine besonderen Punkte für heute.";
-    system = `Du schreibst ein kurzes Tages-Briefing für den Fahrlehrer der Fahrschule "${schoolFacts.school_name}". Er sieht diese Daten bereits als Kacheln in seinem Dashboard - du fasst sie nur in 2-3 freundlichen, natürlich klingenden Sätzen auf Deutsch zusammen, als würde ein Kollege kurz Bescheid geben.
+    system = `Du schreibst ein kurzes Tages-Briefing für den Fahrlehrer der Fahrschule "${schoolFacts.school_name}". Er sieht die reinen Zahlen bereits als Kacheln in seinem Dashboard - dein Mehrwert ist die Einordnung: was die heutigen Termine angesichts des Ausbildungsstands der jeweiligen Schüler bedeuten, und eine konkrete Empfehlung, was als Nächstes sinnvoll ist.
 
 Regeln, unbedingt einhalten:
-1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Namen, Zahlen oder Ereignisse, die dort nicht stehen.
-2. Wenn "Keine besonderen Punkte für heute" dabeisteht, schreib einen kurzen, entspannten Satz dazu - keine Sorge machen, wo keine Daten sind.
-3. Priorisiere: Abbruch-Risiko und offene Anfragen zuerst (die brauchen am ehesten eine Reaktion), reine Terminzahlen zuletzt.
-4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
-5. Keine Ratschläge zu Rechtsfragen oder Prüfungen erfinden.
+1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Namen, Zahlen, Ausbildungsstände oder Ereignisse, die dort nicht stehen.
+2. Geh auf die Schüler mit Termin heute ein, wenn welche da sind: was fällt an ihrem Stand auf (z.B. kurz vor Prüfreife, Theorie noch offen, ein offener Betrag, eine Notiz von der letzten Stunde, die für die heutige Stunde relevant sein könnte)? Nicht jeden Schüler einzeln abarbeiten, sondern das Auffälligste herausgreifen.
+3. Schließe mit EINER knappen, konkreten Handlungsempfehlung ab, was der Fahrlehrer als Nächstes tun sollte (z.B. "bei X die Praxisprüfung anmelden", "bei Y nach dem offenen Betrag fragen") - nur wenn sich das direkt aus den Daten ableiten lässt, sonst weglassen statt zu erfinden.
+4. Wenn "Keine besonderen Punkte für heute" dabeisteht, schreib einen kurzen, entspannten Satz dazu - keine Sorge machen, wo keine Daten sind.
+5. Priorisiere: Abbruch-Risiko und offene Anfragen vor reinen Terminzahlen.
+6. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen. 3-4 Sätze insgesamt.
+7. Keine Ratschläge zu Rechtsfragen erfinden.
 
 Die Daten von heute:
 ${datenText}`;
@@ -202,8 +215,11 @@ ${datenText}`;
         "anthropic-version": "2023-06-01",
       },
       // 250 war bei "statistik" (bis zu 7 einzelne Kennzahlen) manchmal zu knapp und schnitt den
-      // letzten Satz mitten im Wort ab - 350 gibt Luft, ohne dass die Texte spürbar länger werden.
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 350, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
+      // letzten Satz mitten im Wort ab - 350 gab Luft. "morning" analysiert jetzt zusätzlich die
+      // Schüler von heute samt Handlungsempfehlung (3-4 statt 2-3 Sätze) - 450 für denselben
+      // Sicherheitsabstand wie beim 350er-Hotfix, gilt für alle "kind"s gemeinsam (kürzere Texte
+      // brauchen die Reserve einfach nicht aus).
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 450, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
     });
     const data = await resp.json();
     if (!resp.ok) {
