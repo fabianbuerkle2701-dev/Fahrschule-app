@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.133.0";
+const APP_VERSION = "1.134.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.134.0", date: "August 2026", changes: [
+            "Neu: Beim Melden eines Nichterscheinens optional direkt eine Ausfallgebühr aufs Konto des Schülers buchen - Betrag mit Vorschlag (halber Stundenpreis), lässt sich frei anpassen oder ganz weglassen",
+        ] },
     { v: "1.133.0", date: "August 2026", changes: [
             "Neu: „Zuverlässigkeit\" beim Schüler - ein Klick meldet, wenn jemand nicht zur Fahrstunde erschienen ist (mit optionaler Notiz). Zählt sichtbar hoch, in der Schülerliste als kleine Markierung, damit ein Muster auffällt, bevor wieder eine Stunde verschenkt wird",
         ] },
@@ -10528,9 +10531,27 @@ function App() {
         const note = await askPrompt({ message: "Nicht erschienen am " + new Date().toLocaleDateString("de-DE") + " – Notiz (optional):" });
         if (note === null)
             return;
+        // Gebühr wird bewusst VOR dem einzigen updateActive()-Aufruf erfragt (nicht danach): zwei
+        // sequenzielle updateActive()-Aufrufe in einer Funktion würden beide vom selben, zu Beginn
+        // des Renders eingefrorenen "active" ausgehen - der zweite Aufruf hätte damit die Änderung
+        // des ersten wieder überschrieben, statt sie zu ergänzen.
+        const chargeFee = await askConfirm({ message: "Soll dafür eine Ausfallgebühr auf das Konto von " + dispName(active) + " gebucht werden?" });
+        let amount = null;
+        if (chargeFee) {
+            const suggestion = pricePerHour ? (Number(pricePerHour) / 2).toFixed(2).replace(".", ",") : "";
+            const amountStr = await askPrompt({ message: "Höhe der Ausfallgebühr (€):", defaultValue: suggestion });
+            if (amountStr !== null) {
+                const parsed = parseFloat((amountStr || "").replace(",", "."));
+                if (!isNaN(parsed) && parsed > 0)
+                    amount = parsed;
+            }
+        }
         const entry = { id: uniqueId("ns"), date: ymd(new Date()), note: note.trim() };
-        updateActive({ noShows: [...(active.noShows || []), entry] });
-        showFlash("✓ Vermerkt");
+        const patch = { noShows: [...(active.noShows || []), entry] };
+        if (amount !== null)
+            patch.costItems = [...(active.costItems || []), { label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE"), amount }];
+        updateActive(patch);
+        showFlash(amount !== null ? "✓ Vermerkt + Gebühr gebucht" : "✓ Vermerkt");
     }
     function removeNoShow(id) {
         updateActive({ noShows: (active.noShows || []).filter(n => n.id !== id) });
