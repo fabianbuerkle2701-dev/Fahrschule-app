@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.143.0";
+const APP_VERSION = "1.144.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.144.0", date: "August 2026", changes: [
+            "Neu: Mahnungen-Cockpit auf der Startseite - eine neue Karte zeigt alle überfälligen Rechnungen schulweit auf einen Blick (Schüler, Rechnung, Tage überfällig, offener Betrag), statt sie nur einzeln in der Abrechnung zu sehen. „Erinnern\" öffnet wie gewohnt WhatsApp mit einem fertigen Text zum Prüfen vor dem Senden - nichts wird automatisch verschickt",
+        ] },
     { v: "1.143.0", date: "August 2026", changes: [
             "Neu: „Interessent aus Screenshot\" - lädt ein Foto einer Kontaktanfrage (WhatsApp, Instagram-DM, Kontaktformular) hoch, die KI liest Name, Telefon, gewünschte Klasse und eine kurze Notiz aus und öffnet direkt das Interessent-Formular zum Prüfen und Anlegen",
         ] },
@@ -6552,6 +6555,7 @@ function App() {
     const [erinnerungen, setErinnerungen] = useState(false); // Liste "Erinnerungen für morgen" auf der Startseite
     const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
     const [paketKnappOpen, setPaketKnappOpen] = useState(false); // Liste "Paket-Guthaben knapp" auf der Startseite
+    const [mahnCockpit, setMahnCockpit] = useState(false); // Liste "Überfällige Rechnungen" (Mahnungen-Cockpit) auf der Startseite
     const [routesMapOpen, setRoutesMapOpen] = useState(false); // Übersichtskarte "alle Strecken" bei Fahrstunden
     const [practiceLog, setPracticeLog] = useState(null); // {kind,item,sec} - Übungs-Verlauf eines Punkts ansehen/ergänzen, sonst null
     const [practiceLogEnabled, setPracticeLogEnabled] = useState(false); // persönliche Einstellung: Übungs-Verlauf-Feature an/aus
@@ -8182,6 +8186,49 @@ function App() {
             .filter(x => x.remaining != null && x.remaining <= 2)
             .sort((a, b) => a.remaining - b.remaining);
     }, [students]);
+    // Überfällige Rechnungen: dieselbe Berechnung wie in renderAbrechnungBody() ("Überfällig"),
+    // hier zusätzlich auf App()-Ebene dupliziert statt von dort importiert (bewusst - andere
+    // Render-Funktionen anzuzapfen ist genau der Fehler, der schon einmal den Fahrzeug-Kalender
+    // zum Absturz gebracht hat), damit auch die Startseite/das Mahnungen-Cockpit ohne Umweg über
+    // die Auswertung darauf zugreifen können. Bewusst NICHT über die schulweite "Offene Posten"-
+    // RPC gebaut: die kennt nur den rohen offenen Betrag, keine Rechnungsdaten (Datum, Fälligkeit),
+    // kann also gar nicht "überfällig" im eigentlichen Sinn (Zahlungsziel überschritten) bestimmen.
+    const ueberfaelligeRechnungen = React.useMemo(() => {
+        const ZAHLUNGSZIEL_TAGE = 14;
+        const heuteMs = Date.now();
+        const rows = [];
+        (students || []).filter(s => s._isMine).forEach(s => (s.invoices || []).forEach(inv => {
+            if (invoiceStatus(s, inv) === "bezahlt" || inv.cancelledBy || inv.stornoOf)
+                return;
+            const d = inv.date ? new Date(inv.date).getTime() : null;
+            if (!d)
+                return;
+            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
+            if (tage <= 0)
+                return;
+            rows.push({ inv, stu: s, tage, offen: invoiceOpen(s, inv), stufe: mahnstufe(tage) });
+        }));
+        return rows.sort((a, b) => b.tage - a.tage);
+    }, [students]);
+    // WhatsApp-Erinnerung für eine Zeile aus ueberfaelligeRechnungen - exakt dieselbe Text-/
+    // Freigabe-Logik wie erinnern()/erinnerungText() in renderAbrechnungBody(): solange
+    // ZAHLUNGSERINNERUNG_STUFEN_RELEASED false ist, immer der einfache, freundliche Einzelton-
+    // Text (nie mahnstufeText()); wird die Stufung später freigegeben, gilt das dann konsistent
+    // auch hier, statt zwei Stellen einzeln pflegen zu müssen.
+    function ueberfaelligErinnern(x) {
+        const num = waNumber(x.stu.tel);
+        if (!num) {
+            showToast("Für " + dispName(x.stu) + " ist keine Telefonnummer hinterlegt.");
+            return;
+        }
+        const datum = x.inv.date ? new Date(x.inv.date).toLocaleDateString("de-DE") : "";
+        const einfacherText = "Hallo " + ((x.stu.vorname || "").trim() || dispName(x.stu)) + ", "
+            + "kleine Erinnerung: die Rechnung " + x.inv.number + " vom " + datum
+            + " über " + eurFmt(x.offen) + " ist noch offen. "
+            + "Magst du das bei Gelegenheit erledigen? Danke dir! " + ((school && school.name) || "");
+        const text = ZAHLUNGSERINNERUNG_STUFEN_RELEASED ? mahnstufeText(x, school && school.name) : einfacherText;
+        window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+    }
     if (session === undefined)
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (session === null)
@@ -10524,28 +10571,34 @@ function App() {
             // per order:5/6 (bzw. umgekehrt ab 900px) ihre Position, alles andere bleibt beim
             // Default order:0 und würde sonst VOR den getauschten Block rutschen. order:7 stellt
             // sicher, dass "Diese Woche" auf beiden Breakpoints zuverlässig ganz unten bleibt.
-            (fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0 || erinnerungOffen > 0 || pendingCount > 0) && React.createElement("div", { className: "card", style: { padding: "3px 4px", marginTop: 4, overflow: "hidden", background: "var(--field-bg)", order: 7 } },
-                fristenRadar.length > 0 && React.createElement("button", { onClick: () => setFristenOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left" } },
+            (ueberfaelligeRechnungen.length > 0 || fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0 || erinnerungOffen > 0 || pendingCount > 0) && React.createElement("div", { className: "card", style: { padding: "3px 4px", marginTop: 4, overflow: "hidden", background: "var(--field-bg)", order: 7 } },
+                ueberfaelligeRechnungen.length > 0 && React.createElement("button", { onClick: () => setMahnCockpit(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left" } },
+                    icClock({ width: 16, height: 16, stroke: "var(--muted)" }),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
+                        (ueberfaelligeRechnungen.length === 1 ? "1 überfällige Rechnung" : ueberfaelligeRechnungen.length + " überfällige Rechnungen")
+                        + " · " + eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0))),
+                    chev),
+                fristenRadar.length > 0 && React.createElement("button", { onClick: () => setFristenOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: ueberfaelligeRechnungen.length > 0 ? "1px solid var(--line)" : "none" } },
                     icClock({ width: 16, height: 16, stroke: "var(--muted)" }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
                         fristenRadar.length === 1 ? "1 Frist läuft bald ab" : fristenRadar.length + " Fristen laufen bald ab"),
                     chev),
-                paketKnapp.length > 0 && React.createElement("button", { onClick: () => setPaketKnappOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: fristenRadar.length > 0 ? "1px solid var(--line)" : "none" } },
+                paketKnapp.length > 0 && React.createElement("button", { onClick: () => setPaketKnappOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (ueberfaelligeRechnungen.length > 0 || fristenRadar.length > 0) ? "1px solid var(--line)" : "none" } },
                     icClock({ width: 16, height: 16, stroke: "var(--muted)" }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
                         paketKnapp.length === 1 ? "1 Paket-Guthaben knapp" : paketKnapp.length + " Paket-Guthaben knapp"),
                     chev),
-                stillCount > 0 && React.createElement("button", { onClick: () => setStillOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (fristenRadar.length > 0 || paketKnapp.length > 0) ? "1px solid var(--line)" : "none" } },
+                stillCount > 0 && React.createElement("button", { onClick: () => setStillOpen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (ueberfaelligeRechnungen.length > 0 || fristenRadar.length > 0 || paketKnapp.length > 0) ? "1px solid var(--line)" : "none" } },
                     icClock({ width: 16, height: 16, stroke: "var(--muted)" }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
                         stillCount === 1 ? "1 Schüler lange nicht gefahren" : stillCount + " Schüler lange nicht gefahren"),
                     chev),
-                erinnerungOffen > 0 && React.createElement("button", { onClick: () => setErinnerungen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0) ? "1px solid var(--line)" : "none" } },
+                erinnerungOffen > 0 && React.createElement("button", { onClick: () => setErinnerungen(true), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (ueberfaelligeRechnungen.length > 0 || fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0) ? "1px solid var(--line)" : "none" } },
                     icClock({ width: 16, height: 16, stroke: "var(--muted)" }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
                         erinnerungOffen === 1 ? "1 Fahrstunde morgen erinnern" : erinnerungOffen + " Fahrstunden morgen erinnern"),
                     chev),
-                pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "home-pending-banner", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0 || erinnerungOffen > 0) ? "1px solid var(--line)" : "none" } },
+                pendingCount > 0 && React.createElement("button", { onClick: () => setView("kalender"), className: "home-pending-banner", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left", borderTop: (ueberfaelligeRechnungen.length > 0 || fristenRadar.length > 0 || paketKnapp.length > 0 || stillCount > 0 || erinnerungOffen > 0) ? "1px solid var(--line)" : "none" } },
                     icCal({ width: 16, height: 16, stroke: "var(--orange-deep)" }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
                         pendingCount === 1 ? "1 offener Terminvorschlag" : pendingCount + " offene Terminvorschläge"),
@@ -18311,6 +18364,33 @@ function App() {
                             React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0 } }, x.remaining <= 0 ? "aufgebraucht" : "noch " + ueFmt(x.remaining) + " UE"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setPaketKnappOpen(false) }, "Schlie\u00DFen"))),
+        mahnCockpit && React.createElement("div", { onClick: () => setMahnCockpit(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 } },
+                    React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, "\u00DCberf\u00E4llige Rechnungen"),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)))),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + 14 + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
+                ueberfaelligeRechnungen.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell ist nichts \u00FCberf\u00E4llig.")
+                    : ueberfaelligeRechnungen.map(x => React.createElement("div", { key: x.inv.id, className: "card", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 8 } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, dispName(x.stu)),
+                                ZAHLUNGSERINNERUNG_STUFEN_RELEASED && x.stufe > 0 && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, letterSpacing: ".02em", padding: "2px 7px", borderRadius: 99,
+                                        background: x.stufe >= 3 ? "#FDECEA" : x.stufe === 2 ? "var(--orange-soft)" : "var(--field-bg)",
+                                        color: x.stufe >= 3 ? "#B3362A" : x.stufe === 2 ? "var(--orange-deep)" : "var(--muted)" } }, mahnstufeLabel(x.stufe))),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                x.inv.number,
+                                " \u00B7 ",
+                                React.createElement("span", { style: { color: "var(--amber)", fontWeight: 700 } },
+                                    x.tage === 1 ? "1 Tag \u00FCberf\u00E4llig" : x.tage + " Tage \u00FCberf\u00E4llig"))),
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0 } }, eurFmt(x.offen)),
+                        React.createElement("button", { onClick: () => ueberfaelligErinnern(x), className: "btn btn-ghost",
+                            style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: x.stu.tel ? "#128C3E" : "var(--muted)" } },
+                            "Erinnern"))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setMahnCockpit(false) }, "Schlie\u00DFen"))),
         handoverModal && React.createElement("div", { onClick: () => setHandoverModal(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
