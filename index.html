@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.135.0";
+const APP_VERSION = "1.136.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.136.0", date: "August 2026", changes: [
+            "Neu: „Fahrlehrer-Auslastung\" in der Auswertung (nur für Fahrschul-Admins, Mehrlehrer-Fahrschulen) - zeigt gefahrene Fahrstunden je Fahrlehrer der letzten 7 Tage, hilft bei der Verteilung der Arbeitslast im Team",
+        ] },
     { v: "1.135.0", date: "August 2026", changes: [
             "Neu: „Auslastung\" im Fuhrpark - zeigt je Fahrzeug die gebuchten Stunden im Fahrzeug-Kalender der letzten 30 Tage. Hilft einzuschätzen, welches Fahrzeug knapp wird, bevor eine Anschaffung ansteht",
         ] },
@@ -3592,6 +3595,15 @@ async function dbCancelInvoice(studentId, schoolId, invoiceId, reason) {
 // nur Klasse, Fahrlehrer-E-Mail und die Versuche selbst - keine Namen, siehe RPC-Kommentar.
 async function fetchSchoolExamStats(schoolId) {
     const { data, error } = await sb.rpc("school_exam_stats", { p_school_id: schoolId });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Daten konnten nicht geladen werden");
+    }
+    return data || [];
+}
+// Gefahrene Fahrstunden aller Schüler einer Fahrschule laden (für die Fahrlehrer-Auslastung).
+async function fetchSchoolTeacherHours(schoolId) {
+    const { data, error } = await sb.rpc("school_teacher_hours", { p_school_id: schoolId });
     if (error) {
         console.error(error);
         throw new Error(error.message || "Daten konnten nicht geladen werden");
@@ -11998,6 +12010,9 @@ function App() {
        Auswertungs-Seiten. Die einzelne Logik bleibt in renderStatistikBody()/
        renderPruefungsplanungBody()/renderAbrechnungBody() unverändert. ── */
     function renderAuswertung() {
+        // Lokal berechnet statt aus renderEinstellungen() importiert, aus demselben Grund wie bei
+        // renderFuhrpark() (siehe Changelog "Fehler canEditSchool").
+        const canEditSchool = isAdmin(session) || isSchoolAdmin;
         return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Auswertung"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Statistik, Prüfungsplanung und Abrechnung deiner Fahrschule an einem Ort."),
@@ -12006,7 +12021,10 @@ function App() {
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Prüfungsplanung"),
             renderPruefungsplanungBody(),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Abrechnung"),
-            renderAbrechnungBody());
+            renderAbrechnungBody(),
+            canEditSchool && school && school.id && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Fahrlehrer-Auslastung"),
+                React.createElement(FahrlehrerAuslastung, { schoolId: school.id })));
     }
     // Innerer Inhalt von Statistik OHNE eigenen Seitentitel - siehe renderAuswertung().
     function renderStatistikBody() {
@@ -22227,6 +22245,52 @@ function colorForName(name) {
 // Fahrzeug-Auslastung: gebuchte Stunden je Fahrzeug der letzten 30 Tage aus dem Fahrzeug-Kalender.
 // Eigene Komponente mit eigenem State (wie VehicleCalendar selbst), statt zusätzliche Hooks in
 // App() einzuschieben - so bleibt dessen bestehende Hook-Reihenfolge unangetastet.
+// Fahrlehrer-Auslastung: gefahrene Fahrstunden je Fahrlehrer der letzten 7 Tage, für
+// Mehrlehrer-Fahrschulen. Nutzt dieselbe schulweite RPC-Berechtigungsprüfung (Fahrschul-Admin
+// oder zentraler Admin) wie school_exam_stats/Quotenpilot - der Aufrufer hier gated zusätzlich
+// clientseitig auf canEditSchool, damit die RPC für nicht-Admins gar nicht erst versucht wird.
+function FahrlehrerAuslastung({ schoolId }) {
+    const [state, setState] = React.useState({ busy: true, error: "", rows: [] });
+    React.useEffect(() => {
+        if (!schoolId) { setState({ busy: false, error: "", rows: [] }); return; }
+        let on = true;
+        setState(s => ({ ...s, busy: true, error: "" }));
+        fetchSchoolTeacherHours(schoolId)
+            .then(rows => { if (on) setState({ busy: false, error: "", rows }); })
+            .catch(e => { if (on) setState({ busy: false, error: e.message || "Fehler beim Laden", rows: [] }); });
+        return () => { on = false; };
+    }, [schoolId]);
+    if (state.busy)
+        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0 } }, "Lädt…"));
+    if (state.error)
+        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "#B3362A", margin: 0 } }, state.error));
+    const heute = ymd(new Date());
+    const vor7 = ymd(new Date(Date.now() - 7 * 86400000));
+    const byTeacher = {};
+    state.rows.forEach(r => {
+        (r.driven_lessons || []).forEach(l => {
+            if (!l.date || l.date < vor7 || l.date > heute)
+                return;
+            byTeacher[r.teacher_id] = byTeacher[r.teacher_id] || { name: r.teacher_name, minutes: 0 };
+            byTeacher[r.teacher_id].minutes += Number(l.minutes) || 0;
+        });
+    });
+    const list = Object.values(byTeacher).map(t => ({ ...t, hours: t.minutes / 60 })).sort((a, b) => b.hours - a.hours);
+    if (list.length === 0)
+        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0 } }, "In den letzten 7 Tagen wurden noch keine Fahrstunden erfasst."));
+    const maxHours = Math.max(1, ...list.map(x => x.hours));
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+        list.map((t, i) => React.createElement("div", { key: t.name + i, style: { marginTop: i > 0 ? 12 : 0 } },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, gap: 8 } },
+                React.createElement("span", { style: { fontSize: 13, fontWeight: 600 } }, t.name),
+                React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", flexShrink: 0 } }, t.hours.toFixed(1).replace(".", ",") + " Std.")),
+            React.createElement("div", { style: { height: 7, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
+                React.createElement("div", { style: { height: "100%", width: (t.hours / maxHours * 100) + "%", background: "var(--orange)", borderRadius: 99 } })))),
+        React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "14px 0 0", lineHeight: 1.5 } }, "Gefahrene Fahrstunden je Fahrlehrer, letzte 7 Tage."));
+}
 function FahrzeugAuslastung({ code, vehicles }) {
     const [rows, setRows] = React.useState(null); // null=lädt, sonst Liste
     React.useEffect(() => {
