@@ -101,7 +101,7 @@ Wichtig zu "ratings": Bewerte NUR Bereiche (verkehr=Verkehrsbeobachtung, positio
 
   const payload = {
     model: "claude-sonnet-5",
-    max_tokens: 512,
+    max_tokens: 1024,
     messages: [
       {
         role: "user",
