@@ -1253,7 +1253,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.142.0";
+const APP_VERSION = "1.143.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1374,6 +1374,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.143.0", date: "August 2026", changes: [
+            "Neu: „Interessent aus Screenshot\" - lädt ein Foto einer Kontaktanfrage (WhatsApp, Instagram-DM, Kontaktformular) hoch, die KI liest Name, Telefon, gewünschte Klasse und eine kurze Notiz aus und öffnet direkt das Interessent-Formular zum Prüfen und Anlegen",
+        ] },
     { v: "1.142.0", date: "August 2026", changes: [
             "Profilbild auf der Startseite größer",
             "Tages-Briefing analysiert jetzt die Schüler mit Termin heute (Ausbildungsstand, Theorie, offener Betrag, Notiz von der letzten Stunde) und schließt mit einer konkreten Handlungsempfehlung statt nur die Namen aufzuzählen",
@@ -6721,6 +6724,10 @@ function App() {
     // null | {step:"form"|"sign", apptId, studentId, art, vehicleId, klasse, stufe, minutes, date, von, bis, price, priceAuto, note, signature}
     const [leistungForm, setLeistungForm] = useState(null);
     const [importState, setImportState] = useState(null); // null | {busy, error, data} Screenshot-Import
+    // Interessent aus Screenshot: bewusst kein eigener Vorschau-Schritt wie beim Schüler-Import
+    // - das bestehende interessentForm ist selbst schon editierbar, ein zusätzlicher
+    // Read-only-Vorschau-Schritt davor wäre nur ein weiterer Klick ohne echten Mehrwert.
+    const [interessentImport, setInteressentImport] = useState(null); // null | {busy, error}
     const [assistant, setAssistant] = useState(null); // null | {open, busy, error, input, proposal}
     const [calImport, setCalImport] = useState(null); // null | {busy, error, items} Kalender-Screenshot-Import
     const [adkImport, setAdkImport] = useState(null); // null | {busy, error, results} ADK-Karte-Screenshot-Import
@@ -7050,6 +7057,7 @@ function App() {
             else if (paymentForm) setPaymentForm(null);
             else if (leistungForm) setLeistungForm(null);
             else if (importState) setImportState(null);
+            else if (interessentImport) setInteressentImport(null);
             else if (proposeForm) setProposeForm(null);
             else if (birthdayPopup) setBirthdayPopup(null);
             else if (cityTplModal) setCityTplModal(null);
@@ -7080,7 +7088,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal]);
+    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -8434,6 +8442,41 @@ function App() {
         }
         catch (e) {
             setImportState({ busy: false, error: "Fehler: " + (e.message || "unbekannt") + "\n\nLäuft die App über Netlify mit eingerichteter Funktion?", data: null });
+        }
+    }
+    // Interessent aus Screenshot: liest Name/Telefon/Klasse/Notiz aus einem Foto oder Screenshot
+    // einer Kontaktanfrage und öffnet damit direkt das bestehende, editierbare Interessent-
+    // Formular - kein eigener Anlege-Schritt nötig, "Anlegen" dort übernimmt das schon.
+    async function handleInteressentImportFiles(fileList) {
+        const files = Array.from(fileList || []);
+        if (files.length === 0)
+            return;
+        setInteressentImport({ busy: true, error: "" });
+        try {
+            const images = [];
+            for (const f of files) {
+                images.push(await fileToDataUrl(f));
+            }
+            const resp = await fetch("/.netlify/functions/extract-interessent", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ images }),
+            });
+            const out = await resp.json();
+            if (!resp.ok) {
+                setInteressentImport({ busy: false, error: (out && out.error) || "Auslesen fehlgeschlagen" });
+                return;
+            }
+            const d = out.interessent || {};
+            setInteressentImport(null);
+            openInteressentForm({
+                vorname: d.vorname || "", name: d.name || "", tel: d.tel || "",
+                klasse: guessKlasseFromText(d.klasse, klassen) || klassen[0] || DEFAULT_KLASSE,
+                notiz: d.notiz || "", status: "offen", follow_up_am: "",
+            });
+        }
+        catch (e) {
+            setInteressentImport({ busy: false, error: "Fehler: " + (e.message || "unbekannt") + "\n\nLäuft die App über Netlify mit eingerichteter Funktion?" });
         }
     }
     // Kalender-Screenshot auslesen
@@ -12279,7 +12322,13 @@ function App() {
                 statTile(gesamt, "Gesamt", "var(--ink)"),
                 statTile(angemeldetAnzahl, "Angemeldet", "var(--green)"),
                 statTile(quote + "%", "Umwandlungsquote", "var(--orange-deep)")),
-            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 16 }, onClick: () => openInteressentForm(null) }, "+ Interessent"),
+            React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 16 } },
+                React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: () => openInteressentForm(null) }, "+ Interessent"),
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px", color: "var(--orange-deep)" }, onClick: () => setInteressentImport({ busy: false, error: "" }), "aria-label": "Interessent aus Screenshot" },
+                    React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
+                        React.createElement("circle", { cx: "9", cy: "9", r: "2" }),
+                        React.createElement("path", { d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" })))),
             sorted.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Interessenten erfasst.")
                 : sorted.map(it => {
@@ -17323,6 +17372,23 @@ function App() {
                     })(),
                     React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, onClick: () => createStudentFromImport(importState.data) }, "Sch\u00FCler anlegen"),
                     React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setImportState({ busy: false, error: "", data: null }) }, "Anderen Screenshot")))),
+        // Interessent aus Screenshot: kein Vorschau-Schritt hier (anders als beim Sch\u00FCler-Import
+        // oben) - erfolgreiches Auslesen schlie\u00DFt dieses Modal direkt und \u00F6ffnet stattdessen das
+        // schon editierbare interessentForm, siehe handleInteressentImportFiles().
+        interessentImport && React.createElement("div", { onClick: () => { if (!interessentImport.busy)
+                setInteressentImport(null); }, className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88vh", overflowY: "auto" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6 } }, "Interessent aus Screenshot"),
+                !interessentImport.busy && React.createElement("div", null,
+                    React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, "Lade ein Foto oder einen Screenshot einer Kontaktanfrage hoch (z.B. WhatsApp, Instagram-DM, Kontaktformular). Name, Telefon, gew\u00FCnschte Klasse und eine kurze Notiz werden automatisch ausgelesen - du pr\u00FCfst und erg\u00E4nzt sie danach im gewohnten Formular."),
+                    React.createElement("label", { className: "btn btn-primary btn-block", style: { cursor: "pointer", marginBottom: 10 } },
+                        "Screenshot ausw\u00E4hlen",
+                        React.createElement("input", { type: "file", accept: "image/*", multiple: true, style: { display: "none" }, onChange: e => { const fs = Array.from(e.target.files || []); e.target.value = ""; handleInteressentImportFiles(fs); } })),
+                    interessentImport.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", background: "#FDECEA", borderRadius: 10, padding: "10px 12px", marginBottom: 10, whiteSpace: "pre-wrap" } }, interessentImport.error),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setInteressentImport(null) }, "Abbrechen")),
+                interessentImport.busy && React.createElement("div", { style: { padding: "30px 10px", textAlign: "center" } },
+                    React.createElement("div", { style: { fontSize: 14, color: "var(--muted)" } }, "Screenshot wird ausgelesen\u2026"),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6 } }, "Das dauert ein paar Sekunden.")))),
         lessonForm && React.createElement("div", { onClick: () => setLessonForm(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, lessonForm.id ? "Fahrstunde bearbeiten" : "Fahrstunde erfassen"),
