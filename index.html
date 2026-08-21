@@ -1286,7 +1286,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.152.0";
+const APP_VERSION = "1.153.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1407,6 +1407,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.153.0", date: "August 2026", changes: [
+            "Neu: ADK/Strecken-Vorschlag aus der Fahrstunde - im Fahrstunden-Tagebuch schlägt die KI anhand von Thema, \"was lief gut\" und \"was lief schlecht\" vor, welche ADK- oder Strecken-Punkte in dieser Stunde wahrscheinlich geübt wurden. Bewusst zurückhaltender als der bestehende Foto-Import (ein Stichwort ist eine schwächere Grundlage als eine ausgefüllte Karte): jeder Vorschlag ist standardmäßig nicht angehakt, der Fahrlehrer wählt selbst aus, was er übernimmt",
+        ] },
     { v: "1.152.0", date: "August 2026", changes: [
             "Neu: Beleg-Foto → Kostenposition - bei \"Fahrten & Kosten\" ein Foto eines Kassenbons oder einer Quittung aufnehmen, die KI liest Bezeichnung und Betrag aus und öffnet damit vorbefüllt das gewohnte \"Posten hinzufügen\"-Formular zum Prüfen. Gespeichert wird wie immer erst mit Antippen von \"Hinzufügen\"",
         ] },
@@ -8823,8 +8826,61 @@ function App() {
             }
         });
         updateActive({ items, strecken, adkDates });
+        const warSource = adkImport.source;
         setAdkImport(null);
-        showFlash("✓ ADK-Karte übertragen, bitte kurz prüfen");
+        showFlash(warSource === "lesson" ? "✓ Punkte übertragen, bitte kurz prüfen" : "✓ ADK-Karte übertragen, bitte kurz prüfen");
+    }
+    // KI-Vorschlag aus der Fahrstunde: schlägt anhand von Thema/gut/schlecht vor, welche ADK/
+    // Strecken-Punkte wahrscheinlich geübt wurden - deutlich schwächere Grundlage als ein
+    // tatsächlich fotografiertes, ausgefülltes Kärtchen (dort liest die KI eine reale Markierung
+    // ab, hier rät sie aus Freitext). Deshalb: anders als beim Foto-Import defaultet jede Zeile
+    // auf take:false (siehe applyAdkImport/renderResults weiter unten) - der Fahrlehrer muss
+    // jeden Punkt selbst anhaken, nichts wird vorausgewählt. targetDone erhöht sich immer nur um
+    // einen Schritt (ein weiteres Mal geübt), nie auf eine geratene absolute Zahl.
+    async function suggestAdkFromLesson(l) {
+        if (!active)
+            return;
+        const phrase = [l.thema, l.gut, l.schlecht].filter(Boolean).join(". ");
+        if (!phrase.trim())
+            return;
+        setAdkImport({ busy: true, error: "", results: null, source: "lesson" });
+        try {
+            const sections = [
+                ...tplFor(active.klasse).adk.map(sec => ({ id: "adk:" + sec.id, title: sec.title,
+                    items: sec.items.map(it => ({ id: it.id, label: it.label })) })),
+                ...tplFor(active.klasse).strecken.map(sec => ({ id: "strecken:" + sec.id, title: sec.title,
+                    items: sec.items.map(it => ({ id: it.id, label: it.label })) })),
+            ];
+            const resp = await fetch("/.netlify/functions/suggest-adk-items", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ thema: l.thema || "", gut: l.gut || "", schlecht: l.schlecht || "", sections }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out) {
+                setAdkImport({ busy: false, error: (out && out.error) || "Vorschlag fehlgeschlagen", results: null, source: "lesson" });
+                return;
+            }
+            const raw = Array.isArray(out.points) ? out.points : [];
+            const results = raw.map((p, idx) => {
+                const [kind, secId] = String(p.sectionId || "").split(":");
+                const list = kind === "adk" ? tplFor(active.klasse).adk : (kind === "strecken" ? tplFor(active.klasse).strecken : null);
+                const sec = list ? list.find(s => s.id === secId) : null;
+                const item = sec ? (sec.items || []).find(it => it.id === p.pointId) : null;
+                if (!sec || !item)
+                    return null;
+                const c = effCount(active, item);
+                const currentDone = kind === "adk" || sec.usesAdkStore ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0);
+                const targetDone = Math.min(c, currentDone + 1);
+                return { idx, kind, sectionId: secId, sectionTitle: sec.title, pointId: item.id, label: item.label,
+                    count: c, currentDone, targetDone, confidence: p.confidence || "mittel",
+                    usesAdkStore: !!sec.usesAdkStore, take: false };
+            }).filter(Boolean).filter(r => r.targetDone !== r.currentDone);
+            setAdkImport({ busy: false, error: "", results, note: out.note || "", source: "lesson" });
+        }
+        catch (e) {
+            setAdkImport({ busy: false, error: "Fehler: " + (e.message || "unbekannt"), results: null, source: "lesson" });
+        }
     }
     // Aus den ausgelesenen Daten einen Schüler anlegen
     async function createStudentFromImport(d) {
@@ -12041,7 +12097,8 @@ function App() {
                                 React.createElement("label", { className: "ls-lbl" }, "Weitere Notizen"),
                                 React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
                                         updateLesson(l.id, { note: e.target.value }); }, placeholder: "Sonstiges\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
-                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })))));
+                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }))),
+                            (l.thema || l.gut || l.schlecht) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 4 }, onClick: () => suggestAdkFromLesson(l) }, "✨ ADK/Strecken-Vorschlag aus dieser Stunde")));
             }));
     }
     // ── Rechnungen ──
@@ -17766,22 +17823,25 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(18px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "ADK-Karte aus Foto"),
-                !adkImport.results && !adkImport.busy && !adkImport.error && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 } }, "Foto der ausgef\u00FCllten Karte oder Screenshot. Jeder erkannte Punkt wird einzeln \u00FCbernommen."),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, adkImport.source === "lesson" ? "\u2728 ADK-Vorschlag aus der Stunde" : "ADK-Karte aus Foto"),
+                !adkImport.results && !adkImport.busy && !adkImport.error && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 } },
+                    adkImport.source === "lesson" ? "Schl\u00E4gt anhand von Thema, gut/schlecht der Stunde vor, welche Punkte wahrscheinlich ge\u00FCbt wurden. Jeder Vorschlag muss einzeln best\u00E4tigt werden." : "Foto der ausgef\u00FCllten Karte oder Screenshot. Jeder erkannte Punkt wird einzeln \u00FCbernommen."),
                 adkImport.busy && React.createElement("div", { style: { padding: "30px 10px", textAlign: "center" } },
-                    React.createElement("div", { style: { fontSize: 14, color: "var(--muted)" } }, "Karte wird ausgelesen\u2026")),
+                    React.createElement("div", { style: { fontSize: 14, color: "var(--muted)" } }, adkImport.source === "lesson" ? "Vorschl\u00E4ge werden erstellt\u2026" : "Karte wird ausgelesen\u2026")),
                 adkImport.error && !adkImport.busy && React.createElement("div", null,
                     React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", background: "#FDECEA", borderRadius: 10, padding: "10px 12px", margin: "10px 0", whiteSpace: "pre-wrap" } }, adkImport.error),
                     React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAdkImport(null) }, "Schlie\u00DFen")),
                 adkImport.results && !adkImport.busy && React.createElement("div", null, adkImport.results.length === 0
                     ? React.createElement("div", { style: { padding: "16px 4px" } },
                         React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", marginBottom: 14 } },
-                            "Ich konnte keine Punkte erkennen.",
+                            adkImport.source === "lesson" ? "Aus dem Stundentext lie\u00DF sich kein passender Punkt ableiten." : "Ich konnte keine Punkte erkennen.",
                             adkImport.note ? " " + adkImport.note : ""),
                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAdkImport(null) }, "Schlie\u00DFen"))
                     : React.createElement("div", null,
                         React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } },
-                            "Bitte pr\u00FCfen, gerade bei handschriftlichen Karten kann die Erkennung daneben liegen. H\u00E4kchen entfernen, was nicht \u00FCbernommen werden soll. Vorher zeigt den aktuellen Stand von ",
+                            adkImport.source === "lesson"
+                                ? "Bitte pr\u00FCfen - ein Stichwort ist eine schw\u00E4chere Grundlage als eine ausgef\u00FCllte Karte. H\u00E4kchen setzen, was du \u00FCbernehmen willst. Vorher zeigt den aktuellen Stand von "
+                                : "Bitte pr\u00FCfen, gerade bei handschriftlichen Karten kann die Erkennung daneben liegen. H\u00E4kchen entfernen, was nicht \u00FCbernommen werden soll. Vorher zeigt den aktuellen Stand von ",
                             active ? ((active.vorname || "") + " " + (active.name || "")) : "diesem Schüler",
                             "."),
                         adkImport.note && React.createElement("div", { style: { fontSize: 12, color: "var(--amber)", marginBottom: 12 } }, adkImport.note),
