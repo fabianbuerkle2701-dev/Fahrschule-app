@@ -1286,7 +1286,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.149.0";
+const APP_VERSION = "1.150.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1407,6 +1407,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.150.0", date: "August 2026", changes: [
+            "Neu: KI-Eltern-Update bei den Begleitfahrten - eine kurze, warme WhatsApp-Nachricht mit dem aktuellen Ausbildungsstand, einem konkreten Rückblick auf die letzten Fahrstunden und einem Vorschlag für die nächste gemeinsame Übung aus der schon vorhandenen Begleitfahrten-Übungssammlung. Optionale eigene Telefonnummer für Eltern/Begleitperson hinterlegbar, sonst wird die Nummer des Schülers verwendet. WhatsApp öffnet sich erst nach bewusstem Antippen",
+        ] },
     { v: "1.149.0", date: "August 2026", changes: [
             "Neu: KI-Prüfreife-Einschätzung in der Prüfungsplanung eines Schülers - anders als die bisherige Ampel (reiner Prozent-Check auf ADK/Strecken/Theorie) liest die KI zusätzlich die weichen Signale mit, die eine Prozentzahl nicht erfasst: wiederkehrende Schwächen aus dem Fahrtenbuch, wiederkehrende schwere Fehler aus der Prüfungssimulation, Sonderfahrten-Bilanz und Theorie-Übungsstand. Ergebnis ist eine konkrete, begründete Empfehlung samt nächsten Schritten - ausdrücklich eine Einschätzung, keine Zusicherung, die Entscheidung bleibt beim Fahrlehrer",
         ] },
@@ -9071,6 +9074,48 @@ function App() {
             setHandoverModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
         }
     }
+    // Leichtes, warmes Datenpaket für ein Eltern-/Begleitpersonen-Update - bewusst NICHT das
+    // vollständige, teacher-interne buildHandoverPayload() (keine Fehlerschwere-Codes aus der
+    // Prüfungssimulation, keine klinisch formulierten "wiederkehrende Schwächen"-Listen - das ist
+    // interne Fachsprache, keine Familien-Kommunikation). Nimmt zusätzlich die letzten 3 Themen
+    // MIT "gut" und "schlecht" im Original-Wortlaut mit, damit die KI konkret anknüpfen kann, und
+    // die bereits vorhandene Begleitfahrten-Übungssammlung (BEGLEIT_UEBUNGEN) als mögliche
+    // nächste gemeinsame Übung.
+    function buildElternUpdatePayload(stu) {
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const diaryRecent = (stu.lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 3)
+            .map(l => ({ datum: l.date, thema: l.thema || "", gut: l.gut || "", schlecht: l.schlecht || "" }));
+        return {
+            name: dispName(stu),
+            vorname: (stu.vorname || "").trim() || dispName(stu),
+            klasse: vk,
+            gesamtProzent: Math.round(gesamtPct(stu)),
+            theorieBestanden: !!stu.theorie,
+            fahrstunden: (stu.drivenLessons || []).length,
+            letzteThemen: diaryRecent,
+            begleitfahrtenKm: (stu.begleitfahrten || []).reduce((s, f) => s + (Number(f.km) || 0), 0),
+            moeglicheUebungen: BEGLEIT_UEBUNGEN.map(u => ({ key: u.k, titel: u.t, stufe: u.stufe, ziel: u.ziel })),
+        };
+    }
+    async function generateElternUpdate(stu) {
+        setHandoverModal({ busy: true, text: "", error: "", name: dispName(stu), stu, kind: "eltern" });
+        try {
+            const resp = await fetch("/.netlify/functions/eltern-update", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ student: buildElternUpdatePayload(stu) }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out || !out.text) {
+                setHandoverModal(m => ({ ...m, busy: false, error: (out && out.error) || "Entwurf fehlgeschlagen" }));
+                return;
+            }
+            setHandoverModal(m => ({ ...m, busy: false, text: out.text }));
+        }
+        catch (e) {
+            setHandoverModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+        }
+    }
     async function generateHandoverSummary(stu) {
         setHandoverModal({ busy: true, text: "", error: "", name: dispName(stu), stu });
         try {
@@ -13513,6 +13558,15 @@ function App() {
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12, flexShrink: 0, color: einweisung ? "#B3362A" : "var(--orange-deep)" }, onClick: toggleEinweisung },
                         einweisung ? "Zurücknehmen" : "Eintragen")),
                 bereitGenehmigung && React.createElement("p", { style: { fontSize: 12, color: "var(--sage-deep)", fontWeight: 600, marginTop: 8 } }, "Alle Voraussetzungen erfüllt – bereit für den Genehmigungsantrag, sobald die Erprobung gilt.")),
+            React.createElement("div", { className: "card", style: { padding: "15px 16px", marginBottom: 14 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 4 } }, "✨ Eltern-Update"),
+                React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 } }, "KI schlägt eine kurze WhatsApp-Nachricht mit dem aktuellen Ausbildungsstand und einer passenden gemeinsamen Übung vor - du prüfst den Text und öffnest WhatsApp erst per Antippen."),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", null, "Telefonnummer Eltern/Begleitperson (optional)"),
+                    React.createElement("input", { type: "tel", defaultValue: active.elternTel || "", placeholder: "sonst wird die Nummer des Schülers verwendet",
+                        onBlur: e => { if (e.target.value !== (active.elternTel || ""))
+                            updateActive({ elternTel: e.target.value }); } })),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => generateElternUpdate(active) }, "✨ Eltern-Update erstellen")),
             React.createElement("div", { className: "card", style: { padding: "15px 16px", marginBottom: 14, borderLeft: "4px solid " + (auffaellig.length > 0 ? "var(--orange)" : "var(--sage-deep)") } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: 8 } },
                     React.createElement("span", { style: { fontSize: 18 } }, auffaellig.length > 0 ? "⚠️" : "✅"),
@@ -18865,22 +18919,28 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, handoverModal.kind === "pruefreife" ? "\u2728 KI-Pr\u00FCfreife-Einsch\u00E4tzung" : "KI-\u00DCbergabe-Einsch\u00E4tzung"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } },
+                    handoverModal.kind === "pruefreife" ? "\u2728 KI-Pr\u00FCfreife-Einsch\u00E4tzung" : handoverModal.kind === "eltern" ? "\u2728 Eltern-Update" : "KI-\u00DCbergabe-Einsch\u00E4tzung"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, handoverModal.name || ""),
                 handoverModal.busy
-                    ? React.createElement("div", { style: { padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Erstellt Einsch\u00E4tzung\u2026")
+                    ? React.createElement("div", { style: { padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, handoverModal.kind === "eltern" ? "Erstellt Update\u2026" : "Erstellt Einsch\u00E4tzung\u2026")
                     : handoverModal.error
                         ? React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 13.5, color: "#B3362A" } }, handoverModal.error)
                         : React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" } }, handoverModal.text),
-                !handoverModal.busy && !handoverModal.error && handoverModal.text && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 },
-                        onClick: async () => { try {
-                            await navigator.clipboard.writeText(handoverModal.text);
-                            showFlash("\u2713 In die Zwischenablage kopiert");
-                        }
-                        catch (e) {
-                            showToast("Kopieren nicht m\u00F6glich - bitte Text von Hand markieren.");
-                        } } }, "Text kopieren"),
-                !handoverModal.busy && !handoverModal.error && handoverModal.text && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => doPrint("handover") }, "Als PDF drucken"),
+                handoverModal.kind === "eltern"
+                    ? (!handoverModal.busy && !handoverModal.error && handoverModal.text && (waNumber((handoverModal.stu && handoverModal.stu.elternTel) || (handoverModal.stu && handoverModal.stu.tel))
+                        ? React.createElement("a", { href: "https://wa.me/" + waNumber((handoverModal.stu.elternTel) || (handoverModal.stu.tel)) + "?text=" + encodeURIComponent(handoverModal.text),
+                                target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginTop: 12, textAlign: "center" } }, "In WhatsApp \u00F6ffnen")
+                        : React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginTop: 12 } }, "Keine Telefonnummer hinterlegt - Text unten markieren und kopieren.")))
+                    : (!handoverModal.busy && !handoverModal.error && handoverModal.text && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 },
+                            onClick: async () => { try {
+                                await navigator.clipboard.writeText(handoverModal.text);
+                                showFlash("\u2713 In die Zwischenablage kopiert");
+                            }
+                            catch (e) {
+                                showToast("Kopieren nicht m\u00F6glich - bitte Text von Hand markieren.");
+                            } } }, "Text kopieren")),
+                !handoverModal.busy && !handoverModal.error && handoverModal.text && handoverModal.kind !== "eltern" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => doPrint("handover") }, "Als PDF drucken"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setHandoverModal(null) }, "Schlie\u00DFen"))),
         interessentForm && React.createElement("div", { onClick: () => { if (!interessentForm.busy)
                     setInteressentForm(null); }, className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
