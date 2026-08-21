@@ -56,32 +56,32 @@ exports.handler = async function (event) {
     return { type: "image", source: { type: "base64", media_type: mediaType, data } };
   });
 
-  const system = `Du liest ein Foto oder einen Screenshot einer ausgefüllten ADK-Karte (Ausbildungsdiagrammkarte) einer Fahrschule aus. Das kann eine handschriftlich abgehakte Papierkarte sein (Kreuze, Kästchen, Datum bei einzelnen Punkten) oder ein Screenshot einer anderen App mit Fortschrittsbalken oder Prozentangaben.
+  const system = `Du liest ein Foto oder einen Screenshot einer ausgefüllten ADK-Karte (Ausbildungsdiagrammkarte) einer Fahrschule aus. Das kann eine handschriftlich abgehakte Papierkarte sein (Kreuze, Kästchen, Datum bei einzelnen Punkten) oder ein Screenshot einer anderen App mit Fortschrittsanzeige je Punkt.
 
-Bekannte Abschnitte, denen du die erkannten Bereiche zuordnen sollst (falls ein Abschnitt auf dem Bild keinem dieser bekannten Abschnitte eindeutig entspricht, lass ihn weg, erfinde keinen neuen):
-${JSON.stringify(sections.map((s) => ({ id: s.id, title: s.title, kind: s.kind })))}
+Bekannte Abschnitte mit ihren einzelnen Punkten, denen du die erkannten Markierungen zuordnen sollst (falls ein Punkt auf dem Bild keinem dieser bekannten Punkte eindeutig entspricht, lass ihn weg, erfinde keinen neuen). "count" gibt an, wie oft dieser Punkt insgesamt abgehakt werden kann:
+${JSON.stringify(sections.map((s) => ({ id: s.id, title: s.title, kind: s.kind, items: (s.items || []).map((it) => ({ id: it.id, label: it.label, count: it.count })) })))}
 
-Schätze für jeden erkennbaren Abschnitt, wie viel Prozent davon laut dem Bild bereits erledigt ist. Bei einer handschriftlichen Karte zählst du die abgehakten/ausgefüllten Kästchen im Verhältnis zu allen Kästchen dieses Abschnitts. Bei einem Screenshot mit Prozentanzeige oder Fortschrittsbalken liest du den Wert direkt ab.
+Schätze für jeden erkennbaren Punkt, wie oft er laut dem Bild bereits erledigt/abgehakt wurde (eine ganze Zahl von 0 bis maximal dem "count" dieses Punkts). Zähle bei einer handschriftlichen Karte die abgehakten Kästchen oder Datumseinträge dieses Punkts. Bei einem Screenshot mit Fortschrittsanzeige leitest du die Anzahl aus der Anzeige ab.
 
 Gib ein JSON-Objekt in genau diesem Format zurück, kein Text, keine Backticks:
 {
-  "results": [
-    { "sectionId": "<id aus der bekannten Liste>", "percent": <Zahl 0-100>, "confidence": "hoch"|"mittel"|"niedrig" }
+  "points": [
+    { "sectionId": "<id des Abschnitts aus der bekannten Liste>", "pointId": "<id des Punkts aus diesem Abschnitt>", "done": <Zahl 0 bis count>, "confidence": "hoch"|"mittel"|"niedrig" }
   ],
   "note": "<kurzer Hinweis, falls etwas unklar oder nicht lesbar war, sonst leer>"
 }
 
 Regeln:
-- Nur Abschnitte zurückgeben, die du auf dem Bild wirklich erkennen konntest.
-- percent ist eine ganze Zahl zwischen 0 und 100.
+- Nur Punkte zurückgeben, die du auf dem Bild wirklich erkennen konntest.
+- done ist eine ganze Zahl zwischen 0 und dem count des jeweiligen Punkts.
 - confidence "niedrig" wenn die Karte unscharf, unvollständig sichtbar oder schwer lesbar war.
-- Erfinde keine Werte für Abschnitte, die auf dem Bild gar nicht vorkommen.`;
+- Erfinde keine Werte für Punkte, die auf dem Bild gar nicht vorkommen.`;
 
   const payload = {
     model: "claude-sonnet-5",
     max_tokens: 1500,
     system,
-    messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Lies bitte den Fortschritt pro Abschnitt aus dieser ADK-Karte aus." }] }],
+    messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Lies bitte den Fortschritt je Punkt aus dieser ADK-Karte aus." }] }],
   };
 
   try {
