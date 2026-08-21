@@ -72,7 +72,12 @@ ${JSON.stringify(student, null, 2)}`;
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1400, system, messages: [{ role: "user", content: "Schreib die Prüfreife-Einschätzung." }] }),
+      // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach (anders als
+      // Vorgängermodelle), und max_tokens deckelt Denken + Antwort zusammen - dabei konnte das
+      // gesamte Budget fürs Denken draufgehen und für die eigentliche Antwort nichts übrig
+      // lassen ("Leere Antwort erhalten" in Produktion beobachtet). Denken ist für diese Prosa-
+      // Einschätzung nicht nötig.
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1400, thinking: { type: "disabled" }, system, messages: [{ role: "user", content: "Schreib die Prüfreife-Einschätzung." }] }),
     });
     const data = await resp.json();
     if (!resp.ok) {
@@ -81,7 +86,7 @@ ${JSON.stringify(student, null, 2)}`;
     }
     let text = "";
     if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
-    if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten", debug_stop_reason: data.stop_reason, debug_content_types: Array.isArray(data.content) ? data.content.map(c => c && c.type) : typeof data.content, debug_usage: data.usage }) };
+    if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten" }) };
     return { statusCode: 200, headers, body: JSON.stringify({ text }) };
   } catch (e) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };

@@ -92,6 +92,11 @@ Regeln:
       body: JSON.stringify({
         model: "claude-sonnet-5",
         max_tokens: 300,
+        // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach, und max_tokens
+        // deckelt Denken + Antwort zusammen - bei diesem knappen Budget kann das gesamte
+        // Budget fürs Denken draufgehen und für die eigentliche JSON-Antwort nichts übrig
+        // lassen. Denken ist hier nicht nötig.
+        thinking: { type: "disabled" },
         system,
         messages: [{ role: "user", content: "Beobachtung: " + text }],
       }),

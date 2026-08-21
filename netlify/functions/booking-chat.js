@@ -141,7 +141,11 @@ Regeln, unbedingt einhalten:
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, system, messages }),
+      // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach, und max_tokens deckelt
+      // Denken + Antwort zusammen - dabei kann das gesamte Budget fürs Denken draufgehen und
+      // für die eigentliche Antwort nichts übrig lassen. Denken ist für diese kurzen Chat-
+      // Antworten nicht nötig.
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, thinking: { type: "disabled" }, system, messages }),
     });
     const data = await resp.json();
     if (!resp.ok) {

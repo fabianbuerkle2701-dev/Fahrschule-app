@@ -80,6 +80,10 @@ Regeln:
   const payload = {
     model: "claude-sonnet-5",
     max_tokens: 1500,
+    // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach, und max_tokens deckelt
+    // Denken + Antwort zusammen - dabei kann das gesamte Budget fürs Denken draufgehen und für
+    // die eigentliche JSON-Antwort nichts übrig lassen. Denken ist hier nicht nötig.
+    thinking: { type: "disabled" },
     system,
     messages: [{ role: "user", content: [...imageBlocks, { type: "text", text: "Lies bitte den Fortschritt je Punkt aus dieser ADK-Karte aus." }] }],
   };

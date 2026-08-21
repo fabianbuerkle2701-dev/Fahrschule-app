@@ -250,7 +250,11 @@ ${datenText}`;
       // Schüler von heute samt Handlungsempfehlung (3-4 statt 2-3 Sätze) - 450 für denselben
       // Sicherheitsabstand wie beim 350er-Hotfix, gilt für alle "kind"s gemeinsam (kürzere Texte
       // brauchen die Reserve einfach nicht aus).
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 450, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
+      // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach, und max_tokens deckelt
+      // Denken + Antwort zusammen - dabei kann das gesamte Budget fürs Denken draufgehen und
+      // für die eigentliche Antwort nichts übrig lassen. Denken ist für diese kurzen Texte
+      // nicht nötig.
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 450, thinking: { type: "disabled" }, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
     });
     const data = await resp.json();
     if (!resp.ok) {

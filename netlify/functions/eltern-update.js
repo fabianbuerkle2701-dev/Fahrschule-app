@@ -73,7 +73,11 @@ ${JSON.stringify(student, null, 2)}`;
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
       },
-      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 700, system, messages: [{ role: "user", content: "Schreib die Nachricht." }] }),
+      // claude-sonnet-5 denkt ohne explizite Angabe standardmäßig nach, und max_tokens deckelt
+      // Denken + Antwort zusammen - dabei kann das gesamte Budget fürs Denken draufgehen und
+      // für die eigentliche Antwort nichts übrig lassen. Denken ist für diese kurze Nachricht
+      // nicht nötig.
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 700, thinking: { type: "disabled" }, system, messages: [{ role: "user", content: "Schreib die Nachricht." }] }),
     });
     const data = await resp.json();
     if (!resp.ok) {
