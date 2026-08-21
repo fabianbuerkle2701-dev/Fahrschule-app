@@ -1286,7 +1286,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.150.0";
+const APP_VERSION = "1.151.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1407,6 +1407,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.151.0", date: "August 2026", changes: [
+            "Verbessert: Zahlungen zuordnen (Kontoauszug-Import) erkennt jetzt auch Zeilen ohne Rechnungsnummer - der Regelfall bei echten Kontoauszügen, da Banken meist nur den Namen übertragen. Ein neuer \"Weitere Zeilen mit KI zuordnen\"-Button gleicht diese Zeilen per Zahlername und Betrag gegen die offenen Rechnungen ab. Wie beim bestehenden Abgleich wird nichts automatisch gebucht - jede Zuordnung braucht weiterhin einen Tap",
+        ] },
     { v: "1.150.0", date: "August 2026", changes: [
             "Neu: KI-Eltern-Update bei den Begleitfahrten - eine kurze, warme WhatsApp-Nachricht mit dem aktuellen Ausbildungsstand, einem konkreten Rückblick auf die letzten Fahrstunden und einem Vorschlag für die nächste gemeinsame Übung aus der schon vorhandenen Begleitfahrten-Übungssammlung. Optionale eigene Telefonnummer für Eltern/Begleitperson hinterlegbar, sonst wird die Nummer des Schülers verwendet. WhatsApp öffnet sich erst nach bewusstem Antippen",
         ] },
@@ -15065,6 +15068,64 @@ function App() {
         writeStudent({ ...stu, payments: [...(stu.payments || []), eintrag] });
         setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "gebucht", betrag: eintrag.amount } : x) } : z);
     }
+    // Zweitversuch per KI für Kontoauszug-Zeilen ohne erkennbare Rechnungsnummer (der Regel-
+    // fall bei echten Kontoauszügen - die meisten Banken übertragen keine Rechnungsnummer im
+    // Verwendungszweck, nur den Namen). Matcht per Zahlername + Betrag gegen die offenen
+    // Rechnungen. Ergänzt die bestehende Vorschlagsliste um Zeilen mit status "ki_vorschlag" -
+    // bucheZahlung() bleibt für diese Zeilen unverändert derselbe Weg, jede Buchung braucht
+    // weiterhin einen expliziten Tap.
+    async function matchKontoauszugMitKi() {
+        const text = (zahlungsImport && zahlungsImport.text) || "";
+        const bekannteZeilen = new Set((zahlungsImport.vorschlaege || []).map(v => v.text));
+        const kandidaten = text.split(/\r?\n/).map(z => z.trim()).filter(Boolean)
+            .filter(z => !bekannteZeilen.has(z.slice(0, 160)) && findeBetraege(z).length > 0);
+        if (kandidaten.length === 0) {
+            showToast("Keine weiteren Zeilen mit erkennbarem Betrag gefunden.");
+            return;
+        }
+        setZahlungsImport(z => ({ ...z, kiBusy: true, kiError: "" }));
+        try {
+            const studentsPayload = (students || []).filter(s => s._isMine).map(s => ({
+                id: s.id, name: dispName(s),
+                invoices: (s.invoices || []).filter(inv => invoiceStatus(s, inv) !== "bezahlt" && !inv.cancelledBy && !inv.stornoOf)
+                    .map(inv => ({ id: inv.id, number: inv.number, offen: invoiceOpen(s, inv), total: Number(inv.total) || 0, date: inv.date || "" })),
+            })).filter(s => s.invoices.length > 0);
+            const resp = await fetch("/.netlify/functions/match-kontoauszug", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ lines: kandidaten, students: studentsPayload }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out) {
+                setZahlungsImport(z => ({ ...z, kiBusy: false, kiError: (out && out.error) || "KI-Zuordnung fehlgeschlagen" }));
+                return;
+            }
+            const matches = Array.isArray(out.matches) ? out.matches : [];
+            const neue = matches.map((m, i) => {
+                const zeile = kandidaten[m.lineIndex];
+                if (zeile == null)
+                    return null;
+                const stu = (students || []).find(s => s.id === m.studentId);
+                if (!stu)
+                    return null;
+                const inv = (stu.invoices || []).find(iv => iv.id === m.invoiceId);
+                if (!inv)
+                    return null;
+                const offen = invoiceOpen(stu, inv);
+                const betrag = (Number(m.betrag) > 0) ? Number(m.betrag) : offen;
+                return { key: "ki-" + i + "-" + inv.id, text: zeile.slice(0, 160), nummer: inv.number || "–", datum: findeDatum(zeile),
+                    studentId: stu.id, studentName: dispName(stu), invoiceId: inv.id,
+                    offen, total: Number(inv.total) || 0, status: "ki_vorschlag", betrag,
+                    konfidenz: ["hoch", "mittel", "niedrig"].includes(m.confidence) ? m.confidence : "mittel" };
+            }).filter(Boolean);
+            setZahlungsImport(z => ({ ...z, kiBusy: false, vorschlaege: [...(z.vorschlaege || []), ...neue] }));
+            if (neue.length === 0)
+                showToast("Die KI konnte keine weiteren Zeilen sicher zuordnen.");
+        }
+        catch (e) {
+            setZahlungsImport(z => ({ ...z, kiBusy: false, kiError: "Fehler: " + (e.message || "unbekannt") }));
+        }
+    }
     // Aus den Rohdaten die anzuzeigende Liste bauen - mit dem aktuell eingestellten Stichtag.
     function lueckenListe() {
         const price = Number(pricePerHour) || 0;
@@ -18600,7 +18661,7 @@ function App() {
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Zahlungen zuordnen"),
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12, lineHeight: 1.5 } },
-                    "Kopiere die Ums\u00E4tze aus deinem Online-Banking und f\u00FCge sie hier ein. Erkannt werden Zeilen, in denen eine Rechnungsnummer steht (z.B. RE-2026-0001). Gebucht wird nichts automatisch \u2013 du best\u00E4tigst jede Zuordnung."),
+                    "Kopiere die Ums\u00E4tze aus deinem Online-Banking und f\u00FCge sie hier ein. Zeilen mit Rechnungsnummer (z.B. RE-2026-0001) werden direkt erkannt - f\u00FCr alle anderen Zeilen kann die KI danach per Name und Betrag einen Vorschlag machen. Gebucht wird nichts automatisch \u2013 du best\u00E4tigst jede Zuordnung."),
                 React.createElement("textarea", { value: zahlungsImport.text, rows: 5,
                     onChange: e => { const v = e.target.value; setZahlungsImport(z => ({ ...z, text: v, vorschlaege: null })); },
                     placeholder: "13.08.2026;GUTSCHRIFT;Max Mustermann;Rechnung RE-2026-0001;;65,00",
@@ -18609,17 +18670,19 @@ function App() {
                     disabled: !(zahlungsImport.text || "").trim(), onClick: analysiereKontoauszug }, "Zeilen auswerten"),
                 zahlungsImport.vorschlaege && (zahlungsImport.vorschlaege.length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "16px 14px", fontSize: 13.5, color: "var(--muted)", textAlign: "center" } },
-                        "Keine Zeile mit einer Rechnungsnummer gefunden. Steht die Nummer wirklich im Verwendungszweck?")
+                        "Keine Zeile mit einer Rechnungsnummer gefunden. Versuch es unten mit der KI-Zuordnung per Name und Betrag.")
                     : React.createElement("div", null, zahlungsImport.vorschlaege.map(v => {
                         const farbe = v.status === "gebucht" ? "var(--sage-deep)"
                             : v.status === "ok" ? "var(--sage-deep)"
-                                : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)" : "var(--amber)";
+                                : v.status === "ki_vorschlag" ? "var(--sky-deep)"
+                                    : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)" : "var(--amber)";
                         const hinweis = v.status === "gebucht" ? "Gebucht"
                             : v.status === "unbekannt" ? "Keine Rechnung mit dieser Nummer gefunden"
                                 : v.status === "bezahlt" ? "Diese Rechnung ist bereits vollst\u00E4ndig bezahlt"
                                     : v.status === "kein_betrag" ? "Kein Betrag in der Zeile erkennbar"
                                         : v.status === "mehrdeutig" ? "Mehrere Betr\u00E4ge in der Zeile \u2013 bitte w\u00E4hlen"
-                                            : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab" : "";
+                                            : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab"
+                                                : v.status === "ki_vorschlag" ? "\u2728 KI-Vorschlag \u00B7 Konfidenz " + v.konfidenz : "";
                         return React.createElement("div", { key: v.key, className: "card", style: { padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid " + farbe } },
                             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" } },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 700 } }, v.nummer),
@@ -18628,12 +18691,18 @@ function App() {
                             v.status !== "unbekannt" && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 6 } },
                                 "Rechnung " + eurFmt(v.total) + " \u00B7 offen " + eurFmt(v.offen)),
                             hinweis && React.createElement("div", { style: { fontSize: 12.5, color: farbe, fontWeight: 600, marginBottom: 8 } }, hinweis),
-                            (v.status === "ok" || v.status === "abweichend") && React.createElement("button", { className: "btn btn-primary btn-block", style: { padding: "8px", fontSize: 13.5 },
+                            (v.status === "ok" || v.status === "abweichend" || v.status === "ki_vorschlag") && React.createElement("button", { className: "btn btn-primary btn-block", style: { padding: "8px", fontSize: 13.5 },
                                 onClick: () => bucheZahlung(v, v.betrag) }, eurFmt(v.betrag) + " als Zahlung buchen"),
                             v.status === "mehrdeutig" && React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
                                 v.betraege.map((b, bi) => React.createElement("button", { key: bi, className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 13 },
                                     onClick: () => bucheZahlung(v, b) }, eurFmt(b) + " buchen"))));
                     }))),
+                zahlungsImport.vorschlaege && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6, opacity: zahlungsImport.kiBusy ? .6 : 1 },
+                        disabled: !!zahlungsImport.kiBusy, onClick: matchKontoauszugMitKi },
+                    zahlungsImport.kiBusy ? "Ordnet weitere Zeilen zu\u2026" : "\u2728 Weitere Zeilen mit KI zuordnen"),
+                zahlungsImport.kiError && React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 8, fontSize: 13, color: "#B3362A" } }, zahlungsImport.kiError),
+                React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "8px 2px 0", lineHeight: 1.5 } },
+                    "Sucht in Zeilen ohne Rechnungsnummer nach einem passenden Zahlernamen und Betrag - auch hier wird nichts automatisch gebucht."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setZahlungsImport(null) }, "Schlie\u00DFen"))),
         // Quotenpilot: Erfolgsquoten-Cockpit mit Zeitraum-/Klassenfilter, Trend und Monatsverlauf.
         // Reagiert auf die kommende Mobilithek-Meldepflicht - Ziel ist, die eigene Quote zu kennen
