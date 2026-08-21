@@ -1286,7 +1286,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.148.0";
+const APP_VERSION = "1.149.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1407,6 +1407,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.149.0", date: "August 2026", changes: [
+            "Neu: KI-Prüfreife-Einschätzung in der Prüfungsplanung eines Schülers - anders als die bisherige Ampel (reiner Prozent-Check auf ADK/Strecken/Theorie) liest die KI zusätzlich die weichen Signale mit, die eine Prozentzahl nicht erfasst: wiederkehrende Schwächen aus dem Fahrtenbuch, wiederkehrende schwere Fehler aus der Prüfungssimulation, Sonderfahrten-Bilanz und Theorie-Übungsstand. Ergebnis ist eine konkrete, begründete Empfehlung samt nächsten Schritten - ausdrücklich eine Einschätzung, keine Zusicherung, die Entscheidung bleibt beim Fahrlehrer",
+        ] },
     { v: "1.148.0", date: "August 2026", changes: [
             "Neu: Reform-Cockpit 2027 - Vorbereitung auf die geplante Führerscheinreform (Bundestag-Drucksache 21/7404, Stand August 2026, noch nicht in Kraft). Fünf Teile: (1) Theorie-Fortschritt je Schüler ist jetzt auch für den Fahrlehrer sichtbar (war bisher unabsichtlich nur für Schüler freigeschaltet), dazu KI-generierte, frei erfundene Übungsfragen für schwache Sachgebiete (nie amtliche Prüfungsfragen, Fahrlehrer wählt einzeln aus, was übernommen wird), (2) ein optionaler Stichtag für die Übergangsregel je Fahrschule, ab dem neu begonnene Ausbildungen als \"neue Regeln\" markiert werden und die Sonderfahrten-Karte einen entsprechenden Hinweis zeigt, (3) der Ausbildungsnachweis-Ausdruck zeigt jetzt zusätzlich den digitalen Theorie-Übungsstand, (4) eine standardisierte Preismeldung (Grundgebühr/Lehrmaterial/Fahrstunde/Sonderfahrt/Prüfungsvorstellung) lässt sich als PDF erzeugen, mit Erinnerung auf der Startseite, sobald sie länger als ein Quartal her ist, (5) eine KI-Einordnung erklärt in einfacher Sprache, was der Entwurf für die eigene Fahrschule bedeutet. Alles bewusst zurückhaltend formuliert, solange das Gesetz noch nicht verabschiedet ist",
         ] },
@@ -9022,6 +9025,52 @@ function App() {
             schaltkompetenz,
         };
     }
+    // Erweitert buildHandoverPayload() um alles, was speziell für eine Prüfreife-EINSCHÄTZUNG
+    // zählt (nicht für eine reine Übergabe-Beschreibung): die wiederkehrenden, schweren Fehler aus
+    // der Prüfungssimulation (nicht nur die rohen Zahlen), die Sonderfahrten-Bilanz und - falls
+    // schon geladen - der Theorie-Übungsstand. Kosten bleiben wie beim Vorbild bewusst außen vor.
+    function buildPruefreifePayload(stu) {
+        const base = buildHandoverPayload(stu);
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const r = pruefungsreife(stu, tplFor(vk).adk, tplFor(vk).strecken);
+        const amp = ampel(stu, tplFor(vk).adk, tplFor(vk).strecken);
+        const recurring = pruefungssimRecurringIssues(stu.examSims || []);
+        const sfBilanz = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll);
+        let theorie = null;
+        if (theoryQuestions && theoryQuestions.length) {
+            const progress = stu.theoryProgress || {};
+            const gemeistert = theoryQuestions.filter(q => progress[q.id] && progress[q.id].correct).length;
+            theorie = { gemeistertProzent: Math.round((gemeistert / theoryQuestions.length) * 100), beantwortet: Object.keys(progress).length, gesamtFragen: theoryQuestions.length };
+        }
+        return {
+            ...base,
+            ampelStufe: amp.stufe, ampelText: amp.text,
+            offenePunkteAnzahl: r.total, theorieOffen: r.theorieOffen,
+            wiederkehrendeSchwerePruefungssimFehler: (recurring.fahraufgaben.length || recurring.kompetenzbereiche.length) ? recurring : null,
+            sonderfahrten: sfBilanz.length ? sfBilanz.map(x => ({ art: x.label, ue: x.ue, sollUe: x.sollUe, erfuellt: x.erfuellt })) : null,
+            theorieUebungsstand: theorie,
+        };
+    }
+    async function generatePruefreifeEinschaetzung(stu) {
+        setHandoverModal({ busy: true, text: "", error: "", name: dispName(stu), stu, kind: "pruefreife" });
+        try {
+            const payload = buildPruefreifePayload(stu);
+            const resp = await fetch("/.netlify/functions/pruefreife-einschaetzung", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ student: payload }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out || !out.text) {
+                setHandoverModal(m => ({ ...m, busy: false, error: (out && out.error) || "Einschätzung fehlgeschlagen" }));
+                return;
+            }
+            setHandoverModal(m => ({ ...m, busy: false, text: out.text }));
+        }
+        catch (e) {
+            setHandoverModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+        }
+    }
     async function generateHandoverSummary(stu) {
         setHandoverModal({ busy: true, text: "", error: "", name: dispName(stu), stu });
         try {
@@ -11782,6 +11831,8 @@ function App() {
                     React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 1 } }, amp.stufe === "gruen" ? "Alles geübt und Theorie bestanden" :
                         amp.stufe === "gelb" ? (r.theorieOffen ? "Praxis fast komplett, Theorie fehlt noch" : "Praxis fast komplett") :
                             "Noch " + r.total + " offene Punkte"))),
+            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12 }, onClick: () => generatePruefreifeEinschaetzung(active) },
+                "✨ KI-Prüfreife-Einschätzung erstellen"),
             React.createElement("div", { className: "card hero" },
                 React.createElement("div", { className: "label" }, "Pr\u00FCfungsreife"),
                 ready
@@ -16926,7 +16977,7 @@ function App() {
                         React.createElement("div", { style: { fontSize: "13pt", fontWeight: "bold" } }, (school && school.name) || "Fahrschule"),
                         React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, (school && school.subtitle) || ""))),
                 React.createElement("div", { style: { textAlign: "right" } },
-                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, "ÜBERGABE-EINSCHÄTZUNG"),
+                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, handoverModal.kind === "pruefreife" ? "PRÜFREIFE-EINSCHÄTZUNG" : "ÜBERGABE-EINSCHÄTZUNG"),
                     React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "Erstellt am: " + heute))),
             React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", marginBottom: 16, fontSize: "9.5pt" } },
                 React.createElement("tbody", null,
@@ -18814,7 +18865,7 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "KI-\u00DCbergabe-Einsch\u00E4tzung"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, handoverModal.kind === "pruefreife" ? "\u2728 KI-Pr\u00FCfreife-Einsch\u00E4tzung" : "KI-\u00DCbergabe-Einsch\u00E4tzung"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, handoverModal.name || ""),
                 handoverModal.busy
                     ? React.createElement("div", { style: { padding: "24px", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Erstellt Einsch\u00E4tzung\u2026")
