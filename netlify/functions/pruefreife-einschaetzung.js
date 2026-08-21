@@ -81,7 +81,7 @@ ${JSON.stringify(student, null, 2)}`;
     }
     let text = "";
     if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
-    if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten" }) };
+    if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten", debug_stop_reason: data.stop_reason, debug_content_types: Array.isArray(data.content) ? data.content.map(c => c && c.type) : typeof data.content, debug_usage: data.usage }) };
     return { statusCode: 200, headers, body: JSON.stringify({ text }) };
   } catch (e) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
