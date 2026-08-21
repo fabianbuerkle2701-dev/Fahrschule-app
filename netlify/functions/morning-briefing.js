@@ -33,7 +33,7 @@ exports.handler = async function (event) {
 
   const code = (body.code || "").toString().trim();
   const facts = body.facts && typeof body.facts === "object" ? body.facts : null;
-  const kind = ["morning", "evening", "statistik", "interessent", "pruefung", "abrechnung"].includes(body.kind) ? body.kind : "morning";
+  const kind = ["morning", "evening", "statistik", "interessent", "pruefung", "abrechnung", "reform"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
 
@@ -168,6 +168,37 @@ Regeln, unbedingt einhalten:
 
 Die Zahlen:
 ${datenText}`;
+  } else if (kind === "reform") {
+    const zeilen = [];
+    zeilen.push("Stichtag für die Übergangsregel in dieser Fahrschule eingetragen: " + (facts.stichtagGesetzt ? ("ja, " + facts.stichtag) : "nein, noch nicht eingetragen"));
+    zeilen.push("Preise für die standardisierte Preismeldung gepflegt: " + (facts.preiseGepflegt ? "ja" : "nein, noch nicht"));
+    datenText = zeilen.join("\n");
+    system = `Du erklärst dem Fahrlehrer der Fahrschule "${schoolFacts.school_name}" kurz und in einfacher Sprache, was der Regierungsentwurf zur Modernisierung der Fahrschulausbildung (Bundestag-Drucksache 21/7404, Kabinettsbeschluss Juni 2026, seit 29.7.2026 im Bundestag, Inkrafttreten voraussichtlich Anfang 2027) für seine Fahrschule bedeutet, und was er in DIESER App jetzt schon konkret einstellen kann.
+
+Fakten zum Gesetzentwurf (nutze NUR diese, erfinde keine weiteren Details, Paragraphen oder Fristen):
+- Präsenzpflicht beim Theorieunterricht fällt weg, Theorie ist komplett digital per Lern-App möglich.
+- Feste Sonderfahrten-Vorgaben werden flexibilisiert.
+- Fahrsimulatoren werden Teil der Ausbildung.
+- Üben mit privaten Begleitpersonen ergänzend zur Fahrschulausbildung wird gestärkt.
+- Die bisherige Preisaushang-Pflicht wird durch eine regelmäßige, standardisierte Preismeldung ersetzt (Grundgebühr, Lehrmaterial, Fahrstunde, Sonderfahrt, Prüfungsvorstellung).
+- Das Tageslimit von 2 Theorieeinheiten fällt weg.
+- Übergangsregel: laufende Ausbildungen dürfen nach den bisherigen Regeln zu Ende geführt werden.
+- Das Gesetz ist noch NICHT in Kraft - alles hier ist Planung, kein geltendes Recht.
+
+Was die App dafür schon anbietet (nur erwähnen, was laut den Angaben unten auch WIRKLICH schon genutzt wird, nichts andichten):
+- Ein Stichtag für die Übergangsregel (Einstellungen, "Führerschein-Reform 2027").
+- Eine automatisch erzeugbare, standardisierte Preismeldung (Einstellungen, "Kosten").
+- KI-generierte Übungsfragen für die Theorie, digitaler Fortschritts-Nachweis je Schüler.
+
+Angaben zu dieser Fahrschule:
+${datenText}
+
+Regeln, unbedingt einhalten:
+1. 3-4 kurze Sätze, einfache Sprache, keine Paragraphen-Zitate erfinden.
+2. Mach klar, dass das Gesetz noch nicht in Kraft ist - keine falsche Dringlichkeit erzeugen.
+3. Wenn der Stichtag oder die Preise noch nicht gepflegt sind, weise kurz darauf hin, dass er das schon jetzt vorbereiten kann.
+4. Kein Small Talk, keine Anrede, keine Grußformel - direkt mit dem Inhalt anfangen.
+5. Keine Rechtsberatung - immer als Planungshilfe formulieren, nicht als verbindliche Auskunft.`;
   } else {
     const zeilen = [];
     if (typeof facts.heuteAnzahl === "number") zeilen.push("Termine heute: " + facts.heuteAnzahl);
