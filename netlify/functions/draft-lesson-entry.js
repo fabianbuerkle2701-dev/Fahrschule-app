@@ -49,6 +49,12 @@ exports.handler = async function (event) {
     if (!whoResp.ok) {
       return { statusCode: 401, headers, body: JSON.stringify({ error: "Sitzung ungültig oder abgelaufen" }) };
     }
+    // Der oeffentliche Website-Demo-Account darf keine KI-/Bezahl-Funktionen ausloesen
+    // (verhindert Anthropic-Kosten durch Missbrauch des oeffentlichen Demo-Tokens).
+    const whoData = await whoResp.json().catch(() => null);
+    if (whoData && whoData.id === "114d1f0a-9947-459d-8009-06282799ca44") {
+      return { statusCode: 403, headers, body: JSON.stringify({ error: "Diese Funktion ist im Demo-Modus deaktiviert." }) };
+    }
   } catch (e) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Anmeldung konnte nicht geprüft werden" }) };
   }
