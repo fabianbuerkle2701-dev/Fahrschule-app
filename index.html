@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.33";
+const APP_VERSION = "1.164.34";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.34", date: "August 2026", changes: [
+            "Auswertung: Statistik- und Abrechnung-Tab zeigten unter ähnlichem Namen (\"Prüfungs-Erfolgsquote\" / \"Prüfungserfolg\") zwei unterschiedliche Erfolgsquoten für dieselben Schüler, weil der Statistik-Tab naiv alle Prüfungsversuche zählte statt wie die Abrechnung nur den ersten Versuch je Schüler - beide zeigen jetzt dieselbe Zahl. Eine Anzahlung vor jeder Rechnungsstellung konnte die schulweite KPI \"Berechnet, noch offen\" ins Negative rutschen lassen. Stornierte Rechnungen und Stornorechnungen erschienen in der schulweiten Rechnungsliste ohne Kennzeichnung wie jede offene Rechnung und ließen sich weiter über den Zahlung-Knopf bezahlen",
+        ] },
     { v: "1.164.33", date: "August 2026", changes: [
             "Fuhrpark: ein deaktiviertes oder aus dem Kalender genommenes Fahrzeug machte seine bereits bestehenden Buchungen im Fahrzeug-Kalender unsichtbar und unverwaltbar (bei nur einem Fahrzeug in der Fahrschule sogar komplett) - solche Fahrzeuge bleiben jetzt sichtbar (als \"inaktiv\" markiert), solange sie noch Buchungen im angezeigten Zeitraum haben. Fahrzeugkosten akzeptierten bisher negative Beträge ohne Rückfrage. Die Fahrlehrer-Auswahl im Fahrzeug-Kalender war immer ein Freitextfeld statt der vorgesehenen Tippfehler-sicheren Auswahl, weil die Namensliste nie befüllt wurde - kommt jetzt automatisch aus der Fahrschule mit. Der Einladungscode-Eingabe bei der Registrierung fehlte der Tippfehler-Schutz (Auto-Groß-/Korrektur), den das strukturell gleiche Fahrschul-Code-Feld längst hat",
         ] },
@@ -5100,10 +5103,32 @@ function quotenpilotFlatten(quellen) {
     });
     return rows;
 }
-// Kernmetrik der ganzen App (siehe renderAbrechnung/quote()): bestanden im ERSTEN Versuch =
-// Erfolg. Hier zusätzlich nach Zeitraum und Klasse filterbar. Ein Schüler zählt in dem Zeitraum,
-// in dem sein erster Versuch dieser Prüfungsart liegt - nicht in dem, in dem er (ggf. später)
-// bestanden hat, sonst würde eine Wiederholungsprüfung ihr eigenes Startdatum verschleiern.
+// Kernmetrik der ganzen App: bestanden im ERSTEN Versuch = Erfolg (die Reform verlangt künftig,
+// diese Quote zu veröffentlichen - siehe renderAbrechnungBody()). Schüler ohne erfassten Versuch
+// zählen nicht mit, damit die Quote nicht durch fehlende Daten geschönt wird. Eine einzige
+// Implementierung für schoolStats() (Statistik-Tab) und renderAbrechnungBody() (Abrechnung-Tab,
+// dort ursprünglich als eigene quote()-Funktion) - beide zeigten vorher unter ähnlichem Namen
+// ("Prüfungs-Erfolgsquote" vs. "Prüfungserfolg") zwei unterschiedliche Zahlen auf derselben Seite,
+// weil schoolStats() stattdessen naiv passed/attempts über ALLE Versuche gezählt hatte.
+function examFirstAttemptQuote(list, art) {
+    let ersterVersuchBestanden = 0, mitVersuch = 0, versucheGesamt = 0;
+    (list || []).forEach(s => {
+        const el = (s.exams || []).filter(e => e.art === art)
+            .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+        if (!el.length)
+            return;
+        mitVersuch++;
+        versucheGesamt += el.length;
+        if (el[0].passed)
+            ersterVersuchBestanden++;
+    });
+    return { pct: mitVersuch ? Math.round(ersterVersuchBestanden / mitVersuch * 100) : null,
+        schueler: mitVersuch, schnitt: mitVersuch ? (versucheGesamt / mitVersuch) : 0 };
+}
+// Hier zusätzlich nach Zeitraum und Klasse filterbar, auf vorbereiteten Zeilen statt Schüler-
+// Objekten (Quotenpilot). Ein Schüler zählt in dem Zeitraum, in dem sein erster Versuch dieser
+// Prüfungsart liegt - nicht in dem, in dem er (ggf. später) bestanden hat, sonst würde eine
+// Wiederholungsprüfung ihr eigenes Startdatum verschleiern.
 function quotenpilotQuote(rows, art, vonISO, bisISO, klasse) {
     const jeSchueler = {};
     rows.forEach(r => {
@@ -5319,7 +5344,11 @@ function fakturiertOffenSumme(s, stdPrice) {
         fakturiert += b.amount; });
     (s.costItems || []).forEach(it => { if (it.invoiced)
         fakturiert += (Number(it.amount) || 0); });
-    return fakturiert - sumPayments(s);
+    // Eine Anzahlung, die schon vor jeder Rechnungsstellung geleistet wurde (sumPayments zählt
+    // ALLE Zahlungen, nicht nur auf Rechnungen verbuchte), darf die "berechnet, offen"-Summe eines
+    // einzelnen Schülers nicht unter 0 drücken - sonst kann die schulweite KPI insgesamt negativ
+    // werden. Ein Zahlungsüberschuss ist ein Guthaben, kein negativer offener Betrag.
+    return Math.max(0, fakturiert - sumPayments(s));
 }
 // UE auf zwei Nachkommastellen, als Komma-Zahl
 function ueFmt(n) {
@@ -13628,15 +13657,11 @@ function App() {
         }));
         const monthlyRevenue = months.map(m => ({ ...m, amount: revenueByMonth[m.key] }));
 
-        const examStats = { theorie: { attempts: 0, passed: 0 }, praxis: { attempts: 0, passed: 0 } };
-        allOwn.forEach(s => (s.exams || []).forEach(e => {
-            const bucket = examStats[e.art];
-            if (!bucket)
-                return;
-            bucket.attempts++;
-            if (e.passed)
-                bucket.passed++;
-        }));
+        // Dieselbe Definition wie in renderAbrechnungBody() (examFirstAttemptQuote, "1. Versuch
+        // bestanden = Erfolg") statt einer eigenen, laxeren passed/attempts-Zählung über ALLE
+        // Versuche - sonst zeigten Statistik- und Abrechnung-Tab zwei unterschiedliche Zahlen
+        // unter ähnlichem Namen ("Prüfungs-Erfolgsquote" vs. "Prüfungserfolg") auf derselben Seite.
+        const examQuote = { theorie: examFirstAttemptQuote(allOwn, "theorie"), praxis: examFirstAttemptQuote(allOwn, "praxis") };
 
         // Dieselbe Definition von "Prüfungsreif" wie in der Schülerliste und in
         // examPlanning() (beide über ampel().stufe==="gruen", ein gewichteter Gesamt-
@@ -13661,7 +13686,7 @@ function App() {
         const thisMonthKey = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
         const newThisMonth = allOwn.filter(s => s._createdAt && monthKeyOf(s._createdAt) === thisMonthKey).length;
 
-        return { monthlyRevenue, examStats, ready, notReady, avgUE, passedPraxisCount: passedPraxis.length,
+        return { monthlyRevenue, examQuote, ready, notReady, avgUE, passedPraxisCount: passedPraxis.length,
             activeCount: own.length, newThisMonth };
     }
     function statTile(value, label, color) {
@@ -13696,8 +13721,8 @@ function App() {
     function renderStatistikBody() {
         const st = schoolStats();
         const maxRevenue = Math.max(1, ...st.monthlyRevenue.map(m => m.amount));
-        const theoriePct = st.examStats.theorie.attempts ? Math.round(st.examStats.theorie.passed / st.examStats.theorie.attempts * 100) : null;
-        const praxisPct = st.examStats.praxis.attempts ? Math.round(st.examStats.praxis.passed / st.examStats.praxis.attempts * 100) : null;
+        const theoriePct = st.examQuote.theorie.pct;
+        const praxisPct = st.examQuote.praxis.pct;
         return React.createElement(React.Fragment, null,
             React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 16 } },
                 renderBriefingBlock(statBriefing, setStatBriefing, {
@@ -13728,15 +13753,15 @@ function App() {
                     React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)" } }, eurFmt(st.monthlyRevenue.reduce((a, m) => a + m.amount, 0))))),
             React.createElement("div", { className: "card", style: { padding: "16px 15px", marginBottom: 16 } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 12 } }, "Prüfungs-Erfolgsquote"),
-                [["theorie", "Theorie", theoriePct, st.examStats.theorie], ["praxis", "Praxis", praxisPct, st.examStats.praxis]].map(([key, label, pct, data]) =>
+                [["theorie", "Theorie", theoriePct, st.examQuote.theorie], ["praxis", "Praxis", praxisPct, st.examQuote.praxis]].map(([key, label, pct, data]) =>
                     React.createElement("div", { key: key, style: { marginBottom: 12 } },
                         React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 } },
                             React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600 } }, label),
                             React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } },
-                                pct == null ? "Noch keine Versuche erfasst" : data.passed + " von " + data.attempts + " bestanden (" + pct + "%)")),
+                                pct == null ? "Noch keine Versuche erfasst" : data.schueler + " Schüler · " + pct + "% im 1. Versuch bestanden")),
                         pct != null && React.createElement(Bar, { pct: pct, color: pct >= 70 ? "var(--green)" : pct >= 40 ? "var(--amber)" : "#C0392B", h: 6 }))),
                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "8px 2px 0" } },
-                    "Basiert auf allen unter „Prüfungsversuche“ im Führerschein-Reiter erfassten Versuchen.")),
+                    "Bestanden im 1. Versuch = Erfolg, wie bei „Prüfungserfolg“ in der Abrechnung. Schüler ohne erfassten Versuch im Führerschein-Reiter zählen nicht mit.")),
             st.avgUE != null && React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 4 } }, "Ø Fahrstunden bis zur bestandenen Praxisprüfung"),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 28, color: "var(--orange-deep)" } }, ueFmt(st.avgUE) + " UE"),
@@ -14067,24 +14092,9 @@ function App() {
             { label: "Berechnet, noch offen", value: eurFmt(berechnetOffen), color: berechnetOffen > 0.005 ? "var(--orange-deep)" : "var(--green)" },
             { label: "Noch nicht berechnet", value: eurFmt(nichtBerechnetGesamt), color: nichtBerechnetGesamt > 0.005 ? "#B3362A" : "var(--green)" },
         ];
-        // Erfolgsquote aus den erfassten Pruefungsversuchen. Gezaehlt wird je Schueler und
-        // Pruefungsart: bestanden im ersten Versuch = Erfolg. Schueler ohne erfassten Versuch
-        // bleiben aussen vor, damit die Quote nicht durch fehlende Daten geschoent wird.
-        function quote(art) {
-            let ersterVersuchBestanden = 0, mitVersuch = 0, versucheGesamt = 0;
-            mine.forEach(s => {
-                const list = (s.exams || []).filter(e => e.art === art)
-                    .slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-                if (!list.length)
-                    return;
-                mitVersuch++;
-                versucheGesamt += list.length;
-                if (list[0].passed)
-                    ersterVersuchBestanden++;
-            });
-            return { pct: mitVersuch ? Math.round(ersterVersuchBestanden / mitVersuch * 100) : null,
-                schueler: mitVersuch, schnitt: mitVersuch ? (versucheGesamt / mitVersuch) : 0 };
-        }
+        // examFirstAttemptQuote() (Modul-Top-Level) statt einer eigenen Kopie - dieselbe Zahl wie
+        // im Statistik-Tab (schoolStats()).
+        function quote(art) { return examFirstAttemptQuote(mine, art); }
         const qTheorie = quote("theorie"), qPraxis = quote("praxis");
         const hatQuoten = qTheorie.schueler > 0 || qPraxis.schueler > 0;
         // Ueberfaellig = Rechnung aelter als das Zahlungsziel und noch nicht vollstaendig bezahlt.
@@ -14207,7 +14217,12 @@ function App() {
                     const stu = mine.find(x => x.id === inv.studentId);
                     const st = stu ? invoiceStatus(stu, inv) : "offen";
                     const restOffen = stu ? invoiceOpen(stu, inv) : (Number(inv.total) || 0);
-                    const badge = st === "bezahlt" ? { t: "Bezahlt", c: "var(--green)" }
+                    // Stornierte Rechnungen/Stornorechnungen erschienen hier bisher wie jede andere
+                    // offene Rechnung, samt anklickbarem "Zahlung"-Knopf - dieselbe Kennzeichnung wie
+                    // in der Rechnungsliste des einzelnen Schülers (kostenSection()).
+                    const badge = inv.stornoOf ? { t: "Storno zu " + inv.stornoOf, c: "#B3362A" }
+                        : inv.cancelledBy ? { t: "Storniert", c: "#B3362A" }
+                        : st === "bezahlt" ? { t: "Bezahlt", c: "var(--green)" }
                         : st === "teil" ? { t: "Teilweise", c: "var(--amber)" }
                         : { t: "Offen", c: "var(--muted)" };
                     return React.createElement("div", { key: inv.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid var(--line)" } },
@@ -14223,7 +14238,7 @@ function App() {
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, flexShrink: 0,
                                 color: st === "bezahlt" ? "var(--muted)" : "var(--ink)",
                                 textDecoration: st === "bezahlt" ? "line-through" : "none" } }, eurFmt(inv.total)),
-                        st !== "bezahlt" && React.createElement("button", { onClick: () => payInvoice(inv), className: "btn btn-ghost",
+                        st !== "bezahlt" && !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: () => payInvoice(inv), className: "btn btn-ghost",
                             style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 } }, "Zahlung"));
                 })));
     }
