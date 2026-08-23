@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.15";
+const APP_VERSION = "1.164.16";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.16", date: "August 2026", changes: [
+            "Wichtige Fehlerbehebung Fahrtenbuch: der KI-Stundenentwurf konnte in seltenen Fällen (Antwort trifft ein, während der Fahrlehrer währenddessen etwas anderes an diesem Schüler ändert - z.B. eine Zahlung erfasst oder eine andere Fahrstunde bearbeitet/löscht) diese zwischenzeitliche Änderung unbemerkt rückgängig machen, weil intern noch der Datenstand von vor dem KI-Aufruf verwendet wurde. Schreibt jetzt immer gegen den tatsächlich aktuellen Stand",
+            "Fehlerbehebung: befüllte der KI-Stundenentwurf nur eines von mehreren leeren Detailfeldern (z.B. nur \"Hinweis\"), wurden dabei auch die anderen, gerade unabgeschickt eingetippten Felder (z.B. \"Was lief gut\") zurückgesetzt - jetzt wird nur das tatsächlich befüllte Feld aktualisiert",
+        ] },
     { v: "1.164.15", date: "August 2026", changes: [
             "Fehlerbehebung: die \"Aufzeichnung läuft\"-Kachel auf der Startseite sprang nicht zuverlässig zur tatsächlich aufgezeichneten Fahrstunde, sondern manchmal zu einem zuvor geöffneten oder dem neuesten Eintrag",
             "Fehlerbehebung Chat (Fahrschüler-Bereich): neue Nachrichten scrollten nicht automatisch in den sichtbaren Bereich; ein Server-/Netzwerkfehler zeigte statt einer verständlichen Meldung manchmal einen kryptischen Rohfehler",
@@ -10433,26 +10437,64 @@ function App() {
                 return;
             }
             const d0 = out.draft || {};
-            const patch = {};
-            if (!l.thema && d0.thema) patch.thema = String(d0.thema).slice(0, 200);
-            if (!l.hinweis && d0.hinweis) patch.hinweis = String(d0.hinweis).slice(0, 500);
-            if (!l.gut && d0.gut) patch.gut = String(d0.gut).slice(0, 500);
-            if (!l.schlecht && d0.schlecht) patch.schlecht = String(d0.schlecht).slice(0, 500);
-            if (!l.note && d0.note) patch.note = String(d0.note).slice(0, 500);
-            if (d0.ratings && typeof d0.ratings === "object") {
-                const ratings = { ...(l.ratings || {}) };
-                let changed = false;
-                LESSON_FIELDS.forEach(f => {
-                    if (ratings[f.id] == null && [1, 2, 3].includes(d0.ratings[f.id])) {
-                        ratings[f.id] = d0.ratings[f.id];
-                        changed = true;
-                    }
+            // NICHT gegen das beim Klick eingefangene l/active schreiben oder sogar nur ENTSCHEIDEN
+            // ("ist thema noch leer?") - beides kann nach dem await oben veraltet sein, wenn der
+            // Fahrlehrer währenddessen manuell etwas eingetragen oder die Stunde/den Schüler
+            // geändert hat. writeStudent() ersetzt außerdem den KOMPLETTEN Datensatz - mit einem
+            // veralteten active würden dabei alle in der Zwischenzeit vorgenommenen Änderungen
+            // (neue/gelöschte Fahrstunden, Zahlungen) unbemerkt rückgängig gemacht. Deshalb läuft
+            // die komplette Leerfeld-Prüfung UND das Schreiben erst hier drin, funktional gegen den
+            // GERADE AKTUELLEN State - React ruft den setStudents-Updater immer mit dem neuesten
+            // Stand auf, nie mit einem veralteten Schnappschuss.
+            let patch = null, patchedStudent = null;
+            setStudents(prev => {
+                const next = (prev || []).map(s => {
+                    if (s.id !== active.id)
+                        return s;
+                    const lessons = (s.lessons || []).map(x => {
+                        if (x.id !== l.id)
+                            return x;
+                        const p = {};
+                        if (!x.thema && d0.thema) p.thema = String(d0.thema).slice(0, 200);
+                        if (!x.hinweis && d0.hinweis) p.hinweis = String(d0.hinweis).slice(0, 500);
+                        if (!x.gut && d0.gut) p.gut = String(d0.gut).slice(0, 500);
+                        if (!x.schlecht && d0.schlecht) p.schlecht = String(d0.schlecht).slice(0, 500);
+                        if (!x.note && d0.note) p.note = String(d0.note).slice(0, 500);
+                        if (d0.ratings && typeof d0.ratings === "object") {
+                            const ratings = { ...(x.ratings || {}) };
+                            let changed = false;
+                            LESSON_FIELDS.forEach(f => {
+                                if (ratings[f.id] == null && [1, 2, 3].includes(d0.ratings[f.id])) {
+                                    ratings[f.id] = d0.ratings[f.id];
+                                    changed = true;
+                                }
+                            });
+                            if (changed) p.ratings = ratings;
+                        }
+                        patch = p;
+                        return Object.keys(p).length > 0 ? { ...x, ...p } : x;
+                    });
+                    patchedStudent = { ...s, lessons };
+                    return patchedStudent;
                 });
-                if (changed) patch.ratings = ratings;
-            }
-            if (Object.keys(patch).length > 0) {
-                updateLesson(l.id, patch);
-                setLessonFieldRev(r => ({ ...r, [l.id]: (r[l.id] || 0) + 1 }));
+                if (uid)
+                    saveCache(uid, next);
+                return next;
+            });
+            if (patch && Object.keys(patch).length > 0) {
+                scheduleSave(patchedStudent);
+                // Nur die tatsächlich gepatchten Felder remounten (eigener Zähler je Feld) -
+                // sonst würde z.B. ein KI-Entwurf, der nur "hinweis" befüllt, auch das "gut"-Feld
+                // remounten und eine dort gerade unabgeschickte, noch nicht gespeicherte Eingabe
+                // auf ihren zuletzt gespeicherten Stand zurückwerfen.
+                setLessonFieldRev(r => {
+                    const next = { ...r };
+                    Object.keys(patch).forEach(field => {
+                        const k = l.id + ":" + field;
+                        next[k] = (next[k] || 0) + 1;
+                    });
+                    return next;
+                });
             }
             setLessonDraft(d => { const next = { ...d }; delete next[l.id]; return next; });
         }
@@ -12704,30 +12746,30 @@ function App() {
                         captureDetailsOpen && React.createElement("div", { style: { marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line)" } },
                             React.createElement("div", { style: { marginBottom: 12 } },
                                 React.createElement("label", { className: "ls-lbl" }, "Thema der Fahrstunde"),
-                                React.createElement("input", { key: l.id + ":thema:" + (lessonFieldRev[l.id] || 0), type: "text", defaultValue: l.thema || "", onBlur: e => { if (e.target.value !== (l.thema || ""))
+                                React.createElement("input", { key: l.id + ":thema:" + (lessonFieldRev[l.id + ":thema"] || 0), type: "text", defaultValue: l.thema || "", onBlur: e => { if (e.target.value !== (l.thema || ""))
                                         updateLesson(l.id, { thema: e.target.value }); }, placeholder: "z. B. Kreisverkehr, Autobahn auffahren, Einparken…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, fontWeight: 600 } })),
                             React.createElement("div", { style: { display: "grid", gap: 10 } },
                                 React.createElement("div", null,
                                     React.createElement("label", { className: "ls-lbl", style: { color: "var(--orange-deep)", display: "flex", alignItems: "center", gap: 5 } },
                                         "Hinweis für den Schüler",
                                         React.createElement(Help, { text: "Erscheint bei dieser Fahrstunde im Fahrschülerbereich, im Gegensatz zu den Feldern darunter, die privat bleiben." })),
-                                    React.createElement("textarea", { key: l.id + ":hinweis:" + (lessonFieldRev[l.id] || 0), rows: 2, defaultValue: l.hinweis || "", onBlur: e => { if (e.target.value !== (l.hinweis || ""))
+                                    React.createElement("textarea", { key: l.id + ":hinweis:" + (lessonFieldRev[l.id + ":hinweis"] || 0), rows: 2, defaultValue: l.hinweis || "", onBlur: e => { if (e.target.value !== (l.hinweis || ""))
                                             updateLesson(l.id, { hinweis: e.target.value }); }, placeholder: "z. B. Schulterblick vor dem Ausparken nicht vergessen…", style: { width: "100%", border: "1.5px solid var(--orange)", borderRadius: 10, padding: "9px 11px",
                                             fontSize: 16, background: "var(--orange-soft)", resize: "vertical" } }),
                                     React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 4 } }, "Sichtbar für den Schüler")),
                                 React.createElement("div", null,
                                     React.createElement("label", { className: "ls-lbl", style: { color: "var(--green)" } }, "Was lief gut"),
-                                    React.createElement("textarea", { key: l.id + ":gut:" + (lessonFieldRev[l.id] || 0), rows: 2, defaultValue: l.gut || "", onBlur: e => { if (e.target.value !== (l.gut || ""))
+                                    React.createElement("textarea", { key: l.id + ":gut:" + (lessonFieldRev[l.id + ":gut"] || 0), rows: 2, defaultValue: l.gut || "", onBlur: e => { if (e.target.value !== (l.gut || ""))
                                             updateLesson(l.id, { gut: e.target.value }); }, placeholder: "Was hat gut geklappt…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
                                             fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
                                 React.createElement("div", null,
                                     React.createElement("label", { className: "ls-lbl", style: { color: "#B3362A" } }, "Was lief schlecht"),
-                                    React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
+                                    React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id + ":schlecht"] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
                                             updateLesson(l.id, { schlecht: e.target.value }); }, placeholder: "Woran noch arbeiten…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
                                             fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
                                 React.createElement("div", null,
                                     React.createElement("label", { className: "ls-lbl" }, "Weitere Notizen"),
-                                    React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
+                                    React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id + ":note"] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
                                             updateLesson(l.id, { note: e.target.value }); }, placeholder: "Sonstiges…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
                                             fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }))),
                             (l.thema || l.gut || l.schlecht) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => suggestAdkFromLesson(l) }, "✨ ADK/Strecken-Vorschlag aus dieser Stunde")))),
