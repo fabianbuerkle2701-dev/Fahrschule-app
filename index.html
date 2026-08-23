@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.16";
+const APP_VERSION = "1.164.17";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.17", date: "August 2026", changes: [
+            "Fehlerbehebung: der Standort/Filiale-Auswahl eines mit einem Kollegen geteilten (nicht eigenen) Schülers ließ sich ändern - jetzt nur noch vom Besitzer, andere sehen den zugewiesenen Standort nur als Text",
+            "Fehlerbehebung Prüfungssimulation/Schaltkompetenz: eine laufende Sitzung überlebte einen Kontowechsel (Abmelden/neu anmelden) - das Live-Banner zeigte danach weiter den alten Schülernamen, und der Abschluss-Button zeigte fälschlich Erfolg an bzw. reagierte gar nicht, weil der Schüler im neuen Konto nicht existiert. Läuft jetzt sauber zurückgesetzt, mit klarer Fehlermeldung statt falschem Erfolg",
+            "Fehlerbehebung Prüfungssimulation: eine verspätet eintreffende KI-Klassifizierung konnte einen währenddessen manuell gewählten Fahraufgabe/Kompetenzbereich-Kontext überschreiben; der 'Analysieren'-Button konnte außerdem dauerhaft auf 'Wird analysiert…' hängen bleiben",
+            "Fehlerbehebung: der Abo-Status wurde nur einmal beim Login geladen - lief das Zahlungsfenster oder die Probezeit während einer bereits offenen Sitzung ab, oder deaktivierte ein Admin das Abo zwischenzeitlich, bemerkte die offene Sitzung das nicht. Wird jetzt wie Termine/Schülerliste beim Zurückkehren in den Vordergrund neu geladen",
+        ] },
     { v: "1.164.16", date: "August 2026", changes: [
             "Wichtige Fehlerbehebung Fahrtenbuch: der KI-Stundenentwurf konnte in seltenen Fällen (Antwort trifft ein, während der Fahrlehrer währenddessen etwas anderes an diesem Schüler ändert - z.B. eine Zahlung erfasst oder eine andere Fahrstunde bearbeitet/löscht) diese zwischenzeitliche Änderung unbemerkt rückgängig machen, weil intern noch der Datenstand von vor dem KI-Aufruf verwendet wurde. Schreibt jetzt immer gegen den tatsächlich aktuellen Stand",
             "Fehlerbehebung: befüllte der KI-Stundenentwurf nur eines von mehreren leeren Detailfeldern (z.B. nur \"Hinweis\"), wurden dabei auch die anderen, gerade unabgeschickt eingetippten Felder (z.B. \"Was lief gut\") zurückgesetzt - jetzt wird nur das tatsächlich befüllte Feld aktualisiert",
@@ -7791,6 +7797,29 @@ function App() {
             .catch(e => { console.error("Abo-Status konnte nicht geladen werden:", e); setMySubscription({ subscription_active: false }); });
         fetchAppSettings().then(s => setPaypalLink((s && s.paypal_link) || "")).catch(() => setPaypalLink(""));
     }, [uid]);
+    // Wenn die App wieder in den Vordergrund kommt: Abo-Status neu laden - ohne diesen Refresh
+    // blieb eine bereits offene Sitzung bis zu einem manuellen Reload/Re-Login auf dem beim Login
+    // geladenen Stand stehen, selbst wenn das Zahlungsfenster/die Probezeit währenddessen abläuft
+    // oder ein Admin das Abo zwischenzeitlich deaktiviert.
+    useEffect(() => {
+        if (!uid)
+            return;
+        let lastRefresh = 0;
+        function refresh() {
+            if (document.visibilityState === "visible") {
+                const now = Date.now();
+                if (now - lastRefresh < 600) return;
+                lastRefresh = now;
+                fetchOwnSubscription(uid).then(s => setMySubscription(s || { subscription_active: false })).catch(() => { });
+            }
+        }
+        document.addEventListener("visibilitychange", refresh);
+        window.addEventListener("focus", refresh);
+        return () => {
+            document.removeEventListener("visibilitychange", refresh);
+            window.removeEventListener("focus", refresh);
+        };
+    }, [uid]);
     // Eigener Text für die Buchungslink-Nachricht. Leer = Standardtext wird verwendet.
     const [bookingMessage, setBookingMessage] = useState(null); // null solange nicht geladen
     const [bookingMessageError, setBookingMessageError] = useState("");
@@ -7913,6 +7942,12 @@ function App() {
             setTpl(null);
             setSchool(null);
             setAppts([]);
+            // Ohne diesen Reset überlebte eine laufende Prüfungssimulation/Schaltkompetenz-Sitzung
+            // einen Kontowechsel (App() bleibt beim Sign-out gemountet) - das Live-Banner zeigte
+            // danach weiter den alten Schülernamen, und "Test abschließen" suchte den Schüler in
+            // der neu geladenen Liste des neuen Kontos vergeblich.
+            setPruefungssim(null);
+            setSchaltkompetenz(null);
             return;
         }
         const cached = loadCache(uid);
@@ -10170,20 +10205,30 @@ function App() {
                 body: JSON.stringify({ text, fahraufgaben: PRUEFUNGS_FAHRAUFGABEN, kompetenzbereiche: PRUEFUNGS_KOMPETENZBEREICHE,
                     schweregrade: PRUEFUNGS_SCHWEREGRADE.map(s => ({ id: s.id, label: s.label })) }),
             });
-            const r = await resp.json();
+            // Erst den Status prüfen, dann JSON parsen (gegen Parse-Fehler abgesichert) - eine
+            // Infrastruktur-Fehlerseite (Netlify 502/504, Timeout) ist kein JSON und würde sonst
+            // eine kryptische SyntaxError statt einer verständlichen Meldung erzeugen.
+            let r = null;
+            try {
+                r = await resp.json();
+            }
+            catch (e) { }
             if (!resp.ok)
                 throw new Error((r && r.error) || "KI-Anfrage fehlgeschlagen");
-            const validFa = PRUEFUNGS_FAHRAUFGABEN.some(f => f.id === r.fahraufgabe);
-            const validKb = PRUEFUNGS_KOMPETENZBEREICHE.some(k => k.id === r.kompetenzbereich);
-            const validSg = PRUEFUNGS_SCHWEREGRADE.some(s => s.id === r.schweregrad);
+            const validFa = PRUEFUNGS_FAHRAUFGABEN.some(f => f.id === (r && r.fahraufgabe));
+            const validKb = PRUEFUNGS_KOMPETENZBEREICHE.some(k => k.id === (r && r.kompetenzbereich));
+            const validSg = PRUEFUNGS_SCHWEREGRADE.some(s => s.id === (r && r.schweregrad));
             if (!validFa || !validKb || !validSg)
                 throw new Error("Konnte nicht eindeutig zugeordnet werden - bitte manuell auswählen.");
-            setPruefungssim(p => p && ({ ...p, kiBusy: false, step: "fehler",
+            // Nur übernehmen, wenn der Nutzer währenddessen nicht schon manuell weitergegangen
+            // ist (z.B. Fahraufgabe/Kompetenzbereich selbst gewählt) - sonst würde eine verspätete
+            // Antwort dessen Auswahl mitten in der laufenden Simulation kommentarlos überschreiben.
+            setPruefungssim(p => (p && p.step === "ki_eingabe") ? { ...p, kiBusy: false, step: "fehler",
                 draft: { fahraufgabe: r.fahraufgabe, kompetenzbereich: r.kompetenzbereich },
-                kiVorschlag: { schweregrad: r.schweregrad, text: (r.text || text).trim() } }));
+                kiVorschlag: { schweregrad: r.schweregrad, text: (r.text || text).trim() } } : p);
         }
         catch (e) {
-            setPruefungssim(p => p && ({ ...p, kiBusy: false, kiError: e.message || "KI-Anfrage fehlgeschlagen" }));
+            setPruefungssim(p => (p && p.step === "ki_eingabe") ? { ...p, kiBusy: false, kiError: e.message || "KI-Anfrage fehlgeschlagen" } : p);
         }
     }
     // Speichert die abgeschlossene Simulation im Fahrtenbuch des Schülers (examSims) und beendet
@@ -10194,13 +10239,20 @@ function App() {
         if (!p)
             return;
         const stu = (students || []).find(s => s.id === p.studentId);
+        if (!stu) {
+            // Schüler nicht mehr auffindbar (z.B. Kontowechsel während laufender Simulation) -
+            // NICHT den Erfolgs-Bildschirm zeigen, sonst denkt der Fahrlehrer, das Ergebnis sei
+            // gespeichert, obwohl nichts geschrieben wurde.
+            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.");
+            setPruefungssim(null);
+            setView("uebersicht");
+            return;
+        }
         const summary = pruefungssimSummary(p.entries);
         const durationSec = Math.round((Date.now() - p.startedAt) / 1000);
-        if (stu) {
-            const sim = { id: "SIM" + Date.now().toString(36), date: ymd(new Date()), startedAt: new Date(p.startedAt).toISOString(),
-                durationSec, entries: p.entries, summary };
-            writeStudent({ ...stu, examSims: [...(stu.examSims || []), sim] });
-        }
+        const sim = { id: "SIM" + Date.now().toString(36), date: ymd(new Date()), startedAt: new Date(p.startedAt).toISOString(),
+            durationSec, entries: p.entries, summary };
+        writeStudent({ ...stu, examSims: [...(stu.examSims || []), sim] });
         // Nicht sofort schließen: erst die Zusammenfassung zeigen, wie am Ende jeder Simulation.
         setPruefungssim(prev => prev && ({ ...prev, step: "summary", finalSummary: summary, finalDuration: durationSec }));
     }
@@ -10235,8 +10287,14 @@ function App() {
         if (!sk)
             return;
         const stu = (students || []).find(s => s.id === sk.studentId);
-        if (!stu)
+        if (!stu) {
+            // Schüler nicht mehr auffindbar (z.B. Kontowechsel während laufendem Test) - vorher
+            // tat der Button hier einfach gar nichts, ohne jede Rückmeldung.
+            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.");
+            setSchaltkompetenz(null);
+            setView("schaltkompetenzliste");
             return;
+        }
         const sim = { id: "SK" + Date.now().toString(36), date: ymd(new Date()), startedAt: new Date(sk.startedAt).toISOString(),
             durationSec: Math.round((Date.now() - sk.startedAt) / 1000), items: sk.items, notiz: sk.notiz || "" };
         writeStudent({ ...stu, schaltkompetenzTests: [...(stu.schaltkompetenzTests || []), sim] });
@@ -12287,7 +12345,7 @@ function App() {
         }
         if (p.step === "ki_eingabe") {
             return React.createElement("div", { className: "pad" },
-                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "running", kiError: "" })) }, "‹ Zurück"),
+                React.createElement("button", { className: "btn btn-ghost", style: { marginBottom: 14 }, onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "running", kiBusy: false, kiError: "" })) }, "‹ Zurück"),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "✨ KI-Schnelleintrag"),
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, "Kurz beschreiben, was passiert ist - die KI ordnet Fahraufgabe, Kompetenzbereich und Schweregrad automatisch zu. Du bestätigst den Vorschlag danach noch."),
                 React.createElement("textarea", { rows: 4, value: p.kiInput, autoFocus: true, placeholder: "z.B. „Schulterblick vergessen beim Abbiegen, war aber ungefährlich“",
@@ -12339,7 +12397,7 @@ function App() {
                     pruefungssimFmtZeit(elapsedSec))),
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21, margin: "6px 0 16px" } }, "Was ist passiert?"),
             React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 10, display: "flex", alignItems: "center", gap: 12, borderLeft: "3px solid var(--orange)" },
-                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "ki_eingabe", kiInput: "", kiError: "" })) },
+                    onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "ki_eingabe", kiBusy: false, kiInput: "", kiError: "" })) },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)" } }, "✨"),
                 React.createElement("span", { style: { flex: 1 } },
                     React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 15 } }, "KI-Schnelleintrag"),
@@ -14538,9 +14596,16 @@ function App() {
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Bestimmt, welche ADK und Strecken bei diesem Schüler angezeigt werden. Ohne Auswahl gilt Klasse " + DEFAULT_KLASSE + ".")),
                 locations.length > 0 && React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Standort / Filiale"),
-                    React.createElement("select", { value: active.location_id || "", onChange: e => updateActive({ location_id: e.target.value }) },
-                        React.createElement("option", { value: "" }, "– Kein Standort zugewiesen –"),
-                        locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))),
+                    // Nur der Besitzer darf den Standort ändern - der bestimmt u.a., welche
+                    // Filial-Adresse dem Schüler in dessen eigener App angezeigt wird, und
+                    // assignMyLocationToStudents() geht ohnehin davon aus, dass location_id
+                    // unter Kontrolle des Besitzers steht.
+                    active._isMine
+                        ? React.createElement("select", { value: active.location_id || "", onChange: e => updateActive({ location_id: e.target.value }) },
+                            React.createElement("option", { value: "" }, "– Kein Standort zugewiesen –"),
+                            locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))
+                        : React.createElement("div", { style: { fontSize: 14, padding: "10px 0", color: "var(--muted)" } },
+                            (locations.find(loc => loc.id === active.location_id) || {}).name || "– Kein Standort zugewiesen –")),
                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                     React.createElement("div", { style: { flex: 1 } }, f("lenkrad", "Lenkrad (Pos.)", "number")),
                     React.createElement("div", { style: { flex: 1 } }, f("kopfstuetze", "Kopfstütze (Pos.)", "number"))),
