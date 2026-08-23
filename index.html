@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.5";
+const APP_VERSION = "1.164.6";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,13 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.6", date: "August 2026", changes: [
+            "Sicherheitslücke geschlossen: der \"Stilllegen\"-Button zum Entfernen eines Fahrlehrers aus einer Fahrschule hatte als einziger der Buttons im Fahrlehrer-Verwaltungsfenster kein Admin-Gate - jeder App-Moderator konnte ihn sehen und anklicken, obwohl diese Aktion laut Rollenkonzept dem zentralen Admin vorbehalten ist",
+            "Fehlerbehebung Warteliste: zwei Lösch-Wege für Termine (über das Termin-Bearbeiten-Formular, und beim direkten Löschen einer Storno-Anfrage aus dem Auswahlfenster) boten einen frei gewordenen Termin nie wartenden Schülern an, obwohl der dritte, direkte Lösch-Weg das korrekt tat",
+            "Fehlerbehebung Fahrschüler-Startseite: ein Termin mit offener Stornoanfrage wurde komplett ausgeblendet (\"keine Fahrstunde eingetragen\", Termine-Zähler sprang auf 0), obwohl der Termin bis zur Entscheidung des Fahrlehrers voll gültig bleibt und sogar abgelehnt werden kann. Zeigt den Termin jetzt weiter an, mit Hinweis \"Storno angefragt\" (auch im Fortschritts-Tab ergänzt, wo dieser Hinweis bisher nur in der Terminliste, nicht aber im großen Banner erschien)",
+            "Fehlerbehebung: die automatische Schüler-Vorauswahl beim App-Start erkannte einen gerade laufenden, bestätigten Termin ohne eingetragene Endzeit nie als \"aktuell\" (technischer Grund: fehlender 45-Minuten-Standardwert, wie er an anderen Stellen der App längst verwendet wird)",
+            "Fehlerbehebung Interessenten-Formular: der Abbrechen-Button (sowie \"Als Schüler übernehmen\"/\"Löschen\") blieb während des Speicherns bedienbar - ein Klick schloss das Formular sofort, während das Speichern im Hintergrund trotzdem durchlief und der Nutzer den Eindruck hatte, nichts sei passiert",
+        ] },
     { v: "1.164.5", date: "August 2026", changes: [
             "Fehlerbehebung Urlaub eintragen: (1) bestätigte Fahrstunden im gewählten Urlaubszeitraum wurden bisher nicht erkannt - Urlaub ließ sich anlegen, während laut Kalender parallel noch ein bestätigter Termin steht. Es erscheint jetzt vorher eine Rückfrage mit den betroffenen Terminen. (2) Die Dopplungs-Prüfung verglich nur den Kalendertag, nicht das Zeitfenster - ein bereits eingetragener Halbtags-Urlaub blockierte das Anlegen eines zweiten, nicht überlappenden Blocks am selben Tag. Beide Prüfungen vergleichen jetzt die tatsächlichen Zeitfenster",
         ] },
@@ -6599,8 +6606,16 @@ function rmapFmtDur(sec) { const m = Math.round(sec / 60); if (m < 60)
 // das hier greift nur bei der Ausgangsauswahl.
 function findCurrentApptStudentId(appts) {
     const now = Date.now();
-    const current = (appts || []).find(a => a.status === "confirmed" && a.student_id &&
-        new Date(a.start_at).getTime() <= now && now <= new Date(a.end_at).getTime());
+    // Fehlende Endzeit wie überall sonst im File mit +45 Min annehmen (z.B. findOverlaps,
+    // apptMin) - sonst liefert new Date(null).getTime() den Unix-Epoch (0) und ein wirklich
+    // gerade laufender Termin ohne end_at wird nie als "aktuell" erkannt.
+    const current = (appts || []).find(a => {
+        if (a.status !== "confirmed" || !a.student_id)
+            return false;
+        const start = new Date(a.start_at).getTime();
+        const end = a.end_at ? new Date(a.end_at).getTime() : start + 45 * 60000;
+        return start <= now && now <= end;
+    });
     return current ? current.student_id : null;
 }
 // Läuft diese Seite in der nativen Fahrlehrer-App (Capacitor)? Nur dort existiert das
@@ -19274,7 +19289,7 @@ function App() {
                             React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 } },
                                 isAdmin(session) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.school_admin ? "var(--muted)" : "var(--orange-deep)" }, onClick: () => toggleTeacherAdmin(t.id, t.school_admin) }, t.school_admin ? "Admin entziehen" : "Zu Admin machen"),
                                 isAdmin(session) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: t.app_moderator ? "var(--muted)" : "var(--blue)" }, onClick: () => toggleTeacherModerator(t.id, t.app_moderator) }, t.app_moderator ? "Moderator entziehen" : "Zu Moderator machen")),
-                            t.id !== session.user.id && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, onClick: () => detachTeacher(t.id, t.email) }, "Stilllegen")))),
+                            isAdmin(session) && t.id !== session.user.id && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, onClick: () => detachTeacher(t.id, t.email) }, "Stilllegen")))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAdminTeachers(null) }, "Schlie\u00DFen"))),
         calShare && React.createElement("div", { className: "modal-overlay", style: { position: "fixed", inset: 0, background: "var(--paper)", zIndex: 150, overflowY: "auto" } },
             React.createElement("div", { style: { position: "sticky", top: 0, background: "var(--card)", borderBottom: "1px solid var(--line)", padding: "calc(12px + env(safe-area-inset-top)) 16px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", zIndex: 10 } },
@@ -19862,9 +19877,9 @@ function App() {
                         : React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } }, "Keine Telefonnummer hinterlegt - Text oben markieren und kopieren."))),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: interessentForm.busy ? 0.6 : 1 }, disabled: !!interessentForm.busy, onClick: saveInteressentForm },
                     interessentForm.busy ? "Wird gespeichert\u2026" : (interessentForm.id ? "Speichern" : "Anlegen")),
-                interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "var(--green)" }, onClick: () => convertInteressentToStudent(interessentForm) }, "Als Sch\u00FCler \u00FCbernehmen"),
-                interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "#B3362A" }, onClick: () => removeInteressent(interessentForm) }, "L\u00F6schen"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setInteressentForm(null) }, "Abbrechen"))),
+                interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "var(--green)" }, disabled: !!interessentForm.busy, onClick: () => convertInteressentToStudent(interessentForm) }, "Als Sch\u00FCler \u00FCbernehmen"),
+                interessentForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "#B3362A" }, disabled: !!interessentForm.busy, onClick: () => removeInteressent(interessentForm) }, "L\u00F6schen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!interessentForm.busy, onClick: () => { if (!interessentForm.busy) setInteressentForm(null); } }, "Abbrechen"))),
         sickModal && renderSickModal(),
         adminTeacherStudents && React.createElement("div", { onClick: () => setAdminTeacherStudents(null), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 115, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
@@ -20119,7 +20134,10 @@ function App() {
                             setApptChoice(null);
                             if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true })) {
                                 await removeAppt(a.id);
-                                maybeOfferWaitlist(a);
+                                // Bei einer offenen Storno-Anfrage war der Termin bis eben "confirmed"
+                                // (cancel_requested ist nur ein Zwischenstatus) - maybeOfferWaitlist
+                                // verlangt genau diesen Status, sonst bricht sie sofort ab.
+                                maybeOfferWaitlist(a.status === "cancel_requested" ? { ...a, status: "confirmed" } : a);
                             } } },
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M3 6h18" }),
@@ -20282,8 +20300,14 @@ function App() {
                         React.createElement("line", { x1: "3", y1: "10", x2: "21", y2: "10" })),
                     "Als Kalender-Datei senden"),
                 apptForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: "Diesen Termin löschen?" })) {
-                        removeAppt(apptForm.id);
+                        // Freigewordenen, echten Termin merken, BEVOR er entfernt wird - sonst bietet
+                        // dieser (sehr gängige) Löschweg den Slot nie an wartende Schüler an, anders
+                        // als das Löschen direkt aus dem Termin-Auswahlfenster.
+                        const freed = (appts || []).find(x => x.id === apptForm.id);
+                        await removeAppt(apptForm.id);
                         setApptForm(null);
+                        if (freed)
+                            maybeOfferWaitlist(freed.status === "cancel_requested" ? { ...freed, status: "confirmed" } : freed);
                     } } }, "Termin l\u00F6schen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!apptForm.busy, onClick: () => { if (!apptForm.busy) setApptForm(null); } }, "Abbrechen"))),
         showNachweisModal && React.createElement("div", { className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex",
@@ -22672,7 +22696,9 @@ function StudentArea({ code, info, appMode }) {
                         React.createElement("path", { d: "M8 2v4" }), React.createElement("path", { d: "M16 2v4" }), React.createElement("path", { d: "M3 10h18" }),
                         React.createElement("path", { d: "M5 4h14a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" }))),
                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                    React.createElement("div", { className: "home-eyebrow" }, "Nächste Fahrstunde"),
+                    React.createElement("div", { className: "home-eyebrow" },
+                        "Nächste Fahrstunde",
+                        kommend[0].status === "cancel_requested" && " · Storno angefragt"),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, marginTop: 2 } },
                         fmtDLong(kommend[0].start_at) + " · " + hm(kommend[0].start_at) + " Uhr"),
                     lessonWeather && lessonWeather !== "error" && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)", marginTop: 3 } },
@@ -22999,7 +23025,10 @@ function SchuelerStart({ code, info, onGoTab }) {
     const pct = Math.max(adkPct, strPct);
     const lessons = (data && Array.isArray(data.lessons)) ? data.lessons : [];
     const appts = (data && Array.isArray(data.appointments)) ? data.appointments : [];
-    const kommend = appts.filter(a => new Date(a.start_at) >= jetzt && a.status !== "cancel_requested")
+    // cancel_requested NICHT ausschließen: der Termin bleibt bis zur Entscheidung des
+    // Fahrlehrers voll gültig (er kann die Stornierung sogar ablehnen) - sonst zeigt die
+    // Startseite fälschlich "keine Fahrstunde eingetragen", obwohl der Termin noch steht.
+    const kommend = appts.filter(a => new Date(a.start_at) >= jetzt)
         .sort((a, b) => a.start_at.localeCompare(b.start_at));
     const naechster = kommend[0] || null;
     // Erfolge wie im Fortschritts-Bereich zählen, damit die Kachel dieselbe Zahl zeigt.
@@ -23030,7 +23059,9 @@ function SchuelerStart({ code, info, onGoTab }) {
         // Nächste Fahrstunde - für Fahrschüler die wichtigste Information überhaupt
         naechster && React.createElement("button", { onClick: () => onGoTab("termine"), className: "card", style: { width: "100%", textAlign: "left", padding: 0, overflow: "hidden", marginBottom: 12, border: "none" } },
             React.createElement("div", { style: { background: "var(--orange)", padding: "16px 17px", color: "#3A2200" } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase", opacity: .8 } }, "Nächste Fahrstunde"),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase", opacity: .8 } },
+                    "Nächste Fahrstunde",
+                    naechster.status === "cancel_requested" && " · Storno angefragt"),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 23, marginTop: 5, lineHeight: 1.15 } }, fmtDLong(naechster.start_at)),
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginTop: 7, fontSize: 15, fontWeight: 700 } },
                     svg(["M12 6v6l4 2", "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z"], { width: 16, height: 16 }),
