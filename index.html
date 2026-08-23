@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.36";
+const APP_VERSION = "1.164.37";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.37", date: "August 2026", changes: [
+            "Schüler-Screenshot-Import: Doppeltap-Schutz beim Anlegen ergänzt (konnte denselben Schüler zweimal anlegen). KI-Übergabe-/Prüfreife-Einschätzung/Eltern-Update-Fenster ließ sich während des Ladens schließen (Escape, Hintergrund-Klick, Schließen-Knopf) und poppte danach mit dem fertigen Ergebnis überraschend wieder auf - jetzt blockiert das Schließen während des Ladens, und ein bereits geschlossenes Fenster bleibt geschlossen. Escape schloss den KI-Helfer-Chat auch während eine Anfrage noch lief und verwarf die kurz danach fertige Antwort stillschweigend - der Hintergrund-Klick war hier schon richtig geschützt, Escape jetzt auch",
+        ] },
     { v: "1.164.36", date: "August 2026", changes: [
             "Zuverlässigkeit behoben: fetchMySchool() gab bei einem einzelnen kurzzeitigen Netzwerk-/DB-Fehler sofort \"keine Fahrschule\" zurück statt es erneut zu versuchen - konnte ein völlig intaktes Konto fälschlich auf den neuen Wiederherstellungs-Screen aus 1.164.35 treffen lassen. Kalender-Screenshot-Import: Doppeltap-Schutz beim Anlegen der Termine ergänzt, und eine nicht zweistellig erkannte Uhrzeit (z.B. \"9:00\") wird jetzt korrekt übernommen statt stillschweigend auf 00:00 gesetzt zu werden. Führerscheinklasse löschen fragt jetzt nach und warnt, wenn noch Schüler dieser Klasse zugeordnet sind",
         ] },
@@ -7341,6 +7344,9 @@ function App() {
     // Doppeltap-Schutz für convertInteressentToStudent() - ein Ref wirkt sofort, ohne auf das
     // Re-Render von interessentForm.busy zu warten (siehe apptSavingRef für dasselbe Muster).
     const interessentConvertBusyRef = useRef(false);
+    // Doppeltap-Schutz für createStudentFromImport() - ohne diesen Riegel konnte ein zweiter Tipp
+    // auf "Schüler anlegen" denselben gescannten Antrag zweimal als Schüler übernehmen.
+    const studentImportBusyRef = useRef(false);
     // Dokumente (Sehtest, Erste-Hilfe, ...) des aktiven Schülers - lazy geladen im
     // Führerschein-Reiter, siehe renderLicenseSteps. Bei Schülerwechsel zurücksetzen, sonst
     // blieben kurz die Dateien des vorherigen Schülers sichtbar.
@@ -7868,7 +7874,7 @@ function App() {
             else if (qrModal) setQrModal(false);
             else if (calImport) setCalImport(null);
             else if (adkImport) setAdkImport(null);
-            else if (assistant) setAssistant(null);
+            else if (assistant) { if (!assistant.busy) setAssistant(null); }
             else if (lessonForm) setLessonForm(null);
             else if (itemForm) setItemForm(null);
             else if (paymentForm) setPaymentForm(null);
@@ -7896,7 +7902,8 @@ function App() {
             else if (adminEdit) setAdminEdit(null);
             else if (adminTeachers) setAdminTeachers(null);
             else if (tabMenu) setTabMenu(null);
-            else if (handoverModal) setHandoverModal(null);
+            else if (handoverModal) { if (!handoverModal.busy)
+                setHandoverModal(null); }
             else if (interessentForm) { if (!interessentForm.busy)
                 setInteressentForm(null); }
             else if (sickModal) setSickModal(null);
@@ -9744,6 +9751,17 @@ function App() {
     }
     // Aus den ausgelesenen Daten einen Schüler anlegen
     async function createStudentFromImport(d) {
+        if (studentImportBusyRef.current)
+            return;
+        studentImportBusyRef.current = true;
+        try {
+            await createStudentFromImportInner(d);
+        }
+        finally {
+            studentImportBusyRef.current = false;
+        }
+    }
+    async function createStudentFromImportInner(d) {
         const deToIso = (s) => { const m = (s || "").match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : ""; };
         const draft = newStudent();
         draft.location_id = validMyLocationId || "";
@@ -9987,13 +10005,15 @@ function App() {
             });
             const out = await resp.json().catch(() => null);
             if (!resp.ok || !out || !out.text) {
-                setHandoverModal(m => ({ ...m, busy: false, error: (out && out.error) || "Einschätzung fehlgeschlagen" }));
+                setHandoverModal(m => m ? ({ ...m, busy: false, error: (out && out.error) || "Einschätzung fehlgeschlagen" }) : m);
                 return;
             }
-            setHandoverModal(m => ({ ...m, busy: false, text: out.text }));
+            // m ist null, wenn der Nutzer den Dialog inzwischen geschlossen hat - sonst würde das
+            // fertige Ergebnis den bereits geschlossenen Dialog überraschend wieder aufpoppen lassen.
+            setHandoverModal(m => m ? ({ ...m, busy: false, text: out.text }) : m);
         }
         catch (e) {
-            setHandoverModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+            setHandoverModal(m => m ? ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }) : m);
         }
     }
     // Leichtes, warmes Datenpaket für ein Eltern-/Begleitpersonen-Update - bewusst NICHT das
@@ -10029,13 +10049,15 @@ function App() {
             });
             const out = await resp.json().catch(() => null);
             if (!resp.ok || !out || !out.text) {
-                setHandoverModal(m => ({ ...m, busy: false, error: (out && out.error) || "Entwurf fehlgeschlagen" }));
+                setHandoverModal(m => m ? ({ ...m, busy: false, error: (out && out.error) || "Entwurf fehlgeschlagen" }) : m);
                 return;
             }
-            setHandoverModal(m => ({ ...m, busy: false, text: out.text }));
+            // m ist null, wenn der Nutzer den Dialog inzwischen geschlossen hat - sonst würde das
+            // fertige Ergebnis den bereits geschlossenen Dialog überraschend wieder aufpoppen lassen.
+            setHandoverModal(m => m ? ({ ...m, busy: false, text: out.text }) : m);
         }
         catch (e) {
-            setHandoverModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+            setHandoverModal(m => m ? ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }) : m);
         }
     }
     async function generateHandoverSummary(stu) {
@@ -10048,13 +10070,13 @@ function App() {
             });
             const out = await resp.json();
             if (!resp.ok) {
-                setHandoverModal(m => ({ ...(m || {}), busy: false, error: (out && out.error) || "Anfrage fehlgeschlagen" }));
+                setHandoverModal(m => m ? ({ ...m, busy: false, error: (out && out.error) || "Anfrage fehlgeschlagen" }) : m);
                 return;
             }
-            setHandoverModal(m => ({ ...(m || {}), busy: false, text: out.text || "", error: "" }));
+            setHandoverModal(m => m ? ({ ...m, busy: false, text: out.text || "", error: "" }) : m);
         }
         catch (e) {
-            setHandoverModal(m => ({ ...(m || {}), busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+            setHandoverModal(m => m ? ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }) : m);
         }
     }
     // Vorgeschlagene Aktion nach Bestätigung ausführen
@@ -20547,7 +20569,8 @@ function App() {
                                 : React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } }, "Keine Telefonnummer hinterlegt - Text oben markieren und kopieren.")));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setFolgeCockpit(false) }, "Schlie\u00DFen"))),
-        handoverModal && React.createElement("div", { onClick: () => setHandoverModal(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        handoverModal && React.createElement("div", { onClick: () => { if (!handoverModal.busy)
+                    setHandoverModal(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 40, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -20573,7 +20596,7 @@ function App() {
                                 showToast("Kopieren nicht m\u00F6glich - bitte Text von Hand markieren.");
                             } } }, "Text kopieren")),
                 !handoverModal.busy && !handoverModal.error && handoverModal.text && handoverModal.kind !== "eltern" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => doPrint("handover") }, "Als PDF drucken"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setHandoverModal(null) }, "Schlie\u00DFen"))),
+                !handoverModal.busy && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setHandoverModal(null) }, "Schlie\u00DFen"))),
         interessentForm && React.createElement("div", { onClick: () => { if (!interessentForm.busy)
                     setInteressentForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
