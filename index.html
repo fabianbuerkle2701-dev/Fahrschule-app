@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.4";
+const APP_VERSION = "1.164.5";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.5", date: "August 2026", changes: [
+            "Fehlerbehebung Urlaub eintragen: (1) bestätigte Fahrstunden im gewählten Urlaubszeitraum wurden bisher nicht erkannt - Urlaub ließ sich anlegen, während laut Kalender parallel noch ein bestätigter Termin steht. Es erscheint jetzt vorher eine Rückfrage mit den betroffenen Terminen. (2) Die Dopplungs-Prüfung verglich nur den Kalendertag, nicht das Zeitfenster - ein bereits eingetragener Halbtags-Urlaub blockierte das Anlegen eines zweiten, nicht überlappenden Blocks am selben Tag. Beide Prüfungen vergleichen jetzt die tatsächlichen Zeitfenster",
+        ] },
     { v: "1.164.4", date: "August 2026", changes: [
             "Fehlerbehebung Kosten: eine bereits auf einer Rechnung stehende Fahrstunde oder ein bereits abgerechneter Posten ließ sich bisher einfach löschen, wodurch die App-interne Summe nicht mehr zur tatsächlich gestellten Rechnung passte. Löschen ist jetzt gesperrt, solange der Eintrag auf einer Rechnung steht (Hinweis nennt die Rechnungsnummer) - stornieren Sie stattdessen die Rechnung",
             "Fehlerbehebung Paket-Guthaben: ein neu dazugekauftes Paket rechnete sein Guthaben bisher rückwirkend gegen bereits abgerechnete Fahrstunden auf und ließ sie nachträglich als \"gedeckt\" erscheinen - das Guthaben fehlte dann bei den tatsächlich noch offenen, künftigen Stunden, und \"Paket knapp\" konnte sofort nach dem Kauf feuern, obwohl noch keine einzige Stunde mit dem neuen Paket gefahren wurde. Bereits abgerechnete Stunden behalten jetzt ihre zum Rechnungszeitpunkt tatsächlich gedeckte UE fest",
@@ -10400,18 +10403,38 @@ function App() {
             setUrlaubForm({ ...f, error: "Bitte maximal 60 Tage am Stück eintragen." });
             return;
         }
-        setUrlaubForm({ ...f, busy: true, error: "" });
-        let created = 0;
+        // Zeitfenster je Tag vorab bestimmen (nicht nur der Kalendertag) - sowohl die
+        // Dopplungs- als auch die Konflikt-Prüfung unten vergleichen echte Zeitfenster, sonst
+        // blockiert ein an einem Tag bereits eingetragener Teil-Urlaub (z. B. nur nachmittags)
+        // das Anlegen eines zweiten, nicht überlappenden Blocks (z. B. vormittags) am selben Tag.
+        const slots = [];
         for (let i = 0; i < days; i++) {
             const d = ymd(addDays(new Date(von + "T12:00:00"), i));
-            // Doppelte Urlaubstage vermeiden
-            const schon = (appts || []).some(a => isUrlaub(a) && ymd(a.start_at) === d);
-            if (schon)
-                continue;
-            // Nur am ersten/letzten Tag zählt eine eingeschränkte Uhrzeit, dazwischen ganztägig
             const startZeit = i === 0 ? vonZeit : "00:00";
             const endZeit = i === days - 1 ? bisZeit : "23:59";
-            const c = await addAppt({ title: "Urlaub", start_at: combineDT(d, startZeit), end_at: combineDT(d, endZeit),
+            slots.push({ d, startISO: combineDT(d, startZeit), endISO: combineDT(d, endZeit) });
+        }
+        const overlaps = (aStart, aEnd, bStart, bEnd) => aStart < bEnd && bStart < aEnd;
+        // Bestätigte, echte Termine (keine eigenen Urlaubseinträge), die mit einem der neuen
+        // Urlaubsblöcke kollidieren - ohne diese Prüfung ließ sich Urlaub anlegen, während laut
+        // Kalender gleichzeitig noch eine bestätigte Fahrstunde stattfindet.
+        const konflikte = (appts || []).filter(a => a.status === "confirmed" && !isUrlaub(a) &&
+            slots.some(s => overlaps(new Date(s.startISO).getTime(), new Date(s.endISO).getTime(), new Date(a.start_at).getTime(), new Date(a.end_at || a.start_at).getTime())));
+        if (konflikte.length > 0) {
+            const namen = konflikte.slice(0, 4).map(a => (a.title || "Termin") + " am " + new Date(a.start_at).toLocaleDateString("de-DE")).join(", ");
+            const ok = await askConfirm({ title: "Bestätigte Termine im Zeitraum",
+                message: konflikte.length + (konflikte.length === 1 ? " bestätigter Termin liegt" : " bestätigte Termine liegen") + " im gewählten Urlaubszeitraum: " + namen + (konflikte.length > 4 ? " …" : "") + ". Trotzdem als Urlaub eintragen?" });
+            if (!ok)
+                return;
+        }
+        setUrlaubForm({ ...f, busy: true, error: "" });
+        let created = 0;
+        for (const s of slots) {
+            // Doppelte/überlappende Urlaubsblöcke vermeiden - anhand des Zeitfensters, nicht nur des Tages
+            const schon = (appts || []).some(a => isUrlaub(a) && overlaps(new Date(s.startISO).getTime(), new Date(s.endISO).getTime(), new Date(a.start_at).getTime(), new Date(a.end_at || a.start_at).getTime()));
+            if (schon)
+                continue;
+            const c = await addAppt({ title: "Urlaub", start_at: s.startISO, end_at: s.endISO,
                 status: "confirmed", note: URLAUB_MARK, art: "" });
             if (c)
                 created++;
