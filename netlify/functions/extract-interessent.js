@@ -45,6 +45,11 @@ exports.handler = async function (event) {
     if (whoData && whoData.id === "114d1f0a-9947-459d-8009-06282799ca44") {
       return { statusCode: 403, headers, body: JSON.stringify({ error: "Diese Funktion ist im Demo-Modus deaktiviert." }) };
     }
+    // Nur Konten mit aktivem Abo duerfen KI ausloesen (Anthropic-Kosten). Faellt fail-open aus.
+    const kiGate = await require("./lib/ki-guard").subscriptionGate(whoData && whoData.id, requesterToken);
+    if (!kiGate.ok) {
+      return { statusCode: kiGate.statusCode, headers, body: JSON.stringify({ error: kiGate.error }) };
+    }
   } catch (e) {
     return { statusCode: 401, headers, body: JSON.stringify({ error: "Anmeldung konnte nicht geprüft werden" }) };
   }
