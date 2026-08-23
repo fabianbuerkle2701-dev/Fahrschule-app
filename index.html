@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.34";
+const APP_VERSION = "1.164.35";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.35", date: "August 2026", changes: [
+            "Ein Interessent ließ sich durch Doppeltippen (z.B. bei langsamer Verbindung) mehrfach als Schüler übernehmen, weil der vorgesehene Doppeltap-Schutz nie wirklich griff - jetzt zuverlässig verhindert. Neu: schlägt der Beitritt zu einer Fahrschule per Einladungscode bei der Registrierung fehl, landete das neue Konto bisher dauerhaft ohne echte Fahrschule und ohne jede Möglichkeit, das im Nachhinein zu korrigieren - ein neuer Wiederherstellungs-Screen erscheint jetzt direkt nach dem Einloggen und lässt einen Einladungscode erneut eingeben oder alternativ eine eigene Fahrschule gründen",
+        ] },
     { v: "1.164.34", date: "August 2026", changes: [
             "Auswertung: Statistik- und Abrechnung-Tab zeigten unter ähnlichem Namen (\"Prüfungs-Erfolgsquote\" / \"Prüfungserfolg\") zwei unterschiedliche Erfolgsquoten für dieselben Schüler, weil der Statistik-Tab naiv alle Prüfungsversuche zählte statt wie die Abrechnung nur den ersten Versuch je Schüler - beide zeigen jetzt dieselbe Zahl. Eine Anzahlung vor jeder Rechnungsstellung konnte die schulweite KPI \"Berechnet, noch offen\" ins Negative rutschen lassen. Stornierte Rechnungen und Stornorechnungen erschienen in der schulweiten Rechnungsliste ohne Kennzeichnung wie jede offene Rechnung und ließen sich weiter über den Zahlung-Knopf bezahlen",
         ] },
@@ -6242,8 +6245,11 @@ function Auth() {
                         await joinSchoolByCode(inviteCode);
                     }
                     catch (se) {
+                        // Konto existiert bereits (signUp lief oben durch) - nicht als Sackgasse
+                        // enden lassen, sondern direkt beim Einloggen einen eigenen Wiederherstellungs-
+                        // Screen zeigen (school ohne id, siehe schoolRecovery-State in App()).
                         console.error(se);
-                        showToast("Einladungscode ungültig oder Beitritt fehlgeschlagen:\n" + (se.message || se));
+                        showToast("Einladungscode ungültig oder Beitritt fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.");
                     }
                 }
                 else {
@@ -6256,7 +6262,7 @@ function Auth() {
                     }
                     catch (se) {
                         console.error(se);
-                        showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se));
+                        showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.");
                     }
                 }
                 setInfo("Konto erstellt. Du wirst angemeldet…");
@@ -7078,6 +7084,12 @@ function App() {
     const [tpl, setTpl] = useState(null); // {adk:[],strecken:[]}
     const [adminTplSuggestion, setAdminTplSuggestion] = useState(null); // {adk,strecken,...} | null, Vorschlag vom Fahrschul-Admin
     const [school, setSchool] = useState(null); // {id,name,subtitle,color,logo}
+    // Beitritt per Einladungscode während der Registrierung (Auth().submit()) konnte fehlschlagen
+    // (falscher Code, Netzwerkfehler), das Konto war danach aber schon angelegt und eingeloggt -
+    // ohne diesen Wiederherstellungs-Screen blieb so ein Konto dauerhaft ohne echte Fahrschule
+    // hängen (school ohne id, siehe DEFAULT_SCHOOL-Fallback unten), nichts ließ sich speichern und
+    // es gab nirgends im Loggedin-Bereich eine Möglichkeit, einen Code erneut einzugeben.
+    const [schoolRecovery, setSchoolRecovery] = useState({ code: "", newName: "", busy: false, err: "" });
     const [isSchoolAdmin, setIsSchoolAdmin] = useState(false); // darf Fahrschul-Einstellungen ändern
     const [isModerator, setIsModerator] = useState(false); // App-Moderator: darf Beiträge freigeben, alle Fahrschulen einsehen/bearbeiten
     const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
@@ -7311,6 +7323,9 @@ function App() {
     // den Bonus doppelt gutschreiben. Ein Ref (statt State) wirkt sofort, ohne auf ein Re-Render
     // zu warten.
     const referralBusyRef = useRef(false);
+    // Doppeltap-Schutz für convertInteressentToStudent() - ein Ref wirkt sofort, ohne auf das
+    // Re-Render von interessentForm.busy zu warten (siehe apptSavingRef für dasselbe Muster).
+    const interessentConvertBusyRef = useRef(false);
     // Dokumente (Sehtest, Erste-Hilfe, ...) des aktiven Schülers - lazy geladen im
     // Führerschein-Reiter, siehe renderLicenseSteps. Bei Schülerwechsel zurücksetzen, sonst
     // blieben kurz die Dateien des vorherigen Schülers sichtbar.
@@ -8434,6 +8449,49 @@ function App() {
             }
         }, 500);
     }, [uid]);
+    // Wiederherstellung nach einem fehlgeschlagenen Einladungscode-Beitritt bei der Registrierung
+    // (siehe schoolRecovery-State oben) - beide Pfade nutzen dieselben, schon bestehenden und
+    // getesteten Funktionen wie die Registrierung selbst (Auth().submit()).
+    async function retrySchoolJoin() {
+        if (schoolRecovery.busy || !schoolRecovery.code.trim())
+            return;
+        setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
+        try {
+            await joinSchoolByCode(schoolRecovery.code);
+            const fresh = await fetchMySchool(uid);
+            if (fresh) {
+                setSchool(fresh);
+                saveSchoolCache(uid, fresh);
+                setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
+            }
+            else {
+                setSchoolRecovery(r => ({ ...r, busy: false, err: "Beitritt hat geklappt, aber die Fahrschule konnte noch nicht geladen werden. Bitte kurz warten und erneut versuchen." }));
+            }
+        }
+        catch (e) {
+            setSchoolRecovery(r => ({ ...r, busy: false, err: e.message || "Einladungscode ungültig." }));
+        }
+    }
+    async function retryCreateSchool() {
+        if (schoolRecovery.busy || !schoolRecovery.newName.trim())
+            return;
+        setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
+        try {
+            await createAndAssignSchool(schoolRecovery.newName);
+            const fresh = await fetchMySchool(uid);
+            if (fresh) {
+                setSchool(fresh);
+                saveSchoolCache(uid, fresh);
+                setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
+            }
+            else {
+                setSchoolRecovery(r => ({ ...r, busy: false, err: "Anlegen hat geklappt, aber die Fahrschule konnte noch nicht geladen werden. Bitte kurz warten und erneut versuchen." }));
+            }
+        }
+        catch (e) {
+            setSchoolRecovery(r => ({ ...r, busy: false, err: e.message || "Fahrschule konnte nicht angelegt werden." }));
+        }
+    }
     // Save template (debounced)
     const tplTimer = useRef(null);
     const writeTemplate = useCallback((next) => {
@@ -9251,29 +9309,44 @@ function App() {
     // Eintrag wird danach gelöscht; schlägt nur das Löschen fehl, bleibt der neue Schüler
     // trotzdem bestehen (lieber ein doppelter Eintrag als ein verlorener Schüler).
     async function convertInteressentToStudent(it) {
+        // Doppeltap-Schutz: ohne diesen Riegel konnte ein zweiter Tipp (langsame Verbindung, oder
+        // weil interessentForm.busy nie gesetzt wurde und der Knopf so nie wirklich disabled war)
+        // denselben Interessenten zweimal als Schüler anlegen, bevor der erste Versuch fertig ist.
+        if (interessentConvertBusyRef.current)
+            return;
         if (!await askConfirm({ message: dispName(it) + " als Schüler übernehmen? Der Interessenten-Eintrag wird danach als \"Angemeldet\" markiert." }))
             return;
-        const guessedKlasse = it.klasse || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
-        const draft = { ...newStudent(), vorname: it.vorname || "", name: it.name || "", tel: it.tel || "",
-            klasse: guessedKlasse, bemerkungen: it.notiz || "", location_id: validMyLocationId || "" };
-        const created = await dbInsert(uid, draft);
-        if (!created) {
-            showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.");
+        if (interessentConvertBusyRef.current)
             return;
-        }
-        setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+        interessentConvertBusyRef.current = true;
+        setInteressentForm(f => f ? { ...f, busy: true } : f);
         try {
-            // Status auf "angemeldet" setzen statt den Eintrag zu löschen - sonst verschwindet
-            // jede tatsächliche Umwandlung sofort aus Zähler UND Nenner der Umwandlungsquote
-            // (die genau diese Zahl abbilden soll).
-            await dbUpdateInteressent(it.id, { status: "angemeldet" });
-            setInteressenten(prev => prev.map(x => x.id === it.id ? { ...x, status: "angemeldet" } : x));
+            const guessedKlasse = it.klasse || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
+            const draft = { ...newStudent(), vorname: it.vorname || "", name: it.name || "", tel: it.tel || "",
+                klasse: guessedKlasse, bemerkungen: it.notiz || "", location_id: validMyLocationId || "" };
+            const created = await dbInsert(uid, draft);
+            if (!created) {
+                showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.");
+                return;
+            }
+            setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+            try {
+                // Status auf "angemeldet" setzen statt den Eintrag zu löschen - sonst verschwindet
+                // jede tatsächliche Umwandlung sofort aus Zähler UND Nenner der Umwandlungsquote
+                // (die genau diese Zahl abbilden soll).
+                await dbUpdateInteressent(it.id, { status: "angemeldet" });
+                setInteressenten(prev => prev.map(x => x.id === it.id ? { ...x, status: "angemeldet" } : x));
+            }
+            catch (e) { /* Schüler ist trotzdem angelegt - der Interessenten-Eintrag bleibt dann halt auf altem Status stehen */ }
+            setInteressentForm(null);
+            setActiveId(created.id);
+            setView("daten");
+            showToast(dispName(created) + " als Schüler übernommen.");
         }
-        catch (e) { /* Schüler ist trotzdem angelegt - der Interessenten-Eintrag bleibt dann halt auf altem Status stehen */ }
-        setInteressentForm(null);
-        setActiveId(created.id);
-        setView("daten");
-        showToast(dispName(created) + " als Schüler übernommen.");
+        finally {
+            interessentConvertBusyRef.current = false;
+            setInteressentForm(f => f ? { ...f, busy: false } : f);
+        }
     }
     // Neue Selbstanmeldung (über den Buchungslink, siehe public_enroll_student) übernehmen:
     // pending-Flag entfernen und, falls ein gültiger Empfehlungscode angegeben wurde, den
@@ -19635,6 +19708,30 @@ function App() {
             const planned = appt.end_at ? Math.round((new Date(appt.end_at).getTime() - new Date(appt.start_at).getTime()) / 60000) : 45;
             return React.createElement(LessonPromptModal, { appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m) => confirmPastLesson(appt, m), onSkip: () => skipPastLesson(appt) });
         })(),
+        // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
+        // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
+        !IS_DEMO() && school && !school.id && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 400,
+                display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
+            React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "26px 22px" } },
+                React.createElement("div", { style: { fontSize: 32, marginBottom: 10 } }, "🏫"),
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 8 } }, "Keine Fahrschule zugeordnet"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55, marginBottom: 18 } },
+                    "Dein Konto ist angelegt, aber der letzte Beitritt zu einer Fahrschule ist nicht abgeschlossen. Trage einen gültigen Einladungscode ein oder gründe eine neue Fahrschule."),
+                schoolRecovery.err && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 14, whiteSpace: "pre-wrap" } }, schoolRecovery.err),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", { htmlFor: "field-school-recovery-code" }, "Einladungscode"),
+                    React.createElement("input", { id: "field-school-recovery-code", type: "text", value: schoolRecovery.code, autoCapitalize: "none", autoCorrect: "off", spellCheck: false,
+                        onChange: e => setSchoolRecovery(r => ({ ...r, code: e.target.value })), placeholder: "Von deinem Fahrschul-Admin" })),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 18, opacity: schoolRecovery.busy ? .6 : 1 }, disabled: schoolRecovery.busy || !schoolRecovery.code.trim(), onClick: retrySchoolJoin },
+                    schoolRecovery.busy ? "Bitte warten…" : "Beitreten"),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", textAlign: "center", margin: "0 0 14px" } }, "oder"),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", { htmlFor: "field-school-recovery-name" }, "Neue Fahrschule gründen"),
+                    React.createElement("input", { id: "field-school-recovery-name", type: "text", value: schoolRecovery.newName,
+                        onChange: e => setSchoolRecovery(r => ({ ...r, newName: e.target.value })), placeholder: "Name deiner Fahrschule" })),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { opacity: schoolRecovery.busy ? .6 : 1 }, disabled: schoolRecovery.busy || !schoolRecovery.newName.trim(), onClick: retryCreateSchool },
+                    "Fahrschule anlegen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14, fontSize: 12.5 }, onClick: () => sb.auth.signOut() }, "Abmelden"))),
         onboarding && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.7)", zIndex: 150,
                 display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 480, borderTopLeftRadius: 24, borderTopRightRadius: 24,
