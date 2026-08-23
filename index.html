@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.7";
+const APP_VERSION = "1.164.8";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.8", date: "August 2026", changes: [
+            "Fehlerbehebung Umwandlungsquote: „Als Schüler übernehmen“ hat den Interessenten-Eintrag bisher komplett gelöscht - jede tatsächliche Umwandlung verschwand dadurch sofort aus der Statistik (weder als „Angemeldet“ gezählt noch im „Gesamt“ enthalten), während „Angemeldet“ nur durch manuelles Umstellen des Status ganz ohne echten Schüler erreichbar war. Der Eintrag wird jetzt beim Übernehmen auf Status „Angemeldet“ gesetzt statt gelöscht, die Quote bildet damit erstmals echte Umwandlungen ab",
+        ] },
     { v: "1.164.7", date: "August 2026", changes: [
             "Fehlerbehebung Fahrzeug-Kalender: (1) das Realtime-Live-Update lief bisher ohne Filter auf die eigene Fahrschule - jede Buchungsänderung IRGENDEINER Fahrschule löste bei jedem offenen Fahrzeug-Kalender einen Reload aus. (2) Schlug das Speichern einer bearbeiteten Buchung fehl und wurde die ursprüngliche Buchung automatisch wiederhergestellt, blieb im Formular die bereits gelöschte alte Buchungs-ID stehen - ein erneuter Speichern-/Löschen-Versuch hätte ins Leere gezielt. (3) Die Dauer-Schnellwahl (z.B. \"3 FS\") konnte bei später Startzeit rechnerisch über Mitternacht hinausgehen; das wird jetzt vor dem Speichern klar erkannt und gemeldet, statt erst die kryptische Fehlermeldung der Datenbank abzuwarten",
         ] },
@@ -8924,7 +8927,7 @@ function App() {
     // Eintrag wird danach gelöscht; schlägt nur das Löschen fehl, bleibt der neue Schüler
     // trotzdem bestehen (lieber ein doppelter Eintrag als ein verlorener Schüler).
     async function convertInteressentToStudent(it) {
-        if (!await askConfirm({ message: dispName(it) + " als Schüler übernehmen? Der Interessenten-Eintrag wird danach gelöscht." }))
+        if (!await askConfirm({ message: dispName(it) + " als Schüler übernehmen? Der Interessenten-Eintrag wird danach als \"Angemeldet\" markiert." }))
             return;
         const guessedKlasse = it.klasse || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         const draft = { ...newStudent(), vorname: it.vorname || "", name: it.name || "", tel: it.tel || "",
@@ -8936,10 +8939,13 @@ function App() {
         }
         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
         try {
-            await dbDeleteInteressent(it.id);
-            setInteressenten(prev => prev.filter(x => x.id !== it.id));
+            // Status auf "angemeldet" setzen statt den Eintrag zu löschen - sonst verschwindet
+            // jede tatsächliche Umwandlung sofort aus Zähler UND Nenner der Umwandlungsquote
+            // (die genau diese Zahl abbilden soll).
+            await dbUpdateInteressent(it.id, { status: "angemeldet" });
+            setInteressenten(prev => prev.map(x => x.id === it.id ? { ...x, status: "angemeldet" } : x));
         }
-        catch (e) { /* Schüler ist trotzdem angelegt - der Interessenten-Eintrag bleibt dann halt stehen */ }
+        catch (e) { /* Schüler ist trotzdem angelegt - der Interessenten-Eintrag bleibt dann halt auf altem Status stehen */ }
         setInteressentForm(null);
         setActiveId(created.id);
         setView("daten");
