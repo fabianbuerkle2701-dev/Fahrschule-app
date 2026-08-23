@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.31";
+const APP_VERSION = "1.164.32";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.32", date: "August 2026", changes: [
+            "Lücken-Radar hielt einen Termin mit offener Storno-Anfrage des Schülers schon für frei, obwohl er bis zur Entscheidung des Fahrlehrers weiterhin bestätigt ist - konnte zu einer Doppelbuchung desselben Zeitfensters führen. Rechnungen über 0 € blieben dauerhaft als \"offen\" markiert und konnten in die Mahnstufen-Erinnerung rutschen. Wird ein Termin auf eine neue Zeit verschoben, für den schon eine manuelle Erinnerung verschickt wurde, gilt diese jetzt nicht mehr automatisch auch für die neue Zeit. \"Morgen\" in der Tagesabschluss-Übersicht wird jetzt DST-sicher berechnet (vorher: feste 24h-Addition, konnte an Zeitumstellungstagen knapp danebenliegen und von der Erinnerungen-Liste abweichen)",
+        ] },
     { v: "1.164.31", date: "August 2026", changes: [
             "Sicherheitsrelevanter Datenfehler behoben: \"Fahrlehrer krank\" (Sammelabsage aller Termine eines Tages) konnte bereits gegebene, in der Vergangenheit liegende Fahrstunden desselben Tages endgültig löschen statt nur die noch bevorstehenden - betraf nur wirklich vergangene Termine des gewählten Tages. Außerdem: eine fehlgeschlagene Einzelabsage wurde bisher trotzdem als \"erfolgreich abgesagt\" angezeigt, jetzt mit Hinweis; frei gewordene Termine aus der Sammelabsage werden jetzt (wie bei einer einzelnen Stornierung) der Warteliste angeboten, nacheinander für jeden betroffenen Termin statt nur für den letzten",
         ] },
@@ -5343,6 +5346,9 @@ function invoiceOpen(s, inv) {
 // "offen" | "teil" | "bezahlt" – Rundung auf Cent, damit Centbruchteile nicht ewig "offen" bleiben.
 function invoiceStatus(s, inv) {
     const paid = invoicePaid(s, inv.id), total = Number(inv.total) || 0;
+    // Eine 0-€-Rechnung ist nichts offen schuldig - ohne diesen Fall bliebe sie für immer "offen"
+    // (paid ist ebenfalls 0) und könnte in die Mahnstufen-Eskalation rutschen.
+    if (total <= 0.005) return "bezahlt";
     if (paid <= 0.005) return "offen";
     return paid + 0.005 >= total ? "bezahlt" : "teil";
 }
@@ -10939,6 +10945,12 @@ function App() {
     async function updateAppt(id, patch) {
         setSaved(false);
         apptWritesRef.current++;
+        // Verschiebt sich die Startzeit, ist eine frühere manuelle Erinnerung (reminded_at) nicht mehr
+        // gültig - sie bezog sich auf die alte Zeit. Ohne Reset würde die Erinnerungen-Liste den Termin
+        // für die NEUE Zeit fälschlich als "schon erinnert" überspringen (siehe markiereErinnert()).
+        const current = (appts || []).find(a => a.id === id);
+        if (patch.start_at && current && patch.start_at !== current.start_at && current.reminded_at)
+            patch = { ...patch, reminded_at: null };
         setAppts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
         try {
             await dbUpdateAppt(id, patch);
@@ -13763,7 +13775,12 @@ function App() {
     // ganze Logik (Zahlen berechnen, AI-Rückblick, Listen) an einer Stelle bleibt.
     function renderTagesabschlussBody() {
         const todayStr = ymd(new Date());
-        const tomorrowStr = ymd(new Date(Date.now() + 86400000));
+        // Nicht per +86400000ms rechnen (fixe 24h) - an DST-Umstellungstagen (23h-/25h-Tag) kann das
+        // knapp vor/nach Mitternacht auf das falsche Kalenderdatum landen und von erinnerungsKandidaten()
+        // (die dieselbe "morgen"-Grenze über setDate(+1) DST-sicher berechnet) abweichen.
+        const tomorrowD = new Date();
+        tomorrowD.setDate(tomorrowD.getDate() + 1);
+        const tomorrowStr = ymd(tomorrowD);
         const todos = pendingPastLessons().filter(a => ymd(a.start_at) === todayStr);
         const mine = (students || []).filter(s => s._isMine);
 
@@ -15129,7 +15146,11 @@ function App() {
     // Erste freie Lücke von mindestens minMinutes innerhalb [vonHHMM, bisHHMM] an einem Tag -
     // "belegt" zählt jeder Termin, der nicht storniert/abgesagt ist, egal welcher Schüler.
     function findFreeWindow(dateKey, vonHHMM, bisHHMM, minMinutes) {
-        const busy = (appts || []).filter(a => ymd(a.start_at) === dateKey && (a.status === "confirmed" || a.status === "pending" || a.status === "offered"))
+        // cancel_requested zählt als belegt, nicht als frei: der Termin bleibt bestehen, bis der
+        // Fahrlehrer die Stornierung aktiv bestätigt (confirmCancel) - sonst könnte der Lücken-Radar
+        // hier einem Wartelisten-Schüler denselben Slot anbieten, während der ursprüngliche Termin
+        // noch bestätigt ist (Doppelbuchung). findOverlaps() behandelt genau diesen Status schon so.
+        const busy = (appts || []).filter(a => ymd(a.start_at) === dateKey && (a.status === "confirmed" || a.status === "pending" || a.status === "offered" || a.status === "cancel_requested"))
             .map(a => ({ from: hm(a.start_at), to: a.end_at ? hm(a.end_at) : fromMin(toMin(hm(a.start_at)) + 45) }))
             .sort((a, b) => a.from.localeCompare(b.from));
         let cursor = vonHHMM;
