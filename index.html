@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.37";
+const APP_VERSION = "1.164.38";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.38", date: "August 2026", changes: [
+            "ADK-/Strecken-Vorlage: einen einzelnen Punkt löschen fragte bisher gar nicht erst nach und entfernte bereits erfassten Schülerfortschritt zu diesem Punkt sofort und unwiederbringlich aus jeder Anzeige - jetzt mit Rückfrage wie beim Löschen eines ganzen Abschnitts. Ausbildungsfahrt-Art löschen warnt jetzt zusätzlich, wenn die Art (Überland/Autobahn/Dämmerung) für die Sonderfahrten-Soll-Automatik benötigt wird - ohne sie lassen sich Fahrstunden dieser Kategorie danach nicht mehr protokollieren und die Anzeige bleibt eingefroren",
+        ] },
     { v: "1.164.37", date: "August 2026", changes: [
             "Schüler-Screenshot-Import: Doppeltap-Schutz beim Anlegen ergänzt (konnte denselben Schüler zweimal anlegen). KI-Übergabe-/Prüfreife-Einschätzung/Eltern-Update-Fenster ließ sich während des Ladens schließen (Escape, Hintergrund-Klick, Schließen-Knopf) und poppte danach mit dem fertigen Ergebnis überraschend wieder auf - jetzt blockiert das Schließen während des Ladens, und ein bereits geschlossenes Fenster bleibt geschlossen. Escape schloss den KI-Helfer-Chat auch während eine Anfrage noch lief und verwarf die kurz danach fertige Antwort stillschweigend - der Hintergrund-Klick war hier schon richtig geschützt, Escape jetzt auch",
         ] },
@@ -17602,8 +17605,15 @@ function App() {
                                                 return;
                                             saveArten(arten.map((x, i) => i === idx ? { ...x, label: a.code + " · " + newLabelText.trim() } : x));
                                         }, "aria-label": "Art " + a.code + " bearbeiten", style: { border: "none", background: "none", color: "var(--muted)", fontSize: 13, fontWeight: 700, padding: "4px 6px", flexShrink: 0 } }, "Bearbeiten"),
-                                    React.createElement("button", { onClick: async () => { if (await askConfirm({ message: "Diese Art entfernen?" }))
-                                            saveArten(arten.filter((_, i) => i !== idx)); }, "aria-label": "Art " + a.code + " entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1, flexShrink: 0 } }, "×")),
+                                    React.createElement("button", { onClick: async () => {
+                                            // ÜL/AB/NF sind fest im Code als die drei Sonderfahrten-Arten verdrahtet
+                                            // (SONDERFAHRT_ARTEN, sonderfahrtenBilanz()) - wird eine davon entfernt, lässt
+                                            // sich künftig keine Fahrstunde dieser Art mehr protokollieren und die
+                                            // Sonderfahrten-Soll-Anzeige bleibt für diese Art dauerhaft eingefroren.
+                                            const istSonderfahrt = SONDERFAHRT_ARTEN.some(s => s.code === a.code);
+                                            if (await askConfirm({ message: "Diese Art entfernen?" + (istSonderfahrt ? " Achtung: \"" + a.code + "\" wird für die Sonderfahrten-Soll-Anzeige benötigt - ohne diese Art lassen sich Fahrstunden dieser Kategorie danach nicht mehr protokollieren." : "") }))
+                                                saveArten(arten.filter((_, i) => i !== idx));
+                                        }, "aria-label": "Art " + a.code + " entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 18, padding: "2px 4px", lineHeight: 1, flexShrink: 0 } }, "×")),
                                 React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 7, marginTop: 7, marginLeft: 40, fontSize: 12.5, color: "var(--muted)", cursor: "pointer" } },
                                     React.createElement("input", { type: "checkbox", checked: a.countsAsLesson !== false, onChange: e => saveArten(arten.map((x, i) => i === idx ? { ...x, countsAsLesson: e.target.checked } : x)) }),
                                     "Zählt zu den Fahrstunden"))),
@@ -18109,7 +18119,7 @@ function App() {
         }
         function renameSec(idx, title) { const a = deepCopy(list); a[idx].title = title; commit(a); }
         async function delSec(idx) {
-            if (!await askConfirm({ message: 'Abschnitt "' + list[idx].title + '" mit allen Punkten löschen?' }))
+            if (!await askConfirm({ message: 'Abschnitt "' + list[idx].title + '" mit allen Punkten löschen? Bereits erfasster Fortschritt von Schülern zu diesen Punkten wird danach nirgends mehr angezeigt.' }))
                 return;
             const a = deepCopy(list);
             a.splice(idx, 1);
@@ -18130,7 +18140,16 @@ function App() {
         }
         function renameItem(si, ii, label) { const a = deepCopy(list); a[si].items[ii].label = label; commit(a); }
         function setItemCount(si, ii, count) { const a = deepCopy(list); a[si].items[ii].count = Math.max(1, parseInt(count, 10) || 1); commit(a); }
-        function delItem(si, ii) { const a = deepCopy(list); a[si].items.splice(ii, 1); commit(a); }
+        async function delItem(si, ii) {
+            // Ohne Rückfrage entfernte ein Tipp einen Punkt samt bereits erfasstem Schülerfortschritt
+            // sofort und unwiederbringlich aus jeder Anzeige (Fortschrittsberechnung läuft nur noch
+            // über die Punkte der aktuellen Vorlage) - dieselbe Rückfrage wie beim Abschnitt löschen.
+            if (!await askConfirm({ message: 'Punkt "' + list[si].items[ii].label + '" löschen? Bereits erfasster Fortschritt von Schülern zu diesem Punkt wird danach nirgends mehr angezeigt.' }))
+                return;
+            const a = deepCopy(list);
+            a[si].items.splice(ii, 1);
+            commit(a);
+        }
         // Reorder a section from index -> before index "to"
         function reorderSec(from, to) {
             if (from === to || to < 0 || to > list.length)
