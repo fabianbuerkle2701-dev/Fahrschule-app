@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.14";
+const APP_VERSION = "1.164.15";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.15", date: "August 2026", changes: [
+            "Fehlerbehebung: die \"Aufzeichnung läuft\"-Kachel auf der Startseite sprang nicht zuverlässig zur tatsächlich aufgezeichneten Fahrstunde, sondern manchmal zu einem zuvor geöffneten oder dem neuesten Eintrag",
+            "Fehlerbehebung Chat (Fahrschüler-Bereich): neue Nachrichten scrollten nicht automatisch in den sichtbaren Bereich; ein Server-/Netzwerkfehler zeigte statt einer verständlichen Meldung manchmal einen kryptischen Rohfehler",
+            "Fehlerbehebung Kalender-Datei senden: ein bewusster Abbruch des Teilen-Dialogs löste trotzdem einen ungefragten automatischen Download aus",
+            "Fehlerbehebung Prüfungsreife-Anzeige: sowohl die Schülerdetailseite als auch das druckbare \"Mein Ausbildungsstand\"-Blatt für den Schüler nutzten eine strengere Schwelle (jeder Einzelpunkt zu 100%) als die Ampel überall sonst in der App (gewichteter Gesamtfortschritt ≥90%) - beide zeigten dadurch \"noch offen\", obwohl derselbe Schüler in der Fahrlehrer-Übersicht bereits grün als \"Prüfungsreif\" geführt wurde. Das gedruckte Blatt berücksichtigte außerdem offene Sonderfahrten bisher gar nicht",
+        ] },
     { v: "1.164.14", date: "August 2026", changes: [
             "Fehlerbehebung Empfehlungsprogramm: (1) neu erzeugte Empfehlungscodes wurden nie gegen bereits vergebene Codes anderer Schüler geprüft - bei ähnlichen Vornamen konnte derselbe Code doppelt vergeben und der Bonus beim Einlösen dem falschen Schüler gutgeschrieben werden. Prüft jetzt auf Eindeutigkeit und erzeugt bei einer Kollision automatisch einen neuen Code. (2) Ein sehr schneller Doppel-Klick auf „Übernehmen“ oder „Bonus gutschreiben“ konnte den Empfehlungsbonus doppelt gutschreiben - eine sofortige Sperre verhindert das jetzt",
         ] },
@@ -10919,8 +10925,14 @@ function App() {
                 }
             }
         }
-        catch (e) { /* abgebrochen oder nicht unterstützt */ }
-        // Fallback: Datei herunterladen
+        catch (e) {
+            // Ein bewusster Abbruch des nativen Teilen-Dialogs wirft AbortError - das ist keine
+            // Fehlermeldung, sondern eine explizite Nutzerentscheidung, und darf nicht trotzdem
+            // in einen ungefragten automatischen Download münden.
+            if (e && e.name === "AbortError")
+                return;
+        }
+        // Fallback: Datei herunterladen (nicht unterstützt oder echter Fehler beim Teilen)
         downloadICS(apptList, stu);
     }
     async function rejectAppt(id) {
@@ -11472,7 +11484,7 @@ function App() {
                         : React.createElement("div", { className: "home-v2-display", style: { width: 46, height: 46, borderRadius: "50%", border: "1px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 17 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
             // 2) Live-Aufzeichnung (nur wenn aktiv) - echter Zustand, deshalb die einzige
             // Stelle mit dauerhaft laufender Animation (Puls-Punkt).
-            recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
+            recSession && React.createElement("button", { onClick: () => { setActiveId(recSession.studentId); setOpenLesson(recSession.lessonId); setView("tagebuch"); }, className: "card home-live", style: { width: "100%", display: "flex", alignItems: "center", gap: 13, padding: "14px 16px", marginBottom: 12, textAlign: "left" } },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--card)" } }, icRoute({ stroke: "var(--orange-deep)", width: 19, height: 19 })),
                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 8 } },
@@ -12540,8 +12552,12 @@ function App() {
     function renderReife() {
         const vk = active.klasse || DEFAULT_KLASSE;
         const r = pruefungsreife(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
-        const ready = r.total === 0;
         const amp = ampel(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+        // Dieselbe Definition wie die Ampel-Badge direkt darüber (gewichteter Gesamtfortschritt
+        // ≥90%) statt der strengeren pruefungsreife().total===0 (jeder Einzelpunkt zu 100%) - sonst
+        // widersprechen sich Badge und "Bereit"-Anzeige auf derselben Karte sichtbar (siehe
+        // gleiches, bereits gefixtes Muster in schoolStats()).
+        const ready = amp.stufe === "gruen";
         return React.createElement("div", null,
             React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, display: "flex", alignItems: "center", gap: 13,
                     border: "2px solid " + amp.farbe } },
@@ -18235,8 +18251,14 @@ function App() {
         const strPct = calcBack(active, tplFor(active.klasse).strecken);
         const gesamt = Math.max(adkPct, strPct);
         const std = countStunden(active) + (parseInt(active.manualHours, 10) || 0);
-        const r = pruefungsreife(active, tplFor(active.klasse).adk, tplFor(active.klasse).strecken);
-        const ready = r.total === 0;
+        // sonderfahrtenSoll ergänzt (fehlte bisher) - ohne sie liefert sonderfahrtenBilanz() intern
+        // immer [], offene Sonderfahrten wären auf diesem gedruckten Blatt nie sichtbar gewesen.
+        const r = pruefungsreife(active, tplFor(active.klasse).adk, tplFor(active.klasse).strecken, sonderfahrtenSoll);
+        // Dieselbe Definition wie überall sonst (ampel().stufe==="gruen", gewichteter
+        // Gesamtfortschritt ≥90%) statt der strengeren pruefungsreife().total===0 (jeder
+        // Einzelpunkt zu 100%) - sonst zeigt dieses Blatt "noch offen", obwohl derselbe Schüler
+        // in der Fahrlehrer-Übersicht bereits grün als "Prüfungsreif" geführt wird.
+        const ready = ampel(active, tplFor(active.klasse).adk, tplFor(active.klasse).strecken, sonderfahrtenSoll).stufe === "gruen";
         return React.createElement("div", null,
             React.createElement("div", { className: "ps-head" },
                 React.createElement("img", { src: logoFor(school), alt: "" }),
@@ -23269,6 +23291,11 @@ function BookingPage({ code, appMode, onLogout }) {
     const [chatInput, setChatInput] = React.useState("");
     const [chatBusy, setChatBusy] = React.useState(false);
     const [chatErr, setChatErr] = React.useState("");
+    const chatListRef = React.useRef(null);
+    React.useEffect(() => {
+        if (chatListRef.current)
+            chatListRef.current.scrollTop = chatListRef.current.scrollHeight;
+    }, [chatMsgs, chatBusy]);
     async function sendChatMessage() {
         const text = chatInput.trim();
         if (!text || chatBusy)
@@ -23289,9 +23316,19 @@ function BookingPage({ code, appMode, onLogout }) {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ code, message: text, history, name, pin }),
             });
+            // Erst den Status prüfen, dann erst JSON parsen - eine Infrastruktur-Fehlerseite
+            // (Netlify-eigenes 502/504, leerer Body bei Timeout) ist kein JSON und resp.json()
+            // würde sonst eine kryptische SyntaxError 1:1 in der UI landen lassen.
+            if (!resp.ok) {
+                let msg = "Anfrage fehlgeschlagen";
+                try {
+                    const out = await resp.json();
+                    msg = (out && out.error) || msg;
+                }
+                catch (e) { }
+                throw new Error(msg);
+            }
             const out = await resp.json();
-            if (!resp.ok)
-                throw new Error((out && out.error) || "Anfrage fehlgeschlagen");
             setChatMsgs(prev => [...prev, { role: "assistant", text: out.reply }]);
         }
         catch (e) {
@@ -23959,7 +23996,7 @@ function BookingPage({ code, appMode, onLogout }) {
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15.5 } }, "Frag uns"),
                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } }, "Automatischer Assistent · " + ((info && info.school_name) || "Fahrschule"))),
                     React.createElement("button", { onClick: () => setChatOpen(false), "aria-label": "Schließen", style: { flexShrink: 0, width: 30, height: 30, borderRadius: "50%", border: "none", background: "var(--field-bg)", color: "var(--muted)" } }, "✕")),
-                React.createElement("div", { style: { flex: 1, overflowY: "auto", marginBottom: 10, minHeight: 80 } },
+                React.createElement("div", { ref: chatListRef, style: { flex: 1, overflowY: "auto", marginBottom: 10, minHeight: 80 } },
                     chatMsgs.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5 } },
                         (() => { let eingeloggt = false; try {
                                 eingeloggt = !!localStorage.getItem("v3_sa_pin_" + code);
