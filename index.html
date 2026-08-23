@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.41";
+const APP_VERSION = "1.164.42";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.42", date: "August 2026", changes: [
+            "Empfehlungsprogramm: Gutschrift beim Werber (Empfehlungsbonus) hatte keine dauerhafte Schutzsperre gegen doppelte Gutschrift, falls der Gutschrift-Codepfad aus irgendeinem Grund zweimal lief (Netzwerk-Retry, erneuter Aufruf) - anders als beim geworbenen Schüler, der bereits über referralRewardApplied geschützt war. Jetzt an das konkrete Werbe-Ereignis gebunden (referrals-Eintrag mit der jeweiligen Schüler-ID), sodass ein Werber trotzdem für jeden weiteren, andere Freunde werbenden Einsatz normal gutgeschrieben wird",
+        ] },
     { v: "1.164.41", date: "August 2026", changes: [
             "KI-Briefings/-Einordnungen (Tages-Briefing, Statistik, Prüfungsplanung, Abrechnung, Reform-Screen) froren nach der ersten Erstellung für den Rest der Sitzung ein und zeigten auch dann weiter denselben Text, wenn sich die zugrundeliegenden Zahlen längst geändert hatten - ein \"Neu erstellen\"-Knopf war der einzig fehlende Weg, eine frische Einordnung anzufordern, jetzt ergänzt",
         ] },
@@ -9434,8 +9437,15 @@ function App() {
             if (referrer) {
                 referralBusyRef.current = true;
                 setTimeout(() => { referralBusyRef.current = false; }, 1500);
-                writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward }],
-                    referrals: [...(referrer.referrals || []), { studentId: s.id, name: dispName(s), date: ymd(new Date()) }] });
+                // Gutschrift beim Werber ist an dieses eine Referral-Ereignis gebunden (referrals-Eintrag
+                // mit dieser studentId), nicht an "hat der Werber schon irgendwann einen Bonus bekommen" -
+                // sonst würde ein zweiter, andere Freund werbender Einsatz blockiert. Schützt gegen
+                // doppelte Gutschrift, falls dieser Codepfad (Netzwerk-Retry, erneuter Aufruf) zweimal läuft.
+                const alreadyCredited = (referrer.referrals || []).some(r => r.studentId === s.id);
+                if (!alreadyCredited) {
+                    writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward }],
+                        referrals: [...(referrer.referrals || []), { studentId: s.id, name: dispName(s), date: ymd(new Date()) }] });
+                }
                 writeStudent({ ...s, pending: false, referralRewardApplied: true,
                     costItems: [...(s.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }] });
                 showToast(dispName(s) + " übernommen. Empfehlungsbonus (" + eurFmt(referralReward) + ") für beide gutgeschrieben.");
@@ -9490,8 +9500,13 @@ function App() {
         }
         referralBusyRef.current = true;
         setTimeout(() => { referralBusyRef.current = false; }, 1500);
-        writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward }],
-            referrals: [...(referrer.referrals || []), { studentId: stu.id, name: dispName(stu), date: ymd(new Date()) }] });
+        // Gleicher Schutz wie in activateEnrollment(): an dieses eine Referral-Ereignis gebunden,
+        // nicht an "hat der Werber schon irgendwann einen Bonus bekommen".
+        const alreadyCredited = (referrer.referrals || []).some(r => r.studentId === stu.id);
+        if (!alreadyCredited) {
+            writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward }],
+                referrals: [...(referrer.referrals || []), { studentId: stu.id, name: dispName(stu), date: ymd(new Date()) }] });
+        }
         writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }],
             referredByCode: code, referralRewardApplied: true });
         setReferralRedeemCode("");
