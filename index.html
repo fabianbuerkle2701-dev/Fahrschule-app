@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.38";
+const APP_VERSION = "1.164.39";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.39", date: "August 2026", changes: [
+            "Theorie-Fortschritt (Fahrlehrer-Ansicht) wurde gegen ALLE aktiven Übungsfragen berechnet statt nur gegen die für die Klasse des Schülers tatsächlich passenden - ein Schüler einer anderen Klasse als B konnte dadurch strukturell nie 100% erreichen, weil klassenspezifische Fragen anderer Klassen mitgezählt wurden, die er in seiner eigenen App gar nicht zu sehen bekommt. Betraf die Theorie-Fortschritt-Kachel, die KI-Übergabe-Einschätzung, den Ausbildungsnachweis-Druck und den KI-Fragengenerator - alle nutzen jetzt dieselbe klassengefilterte Fragenliste wie die Fahrschüler-App selbst",
+        ] },
     { v: "1.164.38", date: "August 2026", changes: [
             "ADK-/Strecken-Vorlage: einen einzelnen Punkt löschen fragte bisher gar nicht erst nach und entfernte bereits erfassten Schülerfortschritt zu diesem Punkt sofort und unwiederbringlich aus jeder Anzeige - jetzt mit Rückfrage wie beim Löschen eines ganzen Abschnitts. Ausbildungsfahrt-Art löschen warnt jetzt zusätzlich, wenn die Art (Überland/Autobahn/Dämmerung) für die Sonderfahrten-Soll-Automatik benötigt wird - ohne sie lassen sich Fahrstunden dieser Kategorie danach nicht mehr protokollieren und die Anzeige bleibt eingefroren",
         ] },
@@ -9983,10 +9986,11 @@ function App() {
         const recurring = pruefungssimRecurringIssues(stu.examSims || []);
         const sfBilanz = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll);
         let theorie = null;
-        if (theoryQuestions && theoryQuestions.length) {
+        const tq = theoryQuestionsFor(stu);
+        if (tq && tq.length) {
             const progress = stu.theoryProgress || {};
-            const gemeistert = theoryQuestions.filter(q => progress[q.id] && progress[q.id].correct).length;
-            theorie = { gemeistertProzent: Math.round((gemeistert / theoryQuestions.length) * 100), beantwortet: Object.keys(progress).length, gesamtFragen: theoryQuestions.length };
+            const gemeistert = tq.filter(q => progress[q.id] && progress[q.id].correct).length;
+            theorie = { gemeistertProzent: Math.round((gemeistert / tq.length) * 100), beantwortet: Object.keys(progress).length, gesamtFragen: tq.length };
         }
         return {
             ...base,
@@ -10309,12 +10313,16 @@ function App() {
             return;
         window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
     }
-    // Übungsfragen für den Theorie-Fortschritt in den Schülerdaten - einmalig laden, dann cachen
-    // (globale Übungsfragen, nicht pro Schüler unterschiedlich).
+    // Übungsfragen für den Theorie-Fortschritt in den Schülerdaten - einmalig laden, dann cachen.
+    // Der Pool ist plattformweit gemeinsam (kein school_id/owner auf theory_questions), aber NICHT
+    // klassenunabhängig: neben klasse="ALL" gibt es auch klassenspezifische Fragen (z.B. "B"). Die
+    // Fahrschüler-App filtert das schon korrekt über public_theory_questions(code, p_klasse) - hier
+    // wird der volle Pool einmalig geladen und erst pro Schüler in theoryQuestionsFor() gefiltert,
+    // sonst müsste bei jedem Klassenwechsel neu geladen werden.
     const loadTheoryQuestions = () => {
         if (theoryQuestions !== null)
             return;
-        sb.from("theory_questions").select("id, topic_key, points, question").eq("active", true).then(({ data, error }) => {
+        sb.from("theory_questions").select("id, topic_key, klasse, points, question").eq("active", true).then(({ data, error }) => {
             if (error) {
                 console.error(error);
                 setTheoryQuestions([]);
@@ -10323,6 +10331,15 @@ function App() {
             setTheoryQuestions(data || []);
         });
     };
+    // Denselben Filter wie public_theory_questions(code, p_klasse) anwenden, bevor theoryQuestions
+    // als Nenner einer Fortschritts-Prozentzahl benutzt wird - sonst zählen klassenfremde Fragen mit,
+    // die der Schüler in seiner eigenen App nie zu sehen bekommt, und 100% wird strukturell nie erreicht.
+    function theoryQuestionsFor(stu) {
+        if (!theoryQuestions)
+            return theoryQuestions;
+        const vk = (stu && stu.klasse) || DEFAULT_KLASSE;
+        return theoryQuestions.filter(q => q.klasse === "ALL" || q.klasse === vk);
+    }
     // KI-Fragengenerator für ein schwaches Theorie-Sachgebiet: schlägt neue, selbst ausgedachte
     // Übungsfragen vor (NIE amtliche Fragen nachgebildet, siehe Kommentar in der Netlify-Function).
     // Nichts landet automatisch im geteilten Fragenpool - der Fahrlehrer wählt pro Frage einzeln
@@ -10331,7 +10348,7 @@ function App() {
         const klasse = (active && active.klasse) || DEFAULT_KLASSE;
         setTheoryGenModal({ topic, klasse, busy: true, error: "", drafts: [] });
         try {
-            const avoidTexts = (theoryQuestions || []).filter(q => q.topic_key === topic).map(q => q.question).filter(Boolean);
+            const avoidTexts = (theoryQuestionsFor(active) || []).filter(q => q.topic_key === topic).map(q => q.question).filter(Boolean);
             const resp = await fetch("/.netlify/functions/generate-theory-questions", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
@@ -14496,19 +14513,20 @@ function App() {
     function renderTheorieFortschritt() {
         if (theoryQuestions === null)
             return React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…");
-        if (theoryQuestions.length === 0)
+        const tq = theoryQuestionsFor(active);
+        if (tq.length === 0)
             return React.createElement("div", { className: "card", style: { padding: "20px 16px", textAlign: "center", fontSize: 13, color: "var(--muted)" } }, "Noch keine Übungsfragen hinterlegt.");
         const progress = active.theoryProgress || {};
         const byTopic = {};
-        theoryQuestions.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
+        tq.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
         const topics = Object.keys(byTopic);
-        const gesamtGemeistert = theoryQuestions.filter(q => progress[q.id] && progress[q.id].correct).length;
-        const gesamtPct = Math.round((gesamtGemeistert / theoryQuestions.length) * 100);
+        const gesamtGemeistert = tq.filter(q => progress[q.id] && progress[q.id].correct).length;
+        const gesamtPct = Math.round((gesamtGemeistert / tq.length) * 100);
         const beantwortet = Object.keys(progress).length;
         return React.createElement(React.Fragment, null,
             React.createElement("div", { className: "card home-tile", style: { marginBottom: 14, cursor: "default" } },
                 React.createElement("div", { className: "home-num" }, gesamtPct + "%"),
-                React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, "Theorie gemeistert · " + gesamtGemeistert + " / " + theoryQuestions.length + " Fragen")),
+                React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, "Theorie gemeistert · " + gesamtGemeistert + " / " + tq.length + " Fragen")),
             beantwortet === 0
                 ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, dispName(active) + " hat im Fahrschülerbereich noch nicht Theorie geübt.")
                 : React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
@@ -14934,9 +14952,12 @@ function App() {
         if (hasBegleitung)
             begleitErfuellt = [!!active.theorie, lessonUE(active) >= 6, !!(active.begleitEinweisung && active.begleitEinweisung.done)].filter(Boolean).length;
         let theoriePct = null;
-        if (hasTheorie && theoryQuestions && theoryQuestions.length > 0) {
-            const progress = active.theoryProgress || {};
-            theoriePct = Math.round((theoryQuestions.filter(q => progress[q.id] && progress[q.id].correct).length / theoryQuestions.length) * 100);
+        if (hasTheorie) {
+            const tqActive = theoryQuestionsFor(active);
+            if (tqActive && tqActive.length > 0) {
+                const progress = active.theoryProgress || {};
+                theoriePct = Math.round((tqActive.filter(q => progress[q.id] && progress[q.id].correct).length / tqActive.length) * 100);
+            }
         }
         function toneColors(tone) {
             return { bg: tone === "orange" ? "var(--orange-soft)" : ("var(--" + tone + "-bg)"),
@@ -18544,11 +18565,12 @@ function App() {
             // ersetzen. Rendert nur, wenn theoryQuestions schon geladen ist (kein Nachladen beim Druck,
             // damit das Drucken nie an einem fehlenden Netzwerkaufruf hängen bleibt).
             (() => {
-                if (!theoryQuestions || theoryQuestions.length === 0)
+                const tq = theoryQuestionsFor(active);
+                if (!tq || tq.length === 0)
                     return null;
                 const progress = active.theoryProgress || {};
                 const byTopic = {};
-                theoryQuestions.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
+                tq.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
                 const topics = Object.keys(byTopic);
                 if (topics.length === 0)
                     return null;
