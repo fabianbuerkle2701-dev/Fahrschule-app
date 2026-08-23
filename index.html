@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.43";
+const APP_VERSION = "1.164.44";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.44", date: "August 2026", changes: [
+            "Ein ungültiger Preis in einem Fahrtenbuch-Eintrag (z.B. versehentlich mit Währungszeichen eingefügt) konnte die komplette Kostenberechnung eines Schülers auf \"Vollständig bezahlt\" kippen lassen, obwohl noch Geld offen war - jetzt validiert, mit zusätzlicher Absicherung falls doch mal ein kaputter Wert in den Daten steckt. Eine bereits abgerechnete Fahrstunde ließ sich weiterhin bearbeiten (Löschen war schon gesperrt) - Ändern von Minuten/Preis nach Rechnungsstellung verschob die angezeigte Forderung, ohne dass sich an der gedruckten Rechnung etwas änderte, jetzt ebenfalls gesperrt. Ein Termin der Warteliste anbieten geschah bisher auch dann, wenn das vorherige Löschen des Termins fehlgeschlagen war - konnte zu einem doppelt vergebenen Termin führen, jetzt nur noch bei tatsächlich erfolgreichem Löschen. Die Wunschliste eines Fahrschülers berücksichtigte bei der Warteliste-Passung nur den Beginn eines frei gewordenen Termins, nicht dessen Ende - ein Termin konnte damit weit über das eigentliche Wunschfenster hinaus angeboten werden. Ein vertauschtes Zeitfenster (Start nach Ende) in der eigenen Wunschliste ließ sich klaglos speichern, obwohl es nie zu einem Treffer führen kann - jetzt mit Fehlermeldung",
+        ] },
     { v: "1.164.43", date: "August 2026", changes: [
             "Sicherheitslücke geschlossen: das KI-Prüfreife-/Übergabe-Einschätzung/Eltern-Update-Fenster (handoverModal) war von der bestehenden Kontowechsel-Bereinigung nicht erfasst - meldete sich auf einem gemeinsam genutzten Gerät ein Fahrlehrer ab und ein anderer an, konnte Name und KI-generierter Text eines Schülers des vorherigen Kontos sichtbar bleiben bzw. kurz danach mit dessen Daten aufpoppen. Wird jetzt wie die übrigen KI-Briefings beim Kontowechsel zurückgesetzt",
         ] },
@@ -5308,7 +5311,10 @@ function lessonBillables(s, stdPrice) {
 }
 // Summe der Fahrstunden-Kosten (jede Stunde mit ihrem eigenen Preis, abzüglich Paket-Guthaben)
 function lessonsCharge(s, stdPrice) {
-    return lessonBillables(s, stdPrice).reduce((sum, b) => sum + b.amount, 0);
+    // Number.isFinite-Schutz: ein einzelner NaN-Betrag (z.B. aus einer vor dem Preis-Validierungs-
+    // Fix in saveLessonForm() gespeicherten kaputten Fahrstunde) würde per reduce sonst die
+    // GESAMTE Summe unwiderruflich auf NaN kippen und die komplette Saldenanzeige verfälschen.
+    return lessonBillables(s, stdPrice).reduce((sum, b) => sum + (Number.isFinite(b.amount) ? b.amount : 0), 0);
 }
 /* ════════ Abrechnungs-Wächter: erbracht, aber noch nicht berechnet ════════ */
 // Die Kachel "Offene Forderungen" wirft zwei Zustände in eine Zahl: (a) berechnet, aber nicht
@@ -9020,11 +9026,27 @@ function App() {
             return;
         }
         const priceVal = (lessonForm.price === "" || lessonForm.price == null) ? null : Number(lessonForm.price);
+        // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
+        // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
+        // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
+        // zeigt eine NaN-Summe dann fälschlich als "Vollständig bezahlt" an, statt die echte Forderung.
+        if (priceVal !== null && isNaN(priceVal)) {
+            showToast("Bitte einen gültigen Preis eingeben (nur Zahl, z.B. 45 oder 45,50).");
+            return;
+        }
         const stu = students.find(s => s.id === activeId) || active;
         if (!stu)
             return;
         if (lessonForm.id) {
-            // bestehende Fahrstunde bearbeiten
+            // bestehende Fahrstunde bearbeiten - Zweite Absicherung neben der UI-Sperre (Klick auf
+            // eine abgerechnete Fahrstunde öffnet lessonForm gar nicht erst): eine bereits abgerechnete
+            // Stunde ändern würde die angezeigte UE/den offenen Betrag verschieben, ohne dass sich an
+            // der schon gedruckten Rechnung etwas ändert - dieselbe Sperre wie in removeLesson().
+            const current = (stu.drivenLessons || []).find(l => l.id === lessonForm.id);
+            if (current && current.invoiced) {
+                showToast("Diese Fahrstunde steht bereits auf Rechnung " + current.invoiced + " und kann nicht mehr geändert werden. Bitte die Rechnung stornieren, falls die Stunde falsch ist.");
+                return;
+            }
             const driven = (stu.drivenLessons || []).map(l => l.id === lessonForm.id
                 ? { ...l, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal, art: lessonForm.art || "" } : l);
             writeStudent({ ...stu, drivenLessons: driven });
@@ -11523,8 +11545,12 @@ function App() {
     async function confirmCancel(id) {
         if (await askConfirm({ message: "Stornierung bestätigen? Der Termin wird damit endgültig gelöscht." })) {
             const freed = (appts || []).find(a => a.id === id);
-            await removeAppt(id, { label: "Termin storniert" });
-            if (freed)
+            const ok = await removeAppt(id, { label: "Termin storniert" });
+            // Nur bei tatsächlich erfolgreichem Löschen der Warteliste anbieten - sonst könnte ein
+            // fehlgeschlagenes Löschen (Netzwerkfehler) denselben Termin doppelt vergeben: der
+            // ursprüngliche Termin steht in der DB weiter, ein Wartelisten-Schüler bekommt ihn aber
+            // trotzdem angeboten.
+            if (freed && ok)
                 maybeOfferWaitlist({ ...freed, status: "confirmed" });
         }
     }
@@ -13722,15 +13748,21 @@ function App() {
                         const lp = lessonPricePerUE(l, price);
                         const lc = lessonCost(l, price);
                         const isLeist = !!l.leistung;
+                        // Eine bereits abgerechnete Fahrstunde \u00E4ndern (Minuten/Preis/Datum) w\u00FCrde die
+                        // angezeigte UE/den offenen Betrag verschieben, ohne dass sich an der schon
+                        // gedruckten Rechnung etwas \u00E4ndert - removeLesson() sperrt das L\u00F6schen l\u00E4ngst
+                        // aus genau diesem Grund, das Bearbeiten war davon aber nie erfasst.
+                        const locked = isLeist || !!l.invoiced;
                         return React.createElement("div", { key: l.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderBottom: "1px solid var(--line)" } },
-                            React.createElement("div", { style: { flex: 1, cursor: isLeist ? "default" : "pointer" }, onClick: isLeist ? undefined : () => setLessonForm({ id: l.id, date: l.date || ymd(new Date()), time: l.time || "", minutes: l.minutes, price: (l.price != null ? l.price : (pricePerHour || "")), art: l.art || "" }) },
+                            React.createElement("div", { style: { flex: 1, cursor: locked ? "default" : "pointer" }, onClick: locked ? undefined : () => setLessonForm({ id: l.id, date: l.date || ymd(new Date()), time: l.time || "", minutes: l.minutes, price: (l.price != null ? l.price : (pricePerHour || "")), art: l.art || "" }) },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 } },
                                     l.minutes,
                                     " Min \u00B7 ",
                                     ueFmt(l.minutes / 45),
                                     " UE \u00B7 ",
                                     eurFmt(lc),
-                                    isLeist && React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#1B8F4D", background: "#E3F4E9", borderRadius: 6, padding: "2px 6px" } }, "Leistung \u2713")),
+                                    isLeist && React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#1B8F4D", background: "#E3F4E9", borderRadius: 6, padding: "2px 6px" } }, "Leistung \u2713"),
+                                    !isLeist && l.invoiced && React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 6, padding: "2px 6px" } }, "Auf Rechnung " + l.invoiced)),
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
                                     l.date ? new Date(l.date).toLocaleDateString("de-DE") : "",
                                     l.time ? " · " + l.time + " Uhr" : "",
@@ -15317,13 +15349,17 @@ function App() {
         const weekday = d.getDay();
         const hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
         const freedEnd = new Date(freedAppt.end_at || freedAppt.start_at);
+        // Auch die Endzeit gegen wl.bis prüfen, nicht nur den Beginn - sonst könnte ein Termin
+        // angeboten werden, der weit über das Wunschfenster hinaus in eine Zeit reicht, in der der
+        // Schüler laut eigener Angabe gar nicht verfügbar ist.
+        const hhmmEnd = String(freedEnd.getHours()).padStart(2, "0") + ":" + String(freedEnd.getMinutes()).padStart(2, "0");
         return (students || []).filter(s => {
             if (s.archived || s.id === freedAppt.student_id)
                 return false;
             const wl = s.wunschliste;
             if (!wl || !wl.active || !Array.isArray(wl.weekdays) || !wl.weekdays.includes(weekday))
                 return false;
-            if (!wl.von || !wl.bis || hhmm < wl.von || hhmm >= wl.bis)
+            if (!wl.von || !wl.bis || hhmm < wl.von || hhmm >= wl.bis || hhmmEnd > wl.bis)
                 return false;
             if ((s.klasse || DEFAULT_KLASSE) !== klasse)
                 return false;
@@ -21008,11 +21044,14 @@ function App() {
                             // sonst hinter dem Auswahlfenster und ist nicht bedienbar.
                             setApptChoice(null);
                             if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true })) {
-                                await removeAppt(a.id);
+                                const ok = await removeAppt(a.id);
                                 // Bei einer offenen Storno-Anfrage war der Termin bis eben "confirmed"
                                 // (cancel_requested ist nur ein Zwischenstatus) - maybeOfferWaitlist
-                                // verlangt genau diesen Status, sonst bricht sie sofort ab.
-                                maybeOfferWaitlist(a.status === "cancel_requested" ? { ...a, status: "confirmed" } : a);
+                                // verlangt genau diesen Status, sonst bricht sie sofort ab. Nur bei
+                                // tatsächlich erfolgreichem Löschen anbieten, sonst könnte ein
+                                // fehlgeschlagenes Löschen denselben Termin doppelt vergeben.
+                                if (ok)
+                                    maybeOfferWaitlist(a.status === "cancel_requested" ? { ...a, status: "confirmed" } : a);
                             } } },
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M3 6h18" }),
@@ -21181,9 +21220,11 @@ function App() {
                         // dieser (sehr gängige) Löschweg den Slot nie an wartende Schüler an, anders
                         // als das Löschen direkt aus dem Termin-Auswahlfenster.
                         const freed = (appts || []).find(x => x.id === apptForm.id);
-                        await removeAppt(apptForm.id);
+                        const ok = await removeAppt(apptForm.id);
                         setApptForm(null);
-                        if (freed)
+                        // Nur bei tatsächlich erfolgreichem Löschen anbieten, sonst könnte ein
+                        // fehlgeschlagenes Löschen denselben Termin doppelt vergeben.
+                        if (freed && ok)
                             maybeOfferWaitlist(freed.status === "cancel_requested" ? { ...freed, status: "confirmed" } : freed);
                     } } }, "Termin l\u00F6schen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!apptForm.busy, onClick: () => { if (!apptForm.busy) setApptForm(null); } }, "Abbrechen"))),
@@ -23415,6 +23456,13 @@ function StudentArea({ code, info, appMode }) {
         setWlErr("");
         if (wlActive && (!wlWeekdays.length || !wlVon || !wlBis)) {
             setWlErr("Bitte mindestens einen Wochentag und ein Zeitfenster angeben.");
+            return;
+        }
+        // Ohne diese Prüfung ließ sich ein vertauschtes Zeitfenster (von nach bis) klaglos speichern -
+        // waitlistCandidates() findet für ein solches Fenster nie einen passenden Termin, ohne dass
+        // Schüler oder Fahrschule je erfahren, warum die Wunschliste nichts bringt.
+        if (wlActive && wlVon && wlBis && wlVon >= wlBis) {
+            setWlErr("Die Startzeit muss vor der Endzeit liegen.");
             return;
         }
         setWlBusy(true);
