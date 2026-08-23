@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.35";
+const APP_VERSION = "1.164.36";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.36", date: "August 2026", changes: [
+            "Zuverlässigkeit behoben: fetchMySchool() gab bei einem einzelnen kurzzeitigen Netzwerk-/DB-Fehler sofort \"keine Fahrschule\" zurück statt es erneut zu versuchen - konnte ein völlig intaktes Konto fälschlich auf den neuen Wiederherstellungs-Screen aus 1.164.35 treffen lassen. Kalender-Screenshot-Import: Doppeltap-Schutz beim Anlegen der Termine ergänzt, und eine nicht zweistellig erkannte Uhrzeit (z.B. \"9:00\") wird jetzt korrekt übernommen statt stillschweigend auf 00:00 gesetzt zu werden. Führerscheinklasse löschen fragt jetzt nach und warnt, wenn noch Schüler dieser Klasse zugeordnet sind",
+        ] },
     { v: "1.164.35", date: "August 2026", changes: [
             "Ein Interessent ließ sich durch Doppeltippen (z.B. bei langsamer Verbindung) mehrfach als Schüler übernehmen, weil der vorgesehene Doppeltap-Schutz nie wirklich griff - jetzt zuverlässig verhindert. Neu: schlägt der Beitritt zu einer Fahrschule per Einladungscode bei der Registrierung fehl, landete das neue Konto bisher dauerhaft ohne echte Fahrschule und ohne jede Möglichkeit, das im Nachhinein zu korrigieren - ein neuer Wiederherstellungs-Screen erscheint jetzt direkt nach dem Einloggen und lässt einen Einladungscode erneut eingeben oder alternativ eine eigene Fahrschule gründen",
         ] },
@@ -3535,17 +3538,29 @@ async function fetchMySchool(uid) {
     // Direkt nach der Registrierung setzt signUp() schon die Session (uid), aber
     // createAndAssignSchool()/joinSchoolByCode() in Auth() schreiben profiles.school_id erst
     // danach - ohne Retry würde hier "keine Fahrschule" ankommen und der spätere Speicher-Versuch
-    // würde mit id=undefined gegen Postgres laufen.
+    // würde mit id=undefined gegen Postgres laufen. Ein transienter Netzwerk-/DB-Fehler bei EINEM
+    // ohnehin schon zugeordneten, gesunden Konto darf ebenfalls nicht sofort als "keine Fahrschule"
+    // gewertet werden - sonst zeigt App() ihren Wiederherstellungs-Screen fälschlich für ein völlig
+    // intaktes Konto. Beide Fehlerfälle bekommen deshalb dieselben Retries wie das reine Timing-Problem.
     for (let attempt = 0; attempt < 5; attempt++) {
         const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
         if (pe) {
             console.error(pe);
+            if (attempt < 4) {
+                await new Promise(r => setTimeout(r, 500));
+                continue;
+            }
+            return null;
         }
         const sid = prof && prof.school_id;
         if (sid) {
             const { data, error } = await sb.from("schools").select("*").eq("id", sid).maybeSingle();
             if (error) {
                 console.error(error);
+                if (attempt < 4) {
+                    await new Promise(r => setTimeout(r, 500));
+                    continue;
+                }
                 return null;
             }
             return data;
@@ -9539,26 +9554,44 @@ function App() {
         }
     }
     // Ausgelesene Kalender-Termine anlegen
+    // Normalisiert eine vom Screenshot-Auslesen erkannte Uhrzeit ("9:00", "09:00", ...) auf HH:MM,
+    // statt bei einer nicht exakt 5-stelligen Zeichenkette (z.B. einstellige Stunde) stillschweigend
+    // auf 00:00 zu verfallen - die Vorschau zeigt die Original-Uhrzeit, ein Termin um Mitternacht
+    // statt zur erkannten Zeit wäre sonst eine stille Datenverfälschung. null = nicht lesbar.
+    function normHM(s) {
+        const m = /^(\d{1,2}):(\d{2})$/.exec((s || "").trim());
+        if (!m)
+            return null;
+        const hh = parseInt(m[1], 10), mm = parseInt(m[2], 10);
+        if (hh > 23 || mm > 59)
+            return null;
+        return String(hh).padStart(2, "0") + ":" + m[2];
+    }
     async function createApptsFromImport() {
-        if (!calImport || !Array.isArray(calImport.items))
+        // Doppeltap-Schutz: ohne calImport.creating konnte ein zweiter Tipp auf "Termine anlegen"
+        // während des laufenden Anlegens dieselben Termine ein zweites Mal erzeugen.
+        if (!calImport || !Array.isArray(calImport.items) || calImport.creating)
             return;
         const chosen = calImport.items.filter(it => it.take && it.date && it.start);
         if (!chosen.length) {
             setCalImport(null);
             return;
         }
-        let count = 0;
+        setCalImport(c => c ? { ...c, creating: true } : c);
+        let count = 0, skipped = 0;
         for (const it of chosen) {
-            const start = new Date(it.date + "T" + (it.start.length === 5 ? it.start : "00:00") + ":00");
-            if (isNaN(start.getTime()))
+            const startHM = normHM(it.start);
+            if (!startHM) {
+                skipped++;
                 continue;
-            let end;
-            if (it.end && it.end.length === 5) {
-                end = new Date(it.date + "T" + it.end + ":00");
             }
-            else {
-                end = new Date(start.getTime() + 45 * 60000);
+            const start = new Date(it.date + "T" + startHM + ":00");
+            if (isNaN(start.getTime())) {
+                skipped++;
+                continue;
             }
+            const endHM = normHM(it.end);
+            const end = endHM ? new Date(it.date + "T" + endHM + ":00") : new Date(start.getTime() + 45 * 60000);
             const stu = it.studentId ? students.find(s => s.id === it.studentId) : null;
             await addAppt({
                 student_id: stu ? stu.id : null,
@@ -9572,7 +9605,7 @@ function App() {
         }
         setCalImport(null);
         setView("kalender");
-        showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt");
+        showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (skipped ? " · " + skipped + (skipped === 1 ? " übersprungen" : " übersprungen") + " (Uhrzeit nicht lesbar)" : ""));
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
     async function handleAdkImportFiles(fileList) {
@@ -17509,7 +17542,14 @@ function App() {
                             React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 } }, klassen.map((k, idx) => React.createElement("div", { key: k, style: { display: "flex", alignItems: "center", gap: 6, padding: "6px 6px 6px 12px",
                                     borderRadius: 99, border: "1.5px solid var(--line)", background: "var(--field-bg)" } },
                                 React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-d)" } }, k),
-                                React.createElement("button", { onClick: () => saveKlassen(klassen.filter((_, i) => i !== idx)), "aria-label": "Klasse " + k + " entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 16, padding: "2px 4px", lineHeight: 1 } }, "×")))),
+                                React.createElement("button", { onClick: async () => {
+                                        // Ohne Rückfrage ließ sich eine Klasse versehentlich mit einem Tipp entfernen -
+                                        // betroffene Schüler zeigen die Klasse danach nirgends mehr an.
+                                        const affected = (students || []).filter(s => s.klasse === k).length;
+                                        if (!await askConfirm({ message: (affected > 0 ? "Achtung: " + affected + (affected === 1 ? " Schüler ist" : " Schüler sind") + " aktuell Klasse " + k + " zugeordnet. " : "") + "Klasse " + k + " wirklich entfernen?" }))
+                                            return;
+                                        saveKlassen(klassen.filter((_, i) => i !== idx));
+                                    }, "aria-label": "Klasse " + k + " entfernen", style: { border: "none", background: "none", color: "#B3362A", fontSize: 16, padding: "2px 4px", lineHeight: 1 } }, "×")))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => {
                                     const k = await askPrompt({ message: "Neue Klasse hinzufügen (z.B. B197):" });
                                     if (k === null || !k.trim())
