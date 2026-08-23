@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.8";
+const APP_VERSION = "1.164.9";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.9", date: "August 2026", changes: [
+            "Fehlerbehebung Fahrzeug-Kalender: das Bearbeiten einer bestehenden Buchung lief bisher als Löschen-dann-Neuanlegen in zwei getrennten Schritten - buchte in dem kurzen Zeitfenster dazwischen ein anderer Fahrlehrer zufällig denselben Slot, konnte die Buchung im ungünstigsten Fall ersatzlos verloren gehen. Läuft jetzt als eine einzige, atomare Datenbank-Operation ohne dieses Zeitfenster",
+        ] },
     { v: "1.164.8", date: "August 2026", changes: [
             "Fehlerbehebung Umwandlungsquote: „Als Schüler übernehmen“ hat den Interessenten-Eintrag bisher komplett gelöscht - jede tatsächliche Umwandlung verschwand dadurch sofort aus der Statistik (weder als „Angemeldet“ gezählt noch im „Gesamt“ enthalten), während „Angemeldet“ nur durch manuelles Umstellen des Status ganz ohne echten Schüler erreichbar war. Der Eintrag wird jetzt beim Übernehmen auf Status „Angemeldet“ gesetzt statt gelöscht, die Quote bildet damit erstmals echte Umwandlungen ab",
         ] },
@@ -4561,6 +4564,16 @@ async function calBookings(code, von, bis) {
 // Buchung anlegen (mit Überschneidungsprüfung in der Datenbank)
 async function calBook(code, vehicleId, teacherName, start, end, note) {
     const { data, error } = await sb.rpc("cal_book", { p_code: code, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
+    if (error) {
+        throw new Error(error.message);
+    }
+    return data;
+}
+// Bestehende Buchung ändern - eine einzige atomare RPC (Überschneidungsprüfung + Update in einer
+// Transaktion, eigene Zeile per p_id ausgenommen) statt Löschen+Neuanlegen mit einem Zeitfenster
+// dazwischen, in dem das Fahrzeug scheinbar frei ist.
+async function calBookUpdate(code, id, vehicleId, teacherName, start, end, note) {
+    const { data, error } = await sb.rpc("cal_book_update", { p_code: code, p_id: id, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
     if (error) {
         throw new Error(error.message);
     }
@@ -24104,9 +24117,7 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
     }
     // Bestehende Buchung antippen: Bearbeiten-Fenster öffnen (mit Löschen unten)
     function openBookingEdit(r) {
-        // "original" wird für saveBooking() aufgehoben, um die Buchung wiederherstellen zu
-        // können, falls das Neuanlegen beim Bearbeiten fehlschlägt (siehe dort).
-        setForm({ id: r.id, date: ymd(r.start_at), start: hm(r.start_at), end: hm(r.end_at), teacher: r.teacher_name || "", note: r.note || "", busy: false, error: "", original: r });
+        setForm({ id: r.id, date: ymd(r.start_at), start: hm(r.start_at), end: hm(r.end_at), teacher: r.teacher_name || "", note: r.note || "", busy: false, error: "" });
     }
     async function saveBooking() {
         const f = form;
@@ -24135,37 +24146,20 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             return;
         }
         setForm({ ...f, busy: true, error: "" });
-        // Beim Bearbeiten: alte Buchung entfernen, dann neu anlegen (die Datenbank prüft dabei
-        // erneut auf Doppelbelegung). Schlägt das Neuanlegen fehl (z.B. weil der neue Zeitraum
-        // inzwischen belegt ist), wird versucht, die ursprüngliche Buchung wiederherzustellen -
-        // sonst wäre sie ersatzlos verloren, obwohl der Nutzer nur eine Fehlermeldung sieht.
-        let removedOriginal = null;
+        // Bearbeiten läuft über eine einzige atomare RPC (Überschneidungsprüfung + Update in einer
+        // Transaktion, eigene Zeile ausgenommen) statt Löschen+Neuanlegen - dadurch gibt es kein
+        // Zeitfenster mehr, in dem das Fahrzeug für den ursprünglichen Zeitraum scheinbar frei ist,
+        // und keinen Wiederherstellungs-Sonderfall, der selbst wieder fehlschlagen könnte.
         try {
-            if (f.id) {
-                removedOriginal = f.original || null;
-                await calDelete(code, f.id);
-            }
-            await calBook(code, veh.id, f.teacher.trim(), startISO, endISO, f.note);
+            if (f.id)
+                await calBookUpdate(code, f.id, veh.id, f.teacher.trim(), startISO, endISO, f.note);
+            else
+                await calBook(code, veh.id, f.teacher.trim(), startISO, endISO, f.note);
             setForm(null);
             reload();
         }
         catch (e) {
-            if (removedOriginal) {
-                try {
-                    const restoredId = await calBook(code, veh.id, removedOriginal.teacher_name || f.teacher.trim(), removedOriginal.start_at, removedOriginal.end_at, removedOriginal.note);
-                    // calBook liefert die ID der NEU angelegten Zeile (die alte wurde bereits per
-                    // calDelete gelöscht) - form.id muss darauf aktualisiert werden, sonst würde ein
-                    // erneuter Klick auf "Speichern"/"Löschen" auf eine nicht mehr existierende
-                    // Buchung zielen, während die tatsächlich wiederhergestellte unberührt bliebe.
-                    setForm({ ...f, id: restoredId, original: { ...removedOriginal, id: restoredId }, busy: false, error: (e.message || "Bearbeiten fehlgeschlagen") + " Die ursprüngliche Buchung wurde wiederhergestellt." });
-                }
-                catch (e2) {
-                    setForm({ ...f, busy: false, error: "Die Buchung konnte nicht geändert und die ursprüngliche Buchung nicht wiederhergestellt werden. Bitte Kalender prüfen. (" + (e.message || "") + ")" });
-                }
-            }
-            else {
-                setForm({ ...f, busy: false, error: e.message || "Buchung fehlgeschlagen" });
-            }
+            setForm({ ...f, busy: false, error: e.message || "Buchung fehlgeschlagen" });
             reload();
         }
     }
