@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.30";
+const APP_VERSION = "1.164.31";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.31", date: "August 2026", changes: [
+            "Sicherheitsrelevanter Datenfehler behoben: \"Fahrlehrer krank\" (Sammelabsage aller Termine eines Tages) konnte bereits gegebene, in der Vergangenheit liegende Fahrstunden desselben Tages endgültig löschen statt nur die noch bevorstehenden - betraf nur wirklich vergangene Termine des gewählten Tages. Außerdem: eine fehlgeschlagene Einzelabsage wurde bisher trotzdem als \"erfolgreich abgesagt\" angezeigt, jetzt mit Hinweis; frei gewordene Termine aus der Sammelabsage werden jetzt (wie bei einer einzelnen Stornierung) der Warteliste angeboten, nacheinander für jeden betroffenen Termin statt nur für den letzten",
+        ] },
     { v: "1.164.30", date: "August 2026", changes: [
             "Fuhrpark/Einstellungen: zwei gleichzeitige Sitzungen (z.B. zwei offene Tabs, oder Chefin + Fahrlehrer gleichzeitig) konnten sich beim Speichern von Fahrzeugen, Kosten, Paketen o.ä. bisher stillschweigend gegenseitig überschreiben, weil beim Speichern nie geprüft wurde, ob sich der Datensatz zwischenzeitlich schon geändert hatte. Ein Speicherversuch auf einem inzwischen veralteten Stand wird jetzt erkannt, nicht mehr durchgeführt und stattdessen mit einem Hinweis gemeldet, die zuletzt eingegebene Änderung erneut einzutragen",
         ] },
@@ -7835,7 +7838,7 @@ function App() {
             else if (mahnCockpit) setMahnCockpit(false);
             else if (folgeCockpit) setFolgeCockpit(false);
             else if (practiceLog) setPracticeLog(null);
-            else if (waitlistOffer) setWaitlistOffer(null);
+            else if (waitlistOffer) offerNextInQueue(waitlistOffer.queue);
             else if (welcomeOffer) setWelcomeOffer(null);
             else if (showNachweisModal) setShowNachweisModal(false);
             else if (contractSignId) setContractSignId(null);
@@ -10955,6 +10958,7 @@ function App() {
         apptDeletedRef.current.add(id);
         apptWritesRef.current++;
         setAppts(prev => prev.filter(a => a.id !== id));
+        let ok = true;
         try {
             await dbDeleteAppt(id);
             setSaved(true);
@@ -10962,6 +10966,7 @@ function App() {
         catch (e) {
             // Löschen fehlgeschlagen: Vormerkung zurücknehmen und Termin wieder anzeigen,
             // damit die Liste zur Datenbank passt und nichts stillschweigend verschwindet
+            ok = false;
             apptDeletedRef.current.delete(id);
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
@@ -10996,6 +11001,7 @@ function App() {
                 }
             });
         }
+        return ok;
     }
     // Vorschlag bestätigen / ablehnen
     async function confirmAppt(id) {
@@ -15069,17 +15075,33 @@ function App() {
                 && new Date(a.start_at) < freedEnd && new Date(a.end_at || a.start_at) > d);
         });
     }
-    function maybeOfferWaitlist(freedAppt) {
-        if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id)
+    // queue: weitere freigewordene Termine (z.B. aus einer Sammelabsage), die nacheinander
+    // angeboten werden sollen, sobald der aktuelle Vorschlag bestätigt/abgelehnt wurde - ohne
+    // Queue bräche eine Sammelabsage mehrerer Termine sonst still auf nur einen Vorschlag herunter,
+    // weil waitlistOffer immer nur EIN Angebot gleichzeitig halten kann.
+    function offerNextInQueue(queue) {
+        if (!queue || !queue.length) {
+            setWaitlistOffer(null);
             return;
+        }
+        const [next, ...rest] = queue;
+        maybeOfferWaitlist(next, rest);
+    }
+    function maybeOfferWaitlist(freedAppt, queue) {
+        if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id) {
+            offerNextInQueue(queue);
+            return;
+        }
         const candidates = waitlistCandidates(freedAppt);
         if (candidates.length)
-            setWaitlistOffer({ appt: freedAppt, candidates });
+            setWaitlistOffer({ appt: freedAppt, candidates, queue: queue || [] });
+        else
+            offerNextInQueue(queue);
     }
     async function createWaitlistOffer() {
         if (!waitlistOffer)
             return;
-        const { appt } = waitlistOffer;
+        const { appt, queue } = waitlistOffer;
         const freedStudent = students.find(x => x.id === appt.student_id);
         const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
         try {
@@ -15093,7 +15115,7 @@ function App() {
         catch (e) {
             showToast("Anbieten fehlgeschlagen:\n" + e.message);
         }
-        setWaitlistOffer(null);
+        offerNextInQueue(queue);
     }
     /* ── Lücken-Radar: proaktiv freie Zeitfenster in den nächsten 7 Tagen finden, die zu einem
        wartenden Schüler (Wunschliste) passen - im Unterschied zu maybeOfferWaitlist/
@@ -15289,7 +15311,11 @@ function App() {
     // "Fahrlehrer krank": bestätigte Fahrstunden eines Tages, die bei Absage einen Schüler
     // betreffen würden (Sonstige Tätigkeit und Urlaub zählen nicht als "Ausfall für jemanden").
     function sickDayAppts(dateKey) {
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey)
+        const jetzt = new Date();
+        // Nur noch bevorstehende Termine des Tages - sonst würden beim "Fahrlehrer krank"-Sammelabsagen
+        // auch bereits gegebene (vergangene) Fahrstunden desselben Tages endgültig gelöscht (removeAppt
+        // löscht wirklich, siehe cancelSickDay mit noUndo:true), obwohl die Stunde real stattgefunden hat.
+        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey && new Date(a.start_at) > jetzt)
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
     }
     // WhatsApp-Text für eine krankheitsbedingte Absage - ohne Ersatztermin, der wird separat
@@ -15304,9 +15330,25 @@ function App() {
     // Termine selbst sind zu diesem Zeitpunkt bereits aus appts entfernt (removeAppt).
     async function cancelSickDay(dateKey) {
         const list = sickDayAppts(dateKey);
-        const cancelled = list.map(a => ({ appt: a, stu: a.student_id ? students.find(s => s.id === a.student_id) : null }));
+        const cancelled = [];
+        const failed = [];
         for (const a of list) {
-            await removeAppt(a.id, { noUndo: true, label: "Termin krankheitsbedingt abgesagt" });
+            // Nur tatsächlich erfolgreich gelöschte Termine als "abgesagt" zählen - sonst hätte eine
+            // fehlgeschlagene Einzellöschung (z.B. Netzwerkfehler) die WhatsApp-Benachrichtigung fürs
+            // Kind trotzdem als erledigt angezeigt, obwohl der Termin in der DB noch bestätigt ist.
+            const ok = await removeAppt(a.id, { noUndo: true, label: "Termin krankheitsbedingt abgesagt" });
+            if (ok)
+                cancelled.push({ appt: a, stu: a.student_id ? students.find(s => s.id === a.student_id) : null });
+            else
+                failed.push(a);
+        }
+        if (failed.length)
+            showToast((failed.length === 1 ? "1 Termin konnte" : (failed.length + " Termine konnten")) + " nicht abgesagt werden und " + (failed.length === 1 ? "bleibt" : "bleiben") + " weiterhin bestätigt - bitte erneut versuchen.");
+        if (cancelled.length) {
+            // sickDayAppts() liefert nur status:"confirmed"-Termine, ein erneutes Erzwingen des
+            // Status ist hier anders als bei confirmCancel() nicht nötig.
+            const [first, ...rest] = cancelled.map(c => c.appt);
+            maybeOfferWaitlist(first, rest);
         }
         return cancelled;
     }
@@ -20669,11 +20711,13 @@ function App() {
                         React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" })),
                     "Termin löschen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptChoice(null) }, "Abbrechen"))),
-        waitlistOffer && React.createElement("div", { onClick: () => setWaitlistOffer(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1250, display: "flex",
+        waitlistOffer && React.createElement("div", { onClick: () => offerNextInQueue(waitlistOffer.queue), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1250, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
                     padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)", maxHeight: "85vh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
+                waitlistOffer.queue && waitlistOffer.queue.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } },
+                    "Noch " + waitlistOffer.queue.length + (waitlistOffer.queue.length === 1 ? " weiterer freier Termin danach" : " weitere freie Termine danach")),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
                     waitlistOffer.candidates.length + " Schüler warten auf einen früheren Termin"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
@@ -20694,7 +20738,7 @@ function App() {
                                     style: { flexShrink: 0, padding: "6px 12px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12, fontWeight: 700, textDecoration: "none" } }, "WhatsApp")
                             : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "keine Nummer"));
                 }),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setWaitlistOffer(null) }, "Nicht anbieten"))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => offerNextInQueue(waitlistOffer.queue) }, "Nicht anbieten"))),
         // Willkommensnachricht nach Übernahme einer Anmeldung - gleiches Muster wie waitlistOffer:
         // fertiger Text, ein Klick öffnet WhatsApp, die App verschickt nichts von allein.
         welcomeOffer && React.createElement("div", { onClick: () => setWelcomeOffer(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 1250, display: "flex",
