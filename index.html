@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.29";
+const APP_VERSION = "1.164.30";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.30", date: "August 2026", changes: [
+            "Fuhrpark/Einstellungen: zwei gleichzeitige Sitzungen (z.B. zwei offene Tabs, oder Chefin + Fahrlehrer gleichzeitig) konnten sich beim Speichern von Fahrzeugen, Kosten, Paketen o.ä. bisher stillschweigend gegenseitig überschreiben, weil beim Speichern nie geprüft wurde, ob sich der Datensatz zwischenzeitlich schon geändert hatte. Ein Speicherversuch auf einem inzwischen veralteten Stand wird jetzt erkannt, nicht mehr durchgeführt und stattdessen mit einem Hinweis gemeldet, die zuletzt eingegebene Änderung erneut einzutragen",
+        ] },
     { v: "1.164.29", date: "August 2026", changes: [
             "Barrierefreiheit: 58 von 59 Modal-Fenstern (alle bis auf einen unsichtbaren Klick-Catcher ohne eigenen Inhalt) haben jetzt role=\"dialog\" bzw. role=\"alertdialog\" (Bestätigen/Abbrechen-Dialoge) + aria-modal=\"true\". Neu: ein Fokus-Trap hält Tab/Shift+Tab innerhalb des jeweils obersten offenen Modals, statt auf die dahinterliegende Seite auszubrechen, fokussiert beim Öffnen automatisch das erste Feld (falls das Modal nicht schon selbst eins vorgibt) und gibt den Fokus beim Schließen an den ursprünglichen Auslöser zurück - läuft auf Skript-Ebene statt in einer einzelnen Komponente, damit auch Modals im Fahrschüler-Bereich und auf den öffentlichen Kalender-/Buchungsseiten erfasst sind",
         ] },
@@ -3894,11 +3897,25 @@ async function saveSchool(school) {
         price_grundgebuehr: numOrNull(school.price_grundgebuehr), price_lehrmaterial: numOrNull(school.price_lehrmaterial),
         price_sonderfahrt: numOrNull(school.price_sonderfahrt), price_pruefungsvorstellung: numOrNull(school.price_pruefungsvorstellung),
         preismeldung_letzte: school.preismeldung_letzte || null };
-    const { error } = await sb.from("schools").update(payload).eq("id", school.id);
+    // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
+    // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
+    // Sitzungen sich sonst stillschweigend gegenseitig überschreiben. Kennt der Client noch kein
+    // updated_at (alter, seit vor diesem Fix geladener Stand), läuft der Schreibzugriff wie bisher
+    // ungeprüft durch, statt fälschlich einen Konflikt zu melden.
+    let query = sb.from("schools").update(payload).eq("id", school.id);
+    if (school.updated_at)
+        query = query.eq("updated_at", school.updated_at);
+    const { data, error } = await query.select("updated_at").maybeSingle();
     if (error) {
         console.error(error);
         throw new Error(error.message || "Speichern fehlgeschlagen");
     }
+    if (school.updated_at && !data) {
+        const conflict = new Error("Diese Einstellungen wurden inzwischen in einer anderen Sitzung geändert. Deine letzte Änderung wurde NICHT gespeichert - bitte neu laden und erneut eintragen.");
+        conflict.isConflict = true;
+        throw conflict;
+    }
+    return data;
 }
 /* ════════ Admin (nur für Fabian) ════════ */
 // Wird nach dem SQL-Schritt mit der echten User-UID gefüllt:
@@ -8356,11 +8373,23 @@ function App() {
             clearTimeout(schoolTimer.current);
         schoolTimer.current = setTimeout(async () => {
             try {
-                await saveSchool(next);
+                const saved = await saveSchool(next);
+                // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die
+                // nächste Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst
+                // erkannt (school.updated_at im React-State bliebe sonst auf dem alten Wert stehen).
+                if (saved && saved.updated_at)
+                    setSchool(cur => cur ? { ...cur, updated_at: saved.updated_at } : cur);
                 setSaved(true);
             }
             catch (e) {
-                showToast("Einstellungen konnten nicht gespeichert werden:\n" + e.message);
+                if (e.isConflict) {
+                    showToast(e.message);
+                    fetchMySchool(uid).then(fresh => { if (fresh)
+                        setSchool(fresh); });
+                }
+                else {
+                    showToast("Einstellungen konnten nicht gespeichert werden:\n" + e.message);
+                }
             }
         }, 500);
     }, [uid]);
