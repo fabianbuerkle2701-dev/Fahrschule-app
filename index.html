@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.18";
+const APP_VERSION = "1.164.19";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.19", date: "August 2026", changes: [
+            "Fehlerbehebung Personalunterlagen: wechselte man in der Verwaltung schnell zwischen zwei Fahrlehrern, konnte eine verzögert eintreffende Antwort die Dateiliste des inzwischen ausgewählten Fahrlehrers mit der eines anderen überschreiben",
+            "Fehlerbehebung Video-Bibliothek: Videos, die ein Fahrlehrer vor dem Beitritt zu einer Fahrschule hochgeladen hatte, verschwanden für die Fahrschüler sobald er später einer Fahrschule beitrat. Löschte ein Kollege ein schulweit geteiltes Video, wurde außerdem nur der Eintrag entfernt, die Datei blieb dauerhaft verwaist im Speicher liegen. Beide serverseitig behoben; zusätzlich eine bisher nur clientseitig geprüfte Größengrenze (300 MB) jetzt auch serverseitig durchgesetzt",
+        ] },
     { v: "1.164.18", date: "August 2026", changes: [
             "Fehlerbehebung: der zeitlich begrenzte Link für Personalunterlagen war 60 statt der dafür vorgesehenen 5 Minuten gültig",
             "Fehlerbehebung: eine Kostenposition am Fahrzeug (TÜV, Service, Sprit, ...) ließ sich ohne Rückfrage endgültig löschen",
@@ -4320,17 +4324,20 @@ async function uploadVideo(uid, schoolId, file, title, category, onProgress) {
     return data;
 }
 async function deleteVideo(video) {
-    try {
-        await sb.storage.from("videos").remove([video.storage_path]);
-    }
-    catch (e) {
-        console.error(e);
-    }
+    // Rückgabewert jetzt ausgewertet (vorher komplett ignoriert) - die zugehörige Storage-Policy
+    // wurde an dieselbe Berechtigung wie das Löschen der DB-Zeile angeglichen (schulweites Video:
+    // jeder Fahrlehrer derselben Schule darf es entfernen), ein Fehlschlag ist damit die Ausnahme
+    // (z.B. Netzwerkfehler) statt des Regelfalls bei schulweiten Videos fremder Kollegen.
+    const { error: storageError } = await sb.storage.from("videos").remove([video.storage_path]);
+    if (storageError)
+        console.error("Video-Datei konnte nicht aus dem Storage entfernt werden:", storageError);
     const { error } = await sb.from("videos").delete().eq("id", video.id);
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    if (storageError)
+        showToast("Video aus der Liste entfernt, die Datei selbst konnte aber nicht gelöscht werden. Bitte bei wiederholtem Auftreten den Support kontaktieren.");
 }
 function videoPublicUrl(path) {
     const { data } = sb.storage.from("videos").getPublicUrl(path);
@@ -8346,7 +8353,11 @@ function App() {
         setStaffInstructor(instrUid);
         setStaffCategory("vertrag");
         setStaffFiles(null);
-        fetchStaffFiles(instrUid).then(list => setStaffFiles(list));
+        // Staleness-Check: wechselt der Admin schnell zu einem anderen Fahrlehrer, während diese
+        // Anfrage noch läuft, darf ihre (evtl. später eintreffende) Antwort nicht mehr die Liste
+        // des inzwischen ausgewählten Fahrlehrers überschreiben - sonst sieht der Admin Dateien
+        // von A unter dem Namen von B und könnte per Löschen-Button tatsächlich A's Datei entfernen.
+        fetchStaffFiles(instrUid).then(list => setStaffInstructor(cur => { if (cur === instrUid) setStaffFiles(list); return cur; }));
     }
     async function handleStaffUpload(file) {
         if (!file || !staffInstructor || !school)
