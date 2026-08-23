@@ -1422,9 +1422,19 @@ function securePin() {
     }
 }
 // Kurzer, teilbarer Empfehlungscode aus dem Vornamen + Zufallszahl, z.B. "CLAR482".
-function genReferralCode(stu) {
+// existingStudents: alle Schüler, gegen deren referralCode auf Eindeutigkeit geprüft wird - ohne
+// diese Prüfung könnten zwei Schüler mit ähnlichem Vornamen (gleiches 4-Buchstaben-Präfix +
+// zufällig gleiche 3-stellige Zahl) denselben Code bekommen, und der Bonus würde beim Einlösen
+// dem falschen (im Array zuerst gefundenen) Werber gutgeschrieben.
+function genReferralCode(stu, existingStudents) {
     const base = ((stu && stu.vorname) || "").replace(/[^a-zA-Z]/g, "").toUpperCase().slice(0, 4) || "FS";
-    return base + Math.floor(100 + Math.random() * 900);
+    const used = new Set((existingStudents || []).map(s => (s.referralCode || "").toUpperCase()).filter(Boolean));
+    let code, attempts = 0;
+    do {
+        code = base + Math.floor(100 + Math.random() * 900);
+        attempts++;
+    } while (used.has(code) && attempts < 50);
+    return code;
 }
 function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 // Erkennt einen bereits gehashten PIN (Bcrypt-Präfix). Gespeicherte PINs sind seit
@@ -1433,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.13";
+const APP_VERSION = "1.164.14";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1564,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.14", date: "August 2026", changes: [
+            "Fehlerbehebung Empfehlungsprogramm: (1) neu erzeugte Empfehlungscodes wurden nie gegen bereits vergebene Codes anderer Schüler geprüft - bei ähnlichen Vornamen konnte derselbe Code doppelt vergeben und der Bonus beim Einlösen dem falschen Schüler gutgeschrieben werden. Prüft jetzt auf Eindeutigkeit und erzeugt bei einer Kollision automatisch einen neuen Code. (2) Ein sehr schneller Doppel-Klick auf „Übernehmen“ oder „Bonus gutschreiben“ konnte den Empfehlungsbonus doppelt gutschreiben - eine sofortige Sperre verhindert das jetzt",
+        ] },
     { v: "1.164.13", date: "August 2026", changes: [
             "Fehlerbehebung Standorte: das Löschen eines Standorts hat bisher nur den Standort selbst entfernt, obwohl der Hinweistext \"Zugewiesene Schüler verlieren die Zuordnung\" versprach - betroffene Schüler behielten die jetzt verwaiste Standort-ID dauerhaft (auch die anderer Fahrlehrer, die der Client gar nicht sehen konnte). Läuft jetzt über eine serverseitige Bereinigung, die wirklich alle betroffenen Schüler und die eigene Standort-Vorauswahl jedes Fahrlehrers zurücksetzt",
             "Fehlerbehebung: eine auf einen bereits gelöschten Standort zeigende eigene Standort-Vorauswahl blieb nutzbar - der Button \"Alle Schüler ohne Standort auf meinen setzen\" und neu angelegte Schüler übernahmen weiterhin die tote ID, ohne Hinweis",
@@ -7104,6 +7117,13 @@ function App() {
     useEffect(() => { setAdkFilter(""); setStreckenFilter(""); }, [activeId]);
     const [referralRedeemCode, setReferralRedeemCode] = useState("");
     useEffect(() => { setReferralRedeemCode(""); }, [activeId]);
+    // Synchrone Re-Entry-Sperre gegen doppeltes Gutschreiben des Empfehlungsbonus bei einem
+    // schnellen Doppel-Klick: activateEnrollment()/redeemReferral() prüfen referralRewardApplied
+    // nur gegen den beim Klick übergebenen (potenziell veralteten) Schüler-Schnappschuss - zwei
+    // Klicks innerhalb desselben Render-Zyklus würden beide denselben veralteten Stand sehen und
+    // den Bonus doppelt gutschreiben. Ein Ref (statt State) wirkt sofort, ohne auf ein Re-Render
+    // zu warten.
+    const referralBusyRef = useRef(false);
     // Dokumente (Sehtest, Erste-Hilfe, ...) des aktiven Schülers - lazy geladen im
     // Führerschein-Reiter, siehe renderLicenseSteps. Bei Schülerwechsel zurücksetzen, sonst
     // blieben kurz die Dateien des vorherigen Schülers sichtbar.
@@ -8999,9 +9019,13 @@ function App() {
     // pending-Flag entfernen und, falls ein gültiger Empfehlungscode angegeben wurde, den
     // Empfehlungsbonus bei Werber und neuem Schüler gutschreiben (einmalig).
     function activateEnrollment(s) {
+        if (referralBusyRef.current)
+            return;
         if (s.referredByCode && !s.referralRewardApplied) {
             const referrer = students.find(x => x.id !== s.id && (x.referralCode || "").toUpperCase() === s.referredByCode.toUpperCase());
             if (referrer) {
+                referralBusyRef.current = true;
+                setTimeout(() => { referralBusyRef.current = false; }, 1500);
                 writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward }],
                     referrals: [...(referrer.referrals || []), { studentId: s.id, name: dispName(s), date: ymd(new Date()) }] });
                 writeStudent({ ...s, pending: false, referralRewardApplied: true,
@@ -9040,6 +9064,8 @@ function App() {
     // Empfehlungscode eines Freundes manuell nachtragen (z.B. wenn er bei der Anmeldung vergessen
     // wurde). Gleiche Gutschrift-Logik wie activateEnrollment, nur ohne pending-Zusammenhang.
     function redeemReferral(stu, rawCode) {
+        if (referralBusyRef.current)
+            return;
         const code = (rawCode || "").trim().toUpperCase();
         if (!code) {
             showToast("Bitte einen Code eingeben.");
@@ -9054,6 +9080,8 @@ function App() {
             showToast("Für " + dispName(stu) + " wurde bereits ein Empfehlungsbonus eingetragen.");
             return;
         }
+        referralBusyRef.current = true;
+        setTimeout(() => { referralBusyRef.current = false; }, 1500);
         writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward }],
             referrals: [...(referrer.referrals || []), { studentId: stu.id, name: dispName(stu), date: ymd(new Date()) }] });
         writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }],
@@ -14510,7 +14538,7 @@ function App() {
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14 } },
                         React.createElement("div", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, letterSpacing: "0.06em", background: "var(--field-bg)", borderRadius: 11, padding: "10px 14px", textAlign: "center" } }, active.referralCode || "–"),
                         !active.referralCode
-                            ? React.createElement("button", { className: "btn btn-ghost", onClick: () => updateActive({ referralCode: genReferralCode(active) }) }, "Code erzeugen")
+                            ? React.createElement("button", { className: "btn btn-ghost", onClick: () => updateActive({ referralCode: genReferralCode(active, students) }) }, "Code erzeugen")
                             : React.createElement("button", { className: "btn btn-ghost", onClick: () => { const text = dispName(active) + " empfiehlt dich für " + ((school && school.name) || "unsere Fahrschule") + "! Nutze den Code " + active.referralCode + " bei der Anmeldung, dann bekommt ihr beide " + eurFmt(referralReward) + " Rabatt."; window.open("https://wa.me/?text=" + encodeURIComponent(text), "_blank"); } }, "Teilen")),
                     active.referrals && active.referrals.length > 0 && React.createElement("p", { style: { fontSize: 12, color: "var(--green)", fontWeight: 600, marginBottom: 12 } },
                         dispName(active) + " hat schon " + active.referrals.length + (active.referrals.length === 1 ? " Freund" : " Freunde") + " geworben."),
