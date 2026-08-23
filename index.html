@@ -37,7 +37,7 @@
   }
   :root{
     --orange:#FF9300; --orange-deep:#E07C00; --orange-soft:#FFF3E0;
-    --ink:#2B2117; --ink-2:#463C2E; --muted:#8A7A68;
+    --ink:#2B2117; --ink-2:#463C2E; --muted:#6E5F4E;
     --paper:#FBF3E6; --card:#FFFDF9; --line:#EBDFC9;
     --green:#1E7A46; --green-bg:#DDF3E5;
     --blue:#2E5E8C; --blue-bg:#DEEBF8;
@@ -2962,7 +2962,7 @@ async function fetchStudents(uid) {
 }
 // Strip internal fields before saving data jsonb
 function cleanData(s) {
-    const { id, _owner, _shared, _isMine, ...rest } = s;
+    const { id, _owner, _shared, _isMine, _createdAt, ...rest } = s;
     return rest;
 }
 async function dbInsert(uid, s) {
@@ -5287,7 +5287,7 @@ function ToastConfirmHost() {
         return () => document.removeEventListener("keydown", onEsc, true);
     }, [confirmState, promptState]);
     return React.createElement(React.Fragment, null,
-        toast && React.createElement("div", { key: toast.key, style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
+        toast && React.createElement("div", { key: toast.key, role: toast.tone === "error" ? "alert" : "status", "aria-live": toast.tone === "error" ? "assertive" : "polite", "aria-atomic": "true", style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
                 background: toast.tone === "error" ? "#B3362A" : "#181512", color: "#fff", padding: "12px 18px", borderRadius: 12, fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
                 boxShadow: "0 10px 30px rgba(0,0,0,.35)", textAlign: "center", lineHeight: 1.4, whiteSpace: "pre-line" } }, toast.msg),
         confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
@@ -5363,7 +5363,7 @@ function findOverlaps(appts, startISO, endISO, ignoreId) {
     });
 }
 // Prüfungsreife: was fehlt noch?
-function pruefungsreife(stu, adk, strecken) {
+function pruefungsreife(stu, adk, strecken, sonderfahrtenSoll) {
     const offeneADK = []; // Punkte, die noch nicht voll geübt sind
     adk.forEach(sec => sec.items.forEach(it => {
         const c = effCount(stu, it);
@@ -5381,8 +5381,12 @@ function pruefungsreife(stu, adk, strecken) {
             offeneStrecken.push({ sec: sec.title, label: it.label, done, soll: c });
     }); });
     const theorieOffen = !stu.theorie;
-    const total = offeneADK.length + offeneStrecken.length + (theorieOffen ? 1 : 0);
-    return { offeneADK, offeneStrecken, theorieOffen, total };
+    // Ohne erfüllte Sonderfahrten (Überland/Autobahn/Dämmerung) ist ebenfalls keine
+    // Prüfungszulassung möglich (siehe ampel()) - muss hier mitzählen, sonst widerspricht
+    // sich "total===0"/"bereit" gegenüber der Ampel für denselben Schüler.
+    const offeneSonderfahrten = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).filter(x => !x.erfuellt);
+    const total = offeneADK.length + offeneStrecken.length + (theorieOffen ? 1 : 0) + offeneSonderfahrten.length;
+    return { offeneADK, offeneStrecken, theorieOffen, offeneSonderfahrten, total };
 }
 // Prüfungsreife-Ampel: rot (noch viel offen), gelb (fast fertig), grün (prüfungsreif)
 function ampel(stu, adk, strecken, sonderfahrtenSoll) {
@@ -6898,6 +6902,10 @@ function App() {
             return;
         try {
             recWakeLockRef.current = await navigator.wakeLock.request("screen");
+            // Der Browser gibt den Lock beim Wechsel in den Hintergrund automatisch frei; ohne
+            // dieses Nullen bliebe der Ref auf dem freigegebenen Objekt stehen und der
+            // onVisible-Re-Acquire (Guard !recWakeLockRef.current) würde nie wieder feuern.
+            recWakeLockRef.current.addEventListener("release", () => { recWakeLockRef.current = null; });
         }
         catch (e) { /* z.B. Berechtigung verweigert oder Tab nicht sichtbar - dann bleibt es beim reinen watchPosition */ }
     }
@@ -7116,10 +7124,12 @@ function App() {
     // Beim Start prüfen, ob seit dem letzten Öffnen ein Update passiert ist. Wenn ja, automatisch
     // "Was ist neu" zeigen. Bei einer ganz neuen Installation (noch nie eine Version gesehen)
     // wird nichts automatisch geöffnet, nur die aktuelle Version wird gemerkt.
+    const changelogWillShowRef = useRef(false);
     useEffect(() => {
         try {
             const seen = localStorage.getItem("v3_last_seen_version");
-            if (seen && seen !== APP_VERSION) {
+            if (seen && seen !== APP_VERSION && !IS_DEMO()) {
+                changelogWillShowRef.current = true;
                 setShowChangelog(true);
             }
             localStorage.setItem("v3_last_seen_version", APP_VERSION);
@@ -7316,7 +7326,9 @@ function App() {
     useEffect(() => {
         try {
             const seen = localStorage.getItem("v3_version");
-            if (seen && seen !== APP_VERSION) {
+            // Nur zeigen, wenn nicht ohnehin das ausführlichere „Was ist neu?"-Modal öffnet
+            // (sonst doppelte Benachrichtigung) und nie in der Demo.
+            if (seen && seen !== APP_VERSION && !changelogWillShowRef.current && !IS_DEMO()) {
                 setUpdateToast(true);
                 setTimeout(() => setUpdateToast(false), 5000);
             }
@@ -7345,7 +7357,7 @@ function App() {
     const studentWritesRef = useRef(new Set());
     // Auth bootstrap + listener
     useEffect(() => {
-        sb.auth.getSession().then(({ data }) => setSession(data.session || null));
+        sb.auth.getSession().then(({ data }) => setSession(data.session || null)).catch(() => setSession(null));
         const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s || null));
         return () => sub.subscription.unsubscribe();
     }, []);
@@ -7850,12 +7862,18 @@ function App() {
     useEffect(() => {
         if (!uid)
             return;
+        let lastRefresh = 0;
         function refresh() {
             // Kein Neuladen, solange ein Termin gerade angelegt, geändert oder gelöscht wird.
             // Sonst käme ein eben gelöschter Termin für einen Moment zurück in die Liste.
             if (apptWritesRef.current > 0)
                 return;
             if (document.visibilityState === "visible") {
+                // visibilitychange und focus feuern beim Vordergrund-Wechsel meist beide -
+                // doppelten Netzwerk-Roundtrip vermeiden.
+                const now = Date.now();
+                if (now - lastRefresh < 600) return;
+                lastRefresh = now;
                 fetchAppointments(uid).then(list => applyFetchedAppts(list)).catch(() => { });
             }
         }
@@ -7875,9 +7893,13 @@ function App() {
     useEffect(() => {
         if (!uid)
             return;
+        let lastRefresh = 0;
         function refresh() {
             if (document.visibilityState !== "visible")
                 return;
+            const now = Date.now();
+            if (now - lastRefresh < 600) return; // visibilitychange + focus feuern beide
+            lastRefresh = now;
             fetchStudents(uid).then(list => {
                 const busy = studentWritesRef.current;
                 setStudents(prev => {
@@ -9412,7 +9434,7 @@ function App() {
     function buildPruefreifePayload(stu) {
         const base = buildHandoverPayload(stu);
         const vk = stu.klasse || DEFAULT_KLASSE;
-        const r = pruefungsreife(stu, tplFor(vk).adk, tplFor(vk).strecken);
+        const r = pruefungsreife(stu, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         const amp = ampel(stu, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         const recurring = pruefungssimRecurringIssues(stu.examSims || []);
         const sfBilanz = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll);
@@ -9910,7 +9932,11 @@ function App() {
             catch (_) { }
             recWakeLockRef.current = null;
         }
-        const pts = recPtsRef.current.slice(), sess = recSession;
+        // Rohe GPS-Spur vor dem Speichern ausdünnen (max. 1500 Punkte) – identisch zur
+        // Begleitfahrt-Seite. Auf der Karte kein sichtbarer Unterschied, aber die in
+        // students.data/DB/localStorage-Cache gespeicherte Datenmenge sinkt drastisch
+        // (sonst mehrere tausend Rohpunkte pro Stunde → localStorage-Quota-Risiko).
+        const pts = bfRecAusduennen(recPtsRef.current.slice(), 1500), sess = recSession;
         if (save && sess && pts.length >= 2) {
             const route = { pts, dist: Math.round(rmapPathLen(pts)), dur: Math.round((Date.now() - recStartRef.current) / 1000), recordedAt: new Date().toISOString() };
             const stu = (students || []).find(s => s.id === sess.studentId);
@@ -10069,6 +10095,15 @@ function App() {
             const arr = adkDates[itemId] || [];
             if (arr.indexOf(today) === -1)
                 adkDates[itemId] = [...arr, today];
+        }
+        else if (val < prev) { // Abhaken rückgängig gemacht: heute für diesen Punkt eingetragenes
+            // Datum wieder entfernen, wenn es heute hinzugefügt wurde (letzter Eintrag). Sonst würde
+            // ein versehentliches Abhaken+Zurücknehmen dauerhaft eine Fahrstunde/„zuletzt gefahren"
+            // hochzählen. countStunden dedupliziert über alle Punkte, ein noch berechtigter
+            // Heute-Eintrag an einem anderen Punkt bleibt also erhalten.
+            const arr = adkDates[itemId] || [];
+            if (arr.length && arr[arr.length - 1] === today)
+                adkDates[itemId] = arr.slice(0, -1);
         }
         updateActive({ items: { ...active.items, [itemId]: val }, adkDates });
     };
@@ -10988,7 +11023,7 @@ function App() {
                     s.terminLabel ? s.terminLabel + ": " : "",
                     fmtD(s.termin))),
             React.createElement(Ring, { pct: total, color: amp.farbe }),
-            s._isMine && React.createElement("span", { className: "del", onClick: (e) => { e.stopPropagation(); removeStudent(s); } }, "\u00D7"));
+            s._isMine && React.createElement("span", { className: "del", role: "button", tabIndex: 0, "aria-label": "Sch\u00FCler " + dispName(s) + " entfernen", onClick: (e) => { e.stopPropagation(); removeStudent(s); }, onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); removeStudent(s); } } }, "\u00D7"));
         // Wischen nach links zeigt Schnellaktionen (Anruf, WhatsApp), wenn eine Nummer hinterlegt ist
         return React.createElement(SwipeRow, { key: s.id, tel: s.tel, vorname: s.vorname, waText: s.tel ? waNumber(s.tel) : "" }, card);
     }
@@ -12327,7 +12362,7 @@ function App() {
     }
     function renderReife() {
         const vk = active.klasse || DEFAULT_KLASSE;
-        const r = pruefungsreife(active, tplFor(vk).adk, tplFor(vk).strecken);
+        const r = pruefungsreife(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         const ready = r.total === 0;
         const amp = ampel(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         return React.createElement("div", null,
@@ -12349,10 +12384,14 @@ function App() {
                     : React.createElement(React.Fragment, null,
                         React.createElement("div", { className: "num", style: { marginBottom: 2 } }, r.total),
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, "offene Punkte bis zur Pr\u00FCfungsreife"))),
-            ready && React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 14, color: "var(--green)", fontWeight: 600, textAlign: "center" } }, "Alle ADK-Punkte beherrscht, alle Strecken vollst\u00E4ndig, Theorie bestanden. Der Sch\u00FCler ist bereit f\u00FCr die Pr\u00FCfung."),
+            ready && React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 14, color: "var(--green)", fontWeight: 600, textAlign: "center" } }, "Alle ADK-Punkte beherrscht, alle Strecken vollst\u00E4ndig, Theorie bestanden, alle Sonderfahrten erf\u00FCllt. Der Sch\u00FCler ist bereit f\u00FCr die Pr\u00FCfung."),
             r.theorieOffen && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
                 React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Theoriepr\u00FCfung"),
                 " noch nicht bestanden"),
+            r.offeneSonderfahrten.length > 0 && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
+                React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Sonderfahrten"),
+                " noch nicht erf\u00FCllt: ",
+                r.offeneSonderfahrten.map(x => x.label + " (" + x.ue + "/" + x.sollUe + " UE)").join(", ")),
             (r.offeneADK.length > 0 || r.offeneStrecken.length > 0) && React.createElement("div", { className: "sec-grid" },
                 r.offeneADK.length > 0 && React.createElement("div", { className: "card sec", style: { borderLeftColor: "var(--green)", marginBottom: 10 } },
                     React.createElement("div", { className: "sec-head", style: { cursor: "default" } },
@@ -13016,7 +13055,7 @@ function App() {
         let ready = 0, notReady = 0;
         own.forEach(s => {
             const vk = s.klasse || DEFAULT_KLASSE;
-            const r = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken);
+            const r = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
             if (r.total === 0)
                 ready++;
             else
@@ -14830,7 +14869,12 @@ function App() {
             student_id: f.student_id || null,
             note: makeNote(f.sonstige, f.note || ""),
             title: f.title || "",
-            status: "confirmed",
+            // Beim Bearbeiten den vorhandenen Status erhalten – sonst würde ein Vorschlag
+            // (pending), ein Warteliste-Angebot (offered) oder eine Storno-Anfrage
+            // (cancel_requested) durch bloßes Bearbeiten still auf "confirmed" gesetzt und
+            // die zugehörigen Abläufe (Bestätigung/Storno-Auflösung) umgangen. Neue Termine
+            // sind confirmed.
+            status: f.id ? (f.status || "confirmed") : "confirmed",
             art: f.art || "ÜST"
         };
         apptSavingRef.current = true;
@@ -18033,6 +18077,17 @@ function App() {
                         r.total,
                         ")"),
                     r.theorieOffen && React.createElement("div", { style: { fontSize: 12, fontWeight: 700, marginBottom: 6 } }, "\u2022 Theoriepr\u00FCfung bestehen"),
+                    r.offeneSonderfahrten.length > 0 && React.createElement("div", { style: { marginBottom: 6 } },
+                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, marginBottom: 2 } }, "Sonderfahrten:"),
+                        React.createElement("ul", null, r.offeneSonderfahrten.map((o, i) => React.createElement("li", { key: i },
+                            o.label,
+                            " ",
+                            React.createElement("span", { style: { color: "#555" } },
+                                "(",
+                                o.ue,
+                                "/",
+                                o.sollUe,
+                                " UE)"))))),
                     r.offeneADK.length > 0 && React.createElement("div", { style: { marginBottom: 6 } },
                         React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, marginBottom: 2 } },
                             "Lerninhalte (",
@@ -20672,8 +20727,17 @@ async function bfRecWakeLock() {
         return;
     try {
         bfRec.wake = await navigator.wakeLock.request("screen");
+        // Beim automatischen Release (Display aus / Tab-Wechsel) den Ref nullen, damit der
+        // visibilitychange-Handler den Lock erneut anfordern kann.
+        bfRec.wake.addEventListener("release", () => { bfRec.wake = null; });
     }
     catch (e) { /* z.B. Tab nicht sichtbar - dann bleibt es beim reinen watchPosition */ }
+}
+// Fordert den Wake-Lock nach Rückkehr in den Vordergrund erneut an (Web-Modus ohne
+// natives Hintergrund-GPS), analog zur Fahrlehrer-Streckenaufzeichnung.
+function bfRecOnVisible() {
+    if (document.visibilityState === "visible" && bfRec.aktiv && !bfRec.wake)
+        bfRecWakeLock();
 }
 function bfRecStart(onFehler) {
     if (bfRec.aktiv)
@@ -20719,6 +20783,7 @@ function bfRecStart(onFehler) {
         }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
     }
     bfRecWakeLock();
+    document.addEventListener("visibilitychange", bfRecOnVisible);
     // Eigener Takt, damit die angezeigte Dauer auch dann weiterläuft, wenn das Auto steht
     // und deshalb keine neuen GPS-Punkte hereinkommen.
     bfRec.ticker = setInterval(() => bfRec.melde(), 1000);
@@ -20744,6 +20809,7 @@ function bfRecStop() {
         }
         bfRec.nativeId = null;
     }
+    document.removeEventListener("visibilitychange", bfRecOnVisible);
     if (bfRec.wake) {
         try {
             bfRec.wake.release();
@@ -24380,12 +24446,29 @@ function Root() {
 }
 (async function bootWithOptionalDemo(){
   try {
-    if (new URL(window.location.href).searchParams.get("demo") === "1") {
+    const isDemoUrl = new URL(window.location.href).searchParams.get("demo") === "1";
+    const { data } = await sb.auth.getSession();
+    const cur = data && data.session && data.session.user ? data.session.user : null;
+    const curIsDemo = !!cur && (cur.email === DEMO_EMAIL || cur.id === DEMO_UID);
+    if (isDemoUrl) {
       window.__ALLINDRIVE_DEMO__ = true;
-      const { data } = await sb.auth.getSession();
-      if (!data || !data.session || (data.session.user && data.session.user.email !== DEMO_EMAIL)) {
+      // Eine bereits bestehende ECHTE Sitzung nicht stillschweigend überschreiben –
+      // sonst würde ein versehentlich geöffneter ?demo=1-Link einen eingeloggten
+      // Fahrlehrer ausloggen und in der Demo gefangen halten.
+      if (!cur) {
         await sb.auth.signInWithPassword({ email: DEMO_EMAIL, password: DEMO_PW });
+      } else if (curIsDemo) {
+        // schon als Demo angemeldet – nichts zu tun
+      } else {
+        // Echte Sitzung vorhanden: Demo-Flag zurücknehmen und die echte Sitzung behalten.
+        window.__ALLINDRIVE_DEMO__ = false;
       }
+    } else if (curIsDemo) {
+      // Ohne ?demo=1, aber es liegt noch eine persistierte Demo-Sitzung vor (Reload,
+      // Bookmark, PWA-Start). Diese sauber beenden, damit der Besucher nicht ohne
+      // Login-Screen im fremden Demo-Datenbestand landet und die Demo-Guards nicht
+      // fälschlich abgeschaltet sind.
+      await sb.auth.signOut();
     }
   } catch (e) { console.error("Demo-Anmeldung fehlgeschlagen:", e); }
   ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(ErrorBoundary, null,
