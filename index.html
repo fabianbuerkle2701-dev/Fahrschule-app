@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.39";
+const APP_VERSION = "1.164.40";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.40", date: "August 2026", changes: [
+            "ADK-/Strecken-Vorlage: dasselbe optimistische Sperren wie zuvor schon bei den Fahrschul-Einstellungen (zwei gleichzeitige Sitzungen konnten sich beim Bearbeiten der Vorlage sonst stillschweigend gegenseitig überschreiben). Eine Stadt-Streckenvorlage übernehmen warnt jetzt zusätzlich, wenn Schüler der betroffenen Klasse bereits Fortschritt bei den bisherigen Strecken haben - dieser wird durch die neue Vorlage (mit neuen Punkt-IDs) sonst unsichtbar",
+        ] },
     { v: "1.164.39", date: "August 2026", changes: [
             "Theorie-Fortschritt (Fahrlehrer-Ansicht) wurde gegen ALLE aktiven Übungsfragen berechnet statt nur gegen die für die Klasse des Schülers tatsächlich passenden - ein Schüler einer anderen Klasse als B konnte dadurch strukturell nie 100% erreichen, weil klassenspezifische Fragen anderer Klassen mitgezählt wurden, die er in seiner eigenen App gar nicht zu sehen bekommt. Betraf die Theorie-Fortschritt-Kachel, die KI-Übergabe-Einschätzung, den Ausbildungsnachweis-Druck und den KI-Fragengenerator - alle nutzen jetzt dieselbe klassengefilterte Fragenliste wie die Fahrschüler-App selbst",
         ] },
@@ -3262,7 +3265,7 @@ function rowToTplByKlasse(data) {
     if (Array.isArray(data.adk) || Array.isArray(data.strecken)) {
         const slice = { adk: Array.isArray(data.adk) ? data.adk : [], strecken: Array.isArray(data.strecken) ? data.strecken : [],
             adkTitel: data.adk_titel || "", streckenTitel: data.strecken_titel || "" };
-        return { byKlasse: (slice.adk.length || slice.strecken.length) ? { [DEFAULT_KLASSE]: slice } : {} };
+        return { byKlasse: (slice.adk.length || slice.strecken.length) ? { [DEFAULT_KLASSE]: slice } : {}, updated_at: data.updated_at };
     }
     const byKlasse = {};
     const adkMap = (data.adk && typeof data.adk === "object") ? data.adk : {};
@@ -3278,7 +3281,7 @@ function rowToTplByKlasse(data) {
             byKlasse[k] = { adk, strecken, adkTitel: adkTMap[k] || "", streckenTitel: strTMap[k] || "" };
         }
     });
-    return { byKlasse };
+    return { byKlasse, updated_at: data.updated_at };
 }
 async function fetchTemplate(uid, schoolName) {
     const { data, error } = await sb.from("templates").select("*").eq("owner", uid).maybeSingle();
@@ -3334,12 +3337,32 @@ async function saveTemplate(uid, tpl) {
         if (slice.streckenTitel)
             streckenTitel[k] = slice.streckenTitel;
     });
-    const { error } = await sb.from("templates")
-        .upsert({ owner: uid, adk, strecken, adk_titel: adkTitel, strecken_titel: streckenTitel, updated_at: new Date().toISOString() });
+    const payload = { adk, strecken, adk_titel: adkTitel, strecken_titel: streckenTitel };
+    // Optimistisches Sperren wie bei saveSchool(): reiner Full-Overwrite-upsert() ohne jede
+    // Änderungserkennung ließ zwei gleichzeitige Sitzungen (zwei Tabs) sich beim Bearbeiten der
+    // ADK-/Strecken-Vorlage sonst stillschweigend gegenseitig überschreiben.
+    let query = sb.from("templates").update(payload).eq("owner", uid);
+    if (tpl.updated_at)
+        query = query.eq("updated_at", tpl.updated_at);
+    const { data, error } = await query.select("updated_at").maybeSingle();
     if (error) {
         console.error(error);
         throw new Error(error.message || "Speichern fehlgeschlagen");
     }
+    if (data)
+        return data;
+    if (tpl.updated_at) {
+        const conflict = new Error("Deine Vorlage wurde inzwischen in einer anderen Sitzung geändert. Deine letzte Änderung wurde NICHT gespeichert - bitte neu laden und erneut eintragen.");
+        conflict.isConflict = true;
+        throw conflict;
+    }
+    // Noch keine Zeile vorhanden (allererstes Speichern für dieses Konto) - upsert als Fallback.
+    const { data: ins, error: insErr } = await sb.from("templates").upsert({ owner: uid, ...payload }).select("updated_at").maybeSingle();
+    if (insErr) {
+        console.error(insErr);
+        throw new Error(insErr.message || "Speichern fehlgeschlagen");
+    }
+    return ins;
 }
 /* ════════ Streckenvorlagen für Städte (Vorschlag → Admin-Prüfung → Übernahme) ════════ */
 // Ein Fahrschul-Admin schlägt eine Streckenvorlage für seine Stadt vor.
@@ -8531,11 +8554,22 @@ function App() {
             clearTimeout(tplTimer.current);
         tplTimer.current = setTimeout(async () => {
             try {
-                await saveTemplate(uid, next);
+                const saved = await saveTemplate(uid, next);
+                // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die nächste
+                // Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst erkannt.
+                if (saved && saved.updated_at)
+                    setTpl(cur => cur ? { ...cur, updated_at: saved.updated_at } : cur);
                 setSaved(true);
             }
             catch (e) {
-                showToast("Vorlage konnte nicht gespeichert werden:\n" + e.message);
+                if (e.isConflict) {
+                    showToast(e.message);
+                    fetchTemplate(uid, school && school.name).then(fresh => { if (fresh)
+                        setTpl(fresh); });
+                }
+                else {
+                    showToast("Vorlage konnte nicht gespeichert werden:\n" + e.message);
+                }
             }
         }, 500);
     }, [uid]);
@@ -8726,7 +8760,13 @@ function App() {
     }
     // Bestätigte Vorlage in die eigene Strecken-Vorlage übernehmen (ersetzt die Strecken)
     async function adoptCityTemplate(t) {
-        if (!await askConfirm({ message: "Vorlage \"" + t.title + "\" übernehmen? Deine aktuellen Strecken für Klasse " + (vorlageKlasse || DEFAULT_KLASSE) + " werden dadurch ersetzt (deine ADK bleibt unverändert)." }))
+        // Die übernommene Vorlage hat eigene, neu erzeugte Punkt-IDs - der Fortschritt bestehender
+        // Schüler dieser Klasse hängt aber an den ALTEN IDs (stu.strecken[it.id]) und wird dadurch
+        // faktisch unsichtbar/zurückgesetzt, nicht nur die Vorlage selbst ersetzt. Ohne expliziten
+        // Hinweis auf betroffene Schüler wirkte die bisherige Rückfrage wie eine reine Vorlagen-Änderung.
+        const vk = vorlageKlasse || DEFAULT_KLASSE;
+        const affected = (students || []).filter(s => s._isMine && !s.archived && (s.klasse || DEFAULT_KLASSE) === vk).length;
+        if (!await askConfirm({ message: "Vorlage \"" + t.title + "\" übernehmen? Deine aktuellen Strecken für Klasse " + vk + " werden dadurch ersetzt (deine ADK bleibt unverändert)." + (affected > 0 ? " Achtung: " + affected + (affected === 1 ? " Schüler dieser Klasse hat" : " Schüler dieser Klasse haben") + " bereits Fortschritt bei den bisherigen Strecken - dieser wird dadurch nicht mehr angezeigt." : "") }))
             return;
         writeTplForKlasse(vorlageKlasse, { strecken: deepCopy(Array.isArray(t.strecken) ? t.strecken : []), streckenTitel: t.title || tplFor(vorlageKlasse).streckenTitel });
         setCityTplModal(null);
