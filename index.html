@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.10";
+const APP_VERSION = "1.164.11";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1460,7 +1460,7 @@ const ZAHLUNGSERINNERUNG_STUFEN_RELEASED = false;
 // Einzige Stelle, die entscheidet, ob "Theorie üben" sichtbar ist. appMode = native Fahrschüler-App.
 function theorieVerfuegbar(info, appMode) {
     if (THEORY_UEBEN_RELEASED)
-        return !!(info && info.theory_addon_active);
+        return !!(appMode && info && info.theory_addon_active);
     return !!(THEORY_UEBEN_APP_VORSCHAU && appMode);
 }
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
@@ -1554,6 +1554,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.11", date: "August 2026", changes: [
+            "Absicherung für „Theorie üben“: die Freigabe für den amtlichen Fragenkatalog prüfte nicht in jedem Fall, ob die native Fahrschüler-App läuft - sobald der Katalog künftig lizenziert und freigeschaltet wird, hätte er sonst auch auf der öffentlichen, frei weitergegebenen Buchungsseite erscheinen können. Bereits jetzt behoben, bevor die Freischaltung erfolgt",
+            "Fehlerbehebung: die Kachel „Aktive Schüler“ auf der Startseite zählte auch von Kollegen geteilte Schüler mit und zeigte dadurch eine andere Zahl als dieselbe Kachel in der Statistik",
+            "Fehlerbehebung: die Statistik-Kachel „Prüfreif“ nutzte eine strengere Definition (jeder einzelne Ausbildungspunkt zu 100%) als Schülerliste und Prüfungsplanung auf derselben Seite (gewichteter Gesamtfortschritt ≥90%, wie die Ampel es überall sonst in der App handhabt) - beide zeigen jetzt dieselbe Zahl für „Prüfungsreif“",
+            "Klarstellung: die Umsatz-Kacheln in der Abrechnung heißen jetzt „Umsatz diesen Monat (Rechnungen)“ bzw. „Umsatz [Jahr] (Rechnungen)“, weil sie nach Rechnungsdatum zählen (auch unbezahlte Rechnungen) - anders als die Umsatz-Grafik in der Statistik, die nach Zahlungseingang zählt. Beide Zahlen waren korrekt, standen aber unkommentiert nebeneinander unter demselben Begriff „Umsatz“",
+        ] },
     { v: "1.164.10", date: "August 2026", changes: [
             "Hinweistext beim Stilllegen eines Fahrlehrers erweitert: macht jetzt explizit klar, dass dessen Schüler danach aus allen schulweiten Auswertungen (offene Posten, Lücken, Prüfungsstatistik) verschwinden, weil es dafür noch keine Übertragung an einen anderen Fahrlehrer gibt - vorher stand dort nur \"Schülerdaten bleiben erhalten\", ohne auf die verlorene Sichtbarkeit hinzuweisen",
         ] },
@@ -11254,7 +11260,7 @@ function App() {
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
         const jetzt = new Date().toISOString();
         const naechster = heute.find(a => (a.end_at || a.start_at) >= jetzt);
-        const aktiveSchueler = (students || []).filter(s => !s.archived).length;
+        const aktiveSchueler = (students || []).filter(s => !s.archived && s._isMine).length;
         const woche = (() => {
             const start = new Date();
             start.setHours(0, 0, 0, 0);
@@ -13188,11 +13194,16 @@ function App() {
                 bucket.passed++;
         }));
 
+        // Dieselbe Definition von "Prüfungsreif" wie in der Schülerliste und in
+        // examPlanning() (beide über ampel().stufe==="gruen", ein gewichteter Gesamt-
+        // Fortschritt ≥90%) - vorher zählte diese Kachel strenger nach pruefungsreife().total===0
+        // (jeder Einzelpunkt zu 100%), wodurch sie auf derselben Auswertung-Seite einer anderen
+        // Zahl unter demselben Namen "Prüfungsreif" widersprach.
         let ready = 0, notReady = 0;
         own.forEach(s => {
             const vk = s.klasse || DEFAULT_KLASSE;
-            const r = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
-            if (r.total === 0)
+            const a = ampel(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+            if (a.stufe === "gruen")
                 ready++;
             else
                 notReady++;
@@ -13595,9 +13606,13 @@ function App() {
                 setActiveId(inv.studentId);
             viewInvoice(inv);
         }
+        // "(Rechnungen)" ergänzt, weil diese beiden Zahlen nach Rechnungsdatum zählen (auch nicht
+        // bezahlte Rechnungen), während die Umsatz-Grafik in der Statistik-Kachel darüber bewusst
+        // nach Zahlungseingang zählt ("Nach Zahlungseingang, letzte 6 Monate") - ohne den Hinweis
+        // erscheinen auf derselben Auswertung-Seite zwei unterschiedliche Zahlen unter "Umsatz".
         const kpis = [
-            { label: "Umsatz diesen Monat", value: eurFmt(umsatzMonat), color: "var(--ink)" },
-            { label: "Umsatz " + curYear, value: eurFmt(umsatzJahr), color: "var(--ink)" },
+            { label: "Umsatz diesen Monat (Rechnungen)", value: eurFmt(umsatzMonat), color: "var(--ink)" },
+            { label: "Umsatz " + curYear + " (Rechnungen)", value: eurFmt(umsatzJahr), color: "var(--ink)" },
             // Bewusst getrennt statt in einer Summe: "berechnet, offen" ist eine Forderung an den
             // Schüler, "nicht berechnet" ist eine Aufgabe für die Fahrschule. Zwei Zahlen, zwei Handlungen.
             { label: "Berechnet, noch offen", value: eurFmt(berechnetOffen), color: berechnetOffen > 0.005 ? "var(--orange-deep)" : "var(--green)" },
