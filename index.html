@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.44";
+const APP_VERSION = "1.164.45";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.45", date: "August 2026", changes: [
+            "Einen Schüler löschen war schon während einer laufenden Streckenaufzeichnung gesperrt, während einer laufenden Prüfungssimulation oder eines Schaltkompetenz-Tests aber nicht - jetzt ebenfalls gesperrt, mit Hinweis, zuerst abzuschließen. KI-Schnellzuordnung in der Prüfungssimulation: eine verspätete Antwort einer ersten Anfrage konnte das Ergebnis einer zweiten, bereits laufenden Anfrage überschreiben (z.B. nach Zurück und erneutem Anfordern) - jetzt zählt nur noch die Antwort der jeweils aktuellsten Anfrage",
+        ] },
     { v: "1.164.44", date: "August 2026", changes: [
             "Ein ungültiger Preis in einem Fahrtenbuch-Eintrag (z.B. versehentlich mit Währungszeichen eingefügt) konnte die komplette Kostenberechnung eines Schülers auf \"Vollständig bezahlt\" kippen lassen, obwohl noch Geld offen war - jetzt validiert, mit zusätzlicher Absicherung falls doch mal ein kaputter Wert in den Daten steckt. Eine bereits abgerechnete Fahrstunde ließ sich weiterhin bearbeiten (Löschen war schon gesperrt) - Ändern von Minuten/Preis nach Rechnungsstellung verschob die angezeigte Forderung, ohne dass sich an der gedruckten Rechnung etwas änderte, jetzt ebenfalls gesperrt. Ein Termin der Warteliste anbieten geschah bisher auch dann, wenn das vorherige Löschen des Termins fehlgeschlagen war - konnte zu einem doppelt vergebenen Termin führen, jetzt nur noch bei tatsächlich erfolgreichem Löschen. Die Wunschliste eines Fahrschülers berücksichtigte bei der Warteliste-Passung nur den Beginn eines frei gewordenen Termins, nicht dessen Ende - ein Termin konnte damit weit über das eigentliche Wunschfenster hinaus angeboten werden. Ein vertauschtes Zeitfenster (Start nach Ende) in der eigenen Wunschliste ließ sich klaglos speichern, obwohl es nie zu einem Treffer führen kann - jetzt mit Fehlermeldung",
         ] },
@@ -7395,6 +7398,11 @@ function App() {
     // Doppeltap-Schutz für createStudentFromImport() - ohne diesen Riegel konnte ein zweiter Tipp
     // auf "Schüler anlegen" denselben gescannten Antrag zweimal als Schüler übernehmen.
     const studentImportBusyRef = useRef(false);
+    // Laufende-Anfrage-Kennung für submitPruefungssimKI() - der bisherige step==="ki_eingabe"-Guard
+    // schützt nur gegen ein Verlassen des Schritts, nicht gegen zwei Anfragen NACHEINANDER auf
+    // demselben Schritt (z.B. Zurück + erneut KI-Zuordnung anfordern): die spät eintreffende Antwort
+    // der ERSTEN Anfrage würde sonst das Ergebnis der zweiten, noch laufenden Anfrage überschreiben.
+    const pruefungssimKiReqRef = useRef(0);
     // Dokumente (Sehtest, Erste-Hilfe, ...) des aktiven Schülers - lazy geladen im
     // Führerschein-Reiter, siehe renderLicenseSteps. Bei Schülerwechsel zurücksetzen, sonst
     // blieben kurz die Dateien des vorherigen Schülers sichtbar.
@@ -10343,6 +10351,17 @@ function App() {
             showToast("Für " + dispName(s) + " läuft gerade eine Streckenaufzeichnung. Bitte zuerst stoppen (und speichern), bevor der Schüler gelöscht wird.");
             return;
         }
+        // Dieselbe Absicherung wie bei der Streckenaufzeichnung: löscht man den Schüler während einer
+        // laufenden Prüfungssimulation, sucht finishPruefungssim() ihn beim Abschließen in der neu
+        // geladenen Liste vergeblich (und ein Undo würde ohnehin eine neue, andere ID vergeben).
+        if (pruefungssim && pruefungssim.studentId === s.id) {
+            showToast("Für " + dispName(s) + " läuft gerade eine Prüfungssimulation. Bitte zuerst abschließen oder abbrechen, bevor der Schüler gelöscht wird.");
+            return;
+        }
+        if (schaltkompetenz && schaltkompetenz.studentId === s.id) {
+            showToast("Für " + dispName(s) + " läuft gerade ein Schaltkompetenz-Test. Bitte zuerst abschließen oder abbrechen, bevor der Schüler gelöscht wird.");
+            return;
+        }
         if (!await askConfirm({ message: dispName(s) + " wirklich löschen?" }))
             return;
         // Schüler mit Rechnungen dürfen aus Revisionssicherheitsgründen nicht gelöscht werden
@@ -10686,6 +10705,7 @@ function App() {
         const text = (pruefungssim && pruefungssim.kiInput || "").trim();
         if (!text)
             return;
+        const myReq = ++pruefungssimKiReqRef.current;
         setPruefungssim(p => p && ({ ...p, kiBusy: true, kiError: "" }));
         try {
             const resp = await fetch("/.netlify/functions/pruefungssim-classify", {
@@ -10709,15 +10729,16 @@ function App() {
             const validSg = PRUEFUNGS_SCHWEREGRADE.some(s => s.id === (r && r.schweregrad));
             if (!validFa || !validKb || !validSg)
                 throw new Error("Konnte nicht eindeutig zugeordnet werden - bitte manuell auswählen.");
-            // Nur übernehmen, wenn der Nutzer währenddessen nicht schon manuell weitergegangen
-            // ist (z.B. Fahraufgabe/Kompetenzbereich selbst gewählt) - sonst würde eine verspätete
-            // Antwort dessen Auswahl mitten in der laufenden Simulation kommentarlos überschreiben.
-            setPruefungssim(p => (p && p.step === "ki_eingabe") ? { ...p, kiBusy: false, step: "fehler",
+            // Nur übernehmen, wenn der Nutzer währenddessen nicht schon manuell weitergegangen ist
+            // (z.B. Fahraufgabe/Kompetenzbereich selbst gewählt) UND dies noch die aktuellste Anfrage
+            // ist - sonst würde entweder eine manuelle Auswahl oder das Ergebnis einer zweiten,
+            // bereits laufenden Anfrage von einer spät eintreffenden ersten Antwort überschrieben.
+            setPruefungssim(p => (p && p.step === "ki_eingabe" && myReq === pruefungssimKiReqRef.current) ? { ...p, kiBusy: false, step: "fehler",
                 draft: { fahraufgabe: r.fahraufgabe, kompetenzbereich: r.kompetenzbereich },
                 kiVorschlag: { schweregrad: r.schweregrad, text: (r.text || text).trim() } } : p);
         }
         catch (e) {
-            setPruefungssim(p => (p && p.step === "ki_eingabe") ? { ...p, kiBusy: false, kiError: e.message || "KI-Anfrage fehlgeschlagen" } : p);
+            setPruefungssim(p => (p && p.step === "ki_eingabe" && myReq === pruefungssimKiReqRef.current) ? { ...p, kiBusy: false, kiError: e.message || "KI-Anfrage fehlgeschlagen" } : p);
         }
     }
     // Speichert die abgeschlossene Simulation im Fahrtenbuch des Schülers (examSims) und beendet
