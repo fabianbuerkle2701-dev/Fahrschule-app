@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.6";
+const APP_VERSION = "1.164.7";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.7", date: "August 2026", changes: [
+            "Fehlerbehebung Fahrzeug-Kalender: (1) das Realtime-Live-Update lief bisher ohne Filter auf die eigene Fahrschule - jede Buchungsänderung IRGENDEINER Fahrschule löste bei jedem offenen Fahrzeug-Kalender einen Reload aus. (2) Schlug das Speichern einer bearbeiteten Buchung fehl und wurde die ursprüngliche Buchung automatisch wiederhergestellt, blieb im Formular die bereits gelöschte alte Buchungs-ID stehen - ein erneuter Speichern-/Löschen-Versuch hätte ins Leere gezielt. (3) Die Dauer-Schnellwahl (z.B. \"3 FS\") konnte bei später Startzeit rechnerisch über Mitternacht hinausgehen; das wird jetzt vor dem Speichern klar erkannt und gemeldet, statt erst die kryptische Fehlermeldung der Datenbank abzuwarten",
+        ] },
     { v: "1.164.6", date: "August 2026", changes: [
             "Sicherheitslücke geschlossen: der \"Stilllegen\"-Button zum Entfernen eines Fahrlehrers aus einer Fahrschule hatte als einziger der Buttons im Fahrlehrer-Verwaltungsfenster kein Admin-Gate - jeder App-Moderator konnte ihn sehen und anklicken, obwohl diese Aktion laut Rollenkonzept dem zentralen Admin vorbehalten ist",
             "Fehlerbehebung Warteliste: zwei Lösch-Wege für Termine (über das Termin-Bearbeiten-Formular, und beim direkten Löschen einer Storno-Anfrage aus dem Auswahlfenster) boten einen frei gewordenen Termin nie wartenden Schülern an, obwohl der dritte, direkte Lösch-Weg das korrekt tat",
@@ -24059,9 +24062,12 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             return;
         let ch = null;
         try {
-            if (sb && typeof sb.channel === "function") {
+            // Ohne filter löst JEDE Buchungsänderung JEDER Fahrschule hier einen Reload aus - der
+            // Kanalname ist nur ein Client-Label und hat keinen Einfluss darauf, welche Postgres-
+            // Änderungen Supabase tatsächlich schickt. school_id kommt aus cal_info (s.o.).
+            if (sb && typeof sb.channel === "function" && info.school_id) {
                 ch = sb.channel("cal_" + code)
-                    .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, () => reloadRef.current())
+                    .on("postgres_changes", { event: "*", schema: "public", table: "bookings", filter: "school_id=eq." + info.school_id }, () => reloadRef.current())
                     .subscribe();
             }
         }
@@ -24115,6 +24121,13 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         const basisDatum = f.date || ymd(day); // beim Bearbeiten das Datum der Buchung behalten
         const startISO = new Date(basisDatum + "T" + f.start + ":00").toISOString();
         const endISO = new Date(basisDatum + "T" + f.end + ":00").toISOString();
+        if (endISO <= startISO) {
+            // Kann z.B. durch die Dauer-Schnellwahl entstehen, wenn sie über Mitternacht
+            // hinausrechnet (23:00 + "3 FS" ergibt 01:15 desselben Tages) - lieber hier klar
+            // abfangen als die kryptische Fehlermeldung der DB-Prüfung abwarten.
+            setForm({ ...f, error: "Die Bis-Zeit liegt vor oder auf der Von-Zeit (evtl. Mitternachts-Überlauf durch die Dauer-Auswahl) - bitte Zeiten prüfen." });
+            return;
+        }
         setForm({ ...f, busy: true, error: "" });
         // Beim Bearbeiten: alte Buchung entfernen, dann neu anlegen (die Datenbank prüft dabei
         // erneut auf Doppelbelegung). Schlägt das Neuanlegen fehl (z.B. weil der neue Zeitraum
@@ -24133,8 +24146,12 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         catch (e) {
             if (removedOriginal) {
                 try {
-                    await calBook(code, veh.id, removedOriginal.teacher_name || f.teacher.trim(), removedOriginal.start_at, removedOriginal.end_at, removedOriginal.note);
-                    setForm({ ...f, busy: false, error: (e.message || "Bearbeiten fehlgeschlagen") + " Die ursprüngliche Buchung wurde wiederhergestellt." });
+                    const restoredId = await calBook(code, veh.id, removedOriginal.teacher_name || f.teacher.trim(), removedOriginal.start_at, removedOriginal.end_at, removedOriginal.note);
+                    // calBook liefert die ID der NEU angelegten Zeile (die alte wurde bereits per
+                    // calDelete gelöscht) - form.id muss darauf aktualisiert werden, sonst würde ein
+                    // erneuter Klick auf "Speichern"/"Löschen" auf eine nicht mehr existierende
+                    // Buchung zielen, während die tatsächlich wiederhergestellte unberührt bliebe.
+                    setForm({ ...f, id: restoredId, original: { ...removedOriginal, id: restoredId }, busy: false, error: (e.message || "Bearbeiten fehlgeschlagen") + " Die ursprüngliche Buchung wurde wiederhergestellt." });
                 }
                 catch (e2) {
                     setForm({ ...f, busy: false, error: "Die Buchung konnte nicht geändert und die ursprüngliche Buchung nicht wiederhergestellt werden. Bitte Kalender prüfen. (" + (e.message || "") + ")" });
