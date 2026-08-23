@@ -1452,7 +1452,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.51";
+const APP_VERSION = "1.164.52";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1573,6 +1573,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.52", date: "August 2026", changes: [
+            "Datenverlust bei geteilten Schülern behoben: Bearbeiteten zwei Fahrlehrer denselben mit ihnen geteilten Schüler zeitnah (z.B. ADK-Haken und Schaltkompetenz-Test kurz hintereinander), konnte der zuletzt speichernde Fahrlehrer die Änderung des anderen kommentarlos überschreiben, weil die Schülerliste nur einmal beim Login geladen wird und jede Speicherung bisher den kompletten (potenziell veralteten) lokalen Datensatz schrieb. Beim Speichern eines geteilten Schülers wird jetzt zuerst der aktuelle Serverstand nachgeladen und nur die tatsächlich selbst geänderten Felder darübergelegt - alle übrigen Felder (inkl. gerade erst vom Kollegen gespeicherte) bleiben erhalten",
+        ] },
     { v: "1.164.51", date: "August 2026", changes: [
             "Fehler im neuen Login-Screen behoben: die Fahrschule-Auswahl (\"Einladungscode\"/\"Neu gründen\") bei der Registrierung hatte keine Rahmen-/Abstands-Gestaltung mehr und sah wie markierter Text statt wie ein Umschalter aus",
         ] },
@@ -3208,10 +3211,30 @@ async function dbInsert(uid, s) {
 // Läuft über withNetworkRetry (siehe dbUpdateAppt) - dieselbe RPC speichert ADK-Haken,
 // Streckenpunkte und Fahrstunden-Bewertungen (alles liegt in derselben data-Spalte), ein
 // kurzer Verbindungsabbruch (z.B. im Auto) betrifft also alle drei gleichermaßen.
-async function dbUpdate(s) {
+//
+// Bei einem mit Kollegen GETEILTEN Schüler (shared_with) kann derselbe Datensatz von zwei
+// Fahrlehrern gleichzeitig in zwei Sitzungen offen sein, jeweils mit ihrem eigenen, potenziell
+// veralteten lokalen Stand (die Liste wird nur einmal beim Login geladen, siehe oben). Die RPC
+// mergt zwar schon ein paar schülereigene Felder serverseitig, aber ADK-Haken, Streckenpunkte,
+// Schaltkompetenz-Tests, Fahrtenbuch usw. NICHT - dort gewinnt einfach, wer zuletzt speichert,
+// und der andere Fahrlehrer verliert seine Änderung kommentarlos. Deshalb hier bei geteilten
+// Schülern vor dem Schreiben den GERADE AKTUELLEN Serverstand holen und nur die seit dem letzten
+// Speichern tatsächlich lokal geänderten Felder (changedKeys, siehe markDirtyKeys) darüberlegen -
+// alle anderen Felder kommen vom frischen Serverstand und damit ggf. vom Kollegen. Schlägt das
+// Nachladen fehl, wird wie bisher der komplette lokale Stand geschickt (kein Blockieren des Saves).
+async function dbUpdate(s, changedKeys) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Änderungen werden nicht gespeichert."); return; }
     await withNetworkRetry(async () => {
-        const { error } = await sb.rpc("students_teacher_update", { p_id: s.id, p_data: cleanData(s) });
+        let payload = cleanData(s);
+        if (changedKeys && changedKeys.length && s._shared && s._shared.length) {
+            const { data: freshRow, error: fetchErr } = await sb.from("students").select("data").eq("id", s.id).single();
+            if (!fetchErr && freshRow && freshRow.data && typeof freshRow.data === "object") {
+                const merged = { ...freshRow.data };
+                changedKeys.forEach(k => { merged[k] = payload[k]; });
+                payload = merged;
+            }
+        }
+        const { error } = await sb.rpc("students_teacher_update", { p_id: s.id, p_data: payload });
         if (error) {
             console.error(error);
             throw new Error(error.message || "Speichern fehlgeschlagen");
@@ -7866,6 +7889,21 @@ function App() {
     // Speichervorgang - verhindert, dass ein Hintergrund-Neuladen der Schülerliste eine eigene,
     // noch nicht bestätigte Änderung durch den älteren Serverstand ersetzt.
     const studentWritesRef = useRef(new Set());
+    // Pro Schüler-ID die seit dem letzten erfolgreichen Speichern lokal geänderten Top-Level-Felder
+    // (z.B. "items", "schaltkompetenzTests") - siehe dbUpdate: bei geteilten Schülern wird damit vor
+    // dem Schreiben nur genau dieser Ausschnitt auf den frisch geladenen Serverstand gemergt, statt
+    // den kompletten (potenziell veralteten) lokalen Datensatz zu überschreiben.
+    const dirtyKeysRef = useRef({});
+    function markDirtyKeys(id, prevObj, nextObj) {
+        const set = dirtyKeysRef.current[id] || (dirtyKeysRef.current[id] = new Set());
+        const keys = new Set([...Object.keys(prevObj || {}), ...Object.keys(nextObj || {})]);
+        keys.forEach(k => {
+            if (k === "id" || k.startsWith("_"))
+                return;
+            if ((prevObj || {})[k] !== (nextObj || {})[k])
+                set.add(k);
+        });
+    }
     // Auth bootstrap + listener
     useEffect(() => {
         sb.auth.getSession().then(({ data }) => setSession(data.session || null)).catch(() => setSession(null));
@@ -8086,7 +8124,7 @@ function App() {
             // In der Datenbank speichern
             for (const s of updated) {
                 if (zielIds.has(s.id)) {
-                    await dbUpdate(s);
+                    await dbUpdate(s, ["location_id"]);
                 }
             }
             setStudents(updated);
@@ -8932,8 +8970,10 @@ function App() {
             clearTimeout(t[stu.id]);
         studentWritesRef.current.add(stu.id);
         t[stu.id] = setTimeout(async () => {
+            const dirty = dirtyKeysRef.current[stu.id];
+            delete dirtyKeysRef.current[stu.id];
             try {
-                await dbUpdate(stu);
+                await dbUpdate(stu, dirty ? Array.from(dirty) : null);
                 setSaved(true);
             }
             catch (e) {
@@ -8947,7 +8987,12 @@ function App() {
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
         setStudents(prev => {
-            const arr = (prev || []).map(s => s.id === next.id ? next : s);
+            const arr = (prev || []).map(s => {
+                if (s.id !== next.id)
+                    return s;
+                markDirtyKeys(next.id, s, next);
+                return next;
+            });
             if (uid)
                 saveCache(uid, arr);
             return arr;
@@ -11171,6 +11216,8 @@ function App() {
                         return Object.keys(p).length > 0 ? { ...x, ...p } : x;
                     });
                     patchedStudent = { ...s, lessons };
+                    if (patch && Object.keys(patch).length > 0)
+                        markDirtyKeys(s.id, s, patchedStudent);
                     return patchedStudent;
                 });
                 if (uid)
