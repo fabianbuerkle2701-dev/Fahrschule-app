@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.17";
+const APP_VERSION = "1.164.18";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.18", date: "August 2026", changes: [
+            "Fehlerbehebung: der zeitlich begrenzte Link für Personalunterlagen war 60 statt der dafür vorgesehenen 5 Minuten gültig",
+            "Fehlerbehebung: eine Kostenposition am Fahrzeug (TÜV, Service, Sprit, ...) ließ sich ohne Rückfrage endgültig löschen",
+            "Fehlerbehebung Registrierung: bei gedrückt gehaltener Enter-Taste im Feld \"Passwort bestätigen\" konnten mehrere überlappende Registrierungen bzw. Fahrschul-Anlagen ausgelöst werden",
+            "Fehlerbehebung Fahrschule gründen: Anlegen der Fahrschule und Zuordnung als Admin liefen als zwei getrennte Schritte - schlug der zweite fehl, blieb eine verwaiste, nie zugeordnete Fahrschule dauerhaft in der Datenbank stehen, ohne dass sie sich selbst reparieren ließ. Läuft jetzt als eine einzige, sichere Transaktion",
+        ] },
     { v: "1.164.17", date: "August 2026", changes: [
             "Fehlerbehebung: der Standort/Filiale-Auswahl eines mit einem Kollegen geteilten (nicht eigenen) Schülers ließ sich ändern - jetzt nur noch vom Besitzer, andere sehen den zugewiesenen Standort nur als Text",
             "Fehlerbehebung Prüfungssimulation/Schaltkompetenz: eine laufende Sitzung überlebte einen Kontowechsel (Abmelden/neu anmelden) - das Live-Banner zeigte danach weiter den alten Schülernamen, und der Abschluss-Button zeigte fälschlich Erfolg an bzw. reagierte gar nicht, weil der Schüler im neuen Konto nicht existiert. Läuft jetzt sauber zurückgesetzt, mit klarer Fehlermeldung statt falschem Erfolg",
@@ -3462,9 +3468,10 @@ async function regenerateInviteCode(schoolId) {
 }
 async function fetchMySchool(uid) {
     // profile -> school_id -> school
-    // Direkt nach der Registrierung setzt signUp() schon die Session (uid), aber assignSchool()
-    // in Auth() schreibt profiles.school_id erst danach - ohne Retry würde hier "keine Fahrschule"
-    // ankommen und der spätere Speicher-Versuch würde mit id=undefined gegen Postgres laufen.
+    // Direkt nach der Registrierung setzt signUp() schon die Session (uid), aber
+    // createAndAssignSchool()/joinSchoolByCode() in Auth() schreiben profiles.school_id erst
+    // danach - ohne Retry würde hier "keine Fahrschule" ankommen und der spätere Speicher-Versuch
+    // würde mit id=undefined gegen Postgres laufen.
     for (let attempt = 0; attempt < 5; attempt++) {
         const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
         if (pe) {
@@ -3797,6 +3804,9 @@ async function acceptSubscription(uid) {
         throw new Error(error.message || "Speichern fehlgeschlagen");
     return now;
 }
+// Nur für den zentralen Admin-Bereich (adminAddSchool): legt eine Fahrschule OHNE
+// Teacher-Zuordnung an. Für die reguläre Registrierung "Neue Fahrschule gründen" bewusst NICHT
+// verwenden - dafür gibt es createAndAssignSchool(), das Anlegen+Zuordnen atomar erledigt.
 async function createSchool(name) {
     const { data, error } = await sb.from("schools")
         .insert({ name: name.trim(), subtitle: DEFAULT_SCHOOL.subtitle, color: DEFAULT_SCHOOL.color }).select().single();
@@ -3806,20 +3816,18 @@ async function createSchool(name) {
     }
     return data;
 }
-async function assignSchool(uid, schoolId, email, makeAdmin) {
-    // upsert: legt die profiles-Zeile an, falls sie noch nicht existiert (z.B. direkt nach Registrierung)
-    // email wird mitgegeben, weil die Spalte "email" in profiles nicht leer sein darf
-    // makeAdmin: true, wenn der Nutzer diese Fahrschule gerade selbst neu gegründet hat
-    const row = { id: uid, school_id: schoolId };
-    if (email)
-        row.email = email;
-    if (makeAdmin)
-        row.school_admin = true;
-    const { error } = await sb.from("profiles").upsert(row, { onConflict: "id" });
+// Legt eine neue Fahrschule an UND ordnet den eingeloggten Nutzer ihr als Admin zu, atomar in
+// einer einzigen Transaktion (analog zu join_school_by_code) - vorher liefen Anlegen und
+// Zuordnen als zwei getrennte Aufrufe, wodurch bei einem Fehlschlag des zweiten eine verwaiste,
+// nie zugeordnete Fahrschule dauerhaft in der DB stehen bleiben konnte (der anlegende Nutzer darf
+// sie laut RLS nicht selbst löschen - DELETE auf schools ist exklusiv dem zentralen Admin vorbehalten).
+async function createAndAssignSchool(name) {
+    const { data, error } = await sb.rpc("create_and_assign_school", { p_name: name.trim() });
     if (error) {
         console.error(error);
-        throw new Error(error.message || "Zuordnung fehlgeschlagen");
+        throw new Error(error.message || "Fahrschule anlegen fehlgeschlagen");
     }
+    return (data && data[0]) || null;
 }
 async function saveSchool(school) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Einstellungen werden nicht gespeichert."); return; }
@@ -4218,7 +4226,7 @@ async function deleteStaffFile(f) {
 }
 // Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
 async function staffFileSignedUrl(path) {
-    const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 3600);
+    const { data, error } = await sb.storage.from("staff-files").createSignedUrl(path, 300);
     if (error) {
         console.error(error);
         return null;
@@ -6066,7 +6074,15 @@ function Auth() {
     const [newSchoolName, setNewSchoolName] = useState(""); // falls neue angelegt wird
     const [joinMode, setJoinMode] = useState("invite"); // "new" | "invite" ("list" entfernt aus Datenschutzgründen)
     const [inviteCode, setInviteCode] = useState("");
+    // Synchrone Re-Entry-Sperre: der busy-State wirkt erst nach einem Re-Render, das
+    // Passwort-bestätigen-Feld löst submit() aber bei JEDEM Enter unabhängig vom
+    // disabled-Button aus - bei gedrückt gehaltener Enter-Taste (Tastatur-Auto-Repeat, schneller
+    // als der Netzwerk-Roundtrip) konnten dadurch mehrere überlappende Registrierungen/
+    // Fahrschul-Anlagen ausgelöst werden.
+    const submitBusyRef = useRef(false);
     async function submit() {
+        if (submitBusyRef.current)
+            return;
         setErr("");
         setInfo("");
         const e = email.trim().toLowerCase();
@@ -6093,24 +6109,25 @@ function Auth() {
             }
         }
         setBusy(true);
+        submitBusyRef.current = true;
         try {
             if (mode === "register") {
                 const { data, error } = await sb.auth.signUp({ email: e, password: pw });
                 if (error) {
                     setErr(uebersetze(error.message));
                     setBusy(false);
+                    submitBusyRef.current = false;
                     return;
                 }
-                let newUid = data && data.user && data.user.id;
                 // Sicherstellen, dass eine aktive Sitzung besteht (sonst greifen die Zugriffsregeln nicht)
                 if (!data.session) {
-                    const { data: si, error: se2 } = await sb.auth.signInWithPassword({ email: e, password: pw });
+                    const { error: se2 } = await sb.auth.signInWithPassword({ email: e, password: pw });
                     if (se2) {
                         setErr(uebersetze(se2.message));
                         setBusy(false);
+                        submitBusyRef.current = false;
                         return;
                     }
-                    newUid = (si && si.user && si.user.id) || newUid;
                 }
                 if (joinMode === "invite") {
                     // Per Einladungscode direkt und sicher der richtigen Fahrschule beitreten
@@ -6123,27 +6140,16 @@ function Auth() {
                     }
                 }
                 else {
-                    // Fahrschule zuordnen (neu anlegen)
-                    let sid = "";
-                    if (joinMode === "new") {
-                        try {
-                            const created = await createSchool(newSchoolName);
-                            sid = created.id;
-                        }
-                        catch (se) {
-                            console.error(se);
-                            showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se));
-                            sid = "";
-                        }
+                    // Fahrschule neu gründen: Anlegen + Admin-Zuordnung laufen jetzt atomar in
+                    // einer Transaktion (create_and_assign_school) - vorher waren das zwei
+                    // getrennte Aufrufe, bei denen ein Fehlschlag des zweiten eine verwaiste,
+                    // nie zugeordnete Fahrschule dauerhaft in der DB zurücklassen konnte.
+                    try {
+                        await createAndAssignSchool(newSchoolName);
                     }
-                    if (newUid && sid) {
-                        try {
-                            await assignSchool(newUid, sid, e, joinMode === "new");
-                        }
-                        catch (se) {
-                            console.error(se);
-                            showToast("Zuordnung zur Fahrschule fehlgeschlagen:\n" + (se.message || se));
-                        }
+                    catch (se) {
+                        console.error(se);
+                        showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se));
                     }
                 }
                 setInfo("Konto erstellt. Du wirst angemeldet…");
@@ -6159,6 +6165,7 @@ function Auth() {
             setErr("Etwas ist schiefgelaufen. Bitte erneut versuchen.");
         }
         setBusy(false);
+        submitBusyRef.current = false;
     }
     function uebersetze(m) {
         if (/Invalid login/i.test(m))
@@ -14242,8 +14249,12 @@ function App() {
             saveVehicles(next);
             setVehicleCostForm(null);
         }
-        function removeCost(vehId, costId) {
-            saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, costs: (v.costs || []).filter(c => c.id !== costId) } : v));
+        async function removeCost(vehId, costId) {
+            const v = vehicles.find(x => x.id === vehId);
+            const c = v && (v.costs || []).find(x => x.id === costId);
+            if (!await askConfirm({ message: (c ? c.category + " (" + eurFmt(c.amount) + ")" : "Dieser Kostenposten") + " wirklich löschen?" }))
+                return;
+            saveVehicles(vehicles.map(x => x.id === vehId ? { ...x, costs: (x.costs || []).filter(y => y.id !== costId) } : x));
         }
         function setTuvDate(vehId, date) {
             saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, tuvDate: date } : v));
