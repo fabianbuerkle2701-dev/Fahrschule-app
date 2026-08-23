@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.11";
+const APP_VERSION = "1.164.12";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.12", date: "August 2026", changes: [
+            "Fehlerbehebung Theorie üben: der klassenspezifische Zusatzstoff wurde bisher nie nach der Führerscheinklasse des Schülers gefiltert - jeder sah denselben Zusatzstoff-Fragenpool aus allen Klassen, auch in \"Nach Thema üben\" und in der Probeprüfung (die zudem immer als \"Probeprüfung Klasse B\" betitelt war, unabhängig von der tatsächlichen Klasse). Ermittelt jetzt beim Start die eigene Klasse und filtert den Zusatzstoff entsprechend; Grundstoff-Fragen bleiben unverändert für alle Klassen sichtbar",
+        ] },
     { v: "1.164.11", date: "August 2026", changes: [
             "Absicherung für „Theorie üben“: die Freigabe für den amtlichen Fragenkatalog prüfte nicht in jedem Fall, ob die native Fahrschüler-App läuft - sobald der Katalog künftig lizenziert und freigeschaltet wird, hätte er sonst auch auf der öffentlichen, frei weitergegebenen Buchungsseite erscheinen können. Bereits jetzt behoben, bevor die Freischaltung erfolgt",
             "Fehlerbehebung: die Kachel „Aktive Schüler“ auf der Startseite zählte auch von Kollegen geteilte Schüler mit und zeigte dadurch eine andere Zahl als dieselbe Kachel in der Statistik",
@@ -22027,9 +22030,10 @@ function TheoryPractice({ code }) {
     const [examAnswers, setExamAnswers] = React.useState([]); // {id, points, correct} während einer laufenden Probeprüfung
     const [examResult, setExamResult] = React.useState(null); // {total, errorPoints, passed, richtig}
     const [examHistory, setExamHistory] = React.useState([]);
-    React.useEffect(() => {
-        publicTheoryQuestions(code).then(setQuestions).catch(() => setQuestions(null));
-    }, [code]);
+    // undefined = noch nicht ermittelt, "" = ermittelt (Gast oder Schüler ohne Klasse) - der
+    // Fragen-Fetch wartet auf einen der beiden Werte, damit nicht erst ungefiltert und dann
+    // nochmal gefiltert geladen wird.
+    const [myKlasse, setMyKlasse] = React.useState(undefined);
     const LS_NAME = "v3_sa_name_" + code, LS_PIN = "v3_sa_pin_" + code;
     let loggedInName = "", loggedInPin = "";
     try {
@@ -22038,6 +22042,22 @@ function TheoryPractice({ code }) {
     }
     catch (e) { }
     const loggedIn = !!(loggedInName && loggedInPin);
+    React.useEffect(() => {
+        if (!loggedIn) {
+            setMyKlasse("");
+            return;
+        }
+        // Eigene Klasse ermitteln, damit klassenspezifischer Zusatzstoff nicht mit dem anderer
+        // Klassen vermischt wird (Grundstoff bleibt über klasse="ALL" serverseitig für alle sichtbar).
+        publicStudentOverview(code, loggedInName, loggedInPin)
+            .then(d => setMyKlasse((d && d.student && d.student.klasse) || ""))
+            .catch(() => setMyKlasse(""));
+    }, [code, loggedIn, loggedInName, loggedInPin]);
+    React.useEffect(() => {
+        if (myKlasse === undefined)
+            return;
+        publicTheoryQuestions(code, myKlasse || null).then(setQuestions).catch(() => setQuestions(null));
+    }, [code, myKlasse]);
     React.useEffect(() => {
         if (!loggedIn)
             return;
@@ -22166,8 +22186,8 @@ function TheoryPractice({ code }) {
         return React.createElement("div", null,
             React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13, marginBottom: 12 }, onClick: () => setScreen("themen") }, "‹ Themen"),
             React.createElement("div", { className: "card", style: { padding: "18px 16px" } },
-                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 8 } }, "Probeprüfung Klasse B"),
-                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 10 } }, "30 Fragen - erst 20 Grundstoff, dann die letzten 10 klassenspezifisch (Zusatzstoff B) - angelehnt an den Aufbau der echten Theorieprüfung. Anders als beim Üben gibt es keine sofortige Rückmeldung pro Frage, das Ergebnis siehst du erst am Ende."),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 8 } }, myKlasse ? ("Probeprüfung Klasse " + myKlasse) : "Probeprüfung"),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 10 } }, "30 Fragen - erst 20 Grundstoff, dann die letzten 10 klassenspezifisch" + (myKlasse ? (" (Zusatzstoff " + myKlasse + ")") : "") + " - angelehnt an den Aufbau der echten Theorieprüfung. Anders als beim Üben gibt es keine sofortige Rückmeldung pro Frage, das Ergebnis siehst du erst am Ende."),
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 16 } }, "Bestanden ist die Probeprüfung bei höchstens 10 Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - angelehnt an die echte Prüfungsregel, aber ohne Gewähr, da eigene Übungsfragen statt des amtlichen Katalogs verwendet werden."),
                 examHistory.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "9px 11px", marginBottom: 16 } }, examHistory.length + " Probeprüfung" + (examHistory.length === 1 ? "" : "en") + " absolviert · zuletzt " + (examHistory[examHistory.length - 1].passed ? "bestanden" : "nicht bestanden")),
                 React.createElement("button", { className: "btn btn-primary btn-block", onClick: startExam }, "Probeprüfung starten")));
