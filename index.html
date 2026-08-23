@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.12";
+const APP_VERSION = "1.164.13";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.13", date: "August 2026", changes: [
+            "Fehlerbehebung Standorte: das Löschen eines Standorts hat bisher nur den Standort selbst entfernt, obwohl der Hinweistext \"Zugewiesene Schüler verlieren die Zuordnung\" versprach - betroffene Schüler behielten die jetzt verwaiste Standort-ID dauerhaft (auch die anderer Fahrlehrer, die der Client gar nicht sehen konnte). Läuft jetzt über eine serverseitige Bereinigung, die wirklich alle betroffenen Schüler und die eigene Standort-Vorauswahl jedes Fahrlehrers zurücksetzt",
+            "Fehlerbehebung: eine auf einen bereits gelöschten Standort zeigende eigene Standort-Vorauswahl blieb nutzbar - der Button \"Alle Schüler ohne Standort auf meinen setzen\" und neu angelegte Schüler übernahmen weiterhin die tote ID, ohne Hinweis",
+        ] },
     { v: "1.164.12", date: "August 2026", changes: [
             "Fehlerbehebung Theorie üben: der klassenspezifische Zusatzstoff wurde bisher nie nach der Führerscheinklasse des Schülers gefiltert - jeder sah denselben Zusatzstoff-Fragenpool aus allen Klassen, auch in \"Nach Thema üben\" und in der Probeprüfung (die zudem immer als \"Probeprüfung Klasse B\" betitelt war, unabhängig von der tatsächlichen Klasse). Ermittelt jetzt beim Start die eigene Klasse und filtert den Zusatzstoff entsprechend; Grundstoff-Fragen bleiben unverändert für alle Klassen sichtbar",
         ] },
@@ -4024,6 +4028,17 @@ async function adminDetachTeacher(uid) {
         console.error(error);
         throw new Error(error.message);
     }
+}
+// Standort löschen räumt serverseitig alle betroffenen Schüler (über alle Fahrlehrer der
+// Fahrschule, nicht nur die im Client geladenen) sowie die eigene Standort-Vorauswahl jedes
+// Fahrlehrers auf - der Client allein kann das nicht vollständig leisten (siehe delete_school_location).
+async function deleteSchoolLocation(schoolId, locationId) {
+    const { data, error } = await sb.rpc("delete_school_location", { p_school_id: schoolId, p_location_id: locationId });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data;
 }
 // Schüler eines bestimmten Fahrlehrers laden (nur zum Ansehen im Admin-Bereich)
 async function adminFetchTeacherStudents(ownerUid) {
@@ -7318,6 +7333,10 @@ function App() {
     const [packageEdit, setPackageEdit] = useState(null); // null | {name, amount, ue, error} – Paket hinzufügen
     const [artEdit, setArtEdit] = useState(null); // null | {code, label, error} – Terminart hinzufügen
     const [myLocationId, setMyLocationId] = useState(""); // eigener Standort des Fahrlehrers (für neue Schüler)
+    // myLocationId kann auf einen zwischenzeitlich gelöschten Standort zeigen (z.B. bei
+    // Altdaten von vor dem delete_school_location-Fix) - überall dort verwenden, wo eine
+    // tatsächlich noch existierende Auswahl gebraucht wird, statt des rohen State-Werts.
+    const validMyLocationId = locations.some(l => l.id === myLocationId) ? myLocationId : "";
     const [birthdayPopup, setBirthdayPopup] = useState(null); // null | Liste der Schüler mit Geburtstag heute
     const [cityTplModal, setCityTplModal] = useState(null); // null | {busy,error,approved:[],mine:[]} Übernahme-/Vorschlag-Dialog
     const [proposeForm, setProposeForm] = useState(null); // null | {title,busy,error} In-App-Dialog zum Einreichen einer Streckenvorlage
@@ -7653,7 +7672,7 @@ function App() {
     const [assignLocBusy, setAssignLocBusy] = useState(false);
     // Setzt alle eigenen Schüler ohne zugewiesenen Standort auf den Standort des Fahrlehrers.
     async function assignMyLocationToStudents() {
-        if (!myLocationId) {
+        if (!validMyLocationId) {
             showFlash("Wähle zuerst oben deinen Standort aus");
             return;
         }
@@ -7667,7 +7686,7 @@ function App() {
         setAssignLocBusy(true);
         try {
             const zielIds = new Set(ziel.map(s => s.id));
-            const updated = (students || []).map(s => zielIds.has(s.id) ? { ...s, location_id: myLocationId } : s);
+            const updated = (students || []).map(s => zielIds.has(s.id) ? { ...s, location_id: validMyLocationId } : s);
             // In der Datenbank speichern
             for (const s of updated) {
                 if (zielIds.has(s.id)) {
@@ -8892,7 +8911,7 @@ function App() {
     // Add a new student (cloud insert, optimistic)
     async function addStudent() {
         const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
-        const draft = { ...newStudent(), klasse: guessedKlasse, location_id: myLocationId || "" };
+        const draft = { ...newStudent(), klasse: guessedKlasse, location_id: validMyLocationId || "" };
         const created = await dbInsert(uid, draft);
         if (!created) {
             showToast("Konnte nicht speichern. Internetverbindung prüfen.");
@@ -8956,7 +8975,7 @@ function App() {
             return;
         const guessedKlasse = it.klasse || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         const draft = { ...newStudent(), vorname: it.vorname || "", name: it.name || "", tel: it.tel || "",
-            klasse: guessedKlasse, bemerkungen: it.notiz || "", location_id: myLocationId || "" };
+            klasse: guessedKlasse, bemerkungen: it.notiz || "", location_id: validMyLocationId || "" };
         const created = await dbInsert(uid, draft);
         if (!created) {
             showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.");
@@ -9333,7 +9352,7 @@ function App() {
     async function createStudentFromImport(d) {
         const deToIso = (s) => { const m = (s || "").match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : ""; };
         const draft = newStudent();
-        draft.location_id = myLocationId || "";
+        draft.location_id = validMyLocationId || "";
         // Erkannte Klasse aus dem gescannten Antrag hat Vorrang vor der geratenen Klasse aus
         // dem Fahrschul-Untertitel (vorher wurde die erkannte Klasse nur als Text in die
         // Bemerkungen geschrieben, aber nie tatsächlich gesetzt).
@@ -16451,7 +16470,7 @@ function App() {
                             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
                                 React.createElement("div", { className: "field" },
                                     React.createElement("label", null, "Dein Standort / deine Filiale"),
-                                    React.createElement("select", { value: myLocationId, onChange: async (e) => {
+                                    React.createElement("select", { value: validMyLocationId, onChange: async (e) => {
                                             const val = e.target.value;
                                             setMyLocationId(val);
                                             try {
@@ -16464,7 +16483,7 @@ function App() {
                                         React.createElement("option", { value: "" }, "– Kein Standort –"),
                                         locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))),
                                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 0", lineHeight: 1.5 } }, "Neue Schüler, die du anlegst, werden automatisch diesem Standort zugewiesen. Im Schülerprofil kannst du den Standort jederzeit ändern."),
-                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12, fontSize: 13 }, disabled: assignLocBusy || !myLocationId, onClick: assignMyLocationToStudents }, assignLocBusy ? "Wird zugewiesen…" : "Alle Schüler ohne Standort auf meinen setzen"))),
+                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12, fontSize: 13 }, disabled: assignLocBusy || !validMyLocationId, onClick: assignMyLocationToStudents }, assignLocBusy ? "Wird zugewiesen…" : "Alle Schüler ohne Standort auf meinen setzen"))),
                         React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Benachrichtigungen"),
                         React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 16 } }, settingRow("Geburtstage", "Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat", React.createElement("button", { onClick: () => { const next = !birthdayNotify; setBirthdayNotify(next); try {
                                     localStorage.setItem("v3_birthday", next ? "1" : "0");
@@ -16861,6 +16880,20 @@ function App() {
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "#B3362A" }, onClick: async () => { if (await askConfirm({ message: "Standort \"" + loc.name + "\" löschen? Zugewiesene Schüler verlieren die Zuordnung." })) {
                                             const next = locations.filter((_, j) => j !== i);
+                                            // Server räumt zuerst ALLE betroffenen Schüler auf (auch die anderer
+                                            // Fahrlehrer, die der Client gar nicht geladen hat) und die eigene
+                                            // Standort-Vorauswahl jedes Fahrlehrers - danach erst den Standort selbst
+                                            // aus der Liste entfernen, damit der Dialogtext auch wirklich stimmt.
+                                            try {
+                                                await deleteSchoolLocation(school.id, loc.id);
+                                            }
+                                            catch (e) {
+                                                showToast("Standort konnte nicht gelöscht werden:\n" + e.message);
+                                                return;
+                                            }
+                                            setStudents(prev => (prev || []).map(s => s.location_id === loc.id ? { ...s, location_id: "" } : s));
+                                            if (myLocationId === loc.id)
+                                                setMyLocationId("");
                                             saveLocations(next);
                                         } } }, "Löschen")))),
                             locEdit ? React.createElement("div", { style: { marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" } },
@@ -19122,7 +19155,7 @@ function App() {
                                 const n = (((_b = document.getElementById("ob-name2")) === null || _b === void 0 ? void 0 : _b.value) || "").trim();
                                 if (v || n) {
                                     const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
-                                    const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: myLocationId || "" };
+                                    const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: validMyLocationId || "" };
                                     const created = await dbInsert(uid, draft);
                                     if (created) {
                                         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
