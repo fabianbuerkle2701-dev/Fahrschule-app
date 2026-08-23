@@ -2827,6 +2827,31 @@ const DEMO_TOUR = [
   { view: "adk", title: "Digitale ADK", text: "Abschnitte abhaken direkt nach der Fahrstunde – der Stand steht in Prozent." },
   { view: "kalender", title: "Kalender", text: "Die Woche im Griff: prüft Fahrlehrer, Schüler und Fahrzeug gegen Doppelbuchungen." }
 ];
+// Legt die (statischen) Demo-Termine beim Laden dynamisch auf die aktuelle Woche
+// in die Zukunft, sodass nie vergangene Termine entstehen (kein Bestaetigungs-Popup)
+// und die Demo immer frisch wirkt. Nur im Demo-Modus, rein zur Anzeige.
+function reanchorDemoAppts(list) {
+  if (!IS_DEMO() || !Array.isArray(list) || !list.length) return list;
+  const MIN = 60000, DAY = 86400000, now = Date.now();
+  const roundUp = (ts, step) => { const d = new Date(ts); const m = d.getMinutes(); const add = (step - (m % step)) % step; d.setMinutes(m + (add || step), 0, 0); d.setSeconds(0,0); return d; };
+  let base = roundUp(now + 75 * MIN, 30);
+  if (base.getHours() >= 20) { base.setDate(base.getDate() + 1); base.setHours(9, 0, 0, 0); }
+  const dayAt = (off, h) => { const d = new Date(); d.setHours(0,0,0,0); d.setDate(d.getDate() + off); d.setHours(h, 0, 0, 0); return d; };
+  const slots = [ base, new Date(base.getTime() + 2 * 60 * MIN) ];
+  for (let d = 1; d <= 6; d++) { slots.push(dayAt(d, 10)); slots.push(dayAt(d, 14)); }
+  // Bestaetigte zuerst -> sie bekommen die frueheren Slots (u.a. heute); Anfragen danach.
+  const ordered = [...list].sort((a, b) => {
+    const ca = a.status === "confirmed" ? 0 : 1, cb = b.status === "confirmed" ? 0 : 1;
+    if (ca !== cb) return ca - cb;
+    return new Date(a.start_at) - new Date(b.start_at);
+  });
+  return ordered.map((a, i) => {
+    const dur = a.end_at ? (new Date(a.end_at) - new Date(a.start_at)) : 45 * MIN;
+    let start = slots[i] || dayAt(1 + (i % 6), 9 + (i % 8));
+    if (start.getTime() < now + 20 * MIN) start = new Date(start.getTime() + DAY);
+    return { ...a, start_at: start.toISOString(), end_at: new Date(start.getTime() + dur).toISOString() };
+  });
+}
 // Authorization-Header der aktuellen Sitzung, für Aufrufe an geschützte Netlify-Funktionen
 // (KI-Helfer, Admin-Funktionen) - die dürfen nicht ohne Anmeldung aufrufbar sein, sonst
 // könnte jeder im Internet auf Kosten des Fahrschul-Kontos Anfragen schicken.
@@ -5319,11 +5344,18 @@ function pruefungsreife(stu, adk, strecken) {
     return { offeneADK, offeneStrecken, theorieOffen, total };
 }
 // Prüfungsreife-Ampel: rot (noch viel offen), gelb (fast fertig), grün (prüfungsreif)
-function ampel(stu, adk, strecken) {
+function ampel(stu, adk, strecken, sonderfahrtenSoll) {
     const lp = calcLern(stu.items, adk, stu), bp = calcBack(stu, strecken);
     const gesamt = Math.max(lp, bp);
     const theorieOk = !!stu.theorie;
-    if (gesamt >= 90 && theorieOk)
+    // Ohne erfüllte Sonderfahrten (Überland/Autobahn/Dämmerung) darf ein Schüler laut
+    // FahrschAusbO nicht zur Prüfung zugelassen werden - "Prüfungsreif" darf das nicht
+    // ignorieren. sonderfahrtenBilanz() liefert ein leeres Array, wenn für die Klasse
+    // kein Soll hinterlegt ist (siehe DEFAULT_SONDERFAHRTEN_SOLL/Einstellungen); in dem
+    // Fall bleibt die Prüfung absichtlich unscharf (every() auf [] ist true), statt eine
+    // Klasse ohne hinterlegtes Soll dauerhaft auf gelb zu sperren.
+    const sonderfahrtenOk = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).every(x => x.erfuellt);
+    if (gesamt >= 90 && theorieOk && sonderfahrtenOk)
         return { stufe: "gruen", farbe: "#12A150", text: "Prüfungsreif" };
     if (gesamt >= 80)
         return { stufe: "gelb", farbe: "#E5A100", text: "Fast so weit" };
@@ -6777,7 +6809,8 @@ function App() {
     // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
     function applyFetchedAppts(list) {
         const gone = apptDeletedRef.current;
-        setAppts((list || []).filter(a => !gone.has(a.id)));
+        const src = reanchorDemoAppts(list || []);
+        setAppts(src.filter(a => !gone.has(a.id)));
     }
     // App-weite Streckenaufzeichnung (Hooks hier oben, damit vor den frühen returns)
     const recWatchRef = useRef(null);
@@ -9334,7 +9367,7 @@ function App() {
         const base = buildHandoverPayload(stu);
         const vk = stu.klasse || DEFAULT_KLASSE;
         const r = pruefungsreife(stu, tplFor(vk).adk, tplFor(vk).strecken);
-        const amp = ampel(stu, tplFor(vk).adk, tplFor(vk).strecken);
+        const amp = ampel(stu, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         const recurring = pruefungssimRecurringIssues(stu.examSims || []);
         const sfBilanz = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll);
         let theorie = null;
