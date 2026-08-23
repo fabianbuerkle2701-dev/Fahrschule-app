@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.32";
+const APP_VERSION = "1.164.33";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.33", date: "August 2026", changes: [
+            "Fuhrpark: ein deaktiviertes oder aus dem Kalender genommenes Fahrzeug machte seine bereits bestehenden Buchungen im Fahrzeug-Kalender unsichtbar und unverwaltbar (bei nur einem Fahrzeug in der Fahrschule sogar komplett) - solche Fahrzeuge bleiben jetzt sichtbar (als \"inaktiv\" markiert), solange sie noch Buchungen im angezeigten Zeitraum haben. Fahrzeugkosten akzeptierten bisher negative Beträge ohne Rückfrage. Die Fahrlehrer-Auswahl im Fahrzeug-Kalender war immer ein Freitextfeld statt der vorgesehenen Tippfehler-sicheren Auswahl, weil die Namensliste nie befüllt wurde - kommt jetzt automatisch aus der Fahrschule mit. Der Einladungscode-Eingabe bei der Registrierung fehlte der Tippfehler-Schutz (Auto-Groß-/Korrektur), den das strukturell gleiche Fahrschul-Code-Feld längst hat",
+        ] },
     { v: "1.164.32", date: "August 2026", changes: [
             "Lücken-Radar hielt einen Termin mit offener Storno-Anfrage des Schülers schon für frei, obwohl er bis zur Entscheidung des Fahrlehrers weiterhin bestätigt ist - konnte zu einer Doppelbuchung desselben Zeitfensters führen. Rechnungen über 0 € blieben dauerhaft als \"offen\" markiert und konnten in die Mahnstufen-Erinnerung rutschen. Wird ein Termin auf eine neue Zeit verschoben, für den schon eine manuelle Erinnerung verschickt wurde, gilt diese jetzt nicht mehr automatisch auch für die neue Zeit. \"Morgen\" in der Tagesabschluss-Übersicht wird jetzt DST-sicher berechnet (vorher: feste 24h-Addition, konnte an Zeitumstellungstagen knapp danebenliegen und von der Erinnerungen-Liste abweichen)",
         ] },
@@ -6292,7 +6295,7 @@ function Auth() {
                             React.createElement("button", { className: joinMode === "invite" ? "on" : "", onClick: () => { setJoinMode("invite"); setErr(""); } }, "Einladungscode"),
                             React.createElement("button", { className: joinMode === "new" ? "on" : "", onClick: () => { setJoinMode("new"); setErr(""); } }, "Neu gr\u00FCnden")),
                         joinMode === "invite" &&
-                            React.createElement("input", { className: "auth-field", type: "text", value: inviteCode, onChange: e => setInviteCode(e.target.value), placeholder: "Einladungscode von deinem Fahrschul-Admin", style: inp }),
+                            React.createElement("input", { className: "auth-field", type: "text", value: inviteCode, onChange: e => setInviteCode(e.target.value), placeholder: "Einladungscode von deinem Fahrschul-Admin", autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text", style: inp }),
                         joinMode === "new" &&
                             React.createElement("input", { className: "auth-field", type: "text", value: newSchoolName, onChange: e => setNewSchoolName(e.target.value), placeholder: "Name deiner Fahrschule", style: inp }),
                         React.createElement("p", { style: { fontSize: 11.5, color: "#8A8378", marginTop: 7, lineHeight: 1.5 } }, joinMode === "invite" ? "Frag deinen Fahrschul-Admin nach dem Einladungscode." :
@@ -14514,7 +14517,7 @@ function App() {
             if (!f)
                 return;
             const amount = parseFloat((f.amount || "").replace(",", "."));
-            if (isNaN(amount)) {
+            if (isNaN(amount) || amount < 0) {
                 setVehicleCostForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
                 return;
             }
@@ -24716,7 +24719,17 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         return React.createElement("div", { style: { padding: 40, textAlign: "center", color: "var(--muted)" } }, "Kalender l\u00E4dt\u2026");
     if (info === null)
         return React.createElement("div", { style: { padding: 40, textAlign: "center", color: "var(--muted)" } }, "Dieser Kalender-Link ist ung\u00FCltig.");
-    const vehicles = asArray(info.vehicles).filter(v => !v.inactive && !v.calHidden);
+    // teacherNames-Prop wurde an beiden bisherigen Aufrufstellen nie bef\u00FCllt - cal_info() liefert die
+    // Fahrlehrer-Namen der Fahrschule jetzt selbst mit, als zuverl\u00E4ssiger Standard statt eines Props,
+    // an den jeder Aufrufer separat denken m\u00FCsste.
+    const effectiveTeacherNames = (teacherNames && teacherNames.length) ? teacherNames : (info.teacher_names || []);
+    const activeVehicles = asArray(info.vehicles).filter(v => !v.inactive && !v.calHidden);
+    // Ein Fahrzeug, das gerade deaktiviert/aus dem Kalender genommen wurde (renderFahrzeugVerwaltungBody(),
+    // Toggles "Insgesamt: aktiv"/"Kalender: an"), behält seine bestehenden Buchungen im sichtbaren
+    // Zeitraum sichtbar und verwaltbar, statt sie unerreichbar zu machen.
+    const bookedVehicleIds = new Set(rows.map(r => r.vehicle_id));
+    const hiddenWithBookings = asArray(info.vehicles).filter(v => (v.inactive || v.calHidden) && bookedVehicleIds.has(v.id));
+    const vehicles = [...activeVehicles, ...hiddenWithBookings];
     const veh = vehicles.find(v => v.id === vehId);
     const dayRows = rows.filter(r => r.vehicle_id === vehId).slice().sort((a, b) => a.start_at.localeCompare(b.start_at));
     const PXH = 60, startH = 0, endH = 24, totalH = endH - startH;
@@ -24821,12 +24834,13 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             ? React.createElement("div", { style: { margin: "0 16px", padding: "16px", borderRadius: 14, background: "var(--field-bg)", border: "1px solid var(--line)", fontSize: 13.5, color: "var(--muted)", textAlign: "center" } }, "F\u00FCr diese Fahrschule sind keine Fahrzeuge hinterlegt.")
             : vehicles.length > 1 && React.createElement("div", { style: { display: "flex", gap: 8, overflowX: "auto", padding: "0 16px 14px" } }, vehicles.map(v => React.createElement("button", { key: v.id, onClick: () => setVehId(v.id), style: { flexShrink: 0, padding: "9px 15px", borderRadius: 99, fontSize: 13, fontWeight: 700, fontFamily: "var(--font-d)",
                     border: "1.5px solid " + (v.id === vehId ? "var(--orange)" : "var(--line)"),
-                    background: v.id === vehId ? "var(--orange)" : "var(--card)", color: v.id === vehId ? "#fff" : "var(--ink)" } }, v.name))),
+                    background: v.id === vehId ? "var(--orange)" : "var(--card)", color: v.id === vehId ? "#fff" : "var(--ink)" } }, v.name + ((v.inactive || v.calHidden) ? " (inaktiv)" : "")))),
         veh && calView === "tag" && React.createElement("div", { className: "card", style: { margin: "0 16px", overflow: "hidden" } },
             React.createElement("div", { style: { padding: "12px 0", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, textAlign: "center", borderBottom: "1px solid var(--line)", color: "var(--orange-deep)" } },
                 veh.name,
                 veh.plate ? " · " + veh.plate : "",
-                veh.type ? " · " + veh.type : ""),
+                veh.type ? " · " + veh.type : "",
+                (veh.inactive || veh.calHidden) ? " · inaktiv" : ""),
             React.createElement("div", { style: { position: "relative", height: totalH * PXH + 24, paddingLeft: 50 } },
                 hours.slice(0, -1).map(h => React.createElement("div", { key: h, onClick: () => openBookingAt(h), style: { position: "absolute", left: 50, right: 0, top: 12 + (h - startH) * PXH, height: PXH, borderTop: "1px solid var(--line)", cursor: "pointer" }, title: "Zum Buchen tippen" })),
                 hours.map(h => React.createElement("span", { key: "lbl" + h, style: { position: "absolute", left: 0, top: 12 + (h - startH) * PXH - 8, width: 42, textAlign: "right", fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-d)", pointerEvents: "none" } },
@@ -24891,10 +24905,10 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
                     new Date((form.date || ymd(day)) + "T00:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "long" })),
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", { htmlFor: "field-vehicle-booking-fahrlehrer" }, "Fahrlehrer"),
-                    (teacherNames && teacherNames.length)
+                    (effectiveTeacherNames && effectiveTeacherNames.length)
                         ? React.createElement("select", { id: "field-vehicle-booking-fahrlehrer", value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                             React.createElement("option", { value: "" }, "Bitte w\u00E4hlen\u2026"),
-                            teacherNames.map(n => React.createElement("option", { key: n, value: n }, n)))
+                            effectiveTeacherNames.map(n => React.createElement("option", { key: n, value: n }, n)))
                         : React.createElement("input", { id: "field-vehicle-booking-fahrlehrer", type: "text", value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), placeholder: "Name des Fahrlehrers" })),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
                     React.createElement("div", { className: "field", style: { flex: 1 } },
