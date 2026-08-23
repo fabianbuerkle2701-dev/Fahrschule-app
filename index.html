@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.26";
+const APP_VERSION = "1.164.27";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.27", date: "August 2026", changes: [
+            "Barrierefreiheit: die restlichen 14 der 137 Formularfelder (Standort/Filiale, Kosten-Einstellungen, Paket-/Posten-/Zahlungs-Beträge, Fahrzeugbuchung u.a.) hatten ein Eingabefeld hinter einem Wrapper-div (Betrag+Einheit, Auswahl-oder-Freitext), das sich nicht einfach ins Label verschachteln ließ, ohne versehentlich Zusatztext wie Buttons in den vorgelesenen Feldnamen zu ziehen - jetzt per htmlFor/id explizit gekoppelt. Die Leistungsstufe-Auswahl (Button-Gruppe statt Einzelfeld) bekam role=\"group\" + aria-labelledby. Damit sind alle 137 Formularfelder für Screenreader benannt",
+        ] },
     { v: "1.164.26", date: "August 2026", changes: [
             "Barrierefreiheit: 123 von 137 Formularfeldern (Login, Registrierung, Onboarding, Schüler-Stammdaten, Fahrtenbuch, Einstellungen u.a.) hatten Label und Eingabefeld nur als optische Nachbarn ohne echte Kopplung - beim Fokussieren per Screenreader war kein Feldname hörbar. Label umschließt jetzt das Eingabefeld (wie beim bereits vorhandenen Checkbox-Muster), Optik unverändert. Rest folgt in einem eigenen Durchgang",
         ] },
@@ -7334,8 +7337,8 @@ function App() {
         writeSchool({ ...school, reform_stichtag: v || null }); }
     // Standardisierte Preismeldung - siehe preismeldungSheet().
     function savePreismeldungPreis(field, v) { if (school)
-        writeSchool({ ...school, [field]: (v === "" ? "" : v) }); }
-    function openPreismeldung() {
+        writeSchool({ ...school, [field]: (v === "" ? null : v) }); }
+    async function openPreismeldung() {
         if (!school)
             return;
         const datum = new Date().toLocaleDateString("de-DE");
@@ -7347,8 +7350,12 @@ function App() {
             sonderfahrt: school.price_sonderfahrt != null ? Number(school.price_sonderfahrt) : null,
             pruefungsvorstellung: school.price_pruefungsvorstellung != null ? Number(school.price_pruefungsvorstellung) : null,
         });
-        writeSchool({ ...school, preismeldung_letzte: ymd(new Date()) });
         doPrint("preismeldung");
+        // preismeldung_letzte erst nach expliziter Nutzer-Bestätigung setzen, nicht schon vor dem
+        // Druckversuch - weder Browser- noch WKWebView-Druck melden zuverlässig Erfolg/Abbruch zurück,
+        // ein abgebrochener Druck darf die Meldung nicht fälschlich als abgegeben markieren.
+        if (await askConfirm({ message: "Wurde die Preismeldung als PDF erstellt und (per Post/E-Mail) an die zuständige Stelle übermittelt? Nur dann als erledigt markieren." }))
+            writeSchool({ ...school, preismeldung_letzte: ymd(new Date()) });
     }
     function saveArtEdit() {
         const f = artEdit;
@@ -11535,7 +11542,20 @@ function App() {
             action: () => { setActiveId(s.id); setView("adk"); }
         }));
         const all = [...pages, ...settingItems, ...studentItems];
-        const filtered = (q ? all.filter(it => it.label.toLowerCase().includes(q)) : all).slice(0, 8);
+        let filtered;
+        if (!q) {
+            filtered = all.slice(0, 8);
+        }
+        else {
+            // Schüler-Treffer dürfen nicht von Seiten-/Einstellungen-Treffern verdrängt werden (bei
+            // generischen Suchbegriffen wie "a" liefern Seiten+Einstellungen allein schon >8 Treffer) -
+            // ein fester Sockel bleibt Schülern vorbehalten, bevor der Rest die 8 Plätze auffüllt.
+            const matchedPages = pages.filter(it => it.label.toLowerCase().includes(q));
+            const matchedSettings = settingItems.filter(it => it.label.toLowerCase().includes(q));
+            const matchedStudents = studentItems.filter(it => it.label.toLowerCase().includes(q));
+            const studentSlots = Math.min(matchedStudents.length, 4);
+            filtered = [...matchedStudents.slice(0, studentSlots), ...matchedStudents.slice(studentSlots), ...matchedPages, ...matchedSettings].slice(0, 8);
+        }
         const idx = Math.min(cmdIndex, Math.max(0, filtered.length - 1));
         function choose(it) {
             if (!it)
@@ -14798,13 +14818,13 @@ function App() {
                         klassen.map(k => React.createElement("option", { key: k, value: k }, k)))),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Bestimmt, welche ADK und Strecken bei diesem Schüler angezeigt werden. Ohne Auswahl gilt Klasse " + DEFAULT_KLASSE + ".")),
                 locations.length > 0 && React.createElement("div", { className: "field" },
-                    React.createElement("label", null, "Standort / Filiale"),
+                    React.createElement("label", { htmlFor: "field-student-standort" }, "Standort / Filiale"),
                     // Nur der Besitzer darf den Standort ändern - der bestimmt u.a., welche
                     // Filial-Adresse dem Schüler in dessen eigener App angezeigt wird, und
                     // assignMyLocationToStudents() geht ohnehin davon aus, dass location_id
                     // unter Kontrolle des Besitzers steht.
                     active._isMine
-                        ? React.createElement("select", { value: active.location_id || "", onChange: e => updateActive({ location_id: e.target.value }) },
+                        ? React.createElement("select", { id: "field-student-standort", value: active.location_id || "", onChange: e => updateActive({ location_id: e.target.value }) },
                             React.createElement("option", { value: "" }, "– Kein Standort zugewiesen –"),
                             locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))
                         : React.createElement("div", { style: { fontSize: 14, padding: "10px 0", color: "var(--muted)" } },
@@ -17374,9 +17394,9 @@ function App() {
                             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } },
                                 "Der Regierungsentwurf zur Modernisierung der Fahrschulausbildung (Bundestag-Drucksache 21/7404, Kabinettsbeschluss Juni 2026) liegt seit dem 29.7.2026 im Bundestag, Inkrafttreten wird für Anfang 2027 erwartet. Er sieht eine Übergangsregel vor: laufende Ausbildungen dürfen nach den bisherigen Regeln zu Ende geführt werden. Trage hier optional einen Stichtag ein, ab dem NEU begonnene Ausbildungen (Ausbildungsbeginn ab diesem Datum) in dieser App als \"neue Regeln\" behandelt werden - z.B. eine flexiblere Auslegung der Sonderfahrten-Vorgaben. Ohne Eintrag ändert sich nichts."),
                             React.createElement("div", { className: "field" },
-                                React.createElement("label", null, "Stichtag (Ausbildungsbeginn ab diesem Datum = neue Regeln)"),
+                                React.createElement("label", { htmlFor: "field-reform-stichtag" }, "Stichtag (Ausbildungsbeginn ab diesem Datum = neue Regeln)"),
                                 React.createElement("div", { style: { display: "flex", gap: 8 } },
-                                    React.createElement("input", { type: "date", value: (school && school.reform_stichtag) || "", onChange: e => saveReformStichtag(e.target.value), style: { flex: 1 } }),
+                                    React.createElement("input", { id: "field-reform-stichtag", type: "date", value: (school && school.reform_stichtag) || "", onChange: e => saveReformStichtag(e.target.value), style: { flex: 1 } }),
                                     (school && school.reform_stichtag) && React.createElement("button", { className: "btn btn-ghost", onClick: () => saveReformStichtag("") }, "Zurücksetzen"))),
                             React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "10px 0 16px", lineHeight: 1.5 } }, "Wichtig: Das Gesetz ist noch nicht verabschiedet. Bitte die endgültige Fassung prüfen, sobald sie in Kraft tritt, und diese Einstellung dann bei Bedarf anpassen."),
                             React.createElement("div", { style: { paddingTop: 14, borderTop: "1px solid var(--line)" } },
@@ -17419,29 +17439,29 @@ function App() {
                     settingsScreen === "kosten" && React.createElement(SettingsScreen, { title: "Kosten", onBack: closeScreen },
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             React.createElement("div", { className: "field" },
-                                React.createElement("label", null, "Preis pro UE (45 Minuten)"),
+                                React.createElement("label", { htmlFor: "field-preis-pro-ue" }, "Preis pro UE (45 Minuten)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { type: "text", inputMode: "decimal", value: pricePerHour, onChange: e => savePricePerHour(normDecimal(e.target.value)), placeholder: "z.B. 55", style: { flex: 1 } }),
+                                    React.createElement("input", { id: "field-preis-pro-ue", type: "text", inputMode: "decimal", value: pricePerHour, onChange: e => savePricePerHour(normDecimal(e.target.value)), placeholder: "z.B. 55", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8, marginTop: 6 } }, "Standardisierte Preismeldung (geplante Reform)"),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 } }, "Der Reformentwurf ersetzt die bisherige Preisaushang-Pflicht durch eine regelmäßige, standardisierte Meldung dieser 5 Positionen (Fahrstunde = Preis pro UE oben). Trage die übrigen vier ein, um die Preismeldung automatisch erzeugen zu können."),
                             [["price_grundgebuehr", "Grundgebühr"], ["price_lehrmaterial", "Lehrmaterial"], ["price_sonderfahrt", "Sonderfahrt (je UE)"], ["price_pruefungsvorstellung", "Prüfungsvorstellung"]].map(([field, label]) => React.createElement("div", { key: field, className: "field", style: { marginBottom: 10 } },
-                                React.createElement("label", null, label),
+                                React.createElement("label", { htmlFor: "field-preismeldung-" + field }, label),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { type: "text", inputMode: "decimal", value: (school && school[field] != null) ? school[field] : "", onChange: e => savePreismeldungPreis(field, normDecimal(e.target.value)), placeholder: "z.B. 50", style: { flex: 1 } }),
+                                    React.createElement("input", { id: "field-preismeldung-" + field, type: "text", inputMode: "decimal", value: (school && school[field] != null) ? school[field] : "", onChange: e => savePreismeldungPreis(field, normDecimal(e.target.value)), placeholder: "z.B. 50", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€")))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 16 }, onClick: openPreismeldung }, "Preismeldung als PDF erstellen"),
                             React.createElement("div", { className: "field" },
-                                React.createElement("label", null, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
+                                React.createElement("label", { htmlFor: "field-empfehlungsbonus" }, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { type: "text", inputMode: "decimal", value: referralReward, onChange: e => saveReferralReward(normDecimal(e.target.value)), style: { flex: 1 } }),
+                                    React.createElement("input", { id: "field-empfehlungsbonus", type: "text", inputMode: "decimal", value: referralReward, onChange: e => saveReferralReward(normDecimal(e.target.value)), style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Betrag, den Werber und geworbener Schüler je als Gutschrift bekommen, wenn eine Empfehlung im Schülerprofil oder bei der Selbstanmeldung eingelöst wird."),
                             React.createElement("div", { className: "field" },
-                                React.createElement("label", null, "Standard-Ausfallgebühr (optional)"),
+                                React.createElement("label", { htmlFor: "field-ausfallgebuehr-standard" }, "Standard-Ausfallgebühr (optional)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { type: "text", inputMode: "decimal", value: noShowFeeDefault != null ? String(noShowFeeDefault) : "", onChange: e => saveNoShowFeeDefault(normDecimal(e.target.value)), placeholder: "z.B. 30", style: { flex: 1 } }),
+                                    React.createElement("input", { id: "field-ausfallgebuehr-standard", type: "text", inputMode: "decimal", value: noShowFeeDefault != null ? String(noShowFeeDefault) : "", onChange: e => saveNoShowFeeDefault(normDecimal(e.target.value)), placeholder: "z.B. 30", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Vorgeschlagener Betrag beim Melden eines Nichterscheinens (Schülerseite, „Zuverlässigkeit\"). Leer lassen für automatisch die Hälfte des UE-Preises - in beiden Fällen frei anpassbar, bevor die Gebühr gebucht wird."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
@@ -17461,9 +17481,9 @@ function App() {
                                     React.createElement("input", { type: "text", value: packageEdit.name, onChange: e => setPackageEdit(f => ({ ...f, name: e.target.value, error: "" })), placeholder: "z.B. Starterpaket, Select, Prime", autoFocus: true }))),
                                 React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
-                                        React.createElement("label", null, "Preis (Festpreis)"),
+                                        React.createElement("label", { htmlFor: "field-paket-preis" }, "Preis (Festpreis)"),
                                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                                            React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.amount, onChange: e => setPackageEdit(f => ({ ...f, amount: normDecimal(e.target.value), error: "" })) }),
+                                            React.createElement("input", { id: "field-paket-preis", type: "text", inputMode: "decimal", value: packageEdit.amount, onChange: e => setPackageEdit(f => ({ ...f, amount: normDecimal(e.target.value), error: "" })) }),
                                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, color: "var(--muted)" } }, "€"))),
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
                                         React.createElement("label", null, "Enthaltene UE",
@@ -19313,9 +19333,9 @@ function App() {
                         SONDERFAHRT_ARTEN.map(a => React.createElement("option", { key: a.code, value: a.code }, a.label)))),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Bei \u00DCberland/Autobahn/D\u00E4mmerung z\u00E4hlt diese Stunde automatisch zu den Sonderfahrten in der \u00DCbersicht des Sch\u00FClers.")),
                 React.createElement("div", { className: "field" },
-                    React.createElement("label", null, "Preis pro UE f\u00FCr diese Stunde"),
+                    React.createElement("label", { htmlFor: "field-lesson-preis-ue" }, "Preis pro UE f\u00FCr diese Stunde"),
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                        React.createElement("input", { type: "text", inputMode: "decimal", value: lessonForm.price, onChange: e => setLessonForm({ ...lessonForm, price: normDecimal(e.target.value) }), placeholder: "Standard", style: { flex: 1 } }),
+                        React.createElement("input", { id: "field-lesson-preis-ue", type: "text", inputMode: "decimal", value: lessonForm.price, onChange: e => setLessonForm({ ...lessonForm, price: normDecimal(e.target.value) }), placeholder: "Standard", style: { flex: 1 } }),
                         React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "\u20AC"))),
                 React.createElement("div", { style: { textAlign: "right", fontSize: 13, color: "var(--muted)", marginBottom: 4 } },
                     "Kosten dieser Stunde: ",
@@ -19334,9 +19354,9 @@ function App() {
                             React.createElement("label", null, "Bezeichnung",
                             React.createElement("input", { type: "text", value: itemForm.label, onChange: e => setItemForm({ ...itemForm, label: e.target.value, error: "" }), placeholder: "z.B. Grundgebühr, Lernmaterial", autoFocus: true }))),
                         React.createElement("div", { className: "field" },
-                            React.createElement("label", null, "Betrag"),
+                            React.createElement("label", { htmlFor: "field-itemform-betrag" }, "Betrag"),
                             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                React.createElement("input", { type: "text", inputMode: "decimal", value: itemForm.amount, onChange: e => setItemForm({ ...itemForm, amount: normDecimal(e.target.value), error: "" }), onKeyDown: e => { if (e.key === "Enter")
+                                React.createElement("input", { id: "field-itemform-betrag", type: "text", inputMode: "decimal", value: itemForm.amount, onChange: e => setItemForm({ ...itemForm, amount: normDecimal(e.target.value), error: "" }), onKeyDown: e => { if (e.key === "Enter")
                                             saveItemForm(); }, style: { flex: 1 } }),
                                 React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                         itemForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginTop: 8, whiteSpace: "pre-wrap" } }, itemForm.error),
@@ -19351,9 +19371,9 @@ function App() {
                     " gebucht"),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
                     React.createElement("div", { className: "field", style: { flex: 1 } },
-                        React.createElement("label", null, "Betrag"),
+                        React.createElement("label", { htmlFor: "field-paymentform-betrag" }, "Betrag"),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                            React.createElement("input", { type: "text", inputMode: "decimal", value: paymentForm.amount, onChange: e => setPaymentForm({ ...paymentForm, amount: normDecimal(e.target.value), error: "" }), autoFocus: true, style: { flex: 1 } }),
+                            React.createElement("input", { id: "field-paymentform-betrag", type: "text", inputMode: "decimal", value: paymentForm.amount, onChange: e => setPaymentForm({ ...paymentForm, amount: normDecimal(e.target.value), error: "" }), autoFocus: true, style: { flex: 1 } }),
                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Datum",
@@ -19377,10 +19397,10 @@ function App() {
                         React.createElement("select", { value: leistungForm.art, onChange: e => setLeistungForm({ ...leistungForm, art: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, arten.map(a => React.createElement("option", { key: a.code, value: a.code }, a.label))))),
                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
                         React.createElement("div", { className: "field", style: { flex: 1 } },
-                            React.createElement("label", null, "Fahrzeug"),
+                            React.createElement("label", { htmlFor: "field-leistung-fahrzeug" }, "Fahrzeug"),
                             vehicles.length === 0
                                 ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", padding: "12px 0" } }, "Keine Fahrzeuge hinterlegt")
-                                : React.createElement("select", { value: leistungForm.vehicleId, onChange: e => setLeistungForm({ ...leistungForm, vehicleId: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, vehicles.filter(v => !v.inactive || v.id === leistungForm.vehicleId).map(v => React.createElement("option", { key: v.id, value: v.id },
+                                : React.createElement("select", { id: "field-leistung-fahrzeug", value: leistungForm.vehicleId, onChange: e => setLeistungForm({ ...leistungForm, vehicleId: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, vehicles.filter(v => !v.inactive || v.id === leistungForm.vehicleId).map(v => React.createElement("option", { key: v.id, value: v.id },
                                     v.name,
                                     v.plate ? " · " + v.plate : "",
                                     v.inactive ? " (inaktiv)" : "")))),
@@ -19388,8 +19408,8 @@ function App() {
                             React.createElement("label", null, "Klasse",
                             React.createElement("select", { value: leistungForm.klasse, onChange: e => setLeistungForm({ ...leistungForm, klasse: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, klassen.map(k => React.createElement("option", { key: k, value: k }, k)))))),
                     React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                        React.createElement("label", null, "Leistungsstufe"),
-                        React.createElement("div", { className: "seg", style: { marginBottom: 0, flexWrap: "wrap" } }, LEISTUNGSSTUFEN.map(s => React.createElement("button", { key: s, className: leistungForm.stufe === s ? "on" : "", onClick: () => setLeistungForm({ ...leistungForm, stufe: s }) }, s)))),
+                        React.createElement("label", { id: "field-leistung-stufe-label" }, "Leistungsstufe"),
+                        React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "field-leistung-stufe-label", style: { marginBottom: 0, flexWrap: "wrap" } }, LEISTUNGSSTUFEN.map(s => React.createElement("button", { key: s, className: leistungForm.stufe === s ? "on" : "", onClick: () => setLeistungForm({ ...leistungForm, stufe: s }) }, s)))),
                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
                         React.createElement("div", { className: "field", style: { flex: 1 } },
                             React.createElement("label", null, "Datum",
@@ -19412,9 +19432,9 @@ function App() {
                                     setLeistungForm({ ...leistungForm, bis, minutes });
                                 } })))),
                     React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                        React.createElement("label", null, "Dauer in Minuten"),
+                        React.createElement("label", { htmlFor: "field-leistung-dauer" }, "Dauer in Minuten"),
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                            React.createElement("input", { type: "number", inputMode: "numeric", min: "1", value: leistungForm.minutes, onChange: e => setLeistungForm({ ...leistungForm, minutes: e.target.value }), style: { flex: 1 } }),
+                            React.createElement("input", { id: "field-leistung-dauer", type: "number", inputMode: "numeric", min: "1", value: leistungForm.minutes, onChange: e => setLeistungForm({ ...leistungForm, minutes: e.target.value }), style: { flex: 1 } }),
                             React.createElement("span", { style: { fontSize: 14, color: "var(--muted)", whiteSpace: "nowrap" } },
                                 ((Number(leistungForm.minutes) || 0) / 45).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                                 " UE"))),
@@ -23545,12 +23565,15 @@ function SchuelerStart({ code, info, onGoTab }) {
             React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } },
                 data === undefined ? "Einen Moment…"
                     : data === null ? "Melde dich an, um deinen Fortschritt zu sehen."
-                        : (naechster ? "Deine nächste Fahrstunde steht schon fest." : "Aktuell ist keine Fahrstunde eingetragen."))),
-        // Nächste Fahrstunde - für Fahrschüler die wichtigste Information überhaupt
+                        : (naechster ? (naechster.status === "pending" ? "Deine nächste Fahrstunde wartet noch auf Bestätigung." : "Deine nächste Fahrstunde steht schon fest.") : "Aktuell ist keine Fahrstunde eingetragen."))),
+        // Nächste Fahrstunde - für Fahrschüler die wichtigste Information überhaupt. Ohne den
+        // pending-Hinweis wirkte eine noch unbestätigte Anfrage wie ein fest zugesagter Termin,
+        // anders als die Terminliste weiter unten (ApptRow), die "angefragt" längst anzeigt.
         naechster && React.createElement("button", { onClick: () => onGoTab("termine"), className: "card", style: { width: "100%", textAlign: "left", padding: 0, overflow: "hidden", marginBottom: 12, border: "none" } },
             React.createElement("div", { style: { background: "var(--orange)", padding: "16px 17px", color: "#3A2200" } },
                 React.createElement("div", { style: { fontSize: 11, fontWeight: 800, letterSpacing: ".08em", textTransform: "uppercase", opacity: .8 } },
                     "Nächste Fahrstunde",
+                    naechster.status === "pending" && " · Angefragt",
                     naechster.status === "cancel_requested" && " · Storno angefragt"),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 23, marginTop: 5, lineHeight: 1.15 } }, fmtDLong(naechster.start_at)),
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7, marginTop: 7, fontSize: 15, fontWeight: 700 } },
@@ -24764,12 +24787,12 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
                     " \u00B7 ",
                     new Date((form.date || ymd(day)) + "T00:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "long" })),
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                    React.createElement("label", null, "Fahrlehrer"),
+                    React.createElement("label", { htmlFor: "field-vehicle-booking-fahrlehrer" }, "Fahrlehrer"),
                     (teacherNames && teacherNames.length)
-                        ? React.createElement("select", { value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                        ? React.createElement("select", { id: "field-vehicle-booking-fahrlehrer", value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                             React.createElement("option", { value: "" }, "Bitte w\u00E4hlen\u2026"),
                             teacherNames.map(n => React.createElement("option", { key: n, value: n }, n)))
-                        : React.createElement("input", { type: "text", value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), placeholder: "Name des Fahrlehrers" })),
+                        : React.createElement("input", { id: "field-vehicle-booking-fahrlehrer", type: "text", value: form.teacher, onChange: e => setForm({ ...form, teacher: e.target.value }), placeholder: "Name des Fahrlehrers" })),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Von",
