@@ -1433,7 +1433,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.3";
+const APP_VERSION = "1.164.4";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1554,6 +1554,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.4", date: "August 2026", changes: [
+            "Fehlerbehebung Kosten: eine bereits auf einer Rechnung stehende Fahrstunde oder ein bereits abgerechneter Posten ließ sich bisher einfach löschen, wodurch die App-interne Summe nicht mehr zur tatsächlich gestellten Rechnung passte. Löschen ist jetzt gesperrt, solange der Eintrag auf einer Rechnung steht (Hinweis nennt die Rechnungsnummer) - stornieren Sie stattdessen die Rechnung",
+            "Fehlerbehebung Paket-Guthaben: ein neu dazugekauftes Paket rechnete sein Guthaben bisher rückwirkend gegen bereits abgerechnete Fahrstunden auf und ließ sie nachträglich als \"gedeckt\" erscheinen - das Guthaben fehlte dann bei den tatsächlich noch offenen, künftigen Stunden, und \"Paket knapp\" konnte sofort nach dem Kauf feuern, obwohl noch keine einzige Stunde mit dem neuen Paket gefahren wurde. Bereits abgerechnete Stunden behalten jetzt ihre zum Rechnungszeitpunkt tatsächlich gedeckte UE fest",
+        ] },
     { v: "1.164.3", date: "August 2026", changes: [
             "Fehlerbehebung Zahler-Link: stornierte Rechnungen und die zugehörigen Stornorechnungen erschienen in der Zahlungsübersicht des Zahlers weiterhin mit vollem Betrag als „Offen“ und flossen in die Gesamtsumme ein - genau der gleiche Fehlertyp wie zuvor bereits in der internen Mahnwesen-Logik behoben. Betrifft sowohl die serverseitige Datenauswahl (Supabase-RPC public_payer_overview) als auch die Anzeige selbst",
         ] },
@@ -5015,8 +5019,12 @@ function packageRemainingUE(s) {
     const credit = packageCreditUE(s);
     if (credit <= 0)
         return null;
-    const drivenUE = (s.drivenLessons || []).reduce((sum, l) => sum + (Number(l.minutes) || 0) / 45, 0);
-    return Math.max(0, credit - drivenUE);
+    // Nur tatsächlich durch das Paket gedeckte UE zählen (dieselbe chronologische Zuordnung wie
+    // lessonBillables) statt naiv jede je gefahrene UE abzuziehen - sonst zeigt ein frisch
+    // gekauftes Paket sofort "aufgebraucht", wenn der Schüler vorher schon (regulär abgerechnete)
+    // Stunden gefahren ist, die mit diesem Paket gar nichts zu tun haben.
+    const usedUE = lessonBillables(s, 0).reduce((sum, b) => sum + b.coveredUE, 0);
+    return Math.max(0, credit - usedUE);
 }
 // Rechnet das Paket-Guthaben chronologisch gegen die gefahrenen Stunden auf: die frühesten
 // Stunden gelten zuerst als "im Paket enthalten", der Rest wird normal (ggf. mit eigenem
@@ -5026,6 +5034,19 @@ function lessonBillables(s, stdPrice) {
     let creditUE = packageCreditUE(s);
     return lessons.map(l => {
         const ue = (Number(l.minutes) || 0) / 45;
+        if (l.invoiced) {
+            // Bereits abgerechnete Stunde: die zum Rechnungszeitpunkt tatsächlich gedeckte UE
+            // liegt fest (invoicedCoveredUE-Schnappschuss aus confirmInvoice) und wird nicht neu
+            // berechnet - sonst würde ein SPÄTER dazugekauftes Paket rückwirkend eine schon
+            // bezahlte Stunde "abdecken" und das Guthaben fehlt dann bei den tatsächlich noch
+            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten vor diesem Fix), wird
+            // defensiv 0 angenommen statt eine bezahlte Stunde fälschlich als gedeckt zu zeigen.
+            const covered = Math.min(ue, Number(l.invoicedCoveredUE) || 0);
+            creditUE = Math.max(0, creditUE - covered);
+            const billableUE = ue - covered;
+            const amount = Math.round(billableUE * lessonPricePerUE(l, stdPrice) * 100) / 100;
+            return { lesson: l, ue, coveredUE: covered, billableUE, amount };
+        }
         const covered = Math.min(ue, creditUE);
         creditUE = Math.max(0, creditUE - ue);
         const billableUE = ue - covered;
@@ -12686,7 +12707,13 @@ function App() {
         }
         // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
         // nur noch den lokalen Stand nachziehen, ohne einen weiteren Speichervorgang anzustoßen.
-        const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number } : l);
+        // Die JETZT durch ein Paket gedeckte UE wird pro Stunde eingefroren (invoicedCoveredUE) -
+        // ein später dazugekauftes Paket darf eine schon abgerechnete Stunde nicht rückwirkend
+        // "abdecken" und ihr damit Guthaben entziehen, das eigentlich künftigen Stunden zusteht
+        // (siehe lessonBillables).
+        const coveredById = {};
+        lessonBillables(active, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
+        const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
         const costItems = (active.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: inv.number } : it);
         const invoices = [...(active.invoices || []), inv];
         setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
@@ -12720,7 +12747,7 @@ function App() {
             showToast("Stornierung fehlgeschlagen:\n" + e.message);
             return;
         }
-        const drivenLessons = (active.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, ...rest } = l; return rest; })() : l);
+        const drivenLessons = (active.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
         const costItems = (active.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
         const invoices = (active.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
         setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
@@ -12860,6 +12887,10 @@ function App() {
             setItemForm({ label: "", amount: "", error: "" });
         }
         function removeItem(idx) {
+            if (items[idx] && items[idx].invoiced) {
+                showToast("Dieser Posten steht bereits auf Rechnung " + items[idx].invoiced + " und kann nicht gelöscht werden. Bitte die Rechnung stornieren, falls der Posten falsch ist.");
+                return;
+            }
             updateActive({ costItems: items.filter((_, i) => i !== idx) });
         }
         // Beleg-Foto → Kostenposition: liest ein Foto einer Quittung/eines Kassenbons aus und
@@ -12898,6 +12929,11 @@ function App() {
             setLessonForm({ date: ymd(now), time: "", minutes: 45, price: (pricePerHour || ""), art: "" });
         }
         function removeLesson(id) {
+            const l = lessons.find(x => x.id === id);
+            if (l && l.invoiced) {
+                showToast("Diese Fahrstunde steht bereits auf Rechnung " + l.invoiced + " und kann nicht gelöscht werden. Bitte die Rechnung stornieren, falls die Stunde falsch ist.");
+                return;
+            }
             updateActive({ drivenLessons: lessons.filter(l => l.id !== id) });
         }
         function addPayment() {
