@@ -1448,7 +1448,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.45";
+const APP_VERSION = "1.164.46";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1569,6 +1569,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.46", date: "August 2026", changes: [
+            "Fahrtenbuch/Termin-Verknüpfung gehärtet: Das Rückgängig-Machen eines gelöschten Termins vergab intern zwangsläufig eine neue Termin-ID - ein bereits dafür angelegter Fahrtenbuch- oder Tagebuch-Eintrag verlor damit seinen Bezug und der wiederhergestellte Termin wurde erneut zur Erfassung vorgeschlagen (Doppel-Eintrag-Gefahr), jetzt zieht die Verknüpfung automatisch mit um. \"Fahrstunde anlegen\" für einen Termin ließ sich beliebig oft antippen und legte dann mehrere Tagebuch-Einträge für denselben Termin an - öffnet jetzt bei erneutem Antippen den bereits vorhandenen Eintrag. Eine nachträglich korrigierte Terminart (z.B. ÜST zu Überland) wurde nicht mehr in einen bereits erfassten Fahrtenbuch-Eintrag übernommen, wodurch die Sonderfahrten-Bilanz mit der alten Art weiterrechnete - wird jetzt automatisch nachgezogen",
+        ] },
     { v: "1.164.45", date: "August 2026", changes: [
             "Einen Schüler löschen war schon während einer laufenden Streckenaufzeichnung gesperrt, während einer laufenden Prüfungssimulation oder eines Schaltkompetenz-Tests aber nicht - jetzt ebenfalls gesperrt, mit Hinweis, zuerst abzuschließen. KI-Schnellzuordnung in der Prüfungssimulation: eine verspätete Antwort einer ersten Anfrage konnte das Ergebnis einer zweiten, bereits laufenden Anfrage überschreiben (z.B. nach Zurück und erneutem Anfordern) - jetzt zählt nur noch die Antwort der jeweils aktuellsten Anfrage",
         ] },
@@ -8872,6 +8875,37 @@ function App() {
         });
         scheduleSave(next);
     }, [uid, scheduleSave]);
+    // Ersetzt überall dort, wo eine Termin-ID als apptId gespeichert wurde (Fahrtenbuch-Einträge,
+    // Tagebuch-Einträge, übersprungene Termine), die alte durch eine neue ID. Nötig, weil ein per
+    // Undo wiederhergestellter Termin über dbInsertAppt() zwangsläufig eine NEUE Datenbank-ID
+    // bekommt (Postgres vergibt sie beim Insert neu) - ohne dieses Nachziehen würden bereits
+    // erfasste Einträge auf eine nicht mehr existierende ID zeigen und der wiederhergestellte
+    // Termin erneut zur Bestätigung vorgeschlagen (Doppel-Eintrag-Gefahr).
+    const relinkApptId = useCallback((oldId, newId) => {
+        setStudents(prev => {
+            let changed = false;
+            const next = (prev || []).map(stu => {
+                const hasDriven = (stu.drivenLessons || []).some(l => l.apptId === oldId);
+                const hasLessons = (stu.lessons || []).some(l => l.apptId === oldId);
+                const hasDismissed = (stu.dismissedAppts || []).indexOf(oldId) >= 0;
+                if (!hasDriven && !hasLessons && !hasDismissed)
+                    return stu;
+                changed = true;
+                const patched = { ...stu };
+                if (hasDriven)
+                    patched.drivenLessons = stu.drivenLessons.map(l => l.apptId === oldId ? { ...l, apptId: newId } : l);
+                if (hasLessons)
+                    patched.lessons = stu.lessons.map(l => l.apptId === oldId ? { ...l, apptId: newId } : l);
+                if (hasDismissed)
+                    patched.dismissedAppts = stu.dismissedAppts.map(x => x === oldId ? newId : x);
+                scheduleSave(patched);
+                return patched;
+            });
+            if (changed && uid)
+                saveCache(uid, next);
+            return changed ? next : prev;
+        });
+    }, [uid, scheduleSave]);
     // Eine vergangene Fahrstunde bestätigen: Dauer übernehmen und als gefahrene Stunde speichern
     function confirmPastLesson(appt, minutes) {
         const sid = appt._matchedStudentId || appt.student_id;
@@ -10957,8 +10991,19 @@ function App() {
             showToast("Der Schüler dieses Termins ist nicht in deiner Liste.");
             return;
         }
+        // Verhindert Dubletten, wenn "Fahrstunde anlegen" für denselben Termin mehrfach
+        // angetippt wird (z.B. versehentlicher Doppeltap) - statt eines zweiten, leeren
+        // Tagebuch-Eintrags wird der bereits vorhandene geöffnet.
+        const existing = appt.id && (stu.lessons || []).find(l => l.apptId === appt.id);
+        if (existing) {
+            setActiveId(stu.id);
+            setOpenLesson(existing.id);
+            setView("tagebuch");
+            showToast("Für diesen Termin gibt es bereits einen Fahrtenbuch-Eintrag.");
+            return;
+        }
         const date = ymd(appt.start_at);
-        const lesson = { id: uniqueId("ls"), date, thema: "", gut: "", schlecht: "", route: null, ratings: {}, note: "" };
+        const lesson = { id: uniqueId("ls"), date, thema: "", gut: "", schlecht: "", route: null, ratings: {}, note: "", apptId: appt.id || null };
         const lessons = [lesson, ...(stu.lessons || [])];
         writeStudent({ ...stu, lessons });
         setActiveId(stu.id);
@@ -11243,6 +11288,17 @@ function App() {
         const current = (appts || []).find(a => a.id === id);
         if (patch.start_at && current && patch.start_at !== current.start_at && current.reminded_at)
             patch = { ...patch, reminded_at: null };
+        // Wird die Terminart nachträglich korrigiert (z.B. ÜST -> Überland) und für diesen
+        // Termin existiert bereits ein Fahrtenbuch-Eintrag (confirmPastLesson kopiert appt.art
+        // nur EINMALIG beim Anlegen), muss die Art dort nachgezogen werden - sonst rechnet
+        // sonderfahrtenBilanz() weiter mit der veralteten, längst korrigierten Art.
+        if (patch.art !== undefined && current && (patch.art || "ÜST") !== (current.art || "ÜST")) {
+            (students || []).forEach(stu => {
+                if (!(stu.drivenLessons || []).some(l => l.apptId === id))
+                    return;
+                writeStudent({ ...stu, drivenLessons: stu.drivenLessons.map(l => l.apptId === id ? { ...l, art: patch.art || "ÜST" } : l) });
+            });
+        }
         setAppts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
         try {
             await dbUpdateAppt(id, patch);
@@ -11293,6 +11349,10 @@ function App() {
                     });
                     apptDeletedRef.current.delete(id);
                     setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
+                    // dbInsertAppt vergibt zwangsläufig eine neue ID (siehe dbInsertAppt) - alle
+                    // Fahrtenbuch-/Tagebuch-Einträge, die noch auf die alte ID zeigen, müssen mitziehen.
+                    if (created && created.id !== id)
+                        relinkApptId(id, created.id);
                 }
                 catch (e) {
                     // dbInsertAppt wirft bei Fehlern statt null zurückzugeben - ohne dieses
