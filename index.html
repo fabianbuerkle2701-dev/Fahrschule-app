@@ -1443,7 +1443,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.19";
+const APP_VERSION = "1.164.20";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1564,6 +1564,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.164.20", date: "August 2026", changes: [
+            "Fehlerbehebung Streckenaufzeichnung: ein einzelner ungenauer GPS-Punkt (typisch beim Wiedereinsetzen des Signals nach Tunnel/Tiefgarage) konnte die aufgezeichnete Strecke dauerhaft verfälschen - stark ungenaue Punkte werden jetzt verworfen. Bei schwachem/fehlendem Signal erscheint jetzt ein Hinweis, statt dass die Aufzeichnung unbemerkt lückenhaft weiterläuft",
+            "Fehlerbehebung: Löschen der gerade aufgezeichneten Fahrstunde oder des gerade aufgezeichneten Schülers stoppte die Streckenaufzeichnung nicht - die aufgenommene Strecke ging beim späteren \"Speichern\" kommentarlos verloren. Löschen ist jetzt gesperrt, solange dafür eine Aufzeichnung läuft; ein fehlgeschlagenes Speichern (weil Schüler/Stunde inzwischen doch nicht mehr existiert) zeigt jetzt eine klare Meldung statt stillschweigend nichts zu tun",
+            "Fehlerbehebung: verließ die App die Seite während einer aktiven Hintergrund-GPS-Aufzeichnung durch einen unabhängigen Fehler, blieb der native GPS-Watcher unbegrenzt aktiv (inkl. dauerhafter Hintergrund-Benachrichtigung), weil nur der Browser-GPS-Watcher beim Aufräumen berücksichtigt wurde",
+        ] },
     { v: "1.164.19", date: "August 2026", changes: [
             "Fehlerbehebung Personalunterlagen: wechselte man in der Verwaltung schnell zwischen zwei Fahrlehrern, konnte eine verzögert eintreffende Antwort die Dateiliste des inzwischen ausgewählten Fahrlehrers mit der eines anderen überschreiben",
             "Fehlerbehebung Video-Bibliothek: Videos, die ein Fahrlehrer vor dem Beitritt zu einer Fahrschule hochgeladen hatte, verschwanden für die Fahrschüler sobald er später einer Fahrschule beitrat. Löschte ein Kollege ein schulweit geteiltes Video, wurde außerdem nur der Eintrag entfernt, die Datei blieb dauerhaft verwaist im Speicher liegen. Beide serverseitig behoben; zusätzlich eine bisher nur clientseitig geprüfte Größengrenze (300 MB) jetzt auch serverseitig durchgesetzt",
@@ -7025,6 +7030,7 @@ function App() {
     const recLastUiRef = useRef(0);
     const recWakeLockRef = useRef(null); // hält den Bildschirm während der Aufzeichnung wach
     const recNativeWatcherIdRef = useRef(null); // Watcher-ID des nativen Hintergrund-GPS-Plugins (nur in der App, nicht im Browser)
+    const recSignalWarnRef = useRef(0); // Zeitpunkt der letzten "GPS-Signal schwach"-Meldung, gegen Toast-Spam bei anhaltendem Signalverlust
     const [recSession, setRecSession] = useState(null); // null | {studentId,lessonId,studentName}
     const [recUi, setRecUi] = useState({ dist: 0, dur: 0, n: 0, tick: 0 });
     // Prüfungssimulation: läuft wie die Live-Aufzeichnung als eigene Sitzung, die beim Navigieren
@@ -7083,7 +7089,23 @@ function App() {
             navigator.geolocation.clearWatch(recWatchRef.current);
         }
         catch (_) { }
-    } if (recWakeLockRef.current) {
+    }
+    // Nativer Hintergrund-GPS-Watcher fehlte hier bisher (nur stopRecording() räumte ihn auf) -
+    // unmountet die App-Komponente während einer aktiven nativen Aufzeichnung (z.B. weil die
+    // ErrorBoundary nach einem unabhängigen Render-Fehler den Baum abräumt), lief das GPS-Tracking
+    // samt dauerhafter Hintergrund-Benachrichtigung unbegrenzt weiter, ohne dass danach noch eine
+    // Referenz zum Stoppen existierte.
+    if (recNativeWatcherIdRef.current != null) {
+        const nativeGeo = nativeBackgroundGeo();
+        if (nativeGeo) {
+            try {
+                nativeGeo.removeWatcher({ id: recNativeWatcherIdRef.current });
+            }
+            catch (_) { }
+        }
+        recNativeWatcherIdRef.current = null;
+    }
+    if (recWakeLockRef.current) {
         try {
             recWakeLockRef.current.release();
         }
@@ -9916,6 +9938,10 @@ function App() {
         setUndo(null);
     }
     async function removeStudent(s) {
+        if (recSession && recSession.studentId === s.id) {
+            showToast("Für " + dispName(s) + " läuft gerade eine Streckenaufzeichnung. Bitte zuerst stoppen (und speichern), bevor der Schüler gelöscht wird.");
+            return;
+        }
         if (!await askConfirm({ message: dispName(s) + " wirklich löschen?" }))
             return;
         // Schüler mit Rechnungen dürfen aus Revisionssicherheitsgründen nicht gelöscht werden
@@ -10076,7 +10102,14 @@ function App() {
             localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, pts: recPtsRef.current }));
         }
         catch (_) { }
-        const onPoint = (lat, lng) => {
+        // accuracy (Meter, falls vom Gerät geliefert) wird geprüft, bevor ein Punkt übernommen
+        // wird - ohne diese Prüfung erzeugt ein einzelner ungenauer Fix (typisch beim
+        // Wiedereinsetzen des Signals nach Tunnel/Tiefgarage/dichter Bebauung, teils hunderte
+        // Meter Fehler) einen dauerhaften Ausreißer in der aufgezeichneten Strecke, da
+        // rmapPathLen() die Distanz einfach als Summe aller Segmente berechnet.
+        const onPoint = (lat, lng, accuracy) => {
+            if (accuracy != null && accuracy > 50)
+                return;
             const p = [lat, lng], arr = recPtsRef.current;
             if (arr.length === 0 || rmapDist(arr[arr.length - 1], p) > 8) {
                 arr.push(p);
@@ -10108,17 +10141,35 @@ function App() {
                         showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
                         stopRecording(false);
                     }
+                    else {
+                        // z.B. Signalverlust - Aufzeichnung läuft weiter, aber der Nutzer soll es
+                        // merken, statt erst hinterher eine lückenhafte Karte vorzufinden. Gegen
+                        // Toast-Spam gedrosselt, da der Fehler bei anhaltendem Signalverlust
+                        // wiederholt feuern kann.
+                        const now = Date.now();
+                        if (now - recSignalWarnRef.current > 30000) {
+                            recSignalWarnRef.current = now;
+                            showToast("GPS-Signal gerade schwach oder nicht verfügbar - Aufzeichnung läuft weiter.");
+                        }
+                    }
                     return;
                 }
                 if (location)
-                    onPoint(location.latitude, location.longitude);
+                    onPoint(location.latitude, location.longitude, location.accuracy);
             }).then(id => { recNativeWatcherIdRef.current = id; });
         }
         else {
-            recWatchRef.current = navigator.geolocation.watchPosition(pos => onPoint(pos.coords.latitude, pos.coords.longitude), err => {
+            recWatchRef.current = navigator.geolocation.watchPosition(pos => onPoint(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy), err => {
                 if (err && err.code === 1) {
                     showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
                     stopRecording(false);
+                }
+                else if (err) {
+                    const now = Date.now();
+                    if (now - recSignalWarnRef.current > 30000) {
+                        recSignalWarnRef.current = now;
+                        showToast("GPS-Signal gerade schwach oder nicht verfügbar - Aufzeichnung läuft weiter.");
+                    }
                 }
             }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
         }
@@ -10160,8 +10211,14 @@ function App() {
         if (save && sess && pts.length >= 2) {
             const route = { pts, dist: Math.round(rmapPathLen(pts)), dur: Math.round((Date.now() - recStartRef.current) / 1000), recordedAt: new Date().toISOString() };
             const stu = (students || []).find(s => s.id === sess.studentId);
-            if (stu) {
-                const lessons = (stu.lessons || []).map(l => l.id === sess.lessonId ? { ...l, route } : l);
+            // Ohne diese Prüfung wurde die aufgezeichnete Strecke lautlos verworfen, wenn der
+            // Schüler oder die Fahrstunde während der laufenden Aufzeichnung gelöscht wurde
+            // (z.B. versehentlich) - der Nutzer tippte "Speichern" und dachte, es habe geklappt.
+            if (!stu || !(stu.lessons || []).some(l => l.id === sess.lessonId)) {
+                showToast("Strecke konnte nicht gespeichert werden - Fahrstunde oder Schüler existiert nicht mehr.");
+            }
+            else {
+                const lessons = stu.lessons.map(l => l.id === sess.lessonId ? { ...l, route } : l);
                 writeStudent({ ...stu, lessons });
             }
         }
@@ -10478,6 +10535,10 @@ function App() {
         updateActive({ lessons });
     }
     function deleteLesson(id) {
+        if (recSession && recSession.lessonId === id) {
+            showToast("Für diese Fahrstunde läuft gerade eine Streckenaufzeichnung. Bitte zuerst stoppen (und speichern), bevor der Eintrag gelöscht wird.");
+            return;
+        }
         const lessons = (active.lessons || []).filter(l => l.id !== id);
         updateActive({ lessons });
     }
