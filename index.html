@@ -108,6 +108,12 @@
 
   .shell{max-width:560px;margin:0 auto;background:var(--paper);min-height:100vh;position:relative;
     box-shadow:0 0 60px rgba(0,0,0,.45)}
+  /* Wrapper um genau den Seiteninhalt (nicht Topbar/Tabbar/Modals) - wird von der Zurück-Wisch-
+     Geste UND vom Screen-/Reiter-Wechsel-Einblendeffekt per ref direkt (ohne setState) animiert,
+     für ruckelfreies 1:1-Mitziehen. Bewusst keine CSS-@keyframes/animation-Eigenschaft auf dieser
+     Klasse: eine laufende/gefüllte CSS-Animation überschreibt denselben inline gesetzten
+     transform-Wert (Kaskade), das würde sich mit dem Wisch-Dauerdrag beißen. */
+  .view-slide{will-change:transform,opacity}
   /* ── Topbar ──
      Redesign 2026: folgt jetzt wirklich dem Theme (vorheriger Code behauptete das im
      Kommentar, war aber weiterhin fest dunkel in beiden Themes fest verdrahtet - stand
@@ -1455,7 +1461,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.165.5";
+const APP_VERSION = "1.165.6";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1576,6 +1582,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.165.6", date: "August 2026", changes: [
+            "Zurück-Wisch-Geste jetzt mit smoother Animation: der Bildschirminhalt folgt dem Finger beim Ziehen live mit statt erst am Ende umzuspringen, schnellt bei einem zu kurzen Wisch sanft zurück, und gleitet bei einem übernommenen Wisch komplett aus dem Bild, bevor der neue Screen sich einblendet. Dasselbe leichte Einblenden gibt es jetzt auch beim normalen Antippen von Reitern",
+        ] },
     { v: "1.165.5", date: "August 2026", changes: [
             "Zurück-Wisch-Geste läuft jetzt nie mehr ins Leere: vorher endete sie auf den Haupt-Reitern (Schülerliste, Einstellungen, Kalender...) ohne Wirkung, jetzt führt ein weiterer Wisch von dort zur Startseite. So kommt man aus jedem noch so tief verschachtelten Untermenü per Wischen komplett zur Startseite zurück",
         ] },
@@ -8128,6 +8137,33 @@ function App() {
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
     }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    const viewSlideRef = useRef(null);
+    // Leichtes Einblenden bei jedem Screen-/Reiter-Wechsel (Tap UND Wisch-Geste treffen das
+    // gleichermaßen, da beide letztlich view/studentTab/settingsScreen ändern) - bewusst
+    // imperativ statt per CSS-Klasse/@keyframes, da eine laufende CSS-Animation denselben
+    // inline transform-Wert überschreiben würde, den die Wisch-Geste fürs Live-Mitziehen braucht
+    // (siehe .view-slide-Kommentar oben). Setzt den Startzustand synchron vor dem Paint (sonst
+    // wäre kurz die alte Position/der alte Inhalt sichtbar), der doppelte rAF sorgt dafür, dass
+    // der Browser den Startzustand tatsächlich einmal rendert, bevor der Übergang zum Zielwert
+    // losläuft - sonst fasst er beide Style-Änderungen im selben Frame zusammen und es gibt
+    // keinen sichtbaren Übergang.
+    React.useLayoutEffect(() => {
+        const el = viewSlideRef.current;
+        if (!el) return;
+        el.style.transition = "none";
+        el.style.opacity = "0";
+        el.style.transform = "translateX(16px)";
+        const raf1 = requestAnimationFrame(() => {
+            const raf2 = requestAnimationFrame(() => {
+                if (!viewSlideRef.current) return;
+                viewSlideRef.current.style.transition = "opacity .22s cubic-bezier(.22,.8,.32,1), transform .22s cubic-bezier(.22,.8,.32,1)";
+                viewSlideRef.current.style.opacity = "1";
+                viewSlideRef.current.style.transform = "translateX(0)";
+            });
+            el._rafEnter2 = raf2;
+        });
+        return () => { cancelAnimationFrame(raf1); if (el._rafEnter2) cancelAnimationFrame(el._rafEnter2); };
+    }, [view, studentTab, settingsScreen]);
     // Zurück-Wisch-Geste (iOS-typisch: vom linken Bildschirmrand nach rechts ziehen). Rein
     // clientseitig per Touch-Events statt über history.pushState/die native WKWebView-Edge-Geste,
     // damit es identisch in nativer App und Browser funktioniert und ohne natives Rebuild deploybar
@@ -8136,34 +8172,65 @@ function App() {
     // dann den Schüler zurück zur Liste. Ist auch das nicht der Fall, geht es von JEDEM Reiter
     // (Liste/Kalender/Einstellungen/…) zur Startseite - die Geste soll nie ins Leere laufen, egal
     // wie tief man verschachtelt ist, bis man eben auf der Startseite selbst ankommt.
+    // Der Bildschirminhalt (.view-slide, per viewSlideRef) folgt dem Finger währenddessen 1:1 -
+    // per direkter DOM-Manipulation statt setState, damit touchmove (feuert sehr häufig) nicht bei
+    // jedem Frame den ganzen App-Baum neu rendert. Erst am Ende (Loslassen) gibt es einen echten
+    // React-State-Wechsel - entweder gar keinen (abgebrochen: Inhalt schnellt zurück) oder nachdem
+    // der Inhalt fertig aus dem Bild gezogen ist (übernommen: erst dann die Navigation ausführen,
+    // der neue Screen blendet sich dank .view-slide-Keyframe-Animation beim Einhängen selbst ein).
     useEffect(() => {
-        let startX = null, startY = null, tracking = false;
         const EDGE_ZONE = 32, THRESHOLD = 55;
+        const drag = { startX: null, startY: null, tracking: false };
         function onStart(e) {
             const t = e.touches[0];
-            tracking = t.clientX <= EDGE_ZONE;
-            startX = t.clientX;
-            startY = t.clientY;
+            drag.tracking = t.clientX <= EDGE_ZONE;
+            drag.startX = t.clientX;
+            drag.startY = t.clientY;
+        }
+        function onMove(e) {
+            if (!drag.tracking) return;
+            const t = e.touches[0];
+            const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
+            if (Math.abs(dy) > Math.abs(dx) + 10) { drag.tracking = false; return; }
+            const el = viewSlideRef.current;
+            if (el) el.style.transform = "translateX(" + Math.max(0, dx) + "px)";
+        }
+        function settle(toPx, thenRun) {
+            const el = viewSlideRef.current;
+            if (!el) { if (thenRun) thenRun(); return; }
+            el.style.transition = "transform .22s cubic-bezier(.22,.8,.32,1)";
+            el.style.transform = "translateX(" + toPx + "px)";
+            const onDone = () => {
+                el.removeEventListener("transitionend", onDone);
+                el.style.transition = "";
+                if (thenRun) thenRun();
+            };
+            el.addEventListener("transitionend", onDone);
         }
         function onEnd(e) {
-            if (!tracking || startX == null) { tracking = false; return; }
-            tracking = false;
+            if (!drag.tracking || drag.startX == null) { drag.tracking = false; return; }
+            drag.tracking = false;
             const t = e.changedTouches[0];
-            const dx = t.clientX - startX, dy = t.clientY - startY;
-            if (dx < THRESHOLD || Math.abs(dy) > Math.abs(dx)) return;
-            if (closeTopOverlay()) return;
+            const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
+            if (dx < THRESHOLD || Math.abs(dy) > Math.abs(dx)) { settle(0); return; }
+            if (closeTopOverlay()) { settle(0); return; }
             const activeNow = (students || []).find(s => s.id === activeId) || (students || [])[0] || null;
-            if ((view === "daten" || view === "adk") && activeNow) {
-                if (view === "daten" && studentTab !== "profil") setStudentTab("profil");
-                else setView("liste");
-                return;
-            }
-            if (view !== "home") setView("home");
+            if (!((view === "daten" || view === "adk") && activeNow) && view === "home") { settle(0); return; }
+            settle(window.innerWidth, () => {
+                if ((view === "daten" || view === "adk") && activeNow) {
+                    if (view === "daten" && studentTab !== "profil") setStudentTab("profil");
+                    else setView("liste");
+                    return;
+                }
+                if (view !== "home") setView("home");
+            });
         }
         document.addEventListener("touchstart", onStart, { passive: true });
+        document.addEventListener("touchmove", onMove, { passive: true });
         document.addEventListener("touchend", onEnd, { passive: true });
         return () => {
             document.removeEventListener("touchstart", onStart);
+            document.removeEventListener("touchmove", onMove);
             document.removeEventListener("touchend", onEnd);
         };
     }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
@@ -19472,6 +19539,7 @@ function App() {
                             React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 } },
                                 React.createElement(WeatherWidget, { city: myCity, weather: weather }),
                                 React.createElement("div", { className: "save-pill" }, saved ? "✓ Gespeichert" : "Speichert…"))))),
+                React.createElement("div", { className: "view-slide", ref: viewSlideRef },
                 // Hinweiszeile statt Signalkasten: dieser Banner erscheint auf jedem Screen und
                 // stand vorher als amber umrandete Karte mit rotem Vollton-Icon lauter da als der
                 // eigentliche Seiteninhalt \u2013 obwohl die Tab-Leiste dieselbe Zahl schon als Badge zeigt.
@@ -19509,6 +19577,7 @@ function App() {
                 view === "schaltkompetenzliste" && active && renderSchaltkompetenzUebersicht(),
                 view === "schaltkompetenz" && renderSchaltkompetenz(),
                 view === "daten" && active && renderDaten(),
+                ),
                 tabMenu && React.createElement("div", { onClick: () => setTabMenu(null), className: "modal-overlay", style: { position: "fixed", inset: 0, zIndex: 46 } }),
                 cmdOpen && renderCommandPalette(),
                 React.createElement("button", { onClick: () => setAssistant({ open: true, busy: false, error: "", input: "", proposal: null }), "aria-label": "KI-Helfer", className: "fab-assistant", style: { position: "fixed", right: 16, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 47,
