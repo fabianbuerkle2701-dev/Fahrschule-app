@@ -110,10 +110,13 @@
     box-shadow:0 0 60px rgba(0,0,0,.45)}
   /* Wrapper um genau den Seiteninhalt (nicht Topbar/Tabbar/Modals) - wird von der Zurück-Wisch-
      Geste UND vom Screen-/Reiter-Wechsel-Einblendeffekt per ref direkt (ohne setState) animiert,
-     für ruckelfreies 1:1-Mitziehen. Bewusst keine CSS-@keyframes/animation-Eigenschaft auf dieser
-     Klasse: eine laufende/gefüllte CSS-Animation überschreibt denselben inline gesetzten
-     transform-Wert (Kaskade), das würde sich mit dem Wisch-Dauerdrag beißen. */
-  .view-slide{will-change:transform,opacity}
+     für ruckelfreies 1:1-Mitziehen. Bewusst keine CSS-Klasse mit @keyframes/animation oder
+     dauerhaftem will-change hier: eine laufende/gefüllte CSS-Animation überschreibt denselben
+     inline gesetzten transform-Wert (Kaskade) und würde sich mit dem Wisch-Dauerdrag beißen, und
+     dauerhaftes will-change zwingt WKWebView/Safari, für praktisch jeden Screen dauerhaft eine
+     eigene Compositor-Ebene für den kompletten Seiteninhalt offen zu halten, was auf iOS zu leicht
+     "schwimmendem"/nicht ganz scharfem Rendering führen kann. will-change wird stattdessen unten
+     nur direkt vor einer tatsächlichen Animation gesetzt und danach wieder entfernt. */
   /* ── Topbar ──
      Redesign 2026: folgt jetzt wirklich dem Theme (vorheriger Code behauptete das im
      Kommentar, war aber weiterhin fest dunkel in beiden Themes fest verdrahtet - stand
@@ -1461,7 +1464,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.165.6";
+const APP_VERSION = "1.165.7";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1582,6 +1585,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.165.7", date: "August 2026", changes: [
+            "Fehlerbehebung: die neue Screen-Übergangsanimation (v1.165.6) ließ nach jedem Wechsel ein transform auf dem Seiteninhalt stehen (statt es sauber zu entfernen) - dadurch wirkte die ganze App leicht \"schwimmend\", da jeder transform-Wert ungleich none betroffene Elemente zum Bezugsrahmen für darin verschachtelte fest positionierte Elemente macht. Wird nach jeder Animation jetzt vollständig zurückgesetzt, außerdem läuft will-change nur noch während der eigentlichen Animation statt dauerhaft",
+        ] },
     { v: "1.165.6", date: "August 2026", changes: [
             "Zurück-Wisch-Geste jetzt mit smoother Animation: der Bildschirminhalt folgt dem Finger beim Ziehen live mit statt erst am Ende umzuspringen, schnellt bei einem zu kurzen Wisch sanft zurück, und gleitet bei einem übernommenen Wisch komplett aus dem Bild, bevor der neue Screen sich einblendet. Dasselbe leichte Einblenden gibt es jetzt auch beim normalen Antippen von Reitern",
         ] },
@@ -8150,12 +8156,27 @@ function App() {
     React.useLayoutEffect(() => {
         const el = viewSlideRef.current;
         if (!el) return;
+        el.style.willChange = "transform, opacity";
         el.style.transition = "none";
         el.style.opacity = "0";
         el.style.transform = "translateX(16px)";
         const raf1 = requestAnimationFrame(() => {
             const raf2 = requestAnimationFrame(() => {
                 if (!viewSlideRef.current) return;
+                const onDone = () => {
+                    const cur = viewSlideRef.current;
+                    if (!cur) return;
+                    // transform komplett entfernen statt nur auf translateX(0) zu lassen: JEDER
+                    // transform-Wert != none macht das Element zum containing block für darin
+                    // verschachtelte position:fixed-Kinder (z.B. Screen-eigene FABs) - dauerhaft
+                    // gesetzt, driftet so etwas leicht mit statt fix am Viewport zu kleben
+                    // ("die App schwimmt"). Nur während der Animation selbst gebraucht.
+                    cur.style.willChange = "auto";
+                    cur.style.transition = "";
+                    cur.style.opacity = "";
+                    cur.style.transform = "";
+                };
+                viewSlideRef.current.addEventListener("transitionend", onDone, { once: true });
                 viewSlideRef.current.style.transition = "opacity .22s cubic-bezier(.22,.8,.32,1), transform .22s cubic-bezier(.22,.8,.32,1)";
                 viewSlideRef.current.style.opacity = "1";
                 viewSlideRef.current.style.transform = "translateX(0)";
@@ -8193,16 +8214,27 @@ function App() {
             const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
             if (Math.abs(dy) > Math.abs(dx) + 10) { drag.tracking = false; return; }
             const el = viewSlideRef.current;
-            if (el) el.style.transform = "translateX(" + Math.max(0, dx) + "px)";
+            if (el) {
+                if (el.style.willChange !== "transform") el.style.willChange = "transform";
+                el.style.transform = "translateX(" + Math.max(0, dx) + "px)";
+            }
         }
         function settle(toPx, thenRun) {
             const el = viewSlideRef.current;
             if (!el) { if (thenRun) thenRun(); return; }
+            el.style.willChange = "transform";
             el.style.transition = "transform .22s cubic-bezier(.22,.8,.32,1)";
             el.style.transform = "translateX(" + toPx + "px)";
             const onDone = () => {
                 el.removeEventListener("transitionend", onDone);
+                // Bei Übernahme (commit) überschreibt der gleich folgende setView()/setStudentTab()
+                // ohnehin sofort wieder den Einblendeffekt oben (der denselben Ref zurücksetzt) -
+                // hier trotzdem vollständig aufräumen statt nur bei toPx=0, siehe will-change-
+                // Kommentar oben: ein liegen gelassenes transform macht das Element sonst dauerhaft
+                // zum containing block für darin verschachtelte position:fixed-Kinder.
                 el.style.transition = "";
+                el.style.willChange = "auto";
+                el.style.transform = "";
                 if (thenRun) thenRun();
             };
             el.addEventListener("transitionend", onDone);
