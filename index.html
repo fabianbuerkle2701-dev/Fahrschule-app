@@ -1452,7 +1452,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.164.52";
+const APP_VERSION = "1.165.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1573,6 +1573,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.165.0", date: "August 2026", changes: [
+            "Schülerdaten überarbeitet: \"Telefon\" ist jetzt \"Handynummer\", dazu ein neues Feld \"Festnetz\" sowie \"Anmeldedatum\" (setzt das bisher nie befüllte Feld für den Ausbildungsbeginn, das u.a. für die Reform-Übergangsregel und den Ausdruck \"Ausbildungsnachweis\" wichtig ist). \"Theorie bestanden\" ist jetzt kein Häkchen mehr, sondern ein Datum (\"Theorie bestanden am\") - wirkt sich auch auf den Führerschein-Antrag-Reiter aus, wo derselbe Wert jetzt korrekt mit Datum angezeigt und bearbeitet werden kann. Die Felder \"Lenkrad (Pos.)\" und \"Kopfstütze (Pos.)\" wurden entfernt (samt Druck- und KI-Übergabe-Feldern), ebenso die Karte \"Nächster Termin\" im Basislager - sie duplizierte nur noch, was der echte Kalender längst zuverlässiger zeigt. Der Schüler-Screenshot-Import trägt Handynummer, Festnetz, Anmeldedatum und Theorie-Datum jetzt direkt in diese neuen Felder ein statt sie nur als Text in die Bemerkungen zu schreiben",
+        ] },
     { v: "1.164.52", date: "August 2026", changes: [
             "Datenverlust bei geteilten Schülern behoben: Bearbeiteten zwei Fahrlehrer denselben mit ihnen geteilten Schüler zeitnah (z.B. ADK-Haken und Schaltkompetenz-Test kurz hintereinander), konnte der zuletzt speichernde Fahrlehrer die Änderung des anderen kommentarlos überschreiben, weil die Schülerliste nur einmal beim Login geladen wird und jede Speicherung bisher den kompletten (potenziell veralteten) lokalen Datensatz schrieb. Beim Speichern eines geteilten Schülers wird jetzt zuerst der aktuelle Serverstand nachgeladen und nur die tatsächlich selbst geänderten Felder darübergelegt - alle übrigen Felder (inkl. gerade erst vom Kollegen gespeicherte) bleiben erhalten",
         ] },
@@ -6543,9 +6546,9 @@ function Auth() {
     `));
 }
 /* ════════ App ════════ */
-const newStudent = () => ({ name: "", vorname: "", geb: "", tel: "", anschrift: "",
-    sehhilfe: false, theorie: false, lenkrad: "", kopfstuetze: "", bemerkungen: "", lastNote: "",
-    manualHours: 0, archived: false, termin: "", terminLabel: "", klasse: "",
+const newStudent = () => ({ name: "", vorname: "", geb: "", tel: "", festnetz: "", anschrift: "",
+    ausbildungsbeginn: "", sehhilfe: false, theorie: "", bemerkungen: "", lastNote: "",
+    manualHours: 0, archived: false, klasse: "",
     items: {}, strecken: {}, streckenNotes: {}, customCounts: {}, lessons: [] });
 // Übersetzungen für den öffentlichen Fahrschüler-Bereich (StudentArea). Bewusst auf eine
 // überschaubare Sprachauswahl begrenzt statt aller Sprachen, die Konkurrenzapps bewerben -
@@ -10035,26 +10038,21 @@ function App() {
         draft.vorname = d.vorname || "";
         draft.name = d.name || "";
         draft.geb = deToIso(d.geburtstag);
-        draft.tel = d.handy || d.festnetz || "";
+        draft.tel = d.handy || "";
+        draft.festnetz = d.festnetz || "";
+        draft.ausbildungsbeginn = deToIso(d.anmeldedatum);
+        draft.theorie = deToIso(d.theorie_bestanden);
         draft.anschrift = d.adresse || "";
         if (d.sehhilfe)
             draft.sehhilfe = true;
-        if (d.theorie_bestanden)
-            draft.theorie = true;
-        // Telefon, Festnetz und E-Mail zusätzlich in den Bemerkungen festhalten
+        // E-Mail hat kein eigenes Feld im Schüler-Datenmodell, bleibt daher als Notiz erhalten.
+        // Handy/Festnetz/Anmeldedatum/Theorie bestanden haben jetzt eigene Felder (siehe oben) und
+        // werden nicht mehr zusätzlich dupliziert.
         const extra = [];
-        if (d.handy)
-            extra.push("Handy: " + d.handy);
-        if (d.festnetz)
-            extra.push("Festnetz: " + d.festnetz);
         if (d.email)
             extra.push("E-Mail: " + d.email);
-        if (d.anmeldedatum)
-            extra.push("Anmeldung: " + d.anmeldedatum);
         if (d.klasse)
             extra.push("Klasse: " + d.klasse);
-        if (d.theorie_bestanden)
-            extra.push("Theorie bestanden: " + d.theorie_bestanden);
         if (extra.length)
             draft.bemerkungen = extra.join("\n");
         // Bisher gefahrene Fahrstunden als Startwert
@@ -10219,8 +10217,6 @@ function App() {
             gefahreneMinuten: (stu.drivenLessons || []).reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0),
             besonderheiten: {
                 sehhilfe: !!stu.sehhilfe,
-                lenkradPosition: stu.lenkrad || null,
-                kopfstuetzePosition: stu.kopfstuetze || null,
                 bemerkungen: stu.bemerkungen || "",
                 letzteNotizZumStand: stu.lastNote || "",
                 streckenNotizen,
@@ -12020,10 +12016,7 @@ function App() {
                     fmtD(nextAppt.start_at),
                     " \u00B7 ",
                     hm(nextAppt.start_at),
-                    nextAppt.status === "pending" && React.createElement("span", { style: { fontWeight: 600, color: "var(--muted)" } }, " \u00B7 angefragt")),
-                s.termin && React.createElement("div", { className: "stud-meta", style: { marginTop: 1, color: "var(--orange-deep)", fontWeight: 600 } },
-                    s.terminLabel ? s.terminLabel + ": " : "",
-                    fmtD(s.termin))),
+                    nextAppt.status === "pending" && React.createElement("span", { style: { fontWeight: 600, color: "var(--muted)" } }, " \u00B7 angefragt"))),
             React.createElement(Ring, { pct: total, color: amp.farbe }),
             s._isMine && React.createElement("span", { className: "del", role: "button", tabIndex: 0, "aria-label": "Sch\u00FCler " + dispName(s) + " entfernen", onClick: (e) => { e.stopPropagation(); removeStudent(s); }, onKeyDown: (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); removeStudent(s); } } }, "\u00D7"));
         // Wischen nach links zeigt Schnellaktionen (Anruf, WhatsApp), wenn eine Nummer hinterlegt ist
@@ -14711,7 +14704,9 @@ function App() {
         const pct = Math.round((doneCount / LICENSE_STEPS.length) * 100);
         function toggleStep(key) {
             if (key === "theorie_bestanden") {
-                updateActive({ theorie: !active.theorie });
+                // active.theorie ist selbst schon das Datum (siehe LICENSE_STEPS-Kommentar) - Toggle
+                // setzt/löscht direkt dieses eine geteilte Feld statt eines eigenen steps-Eintrags.
+                updateActive({ theorie: active.theorie ? "" : ymd(new Date()) });
                 return;
             }
             const cur = steps[key] || {};
@@ -14719,6 +14714,10 @@ function App() {
             updateActive({ licenseSteps: { ...steps, [key]: { done: nowDone, date: nowDone ? (cur.date || ymd(new Date())) : cur.date } } });
         }
         function setStepDate(key, date) {
+            if (key === "theorie_bestanden") {
+                updateActive({ theorie: date });
+                return;
+            }
             const cur = steps[key] || {};
             updateActive({ licenseSteps: { ...steps, [key]: { ...cur, date } } });
         }
@@ -14732,7 +14731,7 @@ function App() {
             React.createElement("div", { className: "card", style: { padding: "4px 14px", marginBottom: 16 } },
                 LICENSE_STEPS.map((st, i) => {
                     const done = licenseStepDone(active, st.key);
-                    const date = (steps[st.key] && steps[st.key].date) || "";
+                    const date = st.key === "theorie_bestanden" ? (active.theorie || "") : ((steps[st.key] && steps[st.key].date) || "");
                     return React.createElement("div", { key: st.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "12px 0", borderBottom: i < LICENSE_STEPS.length - 1 ? "1px solid var(--line)" : "none", flexWrap: "wrap" } },
                         React.createElement("label", { className: "check", style: { flex: 1, minWidth: 180, cursor: "pointer" } },
                             React.createElement("input", { type: "checkbox", checked: done, onChange: () => toggleStep(st.key) }),
@@ -15354,7 +15353,9 @@ function App() {
                 f("vorname", "Vorname"),
                 f("name", "Name"),
                 f("geb", "Geburtsdatum", "date"),
-                f("tel", "Telefon", "tel"),
+                f("ausbildungsbeginn", "Anmeldedatum", "date"),
+                f("tel", "Handynummer", "tel"),
+                f("festnetz", "Festnetz", "tel"),
                 f("anschrift", "Anschrift"),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Führerscheinklasse",
@@ -15374,16 +15375,12 @@ function App() {
                             locations.map(loc => React.createElement("option", { key: loc.id, value: loc.id }, loc.name)))
                         : React.createElement("div", { style: { fontSize: 14, padding: "10px 0", color: "var(--muted)" } },
                             (locations.find(loc => loc.id === active.location_id) || {}).name || "– Kein Standort zugewiesen –")),
-                React.createElement("div", { style: { display: "flex", gap: 10 } },
-                    React.createElement("div", { style: { flex: 1 } }, f("lenkrad", "Lenkrad (Pos.)", "number")),
-                    React.createElement("div", { style: { flex: 1 } }, f("kopfstuetze", "Kopfstütze (Pos.)", "number"))),
-                React.createElement("div", { style: { display: "flex", gap: 20, margin: "6px 2px 16px" } },
-                    React.createElement("label", { className: "check" },
-                        React.createElement("input", { type: "checkbox", checked: !!active.sehhilfe, onChange: e => updateActive({ sehhilfe: e.target.checked }) }),
-                        "Sehhilfe"),
-                    React.createElement("label", { className: "check" },
-                        React.createElement("input", { type: "checkbox", checked: !!active.theorie, onChange: e => updateActive({ theorie: e.target.checked }) }),
-                        "Theorie bestanden")),
+                React.createElement("label", { className: "check", style: { margin: "6px 2px 12px", display: "flex" } },
+                    React.createElement("input", { type: "checkbox", checked: !!active.sehhilfe, onChange: e => updateActive({ sehhilfe: e.target.checked }) }),
+                    "Sehhilfe"),
+                React.createElement("div", { className: "field" },
+                    React.createElement("label", null, "Theorie bestanden am",
+                    React.createElement("input", { type: "date", value: active.theorie || "", onChange: e => updateActive({ theorie: e.target.value }) }))),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Bemerkungen",
                     React.createElement("textarea", { rows: 3, defaultValue: active.bemerkungen || "", onBlur: e => { if (e.target.value !== (active.bemerkungen || ""))
@@ -15440,14 +15437,6 @@ function App() {
                                 React.createElement("label", null, "Empfehlungscode eines Freundes nachtragen",
                                 React.createElement("input", { type: "text", value: referralRedeemCode, onChange: e => setReferralRedeemCode(e.target.value.toUpperCase()), placeholder: "z.B. CLAR482" }))),
                             React.createElement("button", { className: "btn btn-primary btn-block", disabled: !referralRedeemCode.trim(), onClick: () => redeemReferral(active, referralRedeemCode) }, "Bonus gutschreiben"))),
-                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 9 } }, "Nächster Termin"),
-                    React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("input", { type: "date", defaultValue: active.termin || "", onBlur: e => { if (e.target.value !== (active.termin || ""))
-                                updateActive({ termin: e.target.value }); }, style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16 } }),
-                        active.termin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => updateActive({ termin: "", terminLabel: "" }) }, "Löschen")),
-                    React.createElement("input", { type: "text", defaultValue: active.terminLabel || "", placeholder: "Notiz zum Termin (z.B. Prüfung, Fahrstunde)", onBlur: e => { if (e.target.value !== (active.terminLabel || ""))
-                            updateActive({ terminLabel: e.target.value }); }, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16, marginTop: 8 } })),
                 active._isMine
                     ? React.createElement(ShareBox, null)
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Schüler wurde mit dir geteilt. Du kannst Einträge bearbeiten, aber die Freigabe verwaltet der Besitzer.")),
@@ -18694,9 +18683,17 @@ function App() {
                         " ",
                         active.geb ? fmtD(active.geb) + "." + new Date(active.geb).getFullYear() : "–"),
                     React.createElement("div", null,
-                        React.createElement("b", null, "Tel:"),
+                        React.createElement("b", null, "Angemeldet:"),
+                        " ",
+                        active.ausbildungsbeginn ? fmtD(active.ausbildungsbeginn) + "." + new Date(active.ausbildungsbeginn).getFullYear() : "–"),
+                    React.createElement("div", null,
+                        React.createElement("b", null, "Handy:"),
                         " ",
                         active.tel || "–"),
+                    React.createElement("div", null,
+                        React.createElement("b", null, "Festnetz:"),
+                        " ",
+                        active.festnetz || "–"),
                     React.createElement("div", null,
                         React.createElement("b", null, "Anschrift:"),
                         " ",
@@ -18708,15 +18705,7 @@ function App() {
                         " \u00B7 ",
                         React.createElement("b", null, "Theorie:"),
                         " ",
-                        active.theorie ? "bestanden" : "offen"),
-                    React.createElement("div", null,
-                        React.createElement("b", null, "Lenkrad:"),
-                        " ",
-                        active.lenkrad || "–"),
-                    React.createElement("div", null,
-                        React.createElement("b", null, "Kopfst\u00FCtze:"),
-                        " ",
-                        active.kopfstuetze || "–")),
+                        active.theorie ? "bestanden (" + fmtD(active.theorie) + "." + new Date(active.theorie).getFullYear() + ")" : "offen")),
                 React.createElement("div", { className: "ps-sec" },
                     React.createElement("h3", null, "ADK \u2013 Lerninhalte"),
                     tplFor(active.klasse).adk.map(sec => React.createElement("div", { key: sec.id, style: { marginBottom: 5 } },
@@ -18818,19 +18807,17 @@ function App() {
                     React.createElement("tr", null,
                         React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Anschrift"),
                         React.createElement("td", null, active.anschrift || "–"),
-                        React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Telefon"),
+                        React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Handy"),
                         React.createElement("td", null, active.tel || "–")),
                     React.createElement("tr", null,
-                        React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Theoriepr\u00FCfung"),
+                        React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Theorieprüfung"),
                         React.createElement("td", null, active.theorie ? "Bestanden ✓" : "Noch ausstehend"),
                         React.createElement("td", { style: { color: "#555", paddingRight: 8 } }, "Ausbildungsbeginn"),
-                        // stu.ausbildungsbeginn wird nirgends im Code je gesetzt (kein Eingabefeld
-                        // existiert dafür) - zeigte für jeden Schüler dauerhaft "–". _createdAt (das
-                        // Anlagedatum des Schüler-Datensatzes) ist immer vorhanden und eine
-                        // brauchbare Näherung für den Ausdruck; die rechtlich relevante
-                        // Reform-Übergangsregel (neueRegelnGelten()) bleibt bewusst unverändert auf
-                        // dem echten, bislang nie gesetzten Feld - eine Näherung wäre dort eine
-                        // eigene, folgenreichere Entscheidung.
+                        // ausbildungsbeginn (Anmeldedatum) hat jetzt ein echtes Eingabefeld im Profil -
+                        // _createdAt (Anlagedatum des Datensatzes) bleibt als Näherung für ältere
+                        // Schüler ohne nachgetragenes Anmeldedatum. Die rechtlich relevante Reform-
+                        // Übergangsregel (neueRegelnGelten()) bleibt bewusst unverändert auf dem
+                        // echten Feld ohne Näherung.
                         React.createElement("td", null, (active.ausbildungsbeginn || active._createdAt) ? new Date(active.ausbildungsbeginn || active._createdAt).toLocaleDateString("de-DE") : "–")))),
             React.createElement("div", { style: { display: "flex", gap: 0, marginBottom: 14, border: "1px solid #ccc", borderRadius: 6, overflow: "hidden" } }, [["Fahrstunden", std + " Std."], ["ADK-Fortschritt", adkPct + "%"], ["Strecken", strPct + "%"], ["Gesamt", gesamt + "%"]].map(([l, v]) => React.createElement("div", { key: l, style: { flex: 1, padding: "8px 10px", textAlign: "center", borderRight: "1px solid #ccc" } },
                 React.createElement("div", { style: { fontSize: "8pt", color: "#777", textTransform: "uppercase", letterSpacing: ".05em" } }, l),
@@ -19730,7 +19717,7 @@ function App() {
                     const ue = ((parseInt(p.minutes, 10) || 0) / 45);
                     if (p.action === "schueler") {
                         const stu = students.find(s => s.id === p.studentId);
-                        const fieldLabel = p.field === "tel" ? "Telefon" : p.field === "anschrift" ? "Anschrift" : "Notiz";
+                        const fieldLabel = p.field === "tel" ? "Handynummer" : p.field === "anschrift" ? "Anschrift" : "Notiz";
                         let oldVal = "";
                         if (stu) {
                             oldVal = p.field === "tel" ? (stu.tel || "") : p.field === "anschrift" ? (stu.anschrift || "") : (stu.bemerkungen || "");
