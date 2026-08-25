@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.5";
+const APP_VERSION = "1.166.6";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.6", date: "August 2026", changes: [
+            "Fehlerbehebung Abrechnung: Rechnung erstellen/stornieren, Zahlungsbeleg drucken und ein Paket übernehmen bauten auf dem Schülerstand VOR dem jeweiligen Warten (Server-Antwort bzw. offener Bestätigungsdialog) statt auf dem aktuellen - in der Zwischenzeit eingetragene Fahrstunden, Posten oder Zahlungen für denselben Schüler konnten dadurch beim Abschluss der Aktion stillschweigend wieder verschwinden. Alle vier Stellen schreiben jetzt gegen den zu diesem Zeitpunkt tatsächlich aktuellen Stand, dieselbe Absicherung, die für den KI-Stundenentwurf bereits bestand",
+        ] },
     { v: "1.166.5", date: "August 2026", changes: [
             "Fehlerbehebung KI-Helfer: eine Uhrzeit mit einstelliger Stunde (z.B. \"9:00\") fiel beim Terminanlegen lautlos auf 00:00 Uhr zurück, obwohl das Bestätigungsfenster davor die richtige Zeit anzeigte - der angelegte Termin landete dadurch sichtbar zur falschen Zeit. Prüft die Uhrzeit jetzt wie der Kalender-Screenshot-Import korrekt",
             "KI-Helfer und Kalender-Screenshot-Import prüfen beim Terminanlegen jetzt auf Überschneidungen mit bestehenden Terminen und auf das Tages-/Wochenlimit - wie das normale \"Neuer Termin\"-Formular es schon immer tut. Vorher konnten beide Wege stillschweigend Doppelbuchungen anlegen",
@@ -7712,8 +7715,11 @@ function App() {
         // preismeldung_letzte erst nach expliziter Nutzer-Bestätigung setzen, nicht schon vor dem
         // Druckversuch - weder Browser- noch WKWebView-Druck melden zuverlässig Erfolg/Abbruch zurück,
         // ein abgebrochener Druck darf die Meldung nicht fälschlich als abgegeben markieren.
+        // Funktional (prev => ...) statt {...school, ...} - der Confirm-Dialog kann durch Zögern
+        // offen bleiben, in der Zeit an anderer Stelle geänderte Preisfelder würden mit dem vor
+        // dem Dialog eingefangenen "school" sonst stillschweigend zurückgesetzt.
         if (await askConfirm({ message: "Wurde die Preismeldung als PDF erstellt und (per Post/E-Mail) an die zuständige Stelle übermittelt? Nur dann als erledigt markieren." }))
-            writeSchool({ ...school, preismeldung_letzte: ymd(new Date()) });
+            writeSchool(prev => ({ ...prev, preismeldung_letzte: ymd(new Date()) }));
     }
     function saveArtEdit() {
         const f = artEdit;
@@ -8844,8 +8850,18 @@ function App() {
         applySchoolColor(school.color); }, [school, theme]);
     // Save school (debounced)
     const schoolTimer = useRef(null);
-    const writeSchool = useCallback((next) => {
-        setSchool(next);
+    // Akzeptiert wie React-State-Setter entweder ein fertiges Objekt ODER eine Updater-Funktion
+    // (prev => nächsterZustand) - Letzteres für Aufrufer, die erst NACH einem await (z.B. einem
+    // Bestätigungsdialog, der beliebig lange offen bleiben kann) schreiben und dabei zwingend
+    // gegen den zu diesem Zeitpunkt aktuellen Stand patchen müssen, statt einen vor dem await
+    // eingefangenen, mittlerweile veralteten "school"-Snapshot wieder reinzuschreiben und damit
+    // zwischenzeitliche Änderungen (z.B. an anderen Preisfeldern) stillschweigend zu verwerfen.
+    // Bestehende Aufrufer mit einem fertigen Objekt sind davon unberührt (kein Funktionstyp).
+    const writeSchool = useCallback((nextOrFn) => {
+        let next = null;
+        setSchool(prev => { next = typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn; return next; });
+        if (!next)
+            return;
         if (uid)
             saveSchoolCache(uid, next);
         applySchoolColor(next.color);
@@ -13895,12 +13911,21 @@ function App() {
         // ein später dazugekauftes Paket darf eine schon abgerechnete Stunde nicht rückwirkend
         // "abdecken" und ihr damit Guthaben entziehen, das eigentlich künftigen Stunden zusteht
         // (siehe lessonBillables).
-        const coveredById = {};
-        lessonBillables(active, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
-        const drivenLessons = (active.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
-        const costItems = (active.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: inv.number } : it);
-        const invoices = [...(active.invoices || []), inv];
-        setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
+        // Bewusst funktional gegen den GERADE AKTUELLEN Datensatz (s), nicht gegen das beim Klick
+        // eingefangene, jetzt nach dem await veraltete "active" - sonst würde jede Änderung, die
+        // während der RPC-Laufzeit an diesem Schüler gemacht wurde (neue Fahrstunde, Zahlung,
+        // paralleler Kollege bei geteiltem Schüler), hier stillschweigend wieder verworfen (gleiches
+        // Muster wie draftLessonEntry() weiter oben).
+        setStudents(prev => (prev || []).map(s => {
+            if (s.id !== active.id)
+                return s;
+            const coveredById = {};
+            lessonBillables(s, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
+            const drivenLessons = (s.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
+            const costItems = (s.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: inv.number } : it);
+            const invoices = [...(s.invoices || []), inv];
+            return { ...s, drivenLessons, costItems, invoices };
+        }));
         setInvoiceDraft(null);
         setInvoicePreview(inv);
         doPrint("invoice");
@@ -13931,10 +13956,18 @@ function App() {
             showToast("Stornierung fehlgeschlagen:\n" + e.message);
             return;
         }
-        const drivenLessons = (active.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
-        const costItems = (active.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
-        const invoices = (active.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
-        setStudents(prev => (prev || []).map(s => s.id === active.id ? { ...s, drivenLessons, costItems, invoices } : s));
+        // Funktional gegen den aktuellen Datensatz statt gegen das vor dem askPrompt/RPC-await
+        // eingefangene "active" - der Prompt-Dialog kann durch Tippzeit beliebig lange offen
+        // bleiben, ein größeres Zeitfenster für zwischenzeitliche Änderungen als bei confirmInvoice()
+        // (gleicher Bug, gleicher Fix - siehe dortiger Kommentar).
+        setStudents(prev => (prev || []).map(s => {
+            if (s.id !== active.id)
+                return s;
+            const drivenLessons = (s.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
+            const costItems = (s.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
+            const invoices = (s.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
+            return { ...s, drivenLessons, costItems, invoices };
+        }));
         setInvoicePreview(storno);
         doPrint("invoice");
     }
@@ -13962,9 +13995,24 @@ function App() {
             showToast("Beleg konnte nicht erstellt werden:\n" + e.message);
             return;
         }
-        const withNumber = { ...p, receiptNumber: number };
-        const payments = list.map((x, i) => i === idx ? withNumber : x);
-        updateActive({ payments });
+        // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
+        // ...patch}), baut also auf dem vor dem RPC-await eingefangenen, jetzt veralteten "active"
+        // auf) - sonst würden alle während der Belegnummer-Vergabe an diesem Schüler vorgenommenen
+        // Änderungen (neue Fahrstunde, neuer Posten) hier stillschweigend verworfen. scheduleSave()
+        // bewusst NACH dem setStudents-Aufruf, nicht im Updater selbst (der kann von React mehrfach
+        // aufgerufen werden) - gleiches Muster wie draftLessonEntry() weiter oben.
+        let patchedStudent = null;
+        setStudents(prev => (prev || []).map(s => {
+            if (s.id !== active.id)
+                return s;
+            const payments = (s.payments || []).map((x, i) => i === idx ? { ...x, receiptNumber: number } : x);
+            patchedStudent = { ...s, payments };
+            return patchedStudent;
+        }));
+        if (!patchedStudent)
+            return;
+        scheduleSave(patchedStudent);
+        const withNumber = patchedStudent.payments[idx];
         setReceiptPreview(withNumber);
         doPrint("receipt");
     }
@@ -14247,8 +14295,19 @@ function App() {
                         const ueHint = Number(p.includedUE) > 0 ? (" (" + ueFmt(p.includedUE) + " UE enthalten)") : "";
                         if (!await askConfirm({ message: p.name + " (" + eurFmt(p.amount) + ")" + ueHint + " als Posten hinzufügen?" }))
                             return;
-                        updateActive({ costItems: [...(active.costItems || []), { label: p.name, amount: p.amount }],
-                            packages: [...(active.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()) }] });
+                        // Funktional gegen den aktuellen Datensatz statt updateActive() - der Confirm-
+                        // Dialog kann durch Zögern/Tippen offen bleiben, in der Zeit gemachte Änderungen
+                        // an costItems/drivenLessons/payments/packages würden sonst hier verworfen.
+                        let patchedStudent = null;
+                        setStudents(prev => (prev || []).map(s => {
+                            if (s.id !== active.id)
+                                return s;
+                            patchedStudent = { ...s, costItems: [...(s.costItems || []), { label: p.name, amount: p.amount }],
+                                packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()) }] };
+                            return patchedStudent;
+                        }));
+                        if (patchedStudent)
+                            scheduleSave(patchedStudent);
                     } },
                     p.name,
                     " \u00B7 ",
