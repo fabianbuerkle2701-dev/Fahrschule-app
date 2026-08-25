@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.4";
+const APP_VERSION = "1.166.5";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.5", date: "August 2026", changes: [
+            "Fehlerbehebung KI-Helfer: eine Uhrzeit mit einstelliger Stunde (z.B. \"9:00\") fiel beim Terminanlegen lautlos auf 00:00 Uhr zurück, obwohl das Bestätigungsfenster davor die richtige Zeit anzeigte - der angelegte Termin landete dadurch sichtbar zur falschen Zeit. Prüft die Uhrzeit jetzt wie der Kalender-Screenshot-Import korrekt",
+            "KI-Helfer und Kalender-Screenshot-Import prüfen beim Terminanlegen jetzt auf Überschneidungen mit bestehenden Terminen und auf das Tages-/Wochenlimit - wie das normale \"Neuer Termin\"-Formular es schon immer tut. Vorher konnten beide Wege stillschweigend Doppelbuchungen anlegen",
+        ] },
     { v: "1.166.4", date: "August 2026", changes: [
             "Fehlerbehebung \"Vorlage zurücksetzen\" (Ausbildung, Vorlage bearbeiten): setzte bei jeder Fahrschule außer der internen Demo \"Fahrschule V3\" die Vorlage auf falsche Punkt-IDs zurück, wodurch der ADK-/Strecken-Fortschritt ALLER Schüler dieser Klasse sofort auf 0% fiel, obwohl die Daten dahinter noch da waren. Setzt jetzt korrekt auf die für die eigene Fahrschule tatsächlich passende Werksvorlage zurück",
             "Fehlerbehebung Vorlagen-Editor: einen anderen Abschnitt per Ziehen vor \"Fahrzeugkunde\" verschieben konnte eine zweite, doppelte Fahrzeugkunde-Kopie erzeugen, wodurch deren Punkte doppelt in die Fortschritts-Prozentzahl einflossen. Es kann jetzt nur noch genau einen Fahrzeugkunde-Abschnitt geben, immer an erster Stelle",
@@ -10067,7 +10071,7 @@ function App() {
             return;
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
-        let count = 0, skipped = 0;
+        let count = 0, skipped = 0, skippedClash = 0;
         for (const it of chosen) {
             const startHM = normHM(it.start);
             if (!startHM) {
@@ -10082,6 +10086,18 @@ function App() {
             const endHM = normHM(it.end);
             const end = endHM ? new Date(it.date + "T" + endHM + ":00") : new Date(start.getTime() + 45 * 60000);
             const stu = it.studentId ? students.find(s => s.id === it.studentId) : null;
+            // Dieselben zwei Prüfungen wie bei jedem anderen Weg, mehrere bestätigte Termine auf
+            // einmal anzulegen (saveApptSerie() - gleiches Auto-Überspringen-statt-Nachfragen-Muster,
+            // da hier in einer Schleife über mehrere Screenshot-Treffer angelegt wird und N einzelne
+            // Bestätigungsdialoge nacheinander keine brauchbare UX wären). Fehlten hier bisher
+            // komplett, der Import konnte dadurch stillschweigend Doppelbuchungen anlegen.
+            const mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+            const lp = limitProblem(it.date, mins, null, stu ? stu.id : null);
+            const clash = !lp && findOverlaps(appts, start.toISOString(), end.toISOString(), null);
+            if (lp || (clash && clash.length)) {
+                skippedClash++;
+                continue;
+            }
             await addAppt({
                 student_id: stu ? stu.id : null,
                 title: stu ? ((stu.vorname || "") + " " + (stu.name || "")).trim() : (it.rawText || "Termin"),
@@ -10094,7 +10110,9 @@ function App() {
         }
         setCalImport(null);
         setView("kalender");
-        showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (skipped ? " · " + skipped + (skipped === 1 ? " übersprungen" : " übersprungen") + " (Uhrzeit nicht lesbar)" : ""));
+        const reasons = [skipped ? skipped + (skipped === 1 ? " Uhrzeit nicht lesbar" : " Uhrzeit nicht lesbar") : "",
+            skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : ""].filter(Boolean).join(", ");
+        showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : ""));
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
     async function handleAdkImportFiles(fileList) {
@@ -10556,7 +10574,7 @@ function App() {
         }
     }
     // Vorgeschlagene Aktion nach Bestätigung ausführen
-    function runAssistantAction(p) {
+    async function runAssistantAction(p) {
         if (!p) {
             setAssistant(null);
             return;
@@ -10579,13 +10597,37 @@ function App() {
         }
         if (p.action === "termin") {
             const minutes = parseInt(p.minutes, 10) || 45;
-            const start = new Date((p.date || today0()) + "T" + ((p.time || "00:00").length === 5 ? p.time : "00:00") + ":00");
+            // normHM() statt einer reinen Längenprüfung (".length === 5") - eine vom KI-Modell
+            // gelieferte Uhrzeit mit einstelliger Stunde wie "9:00" (4 statt 5 Zeichen) fiel sonst
+            // lautlos auf 00:00 zurück, obwohl das Bestätigungsfenster davor den rohen p.time-Wert
+            // ("9:00 Uhr") korrekt anzeigt - der Termin landete dadurch sichtbar falsch mitten in
+            // der Nacht statt zur eigentlich bestätigten Zeit. Dieselbe Normalisierung, die der
+            // Kalender-Screenshot-Import schon für genau diesen Fall nutzt (siehe normHM()-Kommentar).
+            const start = new Date((p.date || today0()) + "T" + (normHM(p.time) || "00:00") + ":00");
             if (isNaN(start.getTime())) {
                 showToast("Datum oder Uhrzeit ungültig. Bitte erneut versuchen.");
                 return;
             }
             const end = new Date(start.getTime() + minutes * 60000);
             const stu = p.studentId ? students.find(s => s.id === p.studentId) : null;
+            // Dieselben zwei Prüfungen wie bei jedem anderen Weg, einen bestätigten Termin
+            // anzulegen (saveApptForm/saveApptSerie/confirmAppt) - fehlten hier bisher komplett,
+            // der KI-Helfer konnte dadurch stillschweigend Doppelbuchungen anlegen.
+            const lp = limitProblem(ymd(start), minutes, null, stu ? stu.id : null);
+            if (lp) {
+                showToast(lp);
+                return;
+            }
+            const clash = findOverlaps(appts, start.toISOString(), end.toISOString(), null);
+            if (clash.length) {
+                const c = clash[0];
+                const cname = apptStudentName(c) || c.title || "Termin";
+                const txt = "Achtung: Diese Zeit überschneidet sich mit einem bestehenden Termin:\n\n"
+                    + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
+                    + "\n\nTrotzdem anlegen?";
+                if (!await askConfirm({ message: txt }))
+                    return;
+            }
             addAppt({
                 student_id: stu ? stu.id : null,
                 title: p.title || (stu ? dispName(stu) : "Termin"),
