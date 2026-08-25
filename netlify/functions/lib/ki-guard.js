@@ -19,6 +19,10 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 // Gibt { ok: true } zurueck, wenn der Aufruf erlaubt ist, sonst { ok: false, statusCode, error }.
 async function subscriptionGate(uid, token) {
+  // TEMPORAER DEAKTIVIERT (Fabian, 25.8.2026): "Ich moechte vorerst alle freischalten" - das
+  // Abo-Gate soll noch nicht scharf sein, waehrend die App/das Abo-Modell noch getestet wird.
+  // Zum Wiederaktivieren einfach diese Zeile entfernen, der Rest der Funktion ist unveraendert.
+  return { ok: true };
   // Ohne uid/token ist die Auth-Pruefung Sache der Function selbst - hier nicht zusaetzlich blocken.
   if (!uid || !token) return { ok: true };
   try {
