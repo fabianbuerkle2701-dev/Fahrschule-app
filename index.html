@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.6";
+const APP_VERSION = "1.166.7";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.7", date: "August 2026", changes: [
+            "Sicherheitslücke im Fahrschüler-Bereich behoben: auf einem geteilten Gerät (z.B. Familientablett, ein Buchungslink für mehrere Geschwister) konnte eine spät auflösende Antwort (Termin stornieren, Warteliste-Angebot annehmen, Fahrstunden nachladen) noch nach dem Abmelden ankommen und die Daten des inzwischen neu eingeloggten anderen Fahrschülers überschreiben - Termine, Ausbildungsstand, Adresse und Telefonnummer des vorherigen Schülers wären dann sichtbar gewesen, ohne dass sich der neue je als dieser angemeldet hat. Zusätzlich blieb nach dem Abmelden der volle Name des vorherigen Schülers im Login-Formular sichtbar",
+        ] },
     { v: "1.166.6", date: "August 2026", changes: [
             "Fehlerbehebung Abrechnung: Rechnung erstellen/stornieren, Zahlungsbeleg drucken und ein Paket übernehmen bauten auf dem Schülerstand VOR dem jeweiligen Warten (Server-Antwort bzw. offener Bestätigungsdialog) statt auf dem aktuellen - in der Zwischenzeit eingetragene Fahrstunden, Posten oder Zahlungen für denselben Schüler konnten dadurch beim Abschluss der Aktion stillschweigend wieder verschwinden. Alle vier Stellen schreiben jetzt gegen den zu diesem Zeitpunkt tatsächlich aktuellen Stand, dieselbe Absicherung, die für den KI-Stundenentwurf bereits bestand",
         ] },
@@ -23777,6 +23780,13 @@ function StudentArea({ code, info, appMode }) {
         return "";
     } });
     const [data, setData] = React.useState(null); // Überblick nach erfolgreichem Login
+    // Erhöht sich bei jedem login()/logout() - von doCancel()/claimOffer()/login()'s
+    // Hintergrund-Fahrstunden-Abruf zu Beginn eingefangen und nach ihrem jeweiligen await geprüft,
+    // bevor setData() aufgerufen wird. Auf einem geteilten Gerät (Familientablett, ein Buchungslink
+    // für mehrere Geschwister) konnte sonst eine spät auflösende Antwort für Schüler A noch die
+    // Daten von inzwischen eingeloggtem Schüler B überschreiben, da nur auf "ist überhaupt noch
+    // jemand eingeloggt" (cur !== null) geprüft wurde, nie auf "ist es noch DERSELBE Schüler".
+    const sessionIdRef = React.useRef(0);
     const [loading, setLoading] = React.useState(false);
     const [err, setErr] = React.useState("");
     // PIN-Ändern (Erst-Login oder freiwillig)
@@ -23791,6 +23801,7 @@ function StudentArea({ code, info, appMode }) {
         }
         setLoading(true);
         setErr("");
+        const mySession = ++sessionIdRef.current;
         try {
             const d = await publicStudentOverview(code, n, p);
             if (!d) {
@@ -23805,7 +23816,10 @@ function StudentArea({ code, info, appMode }) {
             setWlWeekdays(Array.isArray(w.weekdays) ? w.weekdays : []);
             setWlVon(w.von || "");
             setWlBis(w.bis || "");
-            publicStudentLessons(code, n, p).then(ls => setData(cur => cur ? { ...cur, lessons: ls } : cur));
+            // Hintergrund-Nachladen der Fahrstunden - nur übernehmen, wenn zwischenzeitlich nicht
+            // aus- und als jemand anderes wieder eingeloggt wurde (siehe sessionIdRef-Kommentar oben).
+            publicStudentLessons(code, n, p).then(ls => { if (sessionIdRef.current === mySession)
+                setData(cur => cur ? { ...cur, lessons: ls } : cur); });
             try {
                 localStorage.setItem(LS_NAME, n);
                 localStorage.setItem(LS_PIN, p);
@@ -23857,11 +23871,15 @@ function StudentArea({ code, info, appMode }) {
             return;
         setConfirmCancel(null);
         setCancelBusy(a.id);
+        const mySession = sessionIdRef.current;
         try {
             await publicStudentCancelAppt(code, name.trim(), pin.trim(), a.id);
             // Überblick neu laden, damit der aktualisierte Status sofort erscheint
             const d = await publicStudentOverview(code, name.trim(), pin.trim());
-            if (d)
+            // Nicht mehr übernehmen, wenn zwischenzeitlich (Abmelden + jemand anderes loggt sich
+            // auf demselben Gerät ein) eine andere Sitzung begonnen hat - sonst würden A's Daten
+            // hier B's Anzeige überschreiben, ohne dass B sich je als A angemeldet hätte.
+            if (d && sessionIdRef.current === mySession)
                 setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
         }
         catch (e) {
@@ -23907,11 +23925,23 @@ function StudentArea({ code, info, appMode }) {
         setChangeBusy(false);
     }
     function logout() {
+        // Ungültig machen statt löschen: eine noch laufende Anfrage (z.B. doCancel() mitten im
+        // await) darf ihr Ergebnis nicht mehr auf die Login-Maske bzw. den nächsten eingeloggten
+        // Schüler auf diesem Gerät schreiben, siehe sessionIdRef-Kommentar oben.
+        sessionIdRef.current++;
         setData(null);
         setPin("");
         setErr("");
+        // Auf einem geteilten Gerät sonst noch der volle Name der/des vorherigen Fahrschülerin/
+        // Fahrschülers in der Login-Maske sichtbar (nur der PIN wurde bisher zurückgesetzt), und
+        // ein automatischer Login-Versuch beim nächsten Öffnen würde weiterhin unter diesem Namen
+        // laufen, solange kein neuer PIN eingegeben wird.
+        setName("");
+        setVorname("");
+        setNachname("");
         try {
             localStorage.removeItem(LS_PIN);
+            localStorage.removeItem(LS_NAME);
         }
         catch (e) { }
     }
@@ -23998,12 +24028,16 @@ function StudentArea({ code, info, appMode }) {
     async function claimOffer(offerId) {
         setClaimBusy(offerId);
         setClaimMsg("");
+        const mySession = sessionIdRef.current;
         try {
             const res = await publicClaimAppointmentOffer(code, name.trim(), pin.trim(), offerId);
             if (res === "ok") {
-                setData(cur => cur ? { ...cur, offers: (cur.offers || []).filter(o => o.id !== offerId) } : cur);
+                // Beide setData()-Aufrufe nur übernehmen, wenn zwischenzeitlich nicht ab- und als
+                // jemand anderes wieder eingeloggt wurde, siehe sessionIdRef-Kommentar oben.
+                if (sessionIdRef.current === mySession)
+                    setData(cur => cur ? { ...cur, offers: (cur.offers || []).filter(o => o.id !== offerId) } : cur);
                 const d = await publicStudentOverview(code, name.trim(), pin.trim());
-                if (d)
+                if (d && sessionIdRef.current === mySession)
                     setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
                 setClaimMsg("ok");
             }
