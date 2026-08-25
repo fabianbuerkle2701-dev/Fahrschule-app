@@ -1464,7 +1464,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.165.9";
+const APP_VERSION = "1.166.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1585,6 +1585,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.0", date: "August 2026", changes: [
+            "Fahrstunden-Bereich zurückgebaut auf die frühere, klarere Struktur: statt einer fest oben angehefteten Bearbeitungskarte mit drei Auf/Zu-Schaltern (Strecke/Details/Fertig) und einem separaten Punkte-Zeitstrahl ist es jetzt wieder eine einfache Liste - jede Fahrstunde eine eigene Karte, antippen klappt sie auf, alles (Datum, KI-Entwurf, Thema, Strecke, Bewertung, Notizen) linear untereinander ohne Zwischenschritte. Die 5 Bewertungskriterien stehen wieder als klare Zeile (Kriterium links, 3 Smileys rechts) statt als gequetschtes 5-Spalten-Raster mit umbrechenden Beschriftungen",
+        ] },
     { v: "1.165.9", date: "August 2026", changes: [
             "Fehlerbehebung Sonderfahrten-Hinweis: die Warnung \"Noch keine einzelne Fahrt mit mindestens 90 Minuten\" bei Überland/Autobahn/Dämmerung verschwand fälschlich, sobald das UE-Soll insgesamt über mehrere kürzere Fahrten erreicht war - die durchgehende 90-Minuten-Fahrt ist aber eine eigene, davon unabhängige Pflicht. Zeigt den Hinweis jetzt unabhängig vom Gesamt-UE-Stand",
             "Abmelden-Button ist jetzt ganz unten in der Einstellungen-Hauptliste (vorher nur versteckt im Untermenü \"Konto\")",
@@ -7733,12 +7736,10 @@ function App() {
     const [lessonForm, setLessonForm] = useState(null); // null | {date,time,minutes} manuelles Erfassen
     const [lessonDraft, setLessonDraft] = useState({}); // { [lessonId]: {phrase,busy,error} } - KI-Stundenentwurf im Fahrstunden-Tagebuch
     const [lessonFieldRev, setLessonFieldRev] = useState({}); // { [lessonId]: number } - erzwingt Remount der Text-Felder (defaultValue), wenn der KI-Entwurf sie befüllt hat
-    const [captureDetailsOpen, setCaptureDetailsOpen] = useState(false); // Tagebuch-Schnellerfassung: "Details" (Thema/Hinweis/Gut/Schlecht/Notiz) auf-/zugeklappt
-    const [captureStreckeOpen, setCaptureStreckeOpen] = useState(false); // Tagebuch-Schnellerfassung: "Strecke"-Karte auf-/zugeklappt
-    // Ohne diesen Reset blieb beim Schülerwechsel ein zuvor aufgeklapptes Tagebuch-Detail
-    // (ältere Stunde fokussiert, Details/Strecke offen) für den neuen Schüler sofort sichtbar,
-    // obwohl der Fahrlehrer das für ihn nie angefordert hat (analog zum studentFiles-Reset oben).
-    useEffect(() => { setOpenLesson(null); setCaptureDetailsOpen(false); setCaptureStreckeOpen(false); setRoutesMapOpen(false); }, [activeId]);
+    // Ohne diesen Reset blieb eine beim vorherigen Schüler aufgeklappte Fahrstunde für den neuen
+    // Schüler sofort sichtbar, obwohl der Fahrlehrer das für ihn nie angefordert hat (analog zum
+    // studentFiles-Reset oben).
+    useEffect(() => { setOpenLesson(null); setRoutesMapOpen(false); }, [activeId]);
     const [itemForm, setItemForm] = useState(null); // null | {label, amount, error} Posten hinzufügen
     const [paymentForm, setPaymentForm] = useState(null); // null | {amount, date, method, error} Zahlung erfassen
     // null | {step:"form"|"sign", apptId, studentId, art, vehicleId, klasse, stufe, minutes, date, von, bis, price, priceAuto, note, signature}
@@ -13617,13 +13618,6 @@ function App() {
     function renderTagebuch() {
         const lessons = active.lessons || [];
         const alleStrecken = lessons.filter(l => l.route && l.route.pts && l.route.pts.length >= 2).map(l => l.route.pts);
-        function startNewLesson() { addLesson(); setOpenLesson(null); }
-        const focusId = openLesson != null ? openLesson : (lessons[0] && lessons[0].id);
-        const l = lessons.find(x => x.id === focusId) || lessons[0] || null;
-        const focusIdx = l ? lessons.indexOf(l) : -1;
-        const isOlder = !!(l && focusIdx > 0);
-        const recActiveHere = !!(l && recSession && recSession.studentId === active.id && recSession.lessonId === l.id);
-        const strecheVisible = captureStreckeOpen || recActiveHere;
         return React.createElement("div", { className: "pad" },
             studentHeader(),
             alleStrecken.length > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden" } },
@@ -13634,135 +13628,109 @@ function App() {
                     React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: routesMapOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
                 routesMapOpen && React.createElement("div", { style: { borderTop: "1px solid var(--line)" } },
                     React.createElement(AllRoutesMap, { routes: alleStrecken, color: (school && school.color) || "#FF9300" }))),
-            React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 18, border: l ? "2px solid var(--orange)" : "1.5px dashed var(--line)" } },
-                !l
-                    ? React.createElement("div", { style: { textAlign: "center", padding: "8px 4px" } },
-                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 6 } }, "Noch keine Fahrstunden"),
-                        React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lege für jede Fahrstunde einen Eintrag mit Datum und Bewertung an."),
-                        React.createElement("button", { className: "btn btn-primary", onClick: startNewLesson }, "+ Erste Stunde eintragen"))
-                    : React.createElement(React.Fragment, null,
-                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12 } },
-                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
-                                    l.thema ? l.thema : (focusIdx === 0 ? "Neue Stunde" : (lessons.length - focusIdx) + ". Fahrstunde")),
-                                isOlder && React.createElement("button", { onClick: () => setOpenLesson(null), style: { fontSize: 12, color: "var(--clay-deep)", fontWeight: 700, padding: "2px 0", marginTop: 2 } }, "← Zur aktuellen Stunde")),
-                            React.createElement("input", { type: "date", value: l.date || "", onChange: e => updateLesson(l.id, { date: e.target.value }), style: { border: "1.5px solid var(--line)", borderRadius: 10, padding: "7px 9px", fontSize: 16, fontWeight: 600, flexShrink: 0, width: 134 } }),
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 2px 12px" } },
+                React.createElement("div", null,
+                    React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 20, lineHeight: 1 } }, "Fahrstunden"),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
+                        lessons.length,
+                        " ",
+                        lessons.length === 1 ? "Eintrag" : "Einträge")),
+                React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Stunde")),
+            lessons.length === 0 && React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 6 } }, "Noch keine Fahrstunden"),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lege für jede Fahrstunde einen Eintrag mit Datum und Bewertung an."),
+                React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Erste Stunde eintragen")),
+            lessons.map((l, idx) => {
+                const avg = lessonAvg(l);
+                const avgSmiley = avg == null ? null : (avg >= 2.5 ? SMILEYS[0] : avg >= 1.75 ? SMILEYS[1] : SMILEYS[2]);
+                const isOpen = openLesson === l.id;
+                const rated = LESSON_FIELDS.filter(f => l.ratings && l.ratings[f.id]).length;
+                const lroute = l.route;
+                const recActiveHere = !!recSession && recSession.studentId === active.id && recSession.lessonId === l.id;
+                return React.createElement("div", { key: l.id, className: "card", style: { marginBottom: 10, overflow: "hidden" } },
+                    React.createElement("button", { onClick: () => setOpenLesson(isOpen ? null : l.id), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", textAlign: "left", background: "var(--card)" } },
+                        React.createElement("div", { style: { width: 42, height: 42, minWidth: 42, borderRadius: 11, background: "var(--field-bg)",
+                                display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 } }, avgSmiley ? avgSmiley.emoji : "📝"),
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, lineHeight: 1.15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, l.thema ? l.thema : (lessons.length - idx) + ". Fahrstunde"),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
+                                l.date ? ("Fahrt am " + new Date(l.date).toLocaleDateString("de-DE")) : "kein Datum",
+                                lroute ? " · 🗺 " + rmapFmtDist(lroute.dist || 0) : "",
+                                rated > 0 ? " · " + rated + "/" + LESSON_FIELDS.length : "",
+                                (l.gut || l.schlecht || l.note || l.hinweis) ? " · 📝" : "")),
+                        React.createElement(IcChev, { open: isOpen })),
+                    isOpen && React.createElement("div", { style: { padding: "0 14px 14px" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, padding: "4px 0 12px" } },
+                            React.createElement("input", { type: "date", value: l.date || "", onChange: e => updateLesson(l.id, { date: e.target.value }), style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, fontWeight: 600 } }),
                             React.createElement("button", { onClick: async () => { if (await askConfirm({ message: "Diese Fahrstunde löschen?" })) {
                                     deleteLesson(l.id);
                                     setOpenLesson(null);
-                                } }, "aria-label": "Löschen", style: { flexShrink: 0, width: 38, height: 38, borderRadius: 10, border: "1.5px solid #F0CFC9",
+                                } }, "aria-label": "Löschen", style: { flexShrink: 0, width: 40, height: 40, borderRadius: 10, border: "1.5px solid #F0CFC9",
                                     background: "#FDECEA", color: "#B3362A", display: "inline-flex", alignItems: "center", justifyContent: "center" } },
                                 React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round" },
                                     React.createElement("polyline", { points: "3 6 5 6 21 6" }),
                                     React.createElement("path", { d: "M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" })))),
-                        React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12 } },
-                            LESSON_FIELDS.map(f => {
-                                const cur = l.ratings && l.ratings[f.id];
-                                return React.createElement("div", { key: f.id, style: { flex: "1 1 0", minWidth: 0, textAlign: "center" } },
-                                    React.createElement("div", { style: { fontSize: 9.5, fontWeight: 700, color: "var(--muted)", marginBottom: 5, lineHeight: 1.15, minHeight: 22, textAlign: "center", overflowWrap: "break-word" } }, f.label),
-                                    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 3 } },
-                                        SMILEYS.map(sm => {
-                                            const on = cur === sm.v;
-                                            return React.createElement("button", { key: sm.v, onClick: () => setLessonRating(l.id, f.id, on ? null : sm.v), "aria-label": f.label + ": " + sm.label,
-                                                style: { width: "100%", height: 40, borderRadius: 10, fontSize: 18,
-                                                    border: on ? "2.5px solid " + sm.color : "2px solid var(--line)",
-                                                    background: on ? sm.bg : "var(--card)",
-                                                    filter: on ? "none" : "grayscale(0.6) opacity(0.55)", transition: "all .12s" } }, sm.emoji);
-                                        })));
-                            })),
-                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, paddingTop: 10, borderTop: "1px solid var(--line)" } },
-                            React.createElement(Help, { text: "Kurzes Stichwort zur Stunde eingeben - die KI schlägt Thema, Bewertung, Hinweis und Notizen vor. Bereits ausgefüllte Felder werden nie überschrieben, gespeichert wird wie immer erst beim Verlassen des jeweiligen Felds." }),
-                            React.createElement("input", { type: "text", value: (lessonDraft[l.id] && lessonDraft[l.id].phrase) || "",
-                                onChange: e => setLessonDraft(d => ({ ...d, [l.id]: { ...(d[l.id] || {}), phrase: e.target.value } })),
-                                onKeyDown: e => { if (e.key === "Enter") { e.preventDefault(); draftLessonEntry(l); } },
-                                disabled: !!(lessonDraft[l.id] && lessonDraft[l.id].busy),
-                                placeholder: "✨ z. B. Kreisverkehr geübt, noch unsicher beim Einfädeln…",
-                                style: { flex: 1, minWidth: 0, border: "1.5px dashed var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "var(--field-bg)" } }),
-                            React.createElement("button", { className: "btn btn-primary", style: { flexShrink: 0, padding: "0 14px", height: 38 },
-                                disabled: !((lessonDraft[l.id] && lessonDraft[l.id].phrase || "").trim()) || !!(lessonDraft[l.id] && lessonDraft[l.id].busy),
-                                onClick: () => draftLessonEntry(l) },
-                                (lessonDraft[l.id] && lessonDraft[l.id].busy) ? "…" : "Entwurf")),
-                        lessonDraft[l.id] && lessonDraft[l.id].error && React.createElement("div", { style: { fontSize: 12, color: "#B3362A", marginTop: 6 } }, lessonDraft[l.id].error),
-                        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
-                            React.createElement("button", { onClick: () => setCaptureStreckeOpen(o => !o), disabled: recActiveHere,
-                                style: { flex: 1, padding: "9px 6px", borderRadius: 10, background: strecheVisible ? "var(--sky-bg)" : "var(--field-bg)", color: strecheVisible ? "var(--sky-deep)" : "var(--ink-2)", fontSize: 12.5, fontWeight: 700, textAlign: "center", opacity: recActiveHere ? .7 : 1 } },
-                                "🗺 Strecke" + (recActiveHere ? " · Aufnahme läuft" : "")),
-                            React.createElement("button", { onClick: () => setCaptureDetailsOpen(o => !o),
-                                style: { flex: 1, padding: "9px 6px", borderRadius: 10, background: captureDetailsOpen ? "var(--sky-bg)" : "var(--field-bg)", color: captureDetailsOpen ? "var(--sky-deep)" : "var(--ink-2)", fontSize: 12.5, fontWeight: 700, textAlign: "center" } },
-                                "Details " + (captureDetailsOpen ? "▴" : "▾")),
-                            React.createElement("button", { onClick: () => { setCaptureDetailsOpen(false); setCaptureStreckeOpen(false); setOpenLesson(null); },
-                                style: { flex: 1, padding: "9px 6px", borderRadius: 10, background: "var(--sage-deep)", color: "#fff", fontSize: 12.5, fontWeight: 700, textAlign: "center" } },
-                                "Fertig")),
-                        strecheVisible && React.createElement("div", { style: { marginTop: 12 } },
+                        React.createElement("div", { style: { marginBottom: 12, padding: "10px 11px", border: "1.5px dashed var(--line)", borderRadius: 10, background: "var(--field-bg)" } },
+                            React.createElement("label", { className: "ls-lbl", style: { display: "flex", alignItems: "center", gap: 5 } },
+                                "✨ KI-Entwurf",
+                                React.createElement(Help, { text: "Kurzes Stichwort zur Stunde eingeben - die KI schlägt Thema, Bewertung, Hinweis und Notizen vor. Bereits ausgefüllte Felder werden nie überschrieben, gespeichert wird wie immer erst beim Verlassen des jeweiligen Felds." })),
+                            React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 6 } },
+                                React.createElement("input", { type: "text", value: (lessonDraft[l.id] && lessonDraft[l.id].phrase) || "",
+                                    onChange: e => setLessonDraft(d => ({ ...d, [l.id]: { ...(d[l.id] || {}), phrase: e.target.value } })),
+                                    onKeyDown: e => { if (e.key === "Enter") { e.preventDefault(); draftLessonEntry(l); } },
+                                    disabled: !!(lessonDraft[l.id] && lessonDraft[l.id].busy),
+                                    placeholder: "z. B. Kreisverkehr geübt, noch unsicher beim Einfädeln…",
+                                    style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
+                                React.createElement("button", { className: "btn btn-primary", style: { flexShrink: 0, padding: "0 14px" },
+                                    disabled: !((lessonDraft[l.id] && lessonDraft[l.id].phrase || "").trim()) || !!(lessonDraft[l.id] && lessonDraft[l.id].busy),
+                                    onClick: () => draftLessonEntry(l) },
+                                    (lessonDraft[l.id] && lessonDraft[l.id].busy) ? "…" : "Entwurf")),
+                            lessonDraft[l.id] && lessonDraft[l.id].error && React.createElement("div", { style: { fontSize: 12, color: "#B3362A", marginTop: 6 } }, lessonDraft[l.id].error)),
+                        React.createElement("div", { style: { marginBottom: 12 } },
+                            React.createElement("label", { className: "ls-lbl" }, "Thema der Fahrstunde"),
+                            React.createElement("input", { key: l.id + ":thema:" + (lessonFieldRev[l.id + ":thema"] || 0), type: "text", defaultValue: l.thema || "", onBlur: e => { if (e.target.value !== (l.thema || ""))
+                                    updateLesson(l.id, { thema: e.target.value }); }, placeholder: "z. B. Kreisverkehr, Autobahn auffahren, Einparken…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, fontWeight: 600 } })),
+                        React.createElement("div", { style: { marginBottom: 12 } },
                             React.createElement("label", { className: "ls-lbl" }, "Gefahrene Strecke"),
                             React.createElement(LessonMap, { route: l.route || null, pins: l.pins || [], color: (school && school.color) || "#FF9300", recActive: recActiveHere, recTick: recUi.tick, recPts: recPtsRef.current, otherRecording: !!recSession && !(recSession.studentId === active.id && recSession.lessonId === l.id), onStart: () => startRecording(active.id, l.id, dispName(active)), onStop: save => stopRecording(save), onDeleteRoute: () => updateLesson(l.id, { route: null }), onSavePin: p => updateLesson(l.id, { pins: [...(l.pins || []), p] }), onDeletePin: id => updateLesson(l.id, { pins: (l.pins || []).filter(x => x.id !== id) }) })),
-                        captureDetailsOpen && React.createElement("div", { style: { marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--line)" } },
-                            React.createElement("div", { style: { marginBottom: 12 } },
-                                React.createElement("label", { className: "ls-lbl" }, "Thema der Fahrstunde"),
-                                React.createElement("input", { key: l.id + ":thema:" + (lessonFieldRev[l.id + ":thema"] || 0), type: "text", defaultValue: l.thema || "", onBlur: e => { if (e.target.value !== (l.thema || ""))
-                                        updateLesson(l.id, { thema: e.target.value }); }, placeholder: "z. B. Kreisverkehr, Autobahn auffahren, Einparken…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, fontWeight: 600 } })),
-                            React.createElement("div", { style: { display: "grid", gap: 10 } },
-                                React.createElement("div", null,
-                                    React.createElement("label", { className: "ls-lbl", style: { color: "var(--orange-deep)", display: "flex", alignItems: "center", gap: 5 } },
-                                        "Hinweis für den Schüler",
-                                        React.createElement(Help, { text: "Erscheint bei dieser Fahrstunde im Fahrschülerbereich, im Gegensatz zu den Feldern darunter, die privat bleiben." })),
-                                    React.createElement("textarea", { key: l.id + ":hinweis:" + (lessonFieldRev[l.id + ":hinweis"] || 0), rows: 2, defaultValue: l.hinweis || "", onBlur: e => { if (e.target.value !== (l.hinweis || ""))
-                                            updateLesson(l.id, { hinweis: e.target.value }); }, placeholder: "z. B. Schulterblick vor dem Ausparken nicht vergessen…", style: { width: "100%", border: "1.5px solid var(--orange)", borderRadius: 10, padding: "9px 11px",
-                                            fontSize: 16, background: "var(--orange-soft)", resize: "vertical" } }),
-                                    React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 4 } }, "Sichtbar für den Schüler")),
-                                React.createElement("div", null,
-                                    React.createElement("label", { className: "ls-lbl", style: { color: "var(--green)" } }, "Was lief gut"),
-                                    React.createElement("textarea", { key: l.id + ":gut:" + (lessonFieldRev[l.id + ":gut"] || 0), rows: 2, defaultValue: l.gut || "", onBlur: e => { if (e.target.value !== (l.gut || ""))
-                                            updateLesson(l.id, { gut: e.target.value }); }, placeholder: "Was hat gut geklappt…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
-                                            fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
-                                React.createElement("div", null,
-                                    React.createElement("label", { className: "ls-lbl", style: { color: "#B3362A" } }, "Was lief schlecht"),
-                                    React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id + ":schlecht"] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
-                                            updateLesson(l.id, { schlecht: e.target.value }); }, placeholder: "Woran noch arbeiten…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
-                                            fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
-                                React.createElement("div", null,
-                                    React.createElement("label", { className: "ls-lbl" }, "Weitere Notizen"),
-                                    React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id + ":note"] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
-                                            updateLesson(l.id, { note: e.target.value }); }, placeholder: "Sonstiges…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
-                                            fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }))),
-                            (l.thema || l.gut || l.schlecht) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => suggestAdkFromLesson(l) }, "✨ ADK/Strecken-Vorschlag aus dieser Stunde")))),
-            lessons.length > 0 && React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { display: "flex", alignItems: "center", padding: "2px 2px 14px", overflowX: "auto" } },
-                    lessons.slice().reverse().map((ll, i, arr) => {
-                        const avg = lessonAvg(ll);
-                        const color = avg == null ? "var(--line)" : avg >= 2.5 ? "var(--green)" : avg >= 1.75 ? "var(--amber)" : "#B3362A";
-                        return React.createElement(React.Fragment, { key: ll.id },
-                            React.createElement("button", { onClick: () => setOpenLesson(ll.id), "aria-label": ll.thema || "Fahrstunde",
-                                style: { width: 12, height: 12, minWidth: 12, borderRadius: "50%", background: color, flexShrink: 0, boxShadow: ll.id === focusId ? "0 0 0 3px var(--orange-soft)" : "none" } }),
-                            i < arr.length - 1 && React.createElement("div", { style: { flex: 1, height: 2, minWidth: 10, margin: "0 2px", background: color, opacity: .4 } }));
-                    })),
-                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "0 2px 12px" } },
-                    React.createElement("div", null,
-                        React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 20, lineHeight: 1 } }, "Verlauf"),
-                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
-                            lessons.length,
-                            " ",
-                            lessons.length === 1 ? "Eintrag" : "Einträge")),
-                    React.createElement("button", { onClick: startNewLesson, "aria-label": "Neue Fahrstunde",
-                        style: { width: 34, height: 34, borderRadius: 10, background: "var(--orange)", color: "#181512", fontSize: 20, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, "+")),
-                React.createElement("div", { className: "card", style: { padding: "2px 13px" } },
-                    lessons.map((ll, idx) => {
-                        const avg = lessonAvg(ll);
-                        const smiley = avg == null ? null : (avg >= 2.5 ? SMILEYS[0] : avg >= 1.75 ? SMILEYS[1] : SMILEYS[2]);
-                        const rated = LESSON_FIELDS.filter(f => ll.ratings && ll.ratings[f.id]).length;
-                        const isFocused = ll.id === focusId;
-                        return React.createElement("button", { key: ll.id, onClick: () => setOpenLesson(ll.id),
-                            style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "10px 8px", marginLeft: -8, marginRight: -8, borderTop: idx > 0 ? "1px solid var(--line)" : "none", textAlign: "left",
-                                background: isFocused ? "var(--orange-soft)" : "none", borderRadius: isFocused ? 10 : 0 } },
-                            React.createElement("span", { style: { fontSize: 18, width: 24, textAlign: "center", flexShrink: 0 } }, smiley ? smiley.emoji : "📝"),
-                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, ll.thema ? ll.thema : (lessons.length - idx) + ". Fahrstunde"),
-                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
-                                    ll.date ? ("Fahrt am " + new Date(ll.date).toLocaleDateString("de-DE")) : "kein Datum",
-                                    ll.route ? " · 🗺 " + rmapFmtDist(ll.route.dist || 0) : "",
-                                    (ll.gut || ll.schlecht || ll.note || ll.hinweis) ? " · 📝" : "")),
-                            React.createElement(Ring, { pct: Math.round(rated / LESSON_FIELDS.length * 100), size: 26, color: rated === LESSON_FIELDS.length ? "var(--green)" : rated > 0 ? "var(--amber)" : "#C9BFAC" }));
-                    }))));
+                        LESSON_FIELDS.map(f => {
+                            const cur = l.ratings && l.ratings[f.id];
+                            return React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 0", borderTop: "1px solid var(--line)" } },
+                                React.createElement("span", { style: { fontSize: 13.5, fontWeight: 500, flex: 1, minWidth: 0 } }, f.label),
+                                React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } }, SMILEYS.map(sm => {
+                                    const on = cur === sm.v;
+                                    return React.createElement("button", { key: sm.v, onClick: () => setLessonRating(l.id, f.id, on ? null : sm.v), "aria-label": f.label + ": " + sm.label, style: { width: 38, height: 38, borderRadius: 10, fontSize: 19,
+                                            border: on ? "2.5px solid " + sm.color : "2px solid var(--line)",
+                                            background: on ? sm.bg : "var(--card)",
+                                            filter: on ? "none" : "grayscale(0.6) opacity(0.55)", transition: "all .12s" } }, sm.emoji);
+                                })));
+                        }),
+                        React.createElement("div", { style: { marginTop: 12, display: "grid", gap: 10 } },
+                            React.createElement("div", null,
+                                React.createElement("label", { className: "ls-lbl", style: { color: "var(--orange-deep)", display: "flex", alignItems: "center", gap: 5 } },
+                                    "Hinweis für den Schüler",
+                                    React.createElement(Help, { text: "Erscheint bei dieser Fahrstunde im Fahrschülerbereich, im Gegensatz zu den Feldern darunter, die privat bleiben." })),
+                                React.createElement("textarea", { key: l.id + ":hinweis:" + (lessonFieldRev[l.id + ":hinweis"] || 0), rows: 2, defaultValue: l.hinweis || "", onBlur: e => { if (e.target.value !== (l.hinweis || ""))
+                                        updateLesson(l.id, { hinweis: e.target.value }); }, placeholder: "z. B. Schulterblick vor dem Ausparken nicht vergessen…", style: { width: "100%", border: "1.5px solid var(--orange)", borderRadius: 10, padding: "9px 11px",
+                                        fontSize: 16, background: "var(--orange-soft)", resize: "vertical" } }),
+                                React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 4 } }, "Sichtbar für den Schüler")),
+                            React.createElement("div", null,
+                                React.createElement("label", { className: "ls-lbl", style: { color: "var(--green)" } }, "Was lief gut"),
+                                React.createElement("textarea", { key: l.id + ":gut:" + (lessonFieldRev[l.id + ":gut"] || 0), rows: 2, defaultValue: l.gut || "", onBlur: e => { if (e.target.value !== (l.gut || ""))
+                                        updateLesson(l.id, { gut: e.target.value }); }, placeholder: "Was hat gut geklappt…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
+                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
+                            React.createElement("div", null,
+                                React.createElement("label", { className: "ls-lbl", style: { color: "#B3362A" } }, "Was lief schlecht"),
+                                React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id + ":schlecht"] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
+                                        updateLesson(l.id, { schlecht: e.target.value }); }, placeholder: "Woran noch arbeiten…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
+                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
+                            React.createElement("div", null,
+                                React.createElement("label", { className: "ls-lbl" }, "Weitere Notizen"),
+                                React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id + ":note"] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
+                                        updateLesson(l.id, { note: e.target.value }); }, placeholder: "Sonstiges…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
+                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }))),
+                        (l.thema || l.gut || l.schlecht) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 4 }, onClick: () => suggestAdkFromLesson(l) }, "✨ ADK/Strecken-Vorschlag aus dieser Stunde")));
+            }));
     }
     // ── Rechnungen ──
     // Sammelt alle noch nicht abgerechneten Posten (Fahrstunden + freie Posten) des aktuellen Schülers
