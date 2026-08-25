@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.7";
+const APP_VERSION = "1.166.8";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.8", date: "August 2026", changes: [
+            "Fehlerbehebung Theorie-Fortschritt: eine Frage nur mit einem Lesezeichen zu markieren (ohne sie zu beantworten) zählte an vier Stellen fälschlich als \"beantwortet\" mit - in der Fortschrittsanzeige, im Hinweis auf ein schwaches Sachgebiet, in der KI-Prüfreife-Einschätzung und auf dem gedruckten \"Ausbildungsnachweis\"-Blatt. Zählt jetzt nur noch tatsächlich beantwortete Fragen",
+            "Fehlerbehebung Vorlagen-Editor: die Stückzahl eines Fahrzeugkunde-Punkts ließ sich ändern, wirkte sich aber nur auf die ADK- oder nur auf die Strecken-Kopie aus (Fahrzeugkunde wird intern doppelt geführt) - der 5-Stufen-Regler zeigte dadurch je nach Reiter einen anderen Nenner für dieselbe Frage. Die Stückzahl ist dort jetzt wie schon auf der Schülerkarte nicht mehr bearbeitbar (Fahrzeugkunde nutzt immer den festen 5-Stufen-Regler)",
+        ] },
     { v: "1.166.7", date: "August 2026", changes: [
             "Sicherheitslücke im Fahrschüler-Bereich behoben: auf einem geteilten Gerät (z.B. Familientablett, ein Buchungslink für mehrere Geschwister) konnte eine spät auflösende Antwort (Termin stornieren, Warteliste-Angebot annehmen, Fahrstunden nachladen) noch nach dem Abmelden ankommen und die Daten des inzwischen neu eingeloggten anderen Fahrschülers überschreiben - Termine, Ausbildungsstand, Adresse und Telefonnummer des vorherigen Schülers wären dann sichtbar gewesen, ohne dass sich der neue je als dieser angemeldet hat. Zusätzlich blieb nach dem Abmelden der volle Name des vorherigen Schülers im Login-Formular sichtbar",
         ] },
@@ -10496,7 +10500,7 @@ function App() {
         if (tq && tq.length) {
             const progress = stu.theoryProgress || {};
             const gemeistert = tq.filter(q => progress[q.id] && progress[q.id].correct).length;
-            theorie = { gemeistertProzent: Math.round((gemeistert / tq.length) * 100), beantwortet: Object.keys(progress).length, gesamtFragen: tq.length };
+            theorie = { gemeistertProzent: Math.round((gemeistert / tq.length) * 100), beantwortet: theoryAnsweredCount(progress, tq), gesamtFragen: tq.length };
         }
         return {
             ...base,
@@ -10880,6 +10884,15 @@ function App() {
             return theoryQuestions;
         const vk = (stu && stu.klasse) || DEFAULT_KLASSE;
         return theoryQuestions.filter(q => q.klasse === "ALL" || q.klasse === vk);
+    }
+    // "beantwortet" heißt: es gibt ein echtes Prüfungsergebnis (progress[id].correct ist true ODER
+    // false, aber gesetzt) - nicht bloß irgendein progress-Eintrag. toggleMark() (Lesezeichen-Stern)
+    // legt beim ersten Antippen einer noch nie beantworteten Frage bereits einen Eintrag {marked:true}
+    // an, ganz ohne correct-Feld. Ein reines Merken einer Frage zählte dadurch an mehreren Stellen
+    // (Fortschrittsanzeige, KI-Prüfreife-Einschätzung, gedrucktes "digitaler Nachweis"-Blatt) fälschlich
+    // als "beantwortet" mit, obwohl der Schüler sie nie tatsächlich bearbeitet hat.
+    function theoryAnsweredCount(progress, questions) {
+        return questions.filter(q => progress[q.id] && progress[q.id].correct != null).length;
     }
     // KI-Fragengenerator für ein schwaches Theorie-Sachgebiet: schlägt neue, selbst ausgedachte
     // Übungsfragen vor (NIE amtliche Fragen nachgebildet, siehe Kommentar in der Netlify-Function).
@@ -15127,7 +15140,7 @@ function App() {
         const topics = Object.keys(byTopic);
         const gesamtGemeistert = tq.filter(q => progress[q.id] && progress[q.id].correct).length;
         const gesamtPct = Math.round((gesamtGemeistert / tq.length) * 100);
-        const beantwortet = Object.keys(progress).length;
+        const beantwortet = theoryAnsweredCount(progress, tq);
         return React.createElement(React.Fragment, null,
             React.createElement("div", { className: "card home-tile", style: { marginBottom: 14, cursor: "default" } },
                 React.createElement("div", { className: "home-num" }, gesamtPct + "%"),
@@ -15139,7 +15152,7 @@ function App() {
                         const qs = byTopic[topic];
                         const gemeistert = qs.filter(q => progress[q.id] && progress[q.id].correct).length;
                         const pct = Math.round((gemeistert / qs.length) * 100);
-                        const beantwortetTopic = qs.filter(q => progress[q.id]).length;
+                        const beantwortetTopic = theoryAnsweredCount(progress, qs);
                         // Schwaches Sachgebiet: mind. 2 Fragen beantwortet, aber unter 60% davon gemeistert -
                         // derselbe "genug Datenpunkte, aber auffällig schlecht"-Schwellenwert-Gedanke wie bei
                         // wiederkehrendeSchwaechen() für Fahrstunden, nur auf die Theorie-Sachgebiete übertragen.
@@ -18936,7 +18949,17 @@ function App() {
                                             opacity: itDragging ? 0.5 : 1 } },
                                         React.createElement(Handle, { onDown: e => startDrag(e, "item", si, ii) }),
                                         React.createElement("input", { value: it.label, onChange: e => renameItem(si, ii, e.target.value), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 9px", fontSize: 16 } }),
-                                        React.createElement("input", { type: "number", min: "1", value: it.count || 1, onChange: e => setItemCount(si, ii, e.target.value), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 16, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
+                                        // Fahrzeugkunde existiert als ZWEI unabh\u00E4ngige Kopien (eine in der
+                                        // ADK-, eine in der Strecken-Vorlage, siehe withFahrzeugkunde()) -
+                                        // eine St\u00FCckzahl-\u00C4nderung hier landet nur in EINER der beiden Kopien
+                                        // und der 5-Stufen-Regler (FZK_RAMP, fest auf count===4 ausgelegt)
+                                        // w\u00FCrde f\u00FCr dieselbe Fahrzeugkunde-Frage je nach Reiter einen
+                                        // anderen Nenner sehen. Dieselbe Ausnahme, die die Sch\u00FClerkarte f\u00FCr
+                                        // Fahrzeugkunde beim St\u00FCckzahl-Bearbeiten schon macht (editCounts &&
+                                        // sec.id !== "fahrzeugkunde").
+                                        sec.id === "fahrzeugkunde"
+                                            ? React.createElement("span", { style: { width: 48, textAlign: "center", fontSize: 13, color: "var(--muted)" }, title: "Fahrzeugkunde nutzt einen festen 5-Stufen-Regler, keine St\u00FCckzahl" }, "\u2014")
+                                            : React.createElement("input", { type: "number", min: "1", value: it.count || 1, onChange: e => setItemCount(si, ii, e.target.value), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 16, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
                                         delBtn(() => delItem(si, ii))));
                             }),
                             drag && drag.type === "item" && drag.si === si && drag.overIndex === sec.items.length && dropLine,
@@ -19205,7 +19228,7 @@ function App() {
                                 React.createElement("th", { style: { textAlign: "center", width: 70, padding: "4px 6px", borderBottom: "1px solid #ccc" } }, "Gemeistert"))),
                         React.createElement("tbody", null, topics.map(topic => {
                             const qs = byTopic[topic];
-                            const beantwortet = qs.filter(q => progress[q.id]).length;
+                            const beantwortet = theoryAnsweredCount(progress, qs);
                             const gemeistert = qs.filter(q => progress[q.id] && progress[q.id].correct).length;
                             return React.createElement("tr", { key: topic, style: { borderBottom: "1px solid #eee" } },
                                 React.createElement("td", { style: { padding: "4px 6px" } }, topic),
