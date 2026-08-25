@@ -990,10 +990,21 @@ const FAHRZEUGKUNDE_ADK = { id: "fahrzeugkunde", title: "Fahrzeugkunde", color: 
 // komplett neuen, noch nie gespeicherten Vorlagen greifen - nicht bei bestehenden Schulen.
 // Beide Stellen zeigen dasselbe Abschnittsobjekt (usesAdkStore) mit gemeinsamem Fortschritt -
 // keine zwei unabhängigen Kopien, die auseinanderlaufen könnten.
+// Stellt sicher, dass GENAU ein Fahrzeugkunde-Abschnitt existiert, ganz vorne. Prüfte vorher nur
+// index 0 ("ist der erste Abschnitt schon Fahrzeugkunde?") - im Vorlagen-Editor lässt sich per
+// Drag&Drop aber jeder andere Abschnitt vor Fahrzeugkunde ziehen (kein Guard dagegen), wodurch
+// hier bei jedem Aufruf eine ZWEITE, frische Fahrzeugkunde-Kopie vorangestellt wurde, ohne die
+// jetzt an zweiter Stelle stehende alte zu entfernen - Fahrzeugkunde-Punkte zählten dadurch
+// doppelt in Fortschritts-Prozentzahlen. Sucht jetzt im GANZEN Array statt nur an Index 0, nimmt
+// eine vorhandene Kopie (keine hart zurückgesetzten Admin-Anpassungen) und entfernt jede weitere.
 function withFahrzeugkunde(t) {
-    const adk = Array.isArray(t.adk) && t.adk[0] && t.adk[0].id === "fahrzeugkunde" ? t.adk : [deepCopy(FAHRZEUGKUNDE_ADK), ...(t.adk || [])];
-    const strecken = Array.isArray(t.strecken) && t.strecken[0] && t.strecken[0].id === "fahrzeugkunde" ? t.strecken : [deepCopy(FAHRZEUGKUNDE_ADK), ...(t.strecken || [])];
-    return { ...t, adk, strecken };
+    return { ...t, adk: dedupeFahrzeugkunde(t.adk), strecken: dedupeFahrzeugkunde(t.strecken) };
+}
+function dedupeFahrzeugkunde(list) {
+    const arr = Array.isArray(list) ? list : [];
+    const existing = arr.find(sec => sec && sec.id === "fahrzeugkunde");
+    const rest = arr.filter(sec => !(sec && sec.id === "fahrzeugkunde"));
+    return [existing || deepCopy(FAHRZEUGKUNDE_ADK), ...rest];
 }
 // ADK-Stufen
 const DEFAULT_ADK = [
@@ -1484,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.3";
+const APP_VERSION = "1.166.4";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1605,6 +1616,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.4", date: "August 2026", changes: [
+            "Fehlerbehebung \"Vorlage zurücksetzen\" (Ausbildung, Vorlage bearbeiten): setzte bei jeder Fahrschule außer der internen Demo \"Fahrschule V3\" die Vorlage auf falsche Punkt-IDs zurück, wodurch der ADK-/Strecken-Fortschritt ALLER Schüler dieser Klasse sofort auf 0% fiel, obwohl die Daten dahinter noch da waren. Setzt jetzt korrekt auf die für die eigene Fahrschule tatsächlich passende Werksvorlage zurück",
+            "Fehlerbehebung Vorlagen-Editor: einen anderen Abschnitt per Ziehen vor \"Fahrzeugkunde\" verschieben konnte eine zweite, doppelte Fahrzeugkunde-Kopie erzeugen, wodurch deren Punkte doppelt in die Fortschritts-Prozentzahl einflossen. Es kann jetzt nur noch genau einen Fahrzeugkunde-Abschnitt geben, immer an erster Stelle",
+        ] },
     { v: "1.166.3", date: "August 2026", changes: [
             "Sicherheitslücke behoben: ein normaler Fahrlehrer (ohne Admin-Rechte) an einer Mehrlehrer-Fahrschule konnte über \"Offene Posten der ganzen Fahrschule ansehen\" und das Lücken-Radar im Abrechnung-Reiter Name, Telefonnummer und offenen Betrag JEDES Schülers der ganzen Fahrschule einsehen, nicht nur der eigenen - obwohl der Rest der App (Statistik, Prüfungsplanung) das bewusst auf eigene Schüler beschränkt. Beide Stellen fragen jetzt wie an allen vergleichbaren Stellen erst Admin-Rechte ab, sonst wird wie im Solo-Betrieb nur die eigene Schülerliste gezeigt",
         ] },
@@ -18830,7 +18845,19 @@ function App() {
                 " hinzuf\u00FCgen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "#B3362A" }, onClick: async () => {
                     if (await askConfirm({ message: "Vorlage f\u00FCr Klasse " + vk + " auf den Auslieferungszustand zur\u00FCcksetzen? Deine eingetragenen Sch\u00FClerdaten bleiben erhalten, aber selbst hinzugef\u00FCgte Punkte verschwinden." })) {
-                        writeTplForKlasse(vk, { adk: deepCopy(DEFAULT_ADK), strecken: deepCopy(DEFAULT_STRECKEN) });
+                        // DEFAULT_ADK/DEFAULT_STRECKEN sind der Sonderfall nur f\u00FCr die Schule
+                        // "Fahrschule V3" (siehe tplForRaw()) - ihre Punkt-IDs (gs_sitz, ...)
+                        // existieren bei jeder anderen Schule gar nicht in stu.items/stu.strecken
+                        // (dort stehen bvf_...-IDs), ein Reset darauf h\u00E4tte JEDEN Sch\u00FClerfortschritt
+                        // dieser Klasse auf 0% gesetzt statt echte Werksdaten wiederherzustellen.
+                        // Dieselbe Fallunterscheidung wie tplForRaw() f\u00FCr "kein gespeichertes
+                        // Vorlage"/Reset-Fall, damit beide Stellen nie auseinanderlaufen.
+                        const isV3 = !!(school && (school.name || "").trim().toLowerCase() === "fahrschule v3");
+                        if (vk === "BE") {
+                            writeTplForKlasse(vk, { adk: deepCopy(BE_ADK), strecken: deepCopy(tplForRaw(DEFAULT_KLASSE).strecken || []) });
+                        } else {
+                            writeTplForKlasse(vk, { adk: deepCopy(isV3 ? DEFAULT_ADK : BVF_ADK), strecken: isV3 ? deepCopy(DEFAULT_STRECKEN) : [] });
+                        }
                         setOpenSection(null);
                     }
                 } }, "Vorlage zur\u00FCcksetzen"),
