@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.9";
+const APP_VERSION = "1.166.10";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.166.10", date: "August 2026", changes: [
+            "Fehlerbehebung Streckenaufzeichnung: nach \"Beenden\"/\"Stoppen\" oder \"Verwerfen\" konnte ein bereits unterwegs befindlicher, verspäteter GPS-Punkt den Zwischenspeicher für unterbrochene Aufzeichnungen erneut anlegen, obwohl die Aufzeichnung korrekt beendet wurde. Das ließ beim nächsten App-Start fälschlich den Hinweis \"nicht beendete Aufzeichnung\" wieder auftauchen. Ein verspäteter Punkt wird jetzt verworfen, sobald die Aufzeichnung beendet ist",
+        ] },
     { v: "1.166.9", date: "August 2026", changes: [
             "Design: mehrere zu kleine Tap-Flächen vergrößert (u.a. Bewertungs-Smileys im Fahrstunden-Eintrag, \"Termin an diesem Tag\"-Button im Kalender, Stornieren/Kalender-Button und Storno-Kreuz im Fahrschüler-Bereich, Löschen-Button im Vorlagen-Editor, Chat-Schließen-Button, Arbeitstag sperren/freigeben) - näher an der von Apple empfohlenen Mindestgröße für Finger-Bedienung",
         ] },
@@ -7459,6 +7462,14 @@ function App() {
     const recWakeLockRef = useRef(null); // hält den Bildschirm während der Aufzeichnung wach
     const recNativeWatcherIdRef = useRef(null); // Watcher-ID des nativen Hintergrund-GPS-Plugins (nur in der App, nicht im Browser)
     const recSignalWarnRef = useRef(0); // Zeitpunkt der letzten "GPS-Signal schwach"-Meldung, gegen Toast-Spam bei anhaltendem Signalverlust
+    // Schaltet onPoint() synchron stumm, sobald stopRecording() läuft. navigator.geolocation.clearWatch()
+    // (und erst recht das native removeWatcher()) garantiert NICHT, dass keine bereits unterwegs
+    // befindliche Positionsmeldung mehr danach eintrifft - ein solcher verspäteter Fix schrieb sonst
+    // noch einen einzelnen Punkt in recPtsRef.current und (schlimmer) erneut den recBufferKey-
+    // Zwischenspeicher in localStorage, obwohl die Aufzeichnung gerade sauber beendet/verworfen wurde.
+    // Das ließ den "nicht beendete Aufzeichnung"-Wiederaufnahme-Dialog beim nächsten App-Start
+    // fälschlich wieder auftauchen, obwohl "Beenden"/"Verwerfen" korrekt funktioniert hatte.
+    const recActiveRef = useRef(false);
     const [recSession, setRecSession] = useState(null); // null | {studentId,lessonId,studentName}
     const [recUi, setRecUi] = useState({ dist: 0, dur: 0, n: 0, tick: 0 });
     // Prüfungssimulation: läuft wie die Live-Aufzeichnung als eigene Sitzung, die beim Navigieren
@@ -7512,7 +7523,7 @@ function App() {
         document.addEventListener("visibilitychange", onVisible);
         return () => document.removeEventListener("visibilitychange", onVisible);
     }, [recSession]);
-    useEffect(() => () => { if (recWatchRef.current != null) {
+    useEffect(() => () => { recActiveRef.current = false; if (recWatchRef.current != null) {
         try {
             navigator.geolocation.clearWatch(recWatchRef.current);
         }
@@ -10973,6 +10984,7 @@ function App() {
             recStartRef.current = Date.now();
         }
         recLastUiRef.current = 0;
+        recActiveRef.current = true;
         setRecUi({ dist: rmapPathLen(recPtsRef.current), dur: (Date.now() - recStartRef.current) / 1000, n: recPtsRef.current.length, tick: 0 });
         setRecSession({ studentId, lessonId, studentName });
         // Zwischenspeicher: überlebt App-Kill/Tab-Schließen mitten in der Aufnahme. Ohne das
@@ -10988,6 +11000,8 @@ function App() {
         // Meter Fehler) einen dauerhaften Ausreißer in der aufgezeichneten Strecke, da
         // rmapPathLen() die Distanz einfach als Summe aller Segmente berechnet.
         const onPoint = (lat, lng, accuracy) => {
+            if (!recActiveRef.current)
+                return;
             if (accuracy != null && accuracy > 50)
                 return;
             const p = [lat, lng], arr = recPtsRef.current;
@@ -11059,6 +11073,10 @@ function App() {
     // recResumeExecRef weiter oben für den TDZ-Hintergrund.
     recResumeExecRef.current = (buf, stu) => startRecording(buf.studentId, buf.lessonId, buf.studentName || [((stu.vorname || "").trim()), ((stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler", buf);
     const stopRecording = (save) => {
+        // Zuerst stummschalten (siehe recActiveRef weiter oben), bevor überhaupt die Watcher
+        // abgemeldet werden - ein noch unterwegs befindlicher, verspäteter GPS-Fix soll onPoint()
+        // dann sofort verlassen, statt recBufferKey in localStorage wiederherzustellen.
+        recActiveRef.current = false;
         if (recWatchRef.current != null) {
             try {
                 navigator.geolocation.clearWatch(recWatchRef.current);
