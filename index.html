@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.166.10";
+const APP_VERSION = "1.167.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.167.0", date: "August 2026", changes: [
+            "Neu: KI-Coaching-Tipp im Fahrstunden-Tagebuch. Sobald bei einer Fahrstunde \"Was lief schlecht\" ausgefüllt ist, schlägt die KI eine konkrete Methode für die nächste Stunde vor - mit vermuteter Ursache und einem Satz, der sich direkt als \"Hinweis für den Schüler\" übernehmen lässt. Berücksichtigt die letzten Einträge desselben Schülers, damit bei einem wiederkehrenden Problem eine andere Methode vorgeschlagen wird als beim letzten Mal",
+        ] },
     { v: "1.166.10", date: "August 2026", changes: [
             "Fehlerbehebung Streckenaufzeichnung: nach \"Beenden\"/\"Stoppen\" oder \"Verwerfen\" konnte ein bereits unterwegs befindlicher, verspäteter GPS-Punkt den Zwischenspeicher für unterbrochene Aufzeichnungen erneut anlegen, obwohl die Aufzeichnung korrekt beendet wurde. Das ließ beim nächsten App-Start fälschlich den Hinweis \"nicht beendete Aufzeichnung\" wieder auftauchen. Ein verspäteter Punkt wird jetzt verworfen, sobald die Aufzeichnung beendet ist",
         ] },
@@ -7810,6 +7813,7 @@ function App() {
     const [lessonPrompt, setLessonPrompt] = useState(null); // null | {queue:[appt...], idx} für vergangene Termine
     const [lessonForm, setLessonForm] = useState(null); // null | {date,time,minutes} manuelles Erfassen
     const [lessonDraft, setLessonDraft] = useState({}); // { [lessonId]: {phrase,busy,error} } - KI-Stundenentwurf im Fahrstunden-Tagebuch
+    const [coachTip, setCoachTip] = useState({}); // { [lessonId]: {busy,error,tip} } - KI-Coaching-Tipp zum notierten Problem ("Was lief schlecht")
     const [lessonFieldRev, setLessonFieldRev] = useState({}); // { [lessonId]: number } - erzwingt Remount der Text-Felder (defaultValue), wenn der KI-Entwurf sie befüllt hat
     // Ohne diesen Reset blieb eine beim vorherigen Schüler aufgeklappte Fahrstunde für den neuen
     // Schüler sofort sichtbar, obwohl der Fahrlehrer das für ihn nie angefordert hat (analog zum
@@ -11552,6 +11556,33 @@ function App() {
             setLessonDraft(d => ({ ...d, [l.id]: { phrase, busy: false, error: "Fehler: " + (e.message || "unbekannt") } }));
         }
     }
+    // Coaching-Tipp zu einem notierten Problem ("Was lief schlecht") - konkrete Methode für die
+    // nächste Fahrstunde statt Curriculum-Zuordnung (das macht suggestAdkFromLesson) oder
+    // Tagebuch-Ausfüllung (das macht draftLessonEntry). Gleiches recent-Muster wie dort, damit
+    // die KI wiederkehrende Probleme erkennt und nicht dieselbe schon erfolglose Methode wiederholt.
+    async function coachTipForLesson(l) {
+        if (!active || !(l.schlecht || "").trim())
+            return;
+        setCoachTip(d => ({ ...d, [l.id]: { busy: true, error: "" } }));
+        try {
+            const recent = (active.lessons || []).filter(x => x.id !== l.id && (x.schlecht || x.gut))
+                .slice(0, 3).map(x => ({ date: x.date, thema: x.thema, gut: x.gut, schlecht: x.schlecht }));
+            const resp = await fetch("/.netlify/functions/lesson-coaching-tip", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ thema: l.thema || "", schlecht: l.schlecht || "", gut: l.gut || "", ratings: l.ratings || {}, klasse: active.klasse || "", recent }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out) {
+                setCoachTip(d => ({ ...d, [l.id]: { busy: false, error: (out && out.error) || "Tipp fehlgeschlagen" } }));
+                return;
+            }
+            setCoachTip(d => ({ ...d, [l.id]: { busy: false, error: "", tip: out.tip || null } }));
+        }
+        catch (e) {
+            setCoachTip(d => ({ ...d, [l.id]: { busy: false, error: "Fehler: " + (e.message || "unbekannt") } }));
+        }
+    }
     // ── Termine ──
     async function addAppt(appt) {
         setSaved(false);
@@ -13786,6 +13817,7 @@ function App() {
                 const rated = LESSON_FIELDS.filter(f => l.ratings && l.ratings[f.id]).length;
                 const lroute = l.route;
                 const recActiveHere = !!recSession && recSession.studentId === active.id && recSession.lessonId === l.id;
+                const ctip = coachTip[l.id];
                 return React.createElement("div", { key: l.id, className: "card", style: { marginBottom: 10, overflow: "hidden" } },
                     React.createElement("button", { onClick: () => setOpenLesson(isOpen ? null : l.id), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", textAlign: "left", background: "var(--card)" } },
                         React.createElement("div", { style: { width: 42, height: 42, minWidth: 42, borderRadius: 11, background: "var(--field-bg)",
@@ -13862,7 +13894,18 @@ function App() {
                                 React.createElement("label", { className: "ls-lbl", style: { color: "#B3362A" } }, "Was lief schlecht"),
                                 React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id + ":schlecht"] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
                                         updateLesson(l.id, { schlecht: e.target.value }); }, placeholder: "Woran noch arbeiten…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
-                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } })),
+                                        fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }),
+                                !!(l.schlecht || "").trim() && React.createElement("div", { style: { marginTop: 8 } },
+                                    React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 12.5, padding: "7px 11px" },
+                                        disabled: !!(ctip && ctip.busy), onClick: () => coachTipForLesson(l) },
+                                        (ctip && ctip.busy) ? "…" : "✨ Tipp: So in den Griff bekommen"),
+                                    ctip && ctip.error && React.createElement("div", { style: { fontSize: 12, color: "#B3362A", marginTop: 6 } }, ctip.error),
+                                    ctip && ctip.tip && React.createElement("div", { style: { marginTop: 8, padding: "10px 11px", border: "1.5px solid var(--orange)", borderRadius: 10, background: "var(--orange-soft)" } },
+                                        ctip.tip.problem && React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 4 } }, ctip.tip.problem),
+                                        ctip.tip.ursache && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 6 } }, "Vermutliche Ursache: " + ctip.tip.ursache),
+                                        ctip.tip.methode && React.createElement("div", { style: { fontSize: 13, lineHeight: 1.45, marginBottom: ctip.tip.hinweis_schueler ? 8 : 0 } }, ctip.tip.methode),
+                                        ctip.tip.hinweis_schueler && React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 12, padding: "6px 10px" },
+                                            onClick: () => updateLesson(l.id, { hinweis: ctip.tip.hinweis_schueler }) }, "→ Als Hinweis für Schüler übernehmen")))),
                             React.createElement("div", null,
                                 React.createElement("label", { className: "ls-lbl" }, "Weitere Notizen"),
                                 React.createElement("textarea", { key: l.id + ":note:" + (lessonFieldRev[l.id + ":note"] || 0), rows: 2, defaultValue: l.note || "", onBlur: e => { if (e.target.value !== (l.note || ""))
