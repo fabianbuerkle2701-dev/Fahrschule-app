@@ -1495,7 +1495,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.167.0";
+const APP_VERSION = "1.167.1";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -1616,6 +1616,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.167.1", date: "August 2026", changes: [
+            "Fehlerbehebung Prüfungsreife: die Sonderfahrten-Pflicht-UE (Überland/Autobahn/Dämmerung) galt als erfüllt, sobald die Gesamtminuten-Summe erreicht war - auch wenn die vorgeschriebene durchgehende 90-Minuten-Fahrt (Doppelstunde) noch nie stattgefunden hatte. Sowohl die \"Prüfungsreif\"-Ampel als auch die Liste der offenen Punkte verlangen jetzt zusätzlich mindestens eine einzelne Fahrt mit 90+ Minuten je Sonderfahrt-Art, bevor ein Schüler als prüfungsreif gilt",
+        ] },
     { v: "1.167.0", date: "August 2026", changes: [
             "Neu: KI-Coaching-Tipp im Fahrstunden-Tagebuch. Sobald bei einer Fahrstunde \"Was lief schlecht\" ausgefüllt ist, schlägt die KI eine konkrete Methode für die nächste Stunde vor - mit vermuteter Ursache und einem Satz, der sich direkt als \"Hinweis für den Schüler\" übernehmen lässt. Berücksichtigt die letzten Einträge desselben Schülers, damit bei einem wiederkehrenden Problem eine andere Methode vorgeschlagen wird als beim letzten Mal",
         ] },
@@ -5863,8 +5866,12 @@ function pruefungsreife(stu, adk, strecken, sonderfahrtenSoll) {
     const theorieOffen = !stu.theorie;
     // Ohne erfüllte Sonderfahrten (Überland/Autobahn/Dämmerung) ist ebenfalls keine
     // Prüfungszulassung möglich (siehe ampel()) - muss hier mitzählen, sonst widerspricht
-    // sich "total===0"/"bereit" gegenüber der Ampel für denselben Schüler.
-    const offeneSonderfahrten = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).filter(x => !x.erfuellt);
+    // sich "total===0"/"bereit" gegenüber der Ampel für denselben Schüler. "erfüllt" prüft nur
+    // die Gesamt-UE-Summe - zusätzlich muss laut Vorgabe je Sonderfahrt-Art mindestens einmal
+    // eine Doppelstunde (90 Min. am Stück) dabei gewesen sein (langeFahrtDabei, siehe
+    // sonderfahrtenBilanz()); ohne diese zweite Bedingung würde z.B. 4x45 Min. Überlandfahrt an
+    // 4 verschiedenen Tagen fälschlich als erfüllt gelten.
+    const offeneSonderfahrten = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).filter(x => !x.erfuellt || !x.langeFahrtDabei);
     const total = offeneADK.length + offeneStrecken.length + (theorieOffen ? 1 : 0) + offeneSonderfahrten.length;
     return { offeneADK, offeneStrecken, theorieOffen, offeneSonderfahrten, total };
 }
@@ -5878,8 +5885,11 @@ function ampel(stu, adk, strecken, sonderfahrtenSoll) {
     // ignorieren. sonderfahrtenBilanz() liefert ein leeres Array, wenn für die Klasse
     // kein Soll hinterlegt ist (siehe DEFAULT_SONDERFAHRTEN_SOLL/Einstellungen); in dem
     // Fall bleibt die Prüfung absichtlich unscharf (every() auf [] ist true), statt eine
-    // Klasse ohne hinterlegtes Soll dauerhaft auf gelb zu sperren.
-    const sonderfahrtenOk = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).every(x => x.erfuellt);
+    // Klasse ohne hinterlegtes Soll dauerhaft auf gelb zu sperren. Zusätzlich zur Gesamt-UE-
+    // Summe (erfuellt) muss je Sonderfahrt-Art mindestens einmal eine Doppelstunde (90 Min.
+    // am Stück) dabei gewesen sein (langeFahrtDabei) - sonst wäre z.B. 4x45 Min. Überlandfahrt
+    // an 4 verschiedenen Tagen fälschlich "prüfungsreif".
+    const sonderfahrtenOk = sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).every(x => x.erfuellt && x.langeFahrtDabei);
     if (gesamt >= 90 && theorieOk && sonderfahrtenOk)
         return { stufe: "gruen", farbe: "#12A150", text: "Prüfungsreif" };
     if (gesamt >= 80)
@@ -13750,7 +13760,7 @@ function App() {
             r.offeneSonderfahrten.length > 0 && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
                 React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Sonderfahrten"),
                 " noch nicht erf\u00FCllt: ",
-                r.offeneSonderfahrten.map(x => x.label + " (" + x.ue + "/" + x.sollUe + " UE)").join(", ")),
+                r.offeneSonderfahrten.map(x => x.label + " (" + x.ue + "/" + x.sollUe + " UE" + (x.erfuellt && !x.langeFahrtDabei ? ", Doppelstunde am Stück fehlt noch" : "") + ")").join(", ")),
             (r.offeneADK.length > 0 || r.offeneStrecken.length > 0) && React.createElement("div", { className: "sec-grid" },
                 r.offeneADK.length > 0 && React.createElement("div", { className: "card sec", style: { borderLeftColor: "var(--green)", marginBottom: 10 } },
                     React.createElement("div", { className: "sec-head", style: { cursor: "default" } },
@@ -19692,7 +19702,9 @@ function App() {
                                 o.ue,
                                 "/",
                                 o.sollUe,
-                                " UE)"))))),
+                                " UE",
+                                (o.erfuellt && !o.langeFahrtDabei) ? ", Doppelstunde am Stück fehlt noch" : "",
+                                ")"))))),
                     r.offeneADK.length > 0 && React.createElement("div", { style: { marginBottom: 6 } },
                         React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, marginBottom: 2 } },
                             "Lerninhalte (",
