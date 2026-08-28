@@ -1,21 +1,14 @@
-// Netlify Function: Chat-Assistent auf der öffentlichen Buchungsseite UND in der Fahrschüler-App.
-// Beantwortet Standardfragen von Interessenten (Preise, Klassen, Anmeldung) automatisch,
-// ohne dass jemand ans Telefon muss. Antwortet ausschließlich anhand der über public_chat_facts
-// geladenen, für diese eine Fahrschule hinterlegten Fakten - keine erfundenen Preise, keine
-// Rechts-/Prüfungsauskünfte.
+// Netlify Function: erklärt einem Fahrschüler eine Frage aus der Theorieprüfung, nachdem er
+// sie beantwortet hat - warum die richtige Antwort richtig ist und wo sein Denkfehler lag.
 //
-// Diese Function ist bewusst OHNE Anmeldung erreichbar (Interessenten sind noch keine Schüler
-// und haben keinen Login). Genau das war bei den anderen KI-Functions vor Task #76 die
-// Sicherheitslücke - hier wird stattdessen über den Buchungscode + ein Tageslimit
-// (public_chat_rate_limit) geschützt, damit die Function nicht zur offenen Kostenfalle wird.
+// Bewusst OHNE Anmeldung erreichbar: Fahrschüler haben in dieser App keinen Supabase-Account,
+// ein Login-Gate gibt es hier also nicht. Geschützt wird stattdessen wie beim Buchungs-Chat
+// über den Buchungscode der Fahrschule plus ein Tageslimit (public_chat_rate_limit) - sonst
+// wäre die Function eine offene Kostenfalle. Das Limit ist absichtlich hoch (120/Tag), weil
+// hier anders als im Chat mehrere Schüler derselben Schule gleichzeitig lernen.
 //
-// Ist ein Schüler eingeloggt, schickt der Client zusätzlich Name+PIN mit (Phase 1 des
-// "Verwaltung ersetzen"-Fahrplans). Diese werden HIER serverseitig über dieselbe
-// public_student_overview-RPC verifiziert, die auch StudentArea nutzt - dem Client wird
-// nie vertraut, genau wie bei jeder anderen public_student_*-RPC in dieser App. Schlägt die
-// Verifikation fehl (falscher PIN, kein Login), läuft der Chat einfach als anonymer
-// Schulfakten-Chat weiter, ohne einen Fehler zurückzugeben - so lässt sich von außen nicht
-// durch Fehlermeldungen erraten, ob ein Name/PIN existiert.
+// Der Client ruft die Function nur auf Knopfdruck auf, nicht automatisch nach jeder Antwort:
+// jede Erklärung kostet einen API-Aufruf, und die meisten Fragen versteht der Schüler ohne.
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
 
@@ -47,10 +40,20 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Frage übergeben" }) };
   }
 
+  async function rpc(name, params) {
+    const resp = await fetch(SUPABASE_URL + "/rest/v1/rpc/" + name, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify(params),
+    });
+    if (!resp.ok) return null;
+    return resp.json();
+  }
+
   // Tageslimit wie beim Buchungs-Chat: die Function ist bewusst ohne Login erreichbar
   // (Schüler haben keinen Supabase-Account), darf aber keine offene Kostenfalle sein.
   const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 120 });
-  if (allowed === false) {
+  if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute ist die Zahl der Erklärungen erschöpft. Morgen geht es weiter." }) };
   }
 
