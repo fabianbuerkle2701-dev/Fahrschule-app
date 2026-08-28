@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.171.0";
+const APP_VERSION = "1.172.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -2716,6 +2716,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.172.0", date: "August 2026", changes: [
+            "Neu: Anwesenheit per QR-Code beim Theorieunterricht. Bei einem Termin der Art „Theorieunterricht“ lässt sich unter „Anwesenheit (QR-Check-in)“ das behandelte Thema wählen (alle 12 Grundstoff- und die klassenspezifischen Zusatzstoff-Themen nach Anlage 1 FahrschAusbO) und ein 15 Minuten gültiger QR-Code anzeigen. Fahrschüler scannen ihn im Fahrschülerbereich und sind automatisch eingetragen, sofern sie eingeloggt sind; alternativ trägt der Fahrlehrer sie manuell ein",
+        ] },
     { v: "1.171.0", date: "August 2026", changes: [
             "Neu: Sofort-Buchung für zuverlässige Schüler. Bei der Zuverlässigkeit eines Schülers lässt sich jetzt „Sofort-Buchung erlauben“ aktivieren - freie Termine innerhalb deiner Arbeitszeiten werden dann direkt fest gebucht, statt erst als Vorschlag zu warten. Läuft komplett serverseitig ab (Überschneidung, Tages-/Wochenlimit und Arbeitszeit werden bei jeder Buchung erneut geprüft), für alle anderen Schüler ändert sich nichts",
         ] },
@@ -5636,6 +5639,47 @@ async function dbDeleteExamSlot(id) {
             throw new Error(error.message);
         }
     });
+}
+/* ── Theorie-Anwesenheit (QR-Check-in), siehe theory_attendance-Tabelle und renderTheoryCheckinModal(). ── */
+async function fetchTheoryAttendance(apptId) {
+    // Ein frisch im Demo-Modus angelegter Termin hat eine lokale "demo_..."-Kennung statt einer
+    // echten UUID (siehe dbInsertAppt) - eine Abfrage damit würde nur einen 22P02-Datenbankfehler
+    // erzeugen, obwohl das Verhalten (noch keine Anwesenheit) ohnehin dasselbe ist.
+    if (typeof apptId === "string" && apptId.startsWith("demo_"))
+        return [];
+    const { data, error } = await sb.from("theory_attendance").select("*").eq("appt_id", apptId);
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+async function dbAddTheoryAttendance(uid, apptId, studentId, thema) {
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, appt_id: apptId, student_id: studentId, thema, checked_at: new Date().toISOString() }; }
+    const { data, error } = await sb.from("theory_attendance").insert({ owner: uid, appt_id: apptId, student_id: studentId, thema }).select().single();
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data;
+}
+async function dbRemoveTheoryAttendance(id) {
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Löschen ist deaktiviert."); return; }
+    const { error } = await sb.from("theory_attendance").delete().eq("id", id);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+}
+// Anonyme Check-in-RPC (Schüler scannt den QR-Code oder tippt ihn ein) - siehe Migration
+// create_theory_attendance. Wirft bei ungültigem/abgelaufenem Code oder falscher PIN.
+async function publicTheoryCheckin(code, p_name, p_pin, p_checkin_code) {
+    const { data, error } = await sb.rpc("public_theory_checkin", { code, p_name: p_name || null, p_pin: p_pin || null, p_checkin_code });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data; // { ok, thema, already }
 }
 /* ════════ Personalunterlagen (Fahrschul-Admin lädt Dateien für einzelne Fahrlehrer hoch) ════════
    Anders als die Video-Bibliothek liegt das im PRIVATEN Storage-Bucket "staff-files" (nicht
@@ -9305,6 +9349,8 @@ function App() {
     }, [uid]);
     const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
+    // Theorie-Anwesenheit (QR-Check-in), siehe renderTheoryCheckinModal().
+    const [theoryCheckinModal, setTheoryCheckinModal] = useState(null); // null | {appt, thema, attendance, manualId}
     // Einmal pro Sitzung prüfen, ob eine Streckenaufzeichnung durch App-Kill/Tab-Schließen
     // unterbrochen wurde (siehe recBufferKey) - falls ja, anbieten, sie fortzusetzen, statt die
     // bereits aufgezeichneten Punkte kommentarlos zu verlieren.
@@ -17507,6 +17553,63 @@ function App() {
         setApptForm({ id: a.id, date: ymd(a.start_at), start: hm(a.start_at), end: a.end_at ? hm(a.end_at) : "",
             student_id: a.student_id || "", note: noteText(a), title: a.title || "", start_at: a.start_at, status: a.status, sonstige: isSonstige(a), art: apptArt(a) });
     }
+    /* ── Theorie-Anwesenheit (QR-Check-in): ein Theorieunterricht-Termin (art TH) ist meist eine
+       Gruppensitzung, die appointments.student_id bildet das nicht ab - deshalb eine eigene
+       theory_attendance-Zeile je anwesendem Schüler statt den Termin selbst umzudeuten. ── */
+    // 6 Zeichen ohne O/0, I/1 (Verwechslungsgefahr beim manuellen Abtippen des Codes).
+    function randomCheckinCode() {
+        const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        let s = "";
+        for (let i = 0; i < 6; i++)
+            s += chars[Math.floor(Math.random() * chars.length)];
+        return s;
+    }
+    async function openTheoryCheckin(appt) {
+        const attendance = await fetchTheoryAttendance(appt.id).catch(() => []);
+        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || "", attendance });
+    }
+    // 15 Minuten gültig - reicht für den Sitzungsbeginn, ohne dass ein alter Code tagelang gültig bliebe.
+    async function startTheoryCheckin(thema) {
+        if (!theoryCheckinModal)
+            return;
+        const code = randomCheckinCode();
+        const expires = new Date(Date.now() + 15 * 60000).toISOString();
+        try {
+            await dbUpdateAppt(theoryCheckinModal.appt.id, { checkin_code: code, checkin_expires_at: expires, checkin_thema: thema });
+            setAppts(prev => prev.map(a => a.id === theoryCheckinModal.appt.id ? { ...a, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema } : a));
+            setTheoryCheckinModal(m => m && ({ ...m, appt: { ...m.appt, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema }, thema }));
+        }
+        catch (e) {
+            showToast("Konnte nicht gestartet werden:\n" + e.message);
+        }
+    }
+    async function refreshTheoryAttendance() {
+        if (!theoryCheckinModal)
+            return;
+        const attendance = await fetchTheoryAttendance(theoryCheckinModal.appt.id).catch(() => null);
+        if (attendance)
+            setTheoryCheckinModal(m => m && ({ ...m, attendance }));
+    }
+    async function addManualAttendance(studentId) {
+        if (!theoryCheckinModal || !studentId)
+            return;
+        try {
+            const row = await dbAddTheoryAttendance(uid, theoryCheckinModal.appt.id, studentId, theoryCheckinModal.thema);
+            setTheoryCheckinModal(m => m && ({ ...m, attendance: [...m.attendance, row] }));
+        }
+        catch (e) {
+            showToast("Konnte nicht hinzugefügt werden:\n" + e.message);
+        }
+    }
+    async function removeAttendanceEntry(id) {
+        try {
+            await dbRemoveTheoryAttendance(id);
+            setTheoryCheckinModal(m => m && ({ ...m, attendance: m.attendance.filter(a => a.id !== id) }));
+        }
+        catch (e) {
+            showToast("Konnte nicht entfernt werden:\n" + e.message);
+        }
+    }
     // Fahrstunden des morgigen Tages, für die eine Erinnerung sinnvoll ist.
     // Bewusst nur der nächste Tag: weiter im Voraus erinnert niemand, und was heute
     // ansteht, ist zu spät. Raus fliegen: unbestätigte Vorschläge, sonstige Tätigkeiten,
@@ -21920,6 +22023,53 @@ function App() {
                                     React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "Auswählen ›"))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setExamSlotAssign(null) }, "Abbrechen"));
                     })())),
+        theoryCheckinModal && (() => {
+            const appt = theoryCheckinModal.appt;
+            const live = appt.checkin_code && appt.checkin_expires_at && new Date(appt.checkin_expires_at) > new Date();
+            const themen = [...GRUNDSTOFF_THEMEN, ...zusatzstoffFor(DEFAULT_KLASSE)];
+            const checkedInIds = new Set(theoryCheckinModal.attendance.map(a => a.student_id));
+            const manualCandidates = (students || []).filter(s => s._isMine && !s.archived && !checkedInIds.has(s.id));
+            const checkinUrl = live ? location.origin + location.pathname + "?code=" + encodeURIComponent(bookingCode || "") + "&checkin=" + appt.checkin_code : "";
+            let qrDataUrl = null;
+            try { qrDataUrl = live && bookingCode ? qrToDataUrl(checkinUrl, { size: 200, margin: 2 }) : null; } catch (e) { }
+            return React.createElement("div", { onClick: () => setTheoryCheckinModal(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+                React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
+                    React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Anwesenheit · Theorieunterricht"),
+                    !live
+                        ? React.createElement(React.Fragment, null,
+                            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, "Welches Thema behandelt ihr in dieser Sitzung?"),
+                            React.createElement("div", { className: "field", style: { marginBottom: 14 } },
+                                React.createElement("select", { value: theoryCheckinModal.thema, onChange: e => setTheoryCheckinModal(m => ({ ...m, thema: e.target.value })), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                                    React.createElement("option", { value: "" }, "– Thema wählen –"),
+                                    themen.map(t => React.createElement("option", { key: t, value: t }, t)))),
+                            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: !theoryCheckinModal.thema, onClick: () => startTheoryCheckin(theoryCheckinModal.thema) }, "Anwesenheit starten"))
+                        : React.createElement(React.Fragment, null,
+                            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, theoryCheckinModal.thema + " · gültig bis " + new Date(appt.checkin_expires_at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" }) + " Uhr"),
+                            qrDataUrl
+                                ? React.createElement("div", { style: { textAlign: "center", marginBottom: 10 } },
+                                    React.createElement("img", { src: qrDataUrl, alt: "QR-Code zum Scannen", width: 200, height: 200, style: { borderRadius: 12, border: "1.5px solid var(--line)" } }))
+                                : React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "QR-Code nicht verfügbar - Code manuell durchgeben."),
+                            React.createElement("div", { style: { textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 26, letterSpacing: ".08em", marginBottom: 16 } }, appt.checkin_code),
+                            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 } },
+                                React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13 } }, "Anwesend (" + theoryCheckinModal.attendance.length + ")"),
+                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 9px", fontSize: 12 }, onClick: refreshTheoryAttendance }, "↻ Aktualisieren")),
+                            theoryCheckinModal.attendance.length === 0
+                                ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", padding: "8px 0" } }, "Noch niemand eingecheckt.")
+                                : theoryCheckinModal.attendance.map((a, i) => {
+                                    const stu = students.find(s => s.id === a.student_id);
+                                    return React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                        React.createElement("span", { style: { flex: 1, fontSize: 13.5 } }, stu ? dispName(stu) : "Unbekannt"),
+                                        React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, new Date(a.checked_at).toLocaleTimeString("de-DE", { hour: "2-digit", minute: "2-digit" })),
+                                        React.createElement("button", { onClick: () => removeAttendanceEntry(a.id), "aria-label": "Entfernen", style: { border: "none", background: "none", color: "var(--muted)", fontSize: 15, padding: "2px 4px", lineHeight: 1 } }, "×"));
+                                }),
+                            manualCandidates.length > 0 && React.createElement("div", { className: "field", style: { marginTop: 14 } },
+                                React.createElement("label", null, "Manuell hinzufügen",
+                                React.createElement("select", { value: "", onChange: e => { if (e.target.value)
+                                            addManualAttendance(e.target.value); }, style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                                    React.createElement("option", { value: "" }, "– Schüler wählen –"),
+                                    manualCandidates.sort((a, b) => dispName(a).localeCompare(dispName(b), "de")).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s)))))),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setTheoryCheckinModal(null) }, "Fertig"))));
+        })(),
         leistungForm && leistungForm.step === "form" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const autoPrice = leistungPriceAuto(leistungForm);
@@ -23352,6 +23502,17 @@ function App() {
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "currentColor" },
                         React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24zm-2.6 4.43c-.18 0-.46.07-.71.34-.24.27-.93.91-.93 2.21 0 1.3.95 2.56 1.08 2.74.13.18 1.86 2.84 4.51 3.98.63.27 1.12.43 1.5.55.63.2 1.21.17 1.66.1.51-.07 1.56-.64 1.78-1.25.22-.61.22-1.14.16-1.25-.07-.11-.24-.18-.51-.31-.27-.13-1.56-.77-1.8-.86-.24-.09-.42-.13-.59.14-.18.27-.68.86-.83 1.03-.15.18-.31.2-.57.07-.27-.14-1.13-.42-2.16-1.33-.8-.71-1.34-1.59-1.49-1.86-.15-.27-.02-.42.12-.55.12-.12.27-.31.4-.47.13-.16.18-.27.27-.45.09-.18.04-.34-.02-.47-.07-.14-.59-1.46-.83-1.99-.22-.52-.44-.45-.59-.46-.15-.01-.33-.01-.51-.01z" })),
                     "Best\u00E4tigung per WhatsApp senden"),
+                apptForm.id && apptForm.art === "TH" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--orange-deep)" }, onClick: () => {
+                        const a = (appts || []).find(x => x.id === apptForm.id) || { id: apptForm.id };
+                        setApptForm(null);
+                        openTheoryCheckin(a);
+                    } },
+                    React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("rect", { x: "3", y: "3", width: "7", height: "7", rx: "1" }),
+                        React.createElement("rect", { x: "14", y: "3", width: "7", height: "7", rx: "1" }),
+                        React.createElement("rect", { x: "3", y: "14", width: "7", height: "7", rx: "1" }),
+                        React.createElement("path", { d: "M14 14h3v3h-3zM19 14h2M14 19h2M19 19h2" })),
+                    "Anwesenheit (QR-Check-in)"),
                 apptForm.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--blue)" }, onClick: () => {
                         const a = (appts || []).find(x => x.id === apptForm.id);
                         const appt = a || { id: apptForm.id, title: apptForm.title, start_at: apptForm.start_at, end_at: apptForm.end_at, note: apptForm.note, student_id: apptForm.student_id };
@@ -26262,6 +26423,29 @@ function BookingPage({ code, appMode, onLogout }) {
         return "";
     } });
     const [nameSlots, setNameSlots] = React.useState([]); // Startzeiten der eigenen Termine, per Name vom Server geholt
+    // Theorie-Anwesenheit: der QR-Code des Fahrlehrers verlinkt hierher mit ?checkin=CODE. Ist der
+    // Schüler bereits eingeloggt (Name+PIN im localStorage von "Mein Fortschritt"), checkt er sich
+    // automatisch ein; sonst wird um das vorherige Einloggen gebeten, statt hier ein zweites,
+    // eigenes Login-Formular nachzubauen.
+    const [theoryCheckinResult, setTheoryCheckinResult] = React.useState(null); // null | {busy, needsLogin, ok, error, thema, already, checkinCode}
+    function runTheoryCheckin(checkinCode) {
+        let pin = "";
+        try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
+        if (!myName.trim() || !pin) {
+            setTheoryCheckinResult({ busy: false, needsLogin: true, checkinCode });
+            return;
+        }
+        setTheoryCheckinResult({ busy: true, checkinCode });
+        publicTheoryCheckin(code, myName.trim(), pin, checkinCode)
+            .then(res => setTheoryCheckinResult({ busy: false, ok: true, thema: res && res.thema, already: res && res.already, checkinCode }))
+            .catch(e => setTheoryCheckinResult({ busy: false, ok: false, error: e.message, checkinCode }));
+    }
+    React.useEffect(() => {
+        let checkinCode;
+        try { checkinCode = new URLSearchParams(location.search).get("checkin"); } catch (e) { return; }
+        if (checkinCode)
+            runTheoryCheckin(checkinCode);
+    }, [code]);
     const [form, setForm] = React.useState(null); // {date,start,end,name,note}
     React.useEffect(() => {
         if (!form) return;
@@ -26742,6 +26926,22 @@ function BookingPage({ code, appMode, onLogout }) {
                     React.createElement("div", null,
                         React.createElement("div", { className: "home-num" }, k.value),
                         React.createElement("div", { className: "home-eyebrow" }, k.label))))),
+                theoryCheckinResult && React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14,
+                        background: theoryCheckinResult.ok ? "var(--green-bg)" : "var(--amber-bg)", border: "1.5px solid " + (theoryCheckinResult.ok ? "var(--green)" : "var(--amber)") } },
+                    theoryCheckinResult.busy
+                        ? React.createElement("div", { style: { fontSize: 13.5 } }, "Wird eingecheckt\u2026")
+                        : theoryCheckinResult.needsLogin
+                            ? React.createElement(React.Fragment, null,
+                                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--amber)" } }, "Erst einloggen"),
+                                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5, marginBottom: 8 } }, "Logg dich unter \u201eMein Fortschritt\" mit Name und PIN ein, dann kannst du dich hier eintragen."),
+                                React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 12.5 }, onClick: () => runTheoryCheckin(theoryCheckinResult.checkinCode) }, "Erneut versuchen"))
+                            : theoryCheckinResult.ok
+                                ? React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--green)" } }, theoryCheckinResult.already ? "\u2713 Schon eingecheckt" : "\u2713 Anwesenheit erfasst"),
+                                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } }, theoryCheckinResult.thema || ""))
+                                : React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "#B3362A" } }, "Konnte nicht eingecheckt werden"),
+                                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } }, /EXPIRED/i.test(theoryCheckinResult.error || "") ? "Der Code ist abgelaufen - bitte deinen Fahrlehrer um einen neuen." : "Bitte kurz beim Fahrlehrer nachfragen."))),
                 done && React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14, background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--green)" } }, doneInstant > 0 ? "\u2713 Direkt gebucht!" : "\u2713 Vielen Dank!"),
                     React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } },
