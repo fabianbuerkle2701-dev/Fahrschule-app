@@ -2639,7 +2639,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.182.2";
+const APP_VERSION = "1.182.3";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2764,6 +2764,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.182.3", date: "August 2026", changes: [
+            "Härtung: Die Abfragen des Fahrschülerbereichs laufen jetzt über eine eigene, anmeldefreie Verbindung. Vorher hing an jeder dieser Abfragen der Anmelde-Token des eingeloggten Fahrlehrers, obwohl sie ihn nicht brauchen - eine gestörte Fahrlehrer-Sitzung hätte den Schülerbereich mit ausfallen lassen können",
+        ] },
     { v: "1.182.2", date: "August 2026", changes: [
             "Auch im Bereich „Mein Fortschritt“ wird jetzt der tatsächliche Fehler angezeigt statt der pauschalen Meldung „Es gab ein Problem beim Laden“ - ohne den echten Text lässt sich ein Fehler, der nur beim Nutzer auftritt, nicht eingrenzen",
         ] },
@@ -4428,6 +4431,17 @@ const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
     auth: { persistSession: true, autoRefreshToken: true, storageKey: "v3-auth" }
 });
+// Zweiter Client OHNE Sitzung, ausschliesslich fuer die oeffentlichen Portal-Aufrufe
+// (Fahrschuelerbereich, Buchungsseite). Grund: der normale Client haengt an JEDEN Aufruf den
+// Anmelde-Token des eingeloggten Fahrlehrers - auch an Abfragen, die nur den anonymen
+// Schluessel brauchen. Ist dieser Token abgelaufen oder laesst er sich nicht erneuern,
+// antwortet PostgREST mit 401 (PGRST301) und der komplette Schuelerbereich faellt aus,
+// obwohl er gar keine Anmeldung benoetigt. Mit persistSession:false traegt dieser Client
+// niemals einen Benutzer-Token und ist damit von einer kaputten Fahrlehrer-Sitzung
+// unabhaengig. Von Fabian im Livebetrieb gemeldet ("Fehler beim Laden", Backend war intakt).
+const sbPublic = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
+    auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false }
+});
 // Oeffentlicher Website-Demo-Account: nur ueber ?demo=1 automatisch angemeldet, dient der
 // klickbaren Vorschau auf der Vertriebswebseite. DB-seitig schreibgeschuetzt (RLS) und KI
 // serverseitig gesperrt; hier zusaetzlich clientseitig alle Schreib-/KI-Aktionen abgefangen.
@@ -5959,7 +5973,7 @@ async function dbRemoveTheoryAttendance(id) {
 // Anonyme Check-in-RPC (Schüler scannt den QR-Code oder tippt ihn ein) - siehe Migration
 // create_theory_attendance. Wirft bei ungültigem/abgelaufenem Code oder falscher PIN.
 async function publicTheoryCheckin(code, p_name, p_pin, p_checkin_code) {
-    const { data, error } = await sb.rpc("public_theory_checkin", { code, p_name: p_name || null, p_pin: p_pin || null, p_checkin_code });
+    const { data, error } = await sbPublic.rpc("public_theory_checkin", { code, p_name: p_name || null, p_pin: p_pin || null, p_checkin_code });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -5979,7 +5993,7 @@ async function fetchLessonReflections(studentId) {
 // (ON CONFLICT DO NOTHING serverseitig), sonst könnte die Selbsteinschätzung nachträglich an die
 // inzwischen sichtbar gewordene Fahrlehrer-Bewertung angeglichen werden.
 async function publicLessonReflectionSubmit(code, p_name, p_pin, p_lesson_id, p_ratings, p_note) {
-    const { data, error } = await sb.rpc("public_lesson_reflection_submit", { code, p_name: p_name || null, p_pin: p_pin || null, p_lesson_id, p_ratings: p_ratings || {}, p_note: p_note || null });
+    const { data, error } = await sbPublic.rpc("public_lesson_reflection_submit", { code, p_name: p_name || null, p_pin: p_pin || null, p_lesson_id, p_ratings: p_ratings || {}, p_note: p_note || null });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6159,7 +6173,7 @@ function videoPublicUrl(path) {
     return data && data.publicUrl;
 }
 async function publicVideos(code) {
-    const { data, error } = await sb.rpc("public_videos", { code });
+    const { data, error } = await sbPublic.rpc("public_videos", { code });
     if (error) {
         console.error(error);
         return [];
@@ -6168,7 +6182,7 @@ async function publicVideos(code) {
 }
 /* ════════ Öffentliche Buchung (anonym, per Code) ════════ */
 async function publicBookingInfo(code) {
-    const { data, error } = await sb.rpc("public_booking_info", { code });
+    const { data, error } = await sbPublic.rpc("public_booking_info", { code });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6177,7 +6191,7 @@ async function publicBookingInfo(code) {
 }
 /* ════════ Öffentlicher Zahler-Zugang (Eltern etc., nur Rechnungen/Zahlstatus) ════════ */
 async function publicPayerOverview(code) {
-    const { data, error } = await sb.rpc("public_payer_overview", { p_code: code });
+    const { data, error } = await sbPublic.rpc("public_payer_overview", { p_code: code });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6187,7 +6201,7 @@ async function publicPayerOverview(code) {
 // Selbstanmeldung eines neuen Interessenten über den Buchungslink. Legt den Schüler serverseitig
 // mit pending=true an; der Fahrlehrer bestätigt/löscht das in der App (siehe renderListe).
 async function publicEnrollStudent(code, vorname, name, tel, geb, referralCode) {
-    const { data, error } = await sb.rpc("public_enroll_student", { code, p_vorname: vorname, p_name: name, p_tel: tel, p_geb: geb, p_referral_code: referralCode || "" });
+    const { data, error } = await sbPublic.rpc("public_enroll_student", { code, p_vorname: vorname, p_name: name, p_tel: tel, p_geb: geb, p_referral_code: referralCode || "" });
     if (error) {
         console.error(error);
         throw new Error(error.message || "Anmeldung fehlgeschlagen");
@@ -6195,7 +6209,7 @@ async function publicEnrollStudent(code, vorname, name, tel, geb, referralCode) 
     return data;
 }
 async function publicBusyTimes(code, von, bis) {
-    const { data, error } = await sb.rpc("public_busy_times", { code, von, bis });
+    const { data, error } = await sbPublic.rpc("public_busy_times", { code, von, bis });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6203,7 +6217,7 @@ async function publicBusyTimes(code, von, bis) {
     return data || [];
 }
 async function publicProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin) {
-    const { data, error } = await sb.rpc("public_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
+    const { data, error } = await sbPublic.rpc("public_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6216,7 +6230,7 @@ async function publicProposeAppointment(code, p_start, p_end, p_name, p_note, p_
 // derselbe Terminvorschlag-Fallback wie bisher. Alle Prüfungen laufen serverseitig in der RPC
 // (siehe Migration create_public_book_or_propose_appointment), der Client zeigt nur das Ergebnis.
 async function publicBookOrProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin) {
-    const { data, error } = await sb.rpc("public_book_or_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
+    const { data, error } = await sbPublic.rpc("public_book_or_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6228,7 +6242,7 @@ async function publicBookOrProposeAppointment(code, p_start, p_end, p_name, p_no
 // gesetzt) - bereits bestätigte Termine eines echten Schülerkontos zeigt der Server nur, wenn
 // der korrekte PIN mitgeschickt wird.
 async function publicMySlots(code, name, von, bis, pin) {
-    const { data, error } = await sb.rpc("public_my_slots", { code, p_name: name, von, bis, p_pin: pin || null });
+    const { data, error } = await sbPublic.rpc("public_my_slots", { code, p_name: name, von, bis, p_pin: pin || null });
     if (error) {
         console.error(error);
         return [];
@@ -6242,7 +6256,7 @@ async function publicStudentLessons(code, name, pin) {
     // Rückgabe: Array bei Erfolg (ggf. leer), null bei Server-Fehler (z.B. Funktion fehlt noch),
     // damit der Schülerbereich den Unterschied anzeigen kann statt still leer zu bleiben.
     try {
-        const { data, error } = await sb.rpc("public_student_lessons", { code, p_name: name, p_pin: pin });
+        const { data, error } = await sbPublic.rpc("public_student_lessons", { code, p_name: name, p_pin: pin });
         if (error) {
             console.warn("public_student_lessons nicht verfügbar:", error.message);
             return null;
@@ -6254,7 +6268,7 @@ async function publicStudentLessons(code, name, pin) {
     }
 }
 async function publicStudentOverview(code, name, pin) {
-    const { data, error } = await sb.rpc("public_student_overview", { code, p_name: name, p_pin: pin });
+    const { data, error } = await sbPublic.rpc("public_student_overview", { code, p_name: name, p_pin: pin });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6266,7 +6280,7 @@ async function publicStudentOverview(code, name, pin) {
 // ändern erzwingt DROP+CREATE der zentralen Portal-Datenquelle. Gibt null zurück, wenn der
 // Schüler nicht eindeutig per Name+PIN identifiziert werden konnte.
 async function publicStudentPaymentStatus(code, name, pin) {
-    const { data, error } = await sb.rpc("public_student_payment_status", { code, p_name: name, p_pin: pin });
+    const { data, error } = await sbPublic.rpc("public_student_payment_status", { code, p_name: name, p_pin: pin });
     if (error) {
         console.error(error);
         return null;
@@ -6275,7 +6289,7 @@ async function publicStudentPaymentStatus(code, name, pin) {
 }
 // Schüler ändert seinen PIN selbst (alter PIN muss stimmen). Gibt true bei Erfolg.
 async function publicStudentSetPin(code, name, oldPin, newPin) {
-    const { data, error } = await sb.rpc("public_student_set_pin", { code, p_name: name, p_old: oldPin, p_new: newPin });
+    const { data, error } = await sbPublic.rpc("public_student_set_pin", { code, p_name: name, p_old: oldPin, p_new: newPin });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6286,7 +6300,7 @@ async function publicStudentSetPin(code, name, oldPin, newPin) {
 // bestätigte Termine werden nur als "Stornierung angefragt" markiert (Fahrlehrer bestätigt final).
 // Gibt "deleted" oder "requested" zurück.
 async function publicStudentCancelAppt(code, name, pin, apptId) {
-    const { data, error } = await sb.rpc("public_student_cancel_appt", { code, p_name: name, p_pin: pin, p_appt: apptId });
+    const { data, error } = await sbPublic.rpc("public_student_cancel_appt", { code, p_name: name, p_pin: pin, p_appt: apptId });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6297,7 +6311,7 @@ async function publicStudentCancelAppt(code, name, pin, apptId) {
 // RPC public_student_send_message existiert in der DB weiter, wird aber nicht mehr aufgerufen.)
 // dataUrl leer/"" lassen, um das Profilbild wieder zu entfernen
 async function publicStudentSetAvatar(code, name, pin, dataUrl) {
-    const { data, error } = await sb.rpc("public_student_set_avatar", { code, p_name: name, p_pin: pin, p_avatar: dataUrl || "" });
+    const { data, error } = await sbPublic.rpc("public_student_set_avatar", { code, p_name: name, p_pin: pin, p_avatar: dataUrl || "" });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6307,7 +6321,7 @@ async function publicStudentSetAvatar(code, name, pin, dataUrl) {
 /* ════════ Warteliste: freie Stunde automatisch an passende Schüler anbieten ════════ */
 // Schüler trägt ein/aktualisiert, wann er/sie früher dran sein möchte. Gibt true bei Erfolg.
 async function publicStudentSetWunschliste(code, name, pin, active, weekdays, von, bis) {
-    const { data, error } = await sb.rpc("public_student_set_wunschliste", { code, p_name: name, p_pin: pin, p_active: active, p_weekdays: weekdays, p_von: von, p_bis: bis });
+    const { data, error } = await sbPublic.rpc("public_student_set_wunschliste", { code, p_name: name, p_pin: pin, p_active: active, p_weekdays: weekdays, p_von: von, p_bis: bis });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6318,7 +6332,7 @@ async function publicStudentSetWunschliste(code, name, pin, active, weekdays, vo
 // entscheidet das atomar in der DB, hier kommt nur noch das Ergebnis an:
 // "ok" | "taken" (schon vergeben) | "conflict" (eigener Terminkonflikt) | "error"
 async function publicClaimAppointmentOffer(code, name, pin, offerId) {
-    const { data, error } = await sb.rpc("public_claim_appointment_offer", { code, p_name: name, p_pin: pin, p_id: offerId });
+    const { data, error } = await sbPublic.rpc("public_claim_appointment_offer", { code, p_name: name, p_pin: pin, p_id: offerId });
     if (error) {
         console.error(error);
         return "error";
@@ -6328,7 +6342,7 @@ async function publicClaimAppointmentOffer(code, name, pin, offerId) {
 /* ════════ Begleitete Übungsfahrten (Fahrtenbuch im Fahrschülerbereich) ════════ */
 // Legt einen Eintrag an oder ersetzt einen bestehenden mit derselben id. Gibt true bei Erfolg.
 async function publicStudentDriveSave(code, name, pin, entry) {
-    const { data, error } = await sb.rpc("public_student_drive_save", { code, p_name: name, p_pin: pin, p_entry: entry });
+    const { data, error } = await sbPublic.rpc("public_student_drive_save", { code, p_name: name, p_pin: pin, p_entry: entry });
     if (error) {
         console.error(error);
         return false;
@@ -6337,7 +6351,7 @@ async function publicStudentDriveSave(code, name, pin, entry) {
 }
 // Stand einer Übung im Ausbildungsplan setzen ("geuebt" | "sitzt" | "offen" zum Zurücksetzen).
 async function publicStudentDriveSkill(code, name, pin, key, stand) {
-    const { data, error } = await sb.rpc("public_student_drive_skill", { code, p_name: name, p_pin: pin, p_key: key, p_stand: stand });
+    const { data, error } = await sbPublic.rpc("public_student_drive_skill", { code, p_name: name, p_pin: pin, p_key: key, p_stand: stand });
     if (error) {
         console.error(error);
         return false;
@@ -6345,7 +6359,7 @@ async function publicStudentDriveSkill(code, name, pin, key, stand) {
     return data === "ok";
 }
 async function publicStudentDriveDelete(code, name, pin, id) {
-    const { data, error } = await sb.rpc("public_student_drive_delete", { code, p_name: name, p_pin: pin, p_id: id });
+    const { data, error } = await sbPublic.rpc("public_student_drive_delete", { code, p_name: name, p_pin: pin, p_id: id });
     if (error) {
         console.error(error);
         return false;
@@ -6356,7 +6370,7 @@ async function publicStudentDriveDelete(code, name, pin, id) {
 // Fragen laden - nur der Fahrschul-Code ist nötig, kein PIN (wie bei der Videobibliothek:
 // unpersönlicher Lese-Content, der Fortschritt selbst braucht dagegen den vollen Login).
 async function publicTheoryQuestions(code, klasse) {
-    const { data, error } = await sb.rpc("public_theory_questions", { code, p_klasse: klasse || null });
+    const { data, error } = await sbPublic.rpc("public_theory_questions", { code, p_klasse: klasse || null });
     if (error) {
         console.error(error);
         return null;
@@ -6365,7 +6379,7 @@ async function publicTheoryQuestions(code, klasse) {
 }
 // Antwort speichern (braucht Name+PIN, da der Fortschritt am jeweiligen Schüler hängt).
 async function publicTheorySubmitAnswer(code, name, pin, questionId, correct) {
-    const { data, error } = await sb.rpc("public_theory_answer_submit", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_correct: correct });
+    const { data, error } = await sbPublic.rpc("public_theory_answer_submit", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_correct: correct });
     if (error) {
         console.error(error);
         return "error";
@@ -6374,7 +6388,7 @@ async function publicTheorySubmitAnswer(code, name, pin, questionId, correct) {
 }
 // Bisherigen Theorie-Übungsfortschritt eines eingeloggten Schülers laden (questionId -> {correct, attempts}).
 async function publicTheoryProgress(code, name, pin) {
-    const { data, error } = await sb.rpc("public_theory_progress", { code, p_name: name, p_pin: pin });
+    const { data, error } = await sbPublic.rpc("public_theory_progress", { code, p_name: name, p_pin: pin });
     if (error) {
         console.error(error);
         return null;
@@ -6383,7 +6397,7 @@ async function publicTheoryProgress(code, name, pin) {
 }
 // Frage als "gemerkt" markieren/entmarkieren (persistiert im selben theoryProgress-Eintrag).
 async function publicTheoryMarkToggle(code, name, pin, questionId, marked) {
-    const { data, error } = await sb.rpc("public_theory_mark_toggle", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_marked: marked });
+    const { data, error } = await sbPublic.rpc("public_theory_mark_toggle", { code, p_name: name, p_pin: pin, p_question_id: questionId, p_marked: marked });
     if (error) {
         console.error(error);
         return "error";
@@ -6392,7 +6406,7 @@ async function publicTheoryMarkToggle(code, name, pin, questionId, marked) {
 }
 // Ergebnis einer Probeprüfung speichern (Verlauf unter students.data.theoryMockExams).
 async function publicTheoryExamSubmit(code, name, pin, result) {
-    const { data, error } = await sb.rpc("public_theory_exam_submit", { code, p_name: name, p_pin: pin, p_result: result });
+    const { data, error } = await sbPublic.rpc("public_theory_exam_submit", { code, p_name: name, p_pin: pin, p_result: result });
     if (error) {
         console.error(error);
         return "error";
@@ -6401,7 +6415,7 @@ async function publicTheoryExamSubmit(code, name, pin, result) {
 }
 // Bisherige Probeprüfungs-Ergebnisse eines eingeloggten Schülers laden.
 async function publicTheoryExamHistory(code, name, pin) {
-    const { data, error } = await sb.rpc("public_theory_exam_history", { code, p_name: name, p_pin: pin });
+    const { data, error } = await sbPublic.rpc("public_theory_exam_history", { code, p_name: name, p_pin: pin });
     if (error) {
         console.error(error);
         return [];
