@@ -2639,7 +2639,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.181.0";
+const APP_VERSION = "1.182.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2764,6 +2764,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.182.0", date: "August 2026", changes: [
+            "Neu: E-Rechnung (XRechnung) für Firmenkunden. Markierst du einen Schüler in den Schülerdaten als Firmenkunde und trägst Firmenname und Anschrift ein, kannst du zu jeder Rechnung zusätzlich eine XRechnung-XML herunterladen - Voraussetzung für Rechnungen an Firmen ab 2027/2028",
+            "Beta: Die Datei deckt die Pflichtfelder ab und ist rechnerisch in sich stimmig, eine formale Prüfung durch einen offiziellen Validator ist im Browser nicht möglich. Lass die erste erzeugte Datei einmal prüfen, bevor du sie an einen Firmenkunden schickst",
+            "Voraussetzung ist eine hinterlegte USt-IdNr. oder Steuernummer unter Einstellungen › Rechnungsdaten - fehlt sie, sagt die App das statt eine unbrauchbare Datei zu erzeugen",
+        ] },
     { v: "1.181.0", date: "August 2026", changes: [
             "Neu: Löschung der Ausbildungsdaten nach § 31 FahrlG. Im Archiv der Schülerliste erscheinen Schüler, deren Fünfjahresfrist abgelaufen ist. Vor dem Löschen siehst du eine vollständige Liste, was entfernt wird und was bleibt - bestätigt wird durch Eintippen des Namens",
             "Rechnungen, Zahlungen, Name und Anschrift bleiben erhalten: die unterliegen der steuerlichen Aufbewahrung und wären als Beleg ohne Namen wertlos. Genau dieser Konflikt der beiden Fristen ist der Grund, warum ausgedünnt und nicht gelöscht wird",
@@ -5566,6 +5571,128 @@ async function fetchVerguetungen(schoolId) {
 async function saveVerguetung(teacherId, modell, satz) {
     const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz: satz == null || satz === "" ? null : Number(satz) });
     if (error) { console.error(error); throw new Error(error.message || "Konnte nicht gespeichert werden"); }
+}
+/* ════════ E-Rechnung (XRechnung, UBL 2.1 nach EN 16931) ════════
+   BETA: Die Erzeugung deckt die Pflichtfelder ab und ist rechnerisch in sich konsistent
+   (Positionssumme = Nettobetrag, Netto + Steuer = Brutto, ueber Rundungsfaelle geprueft).
+   Eine formale Schematron-Pruefung ist im Browser nicht praktikabel - die erste erzeugte
+   Datei gehoert einmal durch einen offiziellen Validator, bevor sie an Firmenkunden geht.
+   Genau deshalb ist die Funktion in der Oberflaeche als Beta gekennzeichnet.
+   Betraege der App sind BRUTTO, XRechnung will NETTO je Position: die Positionsnetti werden
+   einzeln gerundet und die Rundungsdifferenz auf die groesste Position gelegt, damit die
+   Summe exakt dem Nettobetrag entspricht und die gedruckte Rechnung nicht abweicht. */
+// XRechnung (UBL 2.1, EN 16931) aus einer App-Rechnung. Beträge der App sind BRUTTO.
+const xrEsc = (v) => String(v == null ? "" : v)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+const xrR2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
+const xrF2 = (n) => xrR2(n).toFixed(2);
+
+function buildXRechnung(o) {
+  const { inv, seller, buyer, zahlungszielTage } = o;
+  const kUnt = !!inv.kleinunternehmer;
+  const satz = kUnt ? 0 : 19;
+  const brutto = xrR2(inv.total);
+  // Netto aus der Bruttosumme ableiten, damit die Summe exakt zur gedruckten Rechnung passt.
+  const netto = kUnt ? brutto : xrR2(brutto / 1.19);
+  const steuer = xrR2(brutto - netto);
+  // Positionsnetti einzeln runden und die Differenz auf die groesste Position legen -
+  // sonst summieren sich Rundungsreste und die Pruefregel "Summe der Positionen =
+  // Nettobetrag" schlaegt fehl.
+  let pos = (inv.items || []).map((it, i) => ({ i: i + 1, label: it.label || ("Position " + (i + 1)),
+    brutto: xrR2(it.amount), netto: kUnt ? xrR2(it.amount) : xrR2(xrR2(it.amount) / 1.19) }));
+  // Eine Rechnung ohne Einzelpositionen wuerde die Pruefregel "Summe der Positionen =
+  // Nettobetrag" verletzen (Summe waere 0). Deshalb eine Sammelposition ueber den Gesamtbetrag.
+  if (pos.length === 0)
+    pos = [{ i: 1, label: inv.note || "Fahrschulleistungen", brutto: brutto, netto: netto }];
+  if (pos.length) {
+    const summe = xrR2(pos.reduce((s, p) => s + p.netto, 0));
+    const diff = xrR2(netto - summe);
+    if (diff !== 0) {
+      const groesste = pos.reduce((a, b) => (b.netto > a.netto ? b : a), pos[0]);
+      groesste.netto = xrR2(groesste.netto + diff);
+    }
+  }
+  const faellig = (() => {
+    const d = new Date(inv.date + "T12:00:00");
+    d.setDate(d.getDate() + (zahlungszielTage || 14));
+    return d.toISOString().slice(0, 10);
+  })();
+  const kat = kUnt ? "E" : "S";
+  const L = [];
+  L.push('<?xml version="1.0" encoding="UTF-8"?>');
+  L.push('<ubl:Invoice xmlns:ubl="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2" xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2" xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">');
+  L.push('  <cbc:CustomizationID>urn:cen.eu:en16931:2017#compliant#urn:xoev-de:kosit:standard:xrechnung_3.0</cbc:CustomizationID>');
+  L.push('  <cbc:ProfileID>urn:fdc:peppol.eu:2017:poacc:billing:01:1.0</cbc:ProfileID>');
+  L.push(`  <cbc:ID>${xrEsc(inv.number)}</cbc:ID>`);
+  L.push(`  <cbc:IssueDate>${xrEsc(inv.date)}</cbc:IssueDate>`);
+  L.push(`  <cbc:DueDate>${xrEsc(faellig)}</cbc:DueDate>`);
+  L.push('  <cbc:InvoiceTypeCode>380</cbc:InvoiceTypeCode>');
+  L.push('  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>');
+  // BT-10 ist in XRechnung Pflicht; ohne eigene Referenz des Kunden die Rechnungsnummer.
+  L.push(`  <cbc:BuyerReference>${xrEsc(buyer.referenz || inv.number)}</cbc:BuyerReference>`);
+  // Verkaeufer
+  L.push('  <cac:AccountingSupplierParty><cac:Party>');
+  if (seller.email) L.push(`    <cbc:EndpointID schemeID="EM">${xrEsc(seller.email)}</cbc:EndpointID>`);
+  L.push('    <cac:PostalAddress>');
+  if (seller.strasse) L.push(`      <cbc:StreetName>${xrEsc(seller.strasse)}</cbc:StreetName>`);
+  L.push(`      <cbc:CityName>${xrEsc(seller.ort)}</cbc:CityName>`);
+  L.push(`      <cbc:PostalZone>${xrEsc(seller.plz)}</cbc:PostalZone>`);
+  L.push('      <cac:Country><cbc:IdentificationCode>DE</cbc:IdentificationCode></cac:Country>');
+  L.push('    </cac:PostalAddress>');
+  if (seller.ustId) {
+    L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(seller.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
+  } else if (seller.steuernummer) {
+    L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(seller.steuernummer)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>FC</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
+  }
+  L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(seller.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
+  L.push(`    <cac:Contact><cbc:Name>${xrEsc(seller.name)}</cbc:Name>${seller.tel ? `<cbc:Telephone>${xrEsc(seller.tel)}</cbc:Telephone>` : ""}${seller.email ? `<cbc:ElectronicMail>${xrEsc(seller.email)}</cbc:ElectronicMail>` : ""}</cac:Contact>`);
+  L.push('  </cac:Party></cac:AccountingSupplierParty>');
+  // Kaeufer
+  L.push('  <cac:AccountingCustomerParty><cac:Party>');
+  if (buyer.email) L.push(`    <cbc:EndpointID schemeID="EM">${xrEsc(buyer.email)}</cbc:EndpointID>`);
+  L.push('    <cac:PostalAddress>');
+  if (buyer.strasse) L.push(`      <cbc:StreetName>${xrEsc(buyer.strasse)}</cbc:StreetName>`);
+  L.push(`      <cbc:CityName>${xrEsc(buyer.ort)}</cbc:CityName>`);
+  L.push(`      <cbc:PostalZone>${xrEsc(buyer.plz)}</cbc:PostalZone>`);
+  L.push('      <cac:Country><cbc:IdentificationCode>DE</cbc:IdentificationCode></cac:Country>');
+  L.push('    </cac:PostalAddress>');
+  if (buyer.ustId) L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(buyer.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
+  L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(buyer.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
+  L.push('  </cac:Party></cac:AccountingCustomerParty>');
+  if (seller.iban) {
+    L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
+    L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
+    L.push('  </cac:PaymentMeans>');
+  }
+  L.push(`  <cac:PaymentTerms><cbc:Note>Zahlbar bis ${xrEsc(faellig)}</cbc:Note></cac:PaymentTerms>`);
+  L.push(`  <cac:TaxTotal><cbc:TaxAmount currencyID="EUR">${xrF2(steuer)}</cbc:TaxAmount>`);
+  L.push('    <cac:TaxSubtotal>');
+  L.push(`      <cbc:TaxableAmount currencyID="EUR">${xrF2(netto)}</cbc:TaxableAmount>`);
+  L.push(`      <cbc:TaxAmount currencyID="EUR">${xrF2(steuer)}</cbc:TaxAmount>`);
+  L.push(`      <cac:TaxCategory><cbc:ID>${kat}</cbc:ID><cbc:Percent>${satz}</cbc:Percent>`);
+  if (kUnt) L.push('        <cbc:TaxExemptionReason>Kleinunternehmer gemaess Paragraf 19 UStG</cbc:TaxExemptionReason>');
+  L.push('        <cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:TaxCategory>');
+  L.push('    </cac:TaxSubtotal></cac:TaxTotal>');
+  L.push('  <cac:LegalMonetaryTotal>');
+  L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(netto)}</cbc:LineExtensionAmount>`);
+  L.push(`    <cbc:TaxExclusiveAmount currencyID="EUR">${xrF2(netto)}</cbc:TaxExclusiveAmount>`);
+  L.push(`    <cbc:TaxInclusiveAmount currencyID="EUR">${xrF2(brutto)}</cbc:TaxInclusiveAmount>`);
+  L.push(`    <cbc:PayableAmount currencyID="EUR">${xrF2(brutto)}</cbc:PayableAmount>`);
+  L.push('  </cac:LegalMonetaryTotal>');
+  pos.forEach(p => {
+    L.push('  <cac:InvoiceLine>');
+    L.push(`    <cbc:ID>${p.i}</cbc:ID>`);
+    L.push('    <cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity>');
+    L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(p.netto)}</cbc:LineExtensionAmount>`);
+    L.push(`    <cac:Item><cbc:Name>${xrEsc(p.label)}</cbc:Name>`);
+    L.push(`      <cac:ClassifiedTaxCategory><cbc:ID>${kat}</cbc:ID><cbc:Percent>${satz}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:ClassifiedTaxCategory>`);
+    L.push('    </cac:Item>');
+    L.push(`    <cac:Price><cbc:PriceAmount currencyID="EUR">${xrF2(p.netto)}</cbc:PriceAmount></cac:Price>`);
+    L.push('  </cac:InvoiceLine>');
+  });
+  L.push('</ubl:Invoice>');
+  return { xml: L.join("\n"), netto, steuer, brutto, positionen: pos };
 }
 /* ════════ Geschenkgutscheine ════════ */
 async function fetchVouchers(schoolId) {
@@ -12074,6 +12201,47 @@ function App() {
             setLoeschDialog({ ...d, busy: false, error: e.message || "Löschung fehlgeschlagen" });
         }
     }
+    // XRechnung-XML zu einer Rechnung erzeugen und herunterladen. Firmenkundendaten stehen am
+    // Schueler (firmaName/firmaUstId/...), Verkaeuferdaten in den Rechnungsdaten der Fahrschule.
+    function xrechnungHerunterladen(inv, stu) {
+        try {
+            const iv = (school && school.invoice_settings) || {};
+            if (!iv.ustId && !iv.steuernummer) {
+                showToast("Für eine E-Rechnung braucht es deine USt-IdNr. oder Steuernummer. Bitte unter Einstellungen › Rechnungsdaten eintragen.");
+                return;
+            }
+            if (!stu.firmaName) {
+                showToast("Dieser Schüler ist nicht als Firmenkunde hinterlegt. Firmenname und Anschrift stehen unter Schülerdaten.");
+                return;
+            }
+            // "PLZ Ort" aus einem Feld trennen - die App speichert beides zusammen.
+            const teile = (t) => { const m = String(t || "").match(/^\s*(\d{4,5})\s+(.+)$/); return m ? { plz: m[1], ort: m[2].trim() } : { plz: "", ort: String(t || "").trim() }; };
+            const vk = teile(iv.plzOrt);
+            const kd = teile(stu.firmaPlzOrt || "");
+            const out = buildXRechnung({
+                inv,
+                seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
+                    plz: vk.plz, ort: vk.ort, ustId: iv.ustId || "", steuernummer: iv.steuernummer || "",
+                    iban: iv.iban || "", email: (session && session.user && session.user.email) || "" },
+                buyer: { name: stu.firmaName, strasse: stu.firmaStrasse || "", plz: kd.plz, ort: kd.ort,
+                    ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "" },
+                zahlungszielTage: zahlungszielTage,
+            });
+            const blob = new Blob([out.xml], { type: "application/xml;charset=utf-8" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "XRechnung_" + String(inv.number || "Rechnung").replace(/[^\w.-]+/g, "_") + ".xml";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            showToast("XRechnung erzeugt (Beta) – bitte einmal von deinem Steuerberater oder einem Validator prüfen lassen.");
+        }
+        catch (e) {
+            showToast("XRechnung konnte nicht erzeugt werden: " + (e.message || "unbekannt"));
+        }
+    }
     /* ── Geschenkgutscheine ─────────────────────────────────────────────────────────────────
        Verkauf laeuft ausserhalb der App (bar oder Ueberweisung) - die App verkauft nicht selbst,
        damit kein Zahlungsdiensterecht beruehrt wird. Hier werden Gutscheine nur erfasst,
@@ -16403,6 +16571,9 @@ function App() {
                                 inv.cancelledBy && React.createElement("span", { style: { fontWeight: 500, color: "#B3362A" } }, " · storniert")),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, inv.date ? new Date(inv.date).toLocaleDateString("de-DE") : "")),
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(inv.total))),
+                    // XRechnung nur bei Firmenkunden anbieten - fuer Privatkunden gibt es weder
+                    // eine Pflicht noch einen Empfaenger, der etwas damit anfangen kann.
+                    active.istFirmenkunde && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
                     !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); cancelInvoice(inv); }, "aria-label": "Rechnung stornieren", title: "Rechnung stornieren", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", fontSize: 12, flexShrink: 0 } }, "Stornieren")))),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Ausbildungsvertrag"),
@@ -17906,6 +18077,36 @@ function App() {
                 React.createElement("label", { className: "check", style: { margin: "6px 2px 12px", display: "flex" } },
                     React.createElement("input", { type: "checkbox", checked: !!active.sehhilfe, onChange: e => updateActive({ sehhilfe: e.target.checked }) }),
                     "Sehhilfe"),
+                // Firmenkunde: nur noetig, wenn die Rechnung an eine Firma geht (E-Rechnung).
+                // Ab 2027/2028 muessen Rechnungen an Firmenkunden elektronisch gestellt werden;
+                // Privatkunden bleiben ausgenommen, deshalb bewusst optional und eingeklappt.
+                React.createElement("label", { className: "check", style: { margin: "0 2px 10px", display: "flex" } },
+                    React.createElement("input", { type: "checkbox", checked: !!active.istFirmenkunde,
+                        onChange: e => updateActive({ istFirmenkunde: e.target.checked }) }),
+                    "Firmenkunde (E-Rechnung)"),
+                active.istFirmenkunde && React.createElement("div", { className: "card", style: { padding: "12px 13px", marginBottom: 12 } },
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Firmenname",
+                        React.createElement("input", { type: "text", defaultValue: active.firmaName || "", placeholder: "z.B. Spedition Muster GmbH",
+                            onBlur: e => { if (e.target.value !== (active.firmaName || "")) updateActive({ firmaName: e.target.value }); } }))),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Straße und Hausnummer",
+                        React.createElement("input", { type: "text", defaultValue: active.firmaStrasse || "",
+                            onBlur: e => { if (e.target.value !== (active.firmaStrasse || "")) updateActive({ firmaStrasse: e.target.value }); } }))),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "PLZ und Ort",
+                        React.createElement("input", { type: "text", defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
+                            onBlur: e => { if (e.target.value !== (active.firmaPlzOrt || "")) updateActive({ firmaPlzOrt: e.target.value }); } }))),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "USt-IdNr. (optional)",
+                        React.createElement("input", { type: "text", defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
+                            onBlur: e => { if (e.target.value !== (active.firmaUstId || "")) updateActive({ firmaUstId: e.target.value }); } }))),
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "Bestellnummer / Referenz des Kunden (optional)",
+                        React.createElement("input", { type: "text", defaultValue: active.firmaReferenz || "",
+                            onBlur: e => { if (e.target.value !== (active.firmaReferenz || "")) updateActive({ firmaReferenz: e.target.value }); } }))),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45, margin: "2px 2px 0" } },
+                        "Bei einer Rechnung an diesen Schüler kannst du zusätzlich eine XRechnung-Datei erzeugen.")),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Theorie bestanden am",
                     React.createElement("input", { type: "date", value: active.theorie || "", onChange: e => updateActive({ theorie: e.target.value }) }))),
