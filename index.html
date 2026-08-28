@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.176.0";
+const APP_VERSION = "1.177.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2721,6 +2721,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.177.0", date: "August 2026", changes: [
+            "Neu: DATEV-Export für den Steuerberater. Unter Auswertung neben dem CSV-Export lädst du den abgeschlossenen Vormonat als EXTF-Buchungsstapel herunter - Rechnungen und Zahlungen als fertige Buchungssätze. Berater-/Mandantennummer, Kontenrahmen (SKR03/SKR04) und Konten stellst du einmalig unter Einstellungen › DATEV-Export ein",
+            "Wichtig: Der Export ist ein Buchungsvorschlag. Lass den ersten Durchlauf einmal von deinem Steuerberater prüfen, bevor du ihn regelmäßig nutzt",
+            "Bist du Kleinunternehmer (§19 UStG), verlangt der Export vorher das passende Erlöskonto. Es wird bewusst nicht geraten - ein falsches Konto würde still falsche Buchungen erzeugen",
+            "Stornierte Rechnungen und Stornorechnungen bleiben außen vor, genau wie in der Abrechnung",
+        ] },
     { v: "1.176.0", date: "August 2026", changes: [
             "Neu: Guthaben-Modus je Schüler (Schülerdaten › Kasse). Dreistufig: „Aus“ wie bisher, „Hinweis“ zeigt dem Schüler im Fahrschülerbereich bei offener Rechnung einen Hinweis mit QR-Code zum Bezahlen (buchen kann er weiter), „Deckung nötig“ sperrt Selbstbuchung und Terminvorschläge, bis die Rechnung bezahlt ist. Du selbst kannst immer buchen",
             "Maßgeblich ist ausschließlich der offene Betrag aus tatsächlich gestellten Rechnungen - gefahrene, aber noch nicht berechnete Stunden sperren niemanden aus. Stornierte Rechnungen zählen nicht mit",
@@ -5288,6 +5294,9 @@ async function saveSchool(school) {
         // gespeichert) - die Standard-Ausfallgebühr wirkte in derselben Sitzung, ging aber nach
         // einem Neuladen wieder verloren. storno_frist_stunden ist neu, braucht dieselbe Behandlung.
         no_show_fee_default: numOrNull(school.no_show_fee_default), storno_frist_stunden: numOrNull(school.storno_frist_stunden),
+        // Wie oben: jedes neue Fahrschul-Feld MUSS hier explizit auftauchen, sonst wirkt es nur
+        // lokal und ist nach dem naechsten Laden wieder weg.
+        datev_settings: school.datev_settings || {},
         zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen) };
     // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
     // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
@@ -8468,7 +8477,7 @@ function clusterLabel(text, tone) {
 }
 // Welche Einstellungs-Zeilen nur für einen Fahrschul-Admin bzw. den zentralen App-Admin sichtbar/
 // erreichbar sind - ersetzt die alte settingsTab==="admin"-Prüfung, jetzt pro Zeile statt pro Tab.
-const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "personalunterlagen"]);
+const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "personalunterlagen"]);
 /* ─────────────────────────────────────────────────────────────
    Karte: Live-Streckentracking + Stecknadeln pro Fahrschüler
    Nutzt Leaflet + OpenStreetMap (kostenlos, ohne API-Schlüssel).
@@ -9155,6 +9164,29 @@ function App() {
     }
     function saveInvoiceSettings(patch) { if (school)
         writeSchool({ ...school, invoice_settings: { ...(school.invoice_settings || {}), ...patch } }); }
+    // DATEV-Buchungsstapel: Kontenrahmen-abhaengige Standardwerte, damit der Inhaber nur
+    // Berater- und Mandantennummer eintragen muss. SKR03 ist bei kleinen Betrieben der
+    // Regelfall, SKR04 waehlbar. Die Konten sind Vorschlaege - der Steuerberater kann sie
+    // ueberschreiben, deshalb sind alle Felder frei editierbar.
+    const DATEV_DEFAULTS = {
+        // erloes_frei bewusst OHNE Vorbelegung: fuer steuerfreie Umsaetze nach Paragraf 19 UStG
+        // gibt es je nach Beratung unterschiedliche Konten. Ein falsch geratenes Konto erzeugt
+        // still falsche Buchungen - deshalb verweigert der Export lieber und benennt das Feld.
+        SKR03: { erloes_19: "8400", geldkonto: "1200" },
+        SKR04: { erloes_19: "4400", geldkonto: "1800" },
+    };
+    const datev = (school && school.datev_settings) || {};
+    function datevWert(key) {
+        if (datev[key] != null && datev[key] !== "") return String(datev[key]);
+        const rahmen = datev.kontenrahmen === "SKR04" ? "SKR04" : "SKR03";
+        const d = DATEV_DEFAULTS[rahmen];
+        if (d && d[key] != null) return d[key];
+        if (key === "debitor_start") return "10000";
+        if (key === "sachkontenlaenge") return "4";
+        return "";
+    }
+    function saveDatevSettings(patch) { if (school)
+        writeSchool({ ...school, datev_settings: { ...(school.datev_settings || {}), ...patch } }); }
     function saveLocations(list) { if (school)
         writeSchool({ ...school, locations: list }); }
     const [stuSig, setStuSig] = useState(null);
@@ -16659,7 +16691,14 @@ function App() {
             openList.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 20 }, onClick: openOffenePosten }, "Offene Posten der ganzen Fahrschule ansehen"),
             React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", margin: "0 2px 8px" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, "Rechnungen"),
-                allInvoices.length > 0 && React.createElement("button", { onClick: exportRechnungen, style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "CSV-Export")),
+                allInvoices.length > 0 && React.createElement("div", { style: { display: "flex", gap: 12 } },
+                    React.createElement("button", { onClick: exportRechnungen, style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "CSV-Export"),
+                    React.createElement("button", { onClick: () => { const n = new Date();
+                            // Standard ist der VORmonat: der laufende Monat ist beim Buchen praktisch
+                            // nie vollstaendig, der abgeschlossene dagegen schon.
+                            const v = new Date(n.getFullYear(), n.getMonth() - 1, 1);
+                            exportDatev(v.getFullYear(), v.getMonth() + 1); },
+                        style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" } }, "DATEV (Vormonat)"))),
             React.createElement("div", { className: "seg", style: { marginBottom: 12 } }, [["monat", "Dieser Monat"], ["jahr", "Dieses Jahr"], ["alle", "Alle"]].map(([k, l]) => React.createElement("button", { key: k, className: abrTab === k ? "on" : "", onClick: () => setAbrTab(k) }, l))),
             shownInvoices.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Rechnungen in diesem Zeitraum.")
@@ -19481,6 +19520,7 @@ function App() {
             { id: "reform", section: "fahrschule", cluster: "Ausbildung & Struktur", tone: "clay", label: "Führerschein-Reform 2027", icon: IC.reform, keywords: "reform gesetz stichtag übergang", status: (school && school.reform_stichtag) ? "Stichtag " + new Date(school.reform_stichtag).toLocaleDateString("de-DE") : "Kein Stichtag gesetzt" },
             { id: "kosten", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Kosten", icon: IC.kosten, keywords: "preis ue paket gebühr empfehlungsbonus ausfallgebühr preismeldung", status: (pricePerHour ? pricePerHour + " €/UE" : "Kein Preis hinterlegt") + (packages.length ? " · " + packages.length + " Pakete" : "") },
             { id: "rechnungsdaten", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Rechnungsdaten", icon: IC.rechnung, keywords: "rechnung firma iban steuernummer kleinunternehmer", status: { ring: invoicePct } },
+            { id: "datev", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "DATEV-Export", icon: IC.rechnung, keywords: "datev steuerberater buchungsstapel extf kontenrahmen skr03 skr04 berater mandant", status: (datev.berater && datev.mandant) ? "Eingerichtet" : "Nicht eingerichtet" },
             { id: "personalunterlagen", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Personalunterlagen", icon: IC.personal, keywords: "personal unterlagen fahrlehrer dateien", status: staffTeachers ? staffTeachers.length + " Fahrlehrer" : "Nicht geladen" },
             { id: "fuhrpark", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Fuhrpark & Auswertung", icon: IC.fuhrpark, keywords: "fahrzeug kalender leistungen offene beträge auswertung", status: "Kalender · Leistungen · Beträge" },
             { id: "konto", section: "konto", tone: "sky", label: "Konto", icon: IC.konto, keywords: "email abmelden konto schüler", status: session.user.email + " · " + myStudents + " Schüler" },
@@ -20251,6 +20291,36 @@ function App() {
                                 packages.length > 0 && React.createElement("div", { style: { fontSize: 13.5, marginBottom: 8 } },
                                     React.createElement("b", null, "Pakete:"), " ", packages.map(p => p.name + " (" + eurFmt(p.amount) + ")").join(", ")),
                                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Preise legt ein Fahrschul-Admin fest. Du kannst sie bei jedem Schüler verwenden, aber nicht ändern."))),
+                    settingsScreen === "datev" && React.createElement(SettingsScreen, { title: "DATEV-Export", onBack: closeScreen },
+                        (() => {
+                            if (!canEditSchool)
+                                return React.createElement("div", { className: "card", style: { padding: "13px 14px", fontSize: 13, color: "var(--muted)" } }, "Nur der Fahrschul-Admin kann diese Einstellungen \u00E4ndern.");
+                            const feld = (key, label, hint, ph) => React.createElement("div", { className: "field" },
+                                React.createElement("label", null, label,
+                                React.createElement("input", { type: "text", inputMode: "numeric", defaultValue: datev[key] || "", placeholder: ph || "",
+                                    onBlur: e => { if (e.target.value !== (datev[key] || "")) saveDatevSettings({ [key]: e.target.value.trim() }); } })),
+                                hint && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4, lineHeight: 1.45 } }, hint));
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 12, background: "var(--amber-bg)", border: "1.5px solid var(--amber)" } },
+                                    React.createElement("div", { style: { fontSize: 12.5, lineHeight: 1.5 } },
+                                        "Der Export erzeugt einen ", React.createElement("b", null, "Buchungsvorschlag"), " im DATEV-Format (EXTF-Buchungsstapel). Lass den ersten Export einmal von deinem Steuerberater pr\u00FCfen, bevor du ihn regelm\u00E4\u00DFig verwendest \u2013 Konten und Steuerschl\u00FCssel h\u00E4ngen von eurer Buchhaltung ab.")),
+                                React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                                    feld("berater", "Beraternummer", "Bekommst du von deinem Steuerberater.", "z.B. 1234567"),
+                                    feld("mandant", "Mandantennummer", "Ebenfalls vom Steuerberater.", "z.B. 77001"),
+                                    React.createElement("div", { className: "field" },
+                                        React.createElement("label", { id: "datev-rahmen-label" }, "Kontenrahmen"),
+                                        React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "datev-rahmen-label", style: { marginBottom: 0 } },
+                                            ["SKR03", "SKR04"].map(r => React.createElement("button", { key: r,
+                                                className: (datev.kontenrahmen || "SKR03") === r ? "on" : "",
+                                                onClick: () => saveDatevSettings({ kontenrahmen: r }) }, r)))),
+                                    feld("erloes_19", "Erl\u00F6skonto 19 % USt", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "4400 (SKR04)" : "8400 (SKR03)") + ".", datevWert("erloes_19")),
+                                    feld("erloes_frei", "Erl\u00F6skonto ohne USt (\u00A719 UStG)", "Bewusst nicht vorbelegt \u2013 das Konto h\u00E4ngt von eurer Beratung ab. Nur n\u00F6tig, wenn du Kleinunternehmer bist.", "vom Steuerberater"),
+                                    feld("geldkonto", "Geldkonto (Bank)", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "1800 (SKR04)" : "1200 (SKR03)") + ".", datevWert("geldkonto")),
+                                    feld("debitor_start", "Debitoren-Sammelkonto", "Alle Rechnungen laufen \u00FCber dieses eine Konto, der Sch\u00FClername steht im Buchungstext. Vorbelegt: 10000.", "10000"),
+                                    feld("sachkontenlaenge", "Sachkontenl\u00E4nge", "Standard: 4.", "4")),
+                                React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
+                                    "Den Export selbst findest du unter Auswertung neben dem CSV-Export. Gebucht wird: Rechnung = Debitor an Erl\u00F6se, Zahlung = Geldkonto an Debitor. Stornierte Rechnungen bleiben au\u00DFen vor."));
+                        })()),
                     settingsScreen === "rechnungsdaten" && React.createElement(SettingsScreen, { title: "Rechnungsdaten", onBack: closeScreen },
                         (() => {
                             const inv = (school && school.invoice_settings) || {};
@@ -20429,6 +20499,128 @@ function App() {
         }
         catch (e) {
             showToast("Fahrtenbuch konnte nicht exportiert werden.");
+        }
+    }
+    /* ── DATEV-Buchungsstapel (EXTF) für einen Monat ────────────────────────────────────────
+       Erzeugt einen IMPORTVORSCHLAG, keine fertige Buchhaltung. Erste Abnahme gehört einmal
+       mit dem Steuerberater gemacht - deshalb steht der Hinweis auch in der Oberfläche.
+       Gebucht wird bewusst gegen EIN Debitoren-Sammelkonto statt gegen Debitoren je Schüler:
+       stabile Debitorennummern müssten je Schüler dauerhaft gespeichert und beim Export
+       vergeben werden, das ist ein eigener Schritt. Der Schülername steht im Buchungstext,
+       damit die Zuordnung trotzdem lesbar bleibt. Erweiterbar, wenn der Steuerberater
+       Einzeldebitoren verlangt.
+       Buchungssätze: Rechnung = Debitor an Erlöse, Zahlung = Geldkonto an Debitor. ── */
+    function datevCp1252(str) {
+        // DATEV erwartet ANSI/CP1252, nicht UTF-8. Zeichen oberhalb von 0xFF, die CP1252 kennt
+        // (typografische Anführungszeichen, Gedankenstrich, Euro), werden gezielt gemappt,
+        // alles andere wird zu "?" statt die Datei unlesbar zu machen.
+        const MAP = { "\u20AC": 0x80, "\u201A": 0x82, "\u0192": 0x83, "\u201E": 0x84, "\u2026": 0x85,
+            "\u2020": 0x86, "\u2021": 0x87, "\u02C6": 0x88, "\u2030": 0x89, "\u0160": 0x8A,
+            "\u2039": 0x8B, "\u0152": 0x8C, "\u017D": 0x8E, "\u2018": 0x91, "\u2019": 0x92,
+            "\u201C": 0x93, "\u201D": 0x94, "\u2022": 0x95, "\u2013": 0x96, "\u2014": 0x97,
+            "\u02DC": 0x98, "\u2122": 0x99, "\u0161": 0x9A, "\u203A": 0x9B, "\u0153": 0x9C,
+            "\u017E": 0x9E, "\u0178": 0x9F };
+        const out = [];
+        for (const ch of String(str)) {
+            const c = ch.codePointAt(0);
+            if (c <= 0xFF) out.push(c);
+            else if (MAP[ch] != null) out.push(MAP[ch]);
+            else out.push(0x3F);
+        }
+        return new Uint8Array(out);
+    }
+    function exportDatev(jahr, monat) {
+        try {
+            const berater = String(datev.berater || "").trim();
+            const mandant = String(datev.mandant || "").trim();
+            if (!berater || !mandant) {
+                showToast("Bitte zuerst Berater- und Mandantennummer in den Einstellungen (DATEV) eintragen.");
+                return;
+            }
+            const erloes19 = datevWert("erloes_19");
+            const erloesFrei = String(datev.erloes_frei || "").trim();
+            const geldkonto = datevWert("geldkonto");
+            const debitor = datevWert("debitor_start");
+            const skl = Number(datevWert("sachkontenlaenge")) || 4;
+            const kUntFallback = !!(school && school.invoice_settings && school.invoice_settings.kleinunternehmer);
+
+            const inMonat = iso => {
+                if (!iso) return false;
+                const d = new Date(iso + "T12:00:00");
+                return d.getFullYear() === jahr && (d.getMonth() + 1) === monat;
+            };
+            const buchungen = [];
+            let brauchtFrei = false;
+            students.filter(s => s._isMine).forEach(s => {
+                (s.invoices || []).forEach(inv => {
+                    if (!inMonat(inv.date)) return;
+                    // Stornierte Rechnungen und Stornorechnungen bleiben aussen vor - dieselbe
+                    // Abgrenzung wie in der Abrechnung und im bestehenden CSV-Export.
+                    if (inv.cancelledBy || inv.stornoOf) return;
+                    const brutto = Number(inv.total) || 0;
+                    if (!(brutto > 0)) return;
+                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
+                    if (kUnt) brauchtFrei = true;
+                    buchungen.push({ umsatz: brutto, sh: "S", konto: debitor,
+                        gegenkonto: kUnt ? erloesFrei : erloes19, bu: "",
+                        datum: inv.date, beleg1: inv.number || "",
+                        text: "Rechnung " + dispName(s) });
+                });
+                (s.payments || []).forEach(p => {
+                    if (!inMonat(p.date)) return;
+                    const betrag = Number(p.amount) || 0;
+                    if (!(betrag > 0)) return;
+                    const inv = (s.invoices || []).find(x => x.id === p.invoiceId);
+                    buchungen.push({ umsatz: betrag, sh: "S", konto: geldkonto, gegenkonto: debitor, bu: "",
+                        datum: p.date, beleg1: (inv && inv.number) || "",
+                        text: "Zahlung " + dispName(s) });
+                });
+            });
+            if (buchungen.length === 0) {
+                showToast("In diesem Monat gibt es keine Rechnungen oder Zahlungen zum Exportieren.");
+                return;
+            }
+            if (brauchtFrei && !erloesFrei) {
+                showToast("Im Zeitraum liegen Rechnungen ohne Umsatzsteuer (\u00A719 UStG). Bitte erst das Erl\u00F6skonto daf\u00FCr in den Einstellungen (DATEV) eintragen - es wird bewusst nicht geraten.");
+                return;
+            }
+            buchungen.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+
+            const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
+            const betrag = n => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2).replace(".", ",");
+            const ttmm = iso => { const d = new Date(iso + "T12:00:00");
+                return String(d.getDate()).padStart(2, "0") + String(d.getMonth() + 1).padStart(2, "0"); };
+            const p2 = n => String(n).padStart(2, "0");
+            const now = new Date();
+            const stamp = String(now.getFullYear()) + p2(now.getMonth() + 1) + p2(now.getDate())
+                + p2(now.getHours()) + p2(now.getMinutes()) + p2(now.getSeconds()) + "000";
+            const von = String(jahr) + p2(monat) + "01";
+            const bis = String(jahr) + p2(monat) + String(new Date(jahr, monat, 0).getDate());
+            const bez = ((school && school.name) || "Fahrschule") + " " + p2(monat) + "/" + jahr;
+            const kopf = ['"EXTF"', 700, 21, '"Buchungsstapel"', 13, stamp, "", "", '"AllInDrive"', "",
+                berater, mandant, String(jahr) + "0101", skl, von, bis, q(bez), '""', 1, "", 0, '"EUR"',
+                "", "", "", "", '""', "", "", '""', '""', '""', '""', '""'];
+            const spalten = ["Umsatz (ohne Soll/Haben-Kz)", "Soll/Haben-Kennzeichen", "WKZ Umsatz", "Kurs",
+                "Basis-Umsatz", "WKZ Basis-Umsatz", "Konto", "Gegenkonto (ohne BU-Schl\u00FCssel)", "BU-Schl\u00FCssel",
+                "Belegdatum", "Belegfeld 1", "Belegfeld 2", "Skonto", "Buchungstext"];
+            const zeilen = [kopf.join(";"), spalten.map(q).join(";")];
+            buchungen.forEach(b => {
+                zeilen.push([betrag(b.umsatz), q(b.sh), q("EUR"), "", "", "", b.konto, b.gegenkonto, b.bu || "",
+                    ttmm(b.datum), q(b.beleg1), "", "", q(String(b.text).slice(0, 60))].join(";"));
+            });
+            const blob = new Blob([datevCp1252(zeilen.join("\r\n") + "\r\n")], { type: "text/csv" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a");
+            a.href = url;
+            a.download = "EXTF_Buchungsstapel_" + jahr + p2(monat) + ".csv";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(url), 2000);
+            showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen.");
+        }
+        catch (e) {
+            showToast("Export fehlgeschlagen: " + (e.message || "unbekannt"));
         }
     }
     // Alle Rechnungen (über eigene Schüler hinweg) als CSV exportieren, z.B. für den Steuerberater.
