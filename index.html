@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.173.0";
+const APP_VERSION = "1.174.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -2716,6 +2716,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.174.0", date: "August 2026", changes: [
+            "Neu: Schüler-Selbsteinschätzung im Fahrtenbuch. Fahrschüler können sich im Fahrschülerbereich zu jeder Fahrstunde selbst einschätzen (dieselben 5 Kriterien und Smileys wie deine eigene Bewertung) - deine Bewertung dieser Stunde sehen sie dabei bewusst erst, NACHDEM sie selbst eingeschätzt haben, damit niemand einfach abschreibt. Im Fahrtenbuch siehst du zu jeder Stunde, wie der Schüler sich selbst eingeschätzt hat, inklusive Hinweis, wenn ein Kriterium deutlich (2 Stufen oder mehr) von deiner Bewertung abweicht",
+        ] },
     { v: "1.173.0", date: "August 2026", changes: [
             "Neu: Rückwärts-Fahrplan im Führerschein-Reiter. Zielmonat für die Praxisprüfung eintragen, die App schätzt daraus die nötige Wochenfrequenz - aus dem bisherigen eigenen Tempo des Schülers plus einem einstellbaren Planungspuffer für Behörde und Prüfungstermin (Einstellungen, Kosten, Standard 6 Wochen). Ein Knopf schlägt direkt eine passende Terminserie vor. Ausdrücklich eine grobe Schätzung, keine Zusage",
         ] },
@@ -5684,6 +5687,26 @@ async function publicTheoryCheckin(code, p_name, p_pin, p_checkin_code) {
     }
     return data; // { ok, thema, already }
 }
+/* ── Schüler-Selbsteinschätzung je Fahrtenbuch-Eintrag, siehe lesson_reflections-Tabelle. ── */
+async function fetchLessonReflections(studentId) {
+    const { data, error } = await sb.from("lesson_reflections").select("*").eq("student_id", studentId);
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+// Anonyme Abgabe-RPC (Schüler im Fahrschülerbereich) - absichtlich kein Update danach möglich
+// (ON CONFLICT DO NOTHING serverseitig), sonst könnte die Selbsteinschätzung nachträglich an die
+// inzwischen sichtbar gewordene Fahrlehrer-Bewertung angeglichen werden.
+async function publicLessonReflectionSubmit(code, p_name, p_pin, p_lesson_id, p_ratings, p_note) {
+    const { data, error } = await sb.rpc("public_lesson_reflection_submit", { code, p_name: p_name || null, p_pin: p_pin || null, p_lesson_id, p_ratings: p_ratings || {}, p_note: p_note || null });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data; // { ok, already }
+}
 /* ════════ Personalunterlagen (Fahrschul-Admin lädt Dateien für einzelne Fahrlehrer hoch) ════════
    Anders als die Video-Bibliothek liegt das im PRIVATEN Storage-Bucket "staff-files" (nicht
    öffentlich) und wird per zeitlich begrenztem Signed-Link geöffnet, da hier auch sensible
@@ -8016,6 +8039,10 @@ const STUDENT_I18N = {
         strecke_singular: " aufgezeichnete Strecke · insgesamt ", strecke_plural: " aufgezeichnete Strecken · insgesamt ",
         verbergen: "Verbergen", anzeigen: "Anzeigen", fahrstunde_fallback: "Fahrstunde",
         keine_strecke: "Für diese Fahrstunden wurde noch keine Strecke aufgezeichnet.",
+        reflect_title: "Wie war die Stunde für dich?", reflect_hint: "Schätz dich kurz selbst ein - deine Fahrlehrer-Bewertung siehst du direkt danach.",
+        reflect_note_placeholder: "Was ist dir aufgefallen? (optional)", reflect_submit: "Einschätzung abschicken",
+        reflect_done_title: "Deine Einschätzung", reflect_vs_teacher: "Fahrlehrer-Bewertung",
+        reflect_submitted: "Danke! Deine Einschätzung ist gespeichert.", reflect_error: "Konnte nicht gespeichert werden. Bitte nochmal versuchen.",
         meine_termine: "Meine Termine",
         keine_termine: "Für dich sind noch keine Termine eingetragen.",
         anstehend: "Anstehend", verlauf: "Verlauf", vergangene_termine: "{n} vergangene Termine",
@@ -8077,6 +8104,10 @@ const STUDENT_I18N = {
         strecke_singular: " recorded route · total ", strecke_plural: " recorded routes · total ",
         verbergen: "Hide", anzeigen: "Show", fahrstunde_fallback: "Driving lesson",
         keine_strecke: "No route has been recorded for these driving lessons yet.",
+        reflect_title: "How was the lesson for you?", reflect_hint: "Rate yourself briefly - you'll see your instructor's rating right after.",
+        reflect_note_placeholder: "What did you notice? (optional)", reflect_submit: "Submit self-assessment",
+        reflect_done_title: "Your self-assessment", reflect_vs_teacher: "Instructor's rating",
+        reflect_submitted: "Thanks! Your self-assessment was saved.", reflect_error: "Couldn't be saved. Please try again.",
         meine_termine: "My appointments",
         keine_termine: "No appointments have been scheduled for you yet.",
         anstehend: "Upcoming", verlauf: "History", vergangene_termine: "{n} past appointments",
@@ -9394,6 +9425,21 @@ function App() {
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
     // Theorie-Anwesenheit (QR-Check-in), siehe renderTheoryCheckinModal().
     const [theoryCheckinModal, setTheoryCheckinModal] = useState(null); // null | {appt, thema, attendance, manualId}
+    // Schüler-Selbsteinschätzungen (lesson_reflections) des GERADE ANGESEHENEN Schülers, für den
+    // Vergleich im Tagebuch (renderTagebuch). Hook bewusst hier oben bei activeId statt bei active
+    // weiter unten, weil ab dort früh returnende Ladezustands-Checks stehen (React-Fehler #310,
+    // siehe Kommentare dort) - activeId ist als reine ID praktisch gleichwertig zu active.id.
+    const [lessonReflections, setLessonReflections] = useState([]);
+    useEffect(() => {
+        if (!activeId) {
+            setLessonReflections([]);
+            return;
+        }
+        let cancelled = false;
+        fetchLessonReflections(activeId).then(rows => { if (!cancelled)
+            setLessonReflections(rows); });
+        return () => { cancelled = true; };
+    }, [activeId]);
     // Einmal pro Sitzung prüfen, ob eine Streckenaufzeichnung durch App-Kill/Tab-Schließen
     // unterbrochen wurde (siehe recBufferKey) - falls ja, anbieten, sie fortzusetzen, statt die
     // bereits aufgezeichneten Punkte kommentarlos zu verlieren.
@@ -15266,6 +15312,32 @@ function App() {
                                             filter: on ? "none" : "grayscale(0.6) opacity(0.55)", transition: "all .12s" } }, sm.emoji);
                                 })));
                         }),
+                        // Selbsteinschätzung des Schülers zu dieser Stunde, siehe lesson_reflections/
+                        // public_student_lessons - die Fahrlehrer-Bewertung oben wird dem Schüler im
+                        // Fahrschülerbereich bewusst erst gezeigt, NACHDEM er selbst eingeschätzt hat,
+                        // damit er nicht einfach abschreibt.
+                        (() => {
+                            const refl = lessonReflections.find(r => r.lesson_id === l.id);
+                            if (!refl)
+                                return React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", padding: "8px 2px" } }, "Schüler hat sich zu dieser Stunde noch nicht selbst eingeschätzt.");
+                            const abweichungen = LESSON_FIELDS.filter(f => {
+                                const eigen = l.ratings && l.ratings[f.id], selbst = refl.ratings && refl.ratings[f.id];
+                                return eigen != null && selbst != null && Math.abs(eigen - selbst) >= 2;
+                            });
+                            return React.createElement("div", { style: { marginTop: 6, padding: "10px 11px", borderRadius: 10, background: "var(--field-bg)" } },
+                                React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Selbsteinschätzung Schüler"),
+                                LESSON_FIELDS.map(f => {
+                                    const eigen = l.ratings && l.ratings[f.id], selbst = refl.ratings && refl.ratings[f.id];
+                                    const smSelbst = SMILEYS.find(sm => sm.v === selbst);
+                                    const weit = eigen != null && selbst != null && Math.abs(eigen - selbst) >= 2;
+                                    return React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "3px 0", fontSize: 12.5 } },
+                                        React.createElement("span", { style: { color: weit ? "#B3362A" : "var(--ink-2)", fontWeight: weit ? 700 : 400 } }, f.label + (weit ? " ⚠" : "")),
+                                        React.createElement("span", { style: { fontSize: 16 } }, smSelbst ? smSelbst.emoji : "–"));
+                                }),
+                                refl.note && React.createElement("div", { style: { fontSize: 12.5, marginTop: 6, fontStyle: "italic", color: "var(--ink-2)" } }, "„" + refl.note + "“"),
+                                abweichungen.length > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "#B3362A", marginTop: 6 } },
+                                    "Weicht bei " + abweichungen.length + (abweichungen.length === 1 ? " Kriterium" : " Kriterien") + " deutlich von deiner Bewertung ab."));
+                        })(),
                         React.createElement("div", { style: { marginTop: 12, display: "grid", gap: 10 } },
                             React.createElement("div", null,
                                 React.createElement("label", { className: "ls-lbl", style: { color: "var(--orange-deep)", display: "flex", alignItems: "center", gap: 5 } },
@@ -25665,6 +25737,28 @@ function StudentArea({ code, info, appMode }) {
         return "";
     } });
     const [data, setData] = React.useState(null); // Überblick nach erfolgreichem Login
+    // Selbsteinschätzung zu einer Fahrstunde (siehe lesson_reflections/public_lesson_reflection_submit).
+    // Die Fahrlehrer-Bewertung dieser Stunde bleibt bis zur Abgabe unsichtbar (teacherRatings kommt
+    // erst danach vom Server zurück) - genau deshalb erst NACH dem Abschicken neu laden, statt die
+    // Abgabe nur lokal in data zu spiegeln.
+    const [reflectForm, setReflectForm] = React.useState(null); // null | {lessonId, ratings, note, busy, error}
+    function openReflectForm(lessonId) {
+        setReflectForm({ lessonId, ratings: {}, note: "", busy: false, error: "" });
+    }
+    async function submitReflection() {
+        if (!reflectForm || !reflectForm.lessonId)
+            return;
+        setReflectForm(f => ({ ...f, busy: true, error: "" }));
+        try {
+            await publicLessonReflectionSubmit(code, name, pin, reflectForm.lessonId, reflectForm.ratings, reflectForm.note);
+            const fresh = await publicStudentLessons(code, name, pin);
+            setData(cur => cur ? { ...cur, lessons: fresh } : cur);
+            setReflectForm(null);
+        }
+        catch (e) {
+            setReflectForm(f => f && ({ ...f, busy: false, error: t("reflect_error") }));
+        }
+    }
     // Erhöht sich bei jedem login()/logout() - von doCancel()/claimOffer()/login()'s
     // Hintergrund-Fahrstunden-Abruf zu Beginn eingefangen und nach ihrem jeweiligen await geprüft,
     // bevor setData() aufgerufen wird. Auf einem geteilten Gerät (Familientablett, ein Buchungslink
@@ -26220,7 +26314,21 @@ function StudentArea({ code, info, appMode }) {
                             (Number(l.dist) > 0) ? (" \u00B7 " + rmapFmtDist(Number(l.dist))) : "",
                             (Number(l.dur) > 0) ? (" \u00B7 " + rmapFmtDur(Number(l.dur))) : "")),
                     (Array.isArray(l.pts) && l.pts.length >= 2) && React.createElement("span", { title: "Strecke aufgezeichnet", style: { color: (info && info.color) || "var(--orange-deep)", fontSize: 16 } }, "\uD83D\uDDFA")),
-                l.hinweis && React.createElement("div", { style: { fontSize: 13, background: "var(--orange-soft)", color: "var(--orange-deep)", borderRadius: 10, padding: "8px 10px", lineHeight: 1.4 } }, l.hinweis))),
+                l.hinweis && React.createElement("div", { style: { fontSize: 13, background: "var(--orange-soft)", color: "var(--orange-deep)", borderRadius: 10, padding: "8px 10px", lineHeight: 1.4 } }, l.hinweis),
+                l.id && (l.reflected
+                    ? React.createElement("div", { style: { marginTop: 2, padding: "8px 10px", borderRadius: 10, background: "var(--field-bg)" } },
+                        React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap" } },
+                            LESSON_FIELDS.map(f => {
+                                const smMine = SMILEYS.find(sm => sm.v === (l.myRatings && l.myRatings[f.id]));
+                                return smMine && React.createElement("span", { key: f.id, title: f.label, style: { fontSize: 16 } }, smMine.emoji);
+                            })),
+                        l.teacherRatings && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 5, display: "flex", alignItems: "center", gap: 6 } },
+                            t("reflect_vs_teacher") + ":",
+                            LESSON_FIELDS.map(f => {
+                                const smTeach = SMILEYS.find(sm => sm.v === l.teacherRatings[f.id]);
+                                return smTeach && React.createElement("span", { key: f.id, title: f.label, style: { fontSize: 14 } }, smTeach.emoji);
+                            })))
+                    : React.createElement("button", { onClick: () => openReflectForm(l.id), className: "btn btn-ghost", style: { alignSelf: "flex-start", padding: "6px 11px", fontSize: 12.5, marginTop: 2 } }, t("reflect_title"))))),
             lessonsWithRoute.length === 0 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 4 } }, t("keine_strecke"))),
         React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 10 } },
@@ -26280,7 +26388,24 @@ function StudentArea({ code, info, appMode }) {
                     && React.createElement("div", { style: { fontSize: 12.5, color: "var(--amber)", background: "var(--amber-bg)", borderRadius: 10, padding: "9px 12px", marginBottom: 18, lineHeight: 1.5 } },
                         "Dieser Termin beginnt in weniger als " + data.storno_frist_stunden + " Stunden - bei einer so kurzfristigen Absage kann eine Ausfallgebühr anfallen."),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { background: "#B3362A", color: "#fff" }, onClick: doCancel }, confirmCancel.status === "confirmed" ? t("modal_storno_btn") : t("modal_delete_btn")),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setConfirmCancel(null) }, t("zurueck")))));
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setConfirmCancel(null) }, t("zurueck")))),
+        reflectForm && React.createElement("div", { onClick: () => !reflectForm.busy && setReflectForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 4 } }, t("reflect_title")),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } }, t("reflect_hint")),
+                LESSON_FIELDS.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 0", borderTop: "1px solid var(--line)" } },
+                    React.createElement("span", { style: { fontSize: 13.5, fontWeight: 500, flex: 1, minWidth: 0 } }, f.label),
+                    React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } }, SMILEYS.map(sm => {
+                        const on = reflectForm.ratings[f.id] === sm.v;
+                        return React.createElement("button", { key: sm.v, onClick: () => setReflectForm(rf => rf && ({ ...rf, ratings: { ...rf.ratings, [f.id]: on ? undefined : sm.v } })), "aria-label": f.label + ": " + sm.label, style: { width: 38, height: 38, borderRadius: 10, fontSize: 19,
+                                border: on ? "2.5px solid " + sm.color : "2px solid var(--line)",
+                                background: on ? sm.bg : "var(--card)",
+                                filter: on ? "none" : "grayscale(0.6) opacity(0.55)", transition: "all .12s" } }, sm.emoji);
+                    })))),
+                React.createElement("textarea", { rows: 2, value: reflectForm.note, onChange: e => setReflectForm(rf => rf && ({ ...rf, note: e.target.value })), placeholder: t("reflect_note_placeholder"), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, marginTop: 12, resize: "vertical" } }),
+                reflectForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginTop: 8 } }, reflectForm.error),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: reflectForm.busy, onClick: submitReflection }, reflectForm.busy ? "…" : t("reflect_submit")),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: reflectForm.busy, onClick: () => setReflectForm(null) }, t("zurueck")))));
 }
 function ApptRow({ a, past, onCancel, cancelBusy, t }) {
     // t fehlte hier bisher komplett (weder als Prop übergeben noch benutzt) - Status-Badge und
