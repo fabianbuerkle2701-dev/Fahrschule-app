@@ -2639,7 +2639,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.182.3";
+const APP_VERSION = "1.183.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2764,6 +2764,14 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.183.0", date: "August 2026", changes: [
+            "Fehlerbehebung: Die Anmeldung im Fahrschülerbereich schlug für einzelne Schüler komplett fehl. Ursache war das Feld „Theorie bestanden am“ - es enthält ein Datum, wurde serverseitig aber als Ja/Nein-Wert gelesen. Bei leerem Feld brach die gesamte Anmeldung ab",
+            "Fehlerbehebung: Jeder Fahrschüler bekam im Theoriebereich die Fragen der Klasse B, unabhängig von seiner tatsächlichen Führerscheinklasse - die Klasse wurde vom Server nie mitgeliefert. Ein Klasse-A-Schüler sieht jetzt seine 350 Fragen (158 Grundstoff für alle Klassen plus 192 klassenspezifische)",
+            "Neu: Echter Lernfortschritt beim Theorie-Üben. Jede Frage wandert durch fünf Fächer - richtig beantwortet kommt sie erst nach 1, 3, 7 bzw. 21 Tagen wieder, falsch sofort erneut. Geübt wird in der Reihenfolge, die am meisten bringt: erst Fälliges, dann Neues, innerhalb dessen die Fragen mit den meisten Fehlerpunkten zuerst",
+            "Neu: Einschätzung zur Prüfung nach den echten Bewertungsregeln - erwartete Fehlerpunkte gegen die Grenze von 10, plus Warnung vor der Sonderregel, dass zwei falsche 5-Punkte-Fragen auch unterhalb von 10 Punkten zum Durchfallen führen. Erscheint ab 30 geübten Fragen, vorher wäre sie nicht aussagekräftig",
+            "Neu: „Erklär mir das“ nach jeder beantworteten Frage - eine kurze Erklärung, warum die richtige Antwort stimmt und wo der Denkfehler lag. Auf Knopfdruck, nicht automatisch",
+            "Korrektur: Die Probeprüfung trennte Grundstoff und Zusatzstoff nach dem Thema statt nach der Führerscheinklasse und bildete die echte Zusammensetzung (20 Grundstoff + 10 klassenspezifisch) dadurch nicht ab",
+        ] },
     { v: "1.182.3", date: "August 2026", changes: [
             "Härtung: Die Abfragen des Fahrschülerbereichs laufen jetzt über eine eigene, anmeldefreie Verbindung. Vorher hing an jeder dieser Abfragen der Anmelde-Token des eingeloggten Fahrlehrers, obwohl sie ihn nicht brauchen - eine gestörte Fahrlehrer-Sitzung hätte den Schülerbereich mit ausfallen lassen können",
         ] },
@@ -4816,6 +4824,81 @@ const THEORY_GRUNDSTOFF_SACHGEBIETE = [
     "Gefahrenlehre", "Verhalten im Straßenverkehr", "Vorfahrt, Vorrang", "Verkehrszeichen",
     "Umweltschutz", "Technik", "Eignung und Befähigung von Kraftfahrern",
 ];
+/* ── Lernfortschritt (Leitner mit Pruefungsgewichtung) ──────────────────────────────────────
+   Fuenf Faecher, Intervalle 0/1/3/7/21 Tage. Richtig = ein Fach hoch, falsch = zurueck auf 1.
+   Die Faecher setzt der Server (public_theory_answer_submit), hier wird nur ausgewertet.
+
+   Warum nicht einfach "zuletzt richtig": eine geratene Frage galt damit dauerhaft als gekonnt
+   und eine falsche kam nie gezielt wieder. Das Fach bildet dagegen ab, wie oft eine Frage
+   HINTEREINANDER sass - das ist der Unterschied zwischen Wiedererkennen und Koennen. ── */
+const LEITNER_INTERVALL = [0, 1, 3, 7, 21];
+// Geschaetzte Trefferwahrscheinlichkeit je Fach. Grob, aber monoton und plausibel: eine Frage
+// im hoechsten Fach sass zuletzt viermal hintereinander, eine ungesehene ist ein Muenzwurf
+// zwischen Raten und Wissen. Dient nur der Selbsteinschaetzung, nicht der Bewertung.
+const LEITNER_TREFFER = [0.35, 0.55, 0.72, 0.86, 0.95];
+function lernStand(q, progress) {
+    const e = (progress && progress[q.id]) || null;
+    const box = e && e.box ? Math.max(1, Math.min(5, e.box)) : 0; // 0 = nie beantwortet
+    const faellig = !e || !e.due || e.due <= ymd(new Date());
+    return { box, faellig, gesehen: !!e, treffer: box ? LEITNER_TREFFER[box - 1] : 0.30 };
+}
+/* Reihenfolge beim Ueben. Zuerst was faellig ist und am wenigsten sitzt, dann Neues, dann der
+   Rest. Innerhalb einer Gruppe zaehlen die Fehlerpunkte: eine 5-Punkte-Frage kostet in der
+   echten Pruefung mehr als eine mit 2 Punkten, also gehoert sie frueher geuebt. */
+function lernReihenfolge(fragen, progress) {
+    return fragen.slice().map(q => ({ q, st: lernStand(q, progress) }))
+        .sort((a, b) => {
+            const rang = x => x.st.box === 0 ? 1 : (x.st.faellig ? 0 : 2);
+            const ra = rang(a), rb = rang(b);
+            if (ra !== rb) return ra - rb;
+            if (a.st.box !== b.st.box) return a.st.box - b.st.box;
+            return (Number(b.q.points) || 0) - (Number(a.q.points) || 0);
+        }).map(x => x.q);
+}
+/* Erwartete Fehlerpunkte in einer Pruefung mit 30 Fragen. Die echte Klasse-B-Pruefung gilt ab
+   mehr als 10 Fehlerpunkten als nicht bestanden - deshalb wird genau diese Zahl geschaetzt
+   statt einer abstrakten Prozentzahl. Bewusst als Schaetzung benannt, nicht als Prognose. */
+/* Schaetzung des Pruefungsergebnisses nach den echten Bewertungsregeln.
+   Ersterwerb: 30 Fragen, davon 20 Grundstoff (Klasse "ALL") und 10 klassenspezifischer
+   Zusatzstoff, 110 Punkte gesamt, bestanden bis 10 Fehlerpunkte.
+   ZUSAETZLICH gilt: zwei falsch beantwortete Fragen mit je 5 Punkten bedeuten "nicht
+   bestanden", auch wenn die Summe 10 nicht ueberschreitet. Diese Sonderregel wird hier
+   eigens geschaetzt, weil sie sonst unsichtbar bliebe - man kann rechnerisch unter 10 liegen
+   und trotzdem durchfallen.
+   Quelle der Regeln: Bewertungskriterien der theoretischen Fahrerlaubnispruefung. */
+const PRUEFUNG_GRUNDSTOFF_ANZAHL = 20;
+const PRUEFUNG_ZUSATZSTOFF_ANZAHL = 10;
+const PRUEFUNG_MAX_FEHLERPUNKTE = 10;
+function pruefungsSchaetzung(fragen, progress) {
+    if (!fragen || fragen.length === 0) return null;
+    const grund = fragen.filter(q => q.klasse === "ALL");
+    const zusatz = fragen.filter(q => q.klasse !== "ALL");
+    // Erwartete Fehlerpunkte je Teil: Durchschnitt aus dem jeweiligen Pool mal Fragenzahl.
+    const mittel = (pool) => pool.length
+        ? pool.reduce((sum, q) => sum + (1 - lernStand(q, progress).treffer) * (Number(q.points) || 3), 0) / pool.length
+        : 0;
+    const erwartet = Math.round((mittel(grund) * PRUEFUNG_GRUNDSTOFF_ANZAHL
+        + mittel(zusatz) * PRUEFUNG_ZUSATZSTOFF_ANZAHL) * 10) / 10;
+    // Sonderregel: Wahrscheinlichkeit, mindestens zwei 5-Punkte-Fragen falsch zu haben.
+    // Erwartungswert der falschen 5-Punkte-Fragen in einer Pruefung, daraus ueber die
+    // Poisson-Naeherung P(>=2). Bewusst eine Naeherung und als solche benannt.
+    const fuenfer = fragen.filter(q => (Number(q.points) || 0) === 5);
+    const anteilFuenfer = fragen.length ? fuenfer.length / fragen.length : 0;
+    const fehlerQuoteFuenfer = fuenfer.length
+        ? fuenfer.reduce((s, q) => s + (1 - lernStand(q, progress).treffer), 0) / fuenfer.length : 0;
+    const lambda = 30 * anteilFuenfer * fehlerQuoteFuenfer;
+    const pZweiFuenfer = 1 - Math.exp(-lambda) * (1 + lambda);
+    const gesehen = fragen.filter(q => lernStand(q, progress).gesehen).length;
+    const sitzt = fragen.filter(q => lernStand(q, progress).box >= 4).length;
+    return {
+        erwartet,
+        grenze: PRUEFUNG_MAX_FEHLERPUNKTE,
+        bestehtVoraussichtlich: erwartet <= PRUEFUNG_MAX_FEHLERPUNKTE && pZweiFuenfer < 0.5,
+        risikoZweiFuenfer: Math.round(pZweiFuenfer * 100),
+        gesehen, sitzt, gesamt: fragen.length,
+        grundstoff: grund.length, zusatzstoff: zusatz.length,
+    };
+}
 const THEORY_KINDS = [
     { id: "methode", label: "Methoden" },
     { id: "medium", label: "Medien" },
@@ -5713,6 +5796,20 @@ function buildXRechnung(o) {
   });
   L.push('</ubl:Invoice>');
   return { xml: L.join("\n"), netto, steuer, brutto, positionen: pos };
+}
+// KI-Erklärung zu einer Theoriefrage. Läuft über eine eigene Netlify-Function, weil der
+// API-Schlüssel niemals in den Client gehört. Absicherung dort wie beim Buchungs-Chat über
+// Buchungscode + Tageslimit - Schüler haben keinen Supabase-Account, ein Login-Gate gibt es
+// hier also nicht.
+async function erklaereFrage(code, frage, optionen, gewaehlt) {
+    const resp = await fetch("/.netlify/functions/explain-theory-question", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code, frage, optionen, gewaehlt }),
+    });
+    const out = await resp.json().catch(() => null);
+    if (!resp.ok || !out || !out.erklaerung)
+        throw new Error((out && out.error) || "Erklärung konnte nicht geladen werden.");
+    return out.erklaerung;
 }
 /* ════════ Geschenkgutscheine ════════ */
 async function fetchVouchers(schoolId) {
@@ -26499,6 +26596,7 @@ function TheoryPractice({ code }) {
     const [examAnswers, setExamAnswers] = React.useState([]); // {id, points, correct} während einer laufenden Probeprüfung
     const [examResult, setExamResult] = React.useState(null); // {total, errorPoints, passed, richtig}
     const [examHistory, setExamHistory] = React.useState([]);
+    const [erklaerung, setErklaerung] = React.useState(null); // null | {busy, text, error}
     // undefined = noch nicht ermittelt, "" = ermittelt (Gast oder Schüler ohne Klasse) - der
     // Fragen-Fetch wartet auf einen der beiden Werte, damit nicht erst ungefiltert und dann
     // nochmal gefiltert geladen wird.
@@ -26559,11 +26657,19 @@ function TheoryPractice({ code }) {
     // Eine gemischte Runde bleibt auf Prüfungslänge begrenzt. Sonst wächst sie mit jedem neuen
     // Thema weiter an und man wird in einer Sitzung nie fertig.
     const MIX_LEN = 20;
-    const grundstoffPool = questions.filter(q => THEORY_GRUNDSTOFF_SACHGEBIETE.includes(q.topic_key));
-    const zusatzstoffPool = questions.filter(q => !THEORY_GRUNDSTOFF_SACHGEBIETE.includes(q.topic_key));
+    // Grundstoff/Zusatzstoff trennt sich ueber die KLASSE, nicht ueber das Thema: der Grundstoff
+    // gilt fuer alle Klassen (klasse="ALL"), der Zusatzstoff ergibt sich aus den besonderen
+    // Anforderungen der jeweiligen Klasse. Vorher wurde nach topic_key getrennt - damit landete
+    // z.B. eine klassenspezifische Technik-Frage faelschlich im Grundstoff, und die Probepruefung
+    // bildete die echte Zusammensetzung nicht ab.
+    const grundstoffPool = questions.filter(q => q.klasse === "ALL");
+    const zusatzstoffPool = questions.filter(q => q.klasse !== "ALL");
     const markedQs = questions.filter(q => progress[q.id] && progress[q.id].marked);
     function startRound(qs) {
-        setQueue(shuffled(qs));
+        // Nicht mehr zufaellig mischen, sondern nach Lernstand ordnen: erst was faellig ist und
+        // am wenigsten sitzt, dann Neues, dann der Rest - innerhalb dessen die Fragen mit den
+        // meisten Fehlerpunkten zuerst. Siehe lernReihenfolge().
+        setQueue(lernReihenfolge(qs, progress));
         setQIndex(0);
         setSelected([]);
         setChecked(false);
@@ -26603,9 +26709,31 @@ function TheoryPractice({ code }) {
         setChecked(true);
         if (isCorrect)
             setSessionRichtig(c => c + 1);
-        setProgress(prev => ({ ...prev, [q.id]: { ...(prev[q.id] || {}), correct: isCorrect } }));
+        // Fach lokal genauso fortschreiben wie der Server es tut (siehe
+        // public_theory_answer_submit), damit die Anzeige sofort stimmt und nicht erst nach
+        // dem naechsten Laden. Der Server bleibt die massgebliche Quelle.
+        setProgress(prev => {
+            const alt = prev[q.id] || {};
+            const box = isCorrect ? Math.min((alt.box || 1) + 1, 5) : 1;
+            const faellig = new Date(Date.now() + LEITNER_INTERVALL[box - 1] * 86400000);
+            return { ...prev, [q.id]: { ...alt, correct: isCorrect, box, due: ymd(faellig) } };
+        });
+        setErklaerung(null);
         if (loggedIn)
             publicTheorySubmitAnswer(code, loggedInName, loggedInPin, q.id, isCorrect);
+    }
+    async function frageErklaeren() {
+        const q = queue[qIndex];
+        if (!q || (erklaerung && erklaerung.busy)) return;
+        setErklaerung({ busy: true, text: "", error: "" });
+        try {
+            const gewaehlt = (q.options || []).filter(o => selected.includes(o.id)).map(o => o.text);
+            const txt = await erklaereFrage(code, q.question, q.options || [], gewaehlt);
+            setErklaerung({ busy: false, text: txt, error: "" });
+        }
+        catch (e) {
+            setErklaerung({ busy: false, text: "", error: e.message || "Erklärung nicht verfügbar." });
+        }
     }
     function nextQuestion() {
         if (qIndex + 1 < queue.length) {
@@ -26734,6 +26862,24 @@ function TheoryPractice({ code }) {
                     })),
                 checked && q.explanation && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } },
                     React.createElement("strong", { style: { color: isCorrect ? "var(--sage-deep)" : "#B3362A" } }, isCorrect ? "Richtig! " : "Leider falsch. "), q.explanation),
+                // Kurze Rueckmeldung auch dann, wenn zur Frage keine feste Erklaerung hinterlegt
+                // ist - beim amtlichen Katalog ist das der Regelfall.
+                checked && !q.explanation && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, lineHeight: 1.5 } },
+                    React.createElement("strong", { style: { color: isCorrect ? "var(--sage-deep)" : "#B3362A" } }, isCorrect ? "Richtig!" : "Leider falsch."),
+                    isCorrect ? "" : " Die markierten Antworten oben sind die richtigen."),
+                // KI-Erklaerung auf Wunsch. Bewusst erst auf Knopfdruck und nicht automatisch:
+                // jede Erklaerung kostet einen Aufruf, und wer die Frage kann, braucht sie nicht.
+                checked && React.createElement("div", { style: { marginBottom: 14 } },
+                    !erklaerung && React.createElement("button", { className: "btn btn-ghost btn-block", style: { fontSize: 13 }, onClick: frageErklaeren },
+                        "✨ Erklär mir das"),
+                    erklaerung && erklaerung.busy && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "8px 2px" } }, "Wird erklärt…"),
+                    erklaerung && erklaerung.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", lineHeight: 1.5 } },
+                        erklaerung.error,
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8, fontSize: 13 }, onClick: frageErklaeren }, "Nochmal versuchen")),
+                    erklaerung && erklaerung.text && React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.6, background: "var(--sky-bg)", border: "1px solid var(--sky)", borderRadius: 12, padding: "12px 13px", whiteSpace: "pre-wrap" } },
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--sky-deep)", marginBottom: 6 } }, "Erklärung"),
+                        erklaerung.text,
+                        React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8 } }, "Automatisch erstellt - im Zweifel gilt, was dein Fahrlehrer sagt."))),
                 !checked
                     ? React.createElement("button", { className: "btn btn-primary btn-block", disabled: selected.length === 0, onClick: checkAnswer }, "Prüfen")
                     : React.createElement("button", { className: "btn btn-primary btn-block", onClick: nextQuestion }, qIndex + 1 < queue.length ? "Weiter" : "Fertig")));
@@ -26763,6 +26909,43 @@ function TheoryPractice({ code }) {
             React.createElement("span", { style: { flex: 1 } },
                 React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Markierte Fragen"),
                 React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, markedQs.length + " Frage" + (markedQs.length === 1 ? "" : "n") + " zum Wiederholen gemerkt"))),
+        (() => {
+            // Lernstand: keine abstrakte Prozentzahl, sondern die Groesse, um die es in der
+            // echten Pruefung geht - erwartete Fehlerpunkte gegen die Grenze von 10.
+            const sch = pruefungsSchaetzung(questions, progress);
+            if (!sch) return null;
+            // Unter 30 geuebten Fragen ist die Schaetzung nicht aussagekraeftig - sie wuerde nur
+            // den Startwert fuer ungesehene Fragen widerspiegeln und eine Genauigkeit vortaeuschen,
+            // die es nicht gibt. Stattdessen zeigen, wie weit es bis zur ersten Einschaetzung ist.
+            const MINDESTENS_GEUEBT = 30;
+            if (sch.gesehen < MINDESTENS_GEUEBT)
+                return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", marginBottom: 6 } }, "Dein Lernstand"),
+                    React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55 } },
+                        sch.gesehen === 0
+                            ? ("Noch nichts geübt. Ab " + MINDESTENS_GEUEBT + " beantworteten Fragen schätzt dir die App, wie du in der Prüfung stehen würdest.")
+                            : (sch.gesehen + " von " + MINDESTENS_GEUEBT + " Fragen geübt. Ab " + MINDESTENS_GEUEBT + " gibt es eine Einschätzung zur Prüfung.")),
+                    React.createElement("div", { style: { height: 8, borderRadius: 99, background: "var(--field-bg)", overflow: "hidden", marginTop: 10 } },
+                        React.createElement("div", { style: { height: "100%", width: Math.round(100 * sch.gesehen / MINDESTENS_GEUEBT) + "%", background: "var(--orange)" } })),
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
+                        "Für Klasse " + (myKlasse || DEFAULT_KLASSE) + " stehen " + sch.gesamt + " Fragen bereit: " + sch.grundstoff + " Grundstoff für alle Klassen und " + sch.zusatzstoff + " klassenspezifische."));
+            const faellig = questions.filter(q => { const st = lernStand(q, progress); return st.gesehen && st.faellig; }).length;
+            const gut = sch.bestehtVoraussichtlich;
+            return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14,
+                    border: "1.5px solid " + (gut ? "var(--green)" : "var(--amber)"),
+                    background: gut ? "var(--green-bg)" : "var(--amber-bg)" } },
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", marginBottom: 6 } }, "Dein Lernstand"),
+                React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 } },
+                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 26, color: gut ? "var(--green)" : "var(--amber)" } }, String(sch.erwartet).replace(".", ",")),
+                    React.createElement("span", { style: { fontSize: 13, color: "var(--ink-2)" } }, "erwartete Fehlerpunkte · bestanden bis " + sch.grenze)),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5 } },
+                    sch.sitzt + " von " + sch.gesamt + " Fragen sitzen sicher · " + sch.gesehen + " schon geübt"
+                    + (faellig > 0 ? " · " + faellig + " zur Wiederholung fällig" : "")),
+                sch.risikoZweiFuenfer >= 20 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", marginTop: 6, lineHeight: 1.45 } },
+                    "Achtung: Zwei falsche 5-Punkte-Fragen bedeuten durchgefallen, auch unter 10 Punkten. Dieses Risiko liegt bei dir gerade bei rund " + sch.risikoZweiFuenfer + " Prozent."),
+                React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.45 } },
+                    "Schätzung aus deinem Übungsstand, keine Vorhersage. Die echte Prüfung stellt " + PRUEFUNG_GRUNDSTOFF_ANZAHL + " Grundstoff- und " + PRUEFUNG_ZUSATZSTOFF_ANZAHL + " klassenspezifische Fragen."));
+        })(),
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
             topics.map((topic, ti) => {
