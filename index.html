@@ -2645,7 +2645,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.189.1";
+const APP_VERSION = "1.190.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2676,7 +2676,9 @@ const ZAHLUNGSERINNERUNG_STUFEN_RELEASED = true;
 // Einzige Stelle, die entscheidet, ob "Theorie üben" sichtbar ist. appMode = native Fahrschüler-App.
 function theorieVerfuegbar(info, appMode) {
     if (THEORY_UEBEN_RELEASED)
-        return !!(appMode && info && info.theory_addon_active);
+        // Lifetime schliesst alle kostenpflichtigen Zusatzpakete ein - sonst muesste bei jedem
+        // Lifetime-Konto zusaetzlich das Theoriepaket einzeln gesetzt werden.
+        return !!(appMode && info && (info.theory_addon_active || info.subscription_lifetime));
     return !!(THEORY_UEBEN_APP_VORSCHAU && appMode);
 }
 // Ausbildungsklassen nach Fahrerlaubnisrecht, für die Leistungserstellung.
@@ -2770,6 +2772,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.190.0", date: "August 2026", changes: [
+            "Neu: eigener Bereich „Abonnement“ in den Einstellungen. Zeigt deinen Zugang auf einen Blick - Status, Monatsbeitrag, letzte Zahlung, Bezahlen-Knopf und was alles enthalten ist. Vorher steckte das halb versteckt unter „Konto & Daten“ zwischen Backup und Kalender-Abo",
+            "Neu für den App-Admin: Lifetime-Zugang. Ein Konto lässt sich damit dauerhaft freischalten - kein Monatsbeitrag, keine Zahlungsfrist, keine Probezeit, alle kostenpflichtigen Zusatzpakete eingeschlossen. Die Verwaltung aller Konten (Abo, Lifetime, Betrag, Zahlungseingang, Zahlungsempfänger) sitzt jetzt ebenfalls unter „Abonnement“ statt bei „Fahrschulen verwalten“, wo es thematisch nie hingehörte",
+            "Einstellungen aufgeräumt: „Konto & Daten“ heißt jetzt „Daten & Sicherung“ (das Abo ist ausgezogen). Personalunterlagen stehen bei „Identität & Team“ statt bei „Geld“, und Löschprotokoll sowie Führerschein-Reform 2027 haben eine eigene Gruppe „Recht & Datenschutz“ bekommen - beides hatte mit Geld und Fuhrpark nichts zu tun",
+        ] },
     { v: "1.189.1", date: "August 2026", changes: [
             "Der runde Knopf zum Neustarten der Demo-Tour lag über geöffneten Fenstern statt darunter",
         ] },
@@ -5449,7 +5456,7 @@ async function saveProfileData(uid, patch) {
 }
 // Eigenen Abo-Status laden (zahlungspflichtig, Betrag, zuletzt bezahlt, Zustimmungszeitpunkt)
 async function fetchOwnSubscription(uid) {
-    const { data, error } = await sb.from("profiles").select("subscription_active,subscription_amount,subscription_last_paid,subscription_accepted_at,theory_addon_active").eq("id", uid).maybeSingle();
+    const { data, error } = await sb.from("profiles").select("subscription_active,subscription_amount,subscription_last_paid,subscription_accepted_at,theory_addon_active,subscription_lifetime").eq("id", uid).maybeSingle();
     if (error) {
         console.error(error);
         return null;
@@ -11643,6 +11650,9 @@ function App() {
             return "ok";
         if (mySubscription === null)
             return "loading";
+        // Lifetime steht ueber allem: kein Monatsbeitrag, kein Zahlungsdatum, keine Probezeit.
+        if (mySubscription.subscription_lifetime)
+            return "ok";
         if (!mySubscription.subscription_active)
             return "ok";
         if (mySubscription.subscription_last_paid) {
@@ -14638,7 +14648,8 @@ function App() {
             { id: "set-profil", label: "Profil", group: "Einstellungen", action: () => goSetting("profil") },
             { id: "set-arbeit", label: "Arbeit & Ausbildung", group: "Einstellungen", action: () => goSetting("arbeit") },
             { id: "set-unterlagen", label: "Meine Unterlagen", group: "Einstellungen", action: () => goSetting("unterlagen") },
-            { id: "set-konto-daten", label: "Konto & Daten", group: "Einstellungen", action: () => goSetting("konto-daten") },
+            { id: "set-konto-daten", label: "Daten & Sicherung", group: "Einstellungen", action: () => goSetting("konto-daten") },
+            { id: "set-abo", label: "Abonnement", group: "Einstellungen", action: () => goSetting("abo") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-meine-fahrschule", label: "Meine Fahrschule", group: "Einstellungen", action: () => goSetting("meine-fahrschule") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-team", label: "Team & Einladung", group: "Einstellungen", action: () => goSetting("team-einladung") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-standorte", label: "Standorte", group: "Einstellungen", action: () => goSetting("standorte") },
@@ -19629,6 +19640,28 @@ function App() {
             showToast("Konnte nicht geändert werden:\n" + e.message);
         }
     }
+    // Lifetime-Zugang an/aus. Ein Lifetime-Konto ist dauerhaft freigeschaltet: kein
+    // Monatsbeitrag, keine Zahlungsfrist, keine Probezeit, und alle kostenpflichtigen
+    // Zusatzpakete sind eingeschlossen. Setzen darf das nur der zentrale App-Admin - die
+    // Datenbank verwirft jeden anderen Versuch stillschweigend (_guard_profile_privilege_flags).
+    async function toggleLifetime(acc) {
+        const an = !acc.subscription_lifetime;
+        if (!await askConfirm({
+                title: an ? "Lifetime-Zugang geben?" : "Lifetime-Zugang entziehen?",
+                message: an
+                    ? acc.email + " bekommt dauerhaft Zugriff auf alle Funktionen - ohne Monatsbeitrag, ohne Zahlungsfrist und ohne Ablauf. Das gilt, bis du es hier wieder zurücknimmst."
+                    : acc.email + " verliert den dauerhaften Zugang. Danach gelten wieder Abo-Status und Zahlungsfrist.",
+                confirmLabel: an ? "Lifetime geben" : "Entziehen" }))
+            return;
+        try {
+            await adminSetSubscription(acc.id, { subscription_lifetime: an });
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_lifetime: an } : a) } : prev);
+            showFlash(an ? "✓ Lifetime aktiv" : "✓ Lifetime entfernt");
+        }
+        catch (e) {
+            showToast("Konnte nicht geändert werden:\n" + e.message);
+        }
+    }
     // Theorie-üben-Zusatzpaket an/aus umschalten (separat vom Basis-Abo, siehe THEORY_UEBEN_RELEASED)
     async function toggleTheoryAddon(acc) {
         try {
@@ -20188,56 +20221,11 @@ function App() {
                                         } } }, "Ablehnen")));
                         }))),
                 renderTheoryReviewCard(),
-            isAdmin(session) && React.createElement(React.Fragment, null,
-            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Zahlungsempf\u00E4nger (Monatsabo)"),
-            React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
-                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
-                paypalLinkEdit === null
-                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => setPaypalLinkEdit((s && s.paypal_link) || "")) }, "Laden")
-                    : React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("input", { type: "text", value: paypalLinkEdit, onChange: e => setPaypalLinkEdit(e.target.value), placeholder: "z.B. paypal.me/deinname oder name@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + e.message)) }, "Speichern"))),
-            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
-            adminAccounts === null
-                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
-                    React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } }, "Zeigt jedes Anmelde-Konto, unabh\u00E4ngig von Fahrschulen."),
-                    React.createElement("button", { className: "btn btn-ghost", onClick: loadAllAccounts }, "Konten laden"))
-                : React.createElement("div", { style: { marginBottom: 18 } },
-                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
-                        React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } },
-                            adminAccounts.list.length,
-                            " Konten"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px", fontSize: 12.5 }, disabled: adminAccounts.busy, onClick: loadAllAccounts }, "Aktualisieren")),
-                    adminAccounts.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 10 } }, adminAccounts.error),
-                    adminAccounts.list.map(acc => React.createElement("div", { key: acc.id, className: "card", style: { padding: "11px 13px", marginBottom: 8 } },
-                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                                React.createElement("div", { style: { fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
-                                    acc.email,
-                                    acc.is_central_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "App-Admin"),
-                                    acc.school_admin && !acc.is_central_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "Admin")),
-                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
-                                    acc.school_name ? acc.school_name : "Keine Fahrschule",
-                                    acc.created_at ? " · registriert " + new Date(acc.created_at).toLocaleDateString("de-DE") : "")),
-                            !acc.is_central_admin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, disabled: adminAccounts.busy, onClick: () => doDeleteAccount(acc) }, "L\u00F6schen")),
-                        !acc.is_central_admin && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 } },
-                            React.createElement("button", { onClick: () => toggleSubscription(acc), style: { display: "flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", borderRadius: 99,
-                                    background: acc.subscription_active ? "var(--orange-soft)" : "var(--field-bg)", fontSize: 12, fontWeight: 700,
-                                    color: acc.subscription_active ? "var(--orange-deep)" : "var(--muted)" } },
-                                React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: acc.subscription_active ? "var(--orange)" : "var(--line)", position: "relative", flexShrink: 0, transition: "background .15s" } },
-                                    React.createElement("span", { style: { position: "absolute", top: 2, left: acc.subscription_active ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
-                                "Abo ",
-                                acc.subscription_active ? "aktiv" : "aus"),
-                            React.createElement("button", { onClick: () => toggleTheoryAddon(acc), style: { display: "flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", borderRadius: 99,
-                                    background: acc.theory_addon_active ? "var(--sky-bg)" : "var(--field-bg)", fontSize: 12, fontWeight: 700,
-                                    color: acc.theory_addon_active ? "var(--sky-deep)" : "var(--muted)" } },
-                                React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: acc.theory_addon_active ? "var(--sky-deep)" : "var(--line)", position: "relative", flexShrink: 0, transition: "background .15s" } },
-                                    React.createElement("span", { style: { position: "absolute", top: 2, left: acc.theory_addon_active ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
-                                "Theorie üben ",
-                                acc.theory_addon_active ? "aktiv" : "aus"),
-                            React.createElement("button", { onClick: () => editSubscriptionAmount(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px" } }, acc.subscription_amount != null ? Number(acc.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Betrag festlegen"),
-                            acc.subscription_active && React.createElement("button", { onClick: () => markPaidToday(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px", textDecoration: "underline" } }, "Als bezahlt markieren"),
-                            acc.subscription_active && React.createElement("span", { style: { fontSize: 11, color: "var(--muted)", marginLeft: "auto" } }, acc.subscription_last_paid ? "Zuletzt bezahlt: " + new Date(acc.subscription_last_paid).toLocaleDateString("de-DE") : "Noch nicht bezahlt"))))),),
+            isAdmin(session) && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
+                React.createElement("div", { style: { fontSize: 14, fontWeight: 700, marginBottom: 5 } }, "Abos, Lifetime und Zahlungsempf\u00E4nger"),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
+                    "Die Verwaltung aller Konten steht jetzt unter Einstellungen \u2192 Abonnement. Diese Seite hier bleibt f\u00FCr die Fahrschulen selbst."),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => { setView("einstellungen"); setSettingsScreen("abo"); } }, "Zur Abo-Verwaltung")),
             React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
             adminSchools === null
                 ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
@@ -20269,6 +20257,69 @@ function App() {
                             React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px", fontSize: 13 }, onClick: () => openTeachers(sc) }, "Fahrlehrer"),
                             React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px", fontSize: 13 }, onClick: () => setAdminEdit({ id: sc.id, name: sc.name, subtitle: sc.subtitle || "", color: sc.color || "#FF9300", logo: sc.logo || "" }) }, "Bearbeiten")),
                         isAdmin(session) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { padding: "8px", fontSize: 13, color: "#B3362A" }, onClick: () => adminDoDelete(sc) }, "Fahrschule l\u00F6schen")))));
+    }
+    // Abo-Verwaltung aller Konten (nur zentraler App-Admin). Stand frueher in "Fahrschulen
+    // verwalten" - dort ging es aber um Fahrschulen, nicht um Abos. Jetzt ein eigener
+    // Einstellungs-Bildschirm, damit beides genau ein Zuhause hat.
+    function renderAboVerwaltung() {
+        return React.createElement(React.Fragment, null,
+            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Zahlungsempf\u00E4nger (Monatsabo)"),
+            React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
+                paypalLinkEdit === null
+                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => setPaypalLinkEdit((s && s.paypal_link) || "")) }, "Laden")
+                    : React.createElement("div", { style: { display: "flex", gap: 8 } },
+                        React.createElement("input", { type: "text", value: paypalLinkEdit, onChange: e => setPaypalLinkEdit(e.target.value), placeholder: "z.B. paypal.me/deinname oder name@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + e.message)) }, "Speichern"))),
+            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
+            adminAccounts === null
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
+                    React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } }, "Zeigt jedes Anmelde-Konto, unabh\u00E4ngig von Fahrschulen."),
+                    React.createElement("button", { className: "btn btn-ghost", onClick: loadAllAccounts }, "Konten laden"))
+                : React.createElement("div", { style: { marginBottom: 18 } },
+                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } },
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } },
+                            adminAccounts.list.length,
+                            " Konten"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px", fontSize: 12.5 }, disabled: adminAccounts.busy, onClick: loadAllAccounts }, "Aktualisieren")),
+                    adminAccounts.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 10 } }, adminAccounts.error),
+                    adminAccounts.list.map(acc => React.createElement("div", { key: acc.id, className: "card", style: { padding: "11px 13px", marginBottom: 8 } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
+                                    acc.email,
+                                    acc.is_central_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "App-Admin"),
+                                    acc.school_admin && !acc.is_central_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "Admin"),
+                                    acc.subscription_lifetime && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#fff", background: "var(--sage-deep)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "Lifetime")),
+                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
+                                    acc.school_name ? acc.school_name : "Keine Fahrschule",
+                                    acc.created_at ? " · registriert " + new Date(acc.created_at).toLocaleDateString("de-DE") : "")),
+                            !acc.is_central_admin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 12.5, color: "#B3362A", flexShrink: 0 }, disabled: adminAccounts.busy, onClick: () => doDeleteAccount(acc) }, "L\u00F6schen")),
+                        !acc.is_central_admin && React.createElement("div", { style: { marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)", display: "flex", alignItems: "center", flexWrap: "wrap", gap: 8 } },
+                            React.createElement("button", { onClick: () => toggleLifetime(acc), style: { display: "flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", borderRadius: 99,
+                                    background: acc.subscription_lifetime ? "var(--sage-bg)" : "var(--field-bg)", fontSize: 12, fontWeight: 700,
+                                    color: acc.subscription_lifetime ? "var(--sage-deep)" : "var(--muted)" } },
+                                React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: acc.subscription_lifetime ? "var(--sage-deep)" : "var(--line)", position: "relative", flexShrink: 0, transition: "background .15s" } },
+                                    React.createElement("span", { style: { position: "absolute", top: 2, left: acc.subscription_lifetime ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
+                                "Lifetime ",
+                                acc.subscription_lifetime ? "aktiv" : "aus"),
+                            React.createElement("button", { onClick: () => toggleSubscription(acc), disabled: !!acc.subscription_lifetime, style: { display: "flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", borderRadius: 99, opacity: acc.subscription_lifetime ? 0.4 : 1,
+                                    background: acc.subscription_active ? "var(--orange-soft)" : "var(--field-bg)", fontSize: 12, fontWeight: 700,
+                                    color: acc.subscription_active ? "var(--orange-deep)" : "var(--muted)" } },
+                                React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: acc.subscription_active ? "var(--orange)" : "var(--line)", position: "relative", flexShrink: 0, transition: "background .15s" } },
+                                    React.createElement("span", { style: { position: "absolute", top: 2, left: acc.subscription_active ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
+                                "Abo ",
+                                acc.subscription_active ? "aktiv" : "aus"),
+                            React.createElement("button", { onClick: () => toggleTheoryAddon(acc), style: { display: "flex", alignItems: "center", gap: 7, padding: "5px 10px 5px 6px", borderRadius: 99,
+                                    background: acc.theory_addon_active ? "var(--sky-bg)" : "var(--field-bg)", fontSize: 12, fontWeight: 700,
+                                    color: acc.theory_addon_active ? "var(--sky-deep)" : "var(--muted)" } },
+                                React.createElement("span", { style: { width: 30, height: 17, borderRadius: 99, background: acc.theory_addon_active ? "var(--sky-deep)" : "var(--line)", position: "relative", flexShrink: 0, transition: "background .15s" } },
+                                    React.createElement("span", { style: { position: "absolute", top: 2, left: acc.theory_addon_active ? 15 : 2, width: 13, height: 13, borderRadius: 99, background: "#fff", transition: "left .15s" } })),
+                                "Theorie üben ",
+                                acc.theory_addon_active ? "aktiv" : "aus"),
+                            React.createElement("button", { onClick: () => editSubscriptionAmount(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px" } }, acc.subscription_amount != null ? Number(acc.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Betrag festlegen"),
+                            acc.subscription_active && React.createElement("button", { onClick: () => markPaidToday(acc), style: { fontSize: 12, color: "var(--muted)", padding: "5px 2px", textDecoration: "underline" } }, "Als bezahlt markieren"),
+                            acc.subscription_active && React.createElement("span", { style: { fontSize: 11, color: "var(--muted)", marginLeft: "auto" } }, acc.subscription_last_paid ? "Zuletzt bezahlt: " + new Date(acc.subscription_last_paid).toLocaleDateString("de-DE") : "Noch nicht bezahlt"))))),);
     }
     function renderEinstellungen() {
         const myStudents = students.filter(s => s._isMine).length;
@@ -20366,22 +20417,24 @@ function App() {
             { id: "profil", section: "mein-bereich", tone: "sage", label: "Profil", icon: IC.profil, keywords: "profil name foto standort geburtstag benachrichtigung", status: teacherName || "Kein Name hinterlegt" },
             { id: "arbeit", section: "mein-bereich", tone: "sage", label: "Arbeit & Ausbildung", icon: IC.arbeit, keywords: "arbeitszeiten limit buchungslink erinnerung bewertung sortierung adk strecken", status: workDaysCount + " Tage" + (dayLimit > 0 ? " · " + dayLimit + " Min/Tag" : "") },
             { id: "unterlagen", section: "mein-bereich", tone: "sage", label: "Meine Unterlagen", icon: IC.unterlagen, keywords: "unterlagen dokumente lohn vertrag zertifikat", status: myStaffFiles ? myStaffFiles.length + (myStaffFiles.length === 1 ? " Datei" : " Dateien") : "Noch nicht geladen" },
-            { id: "konto-daten", section: "mein-bereich", tone: "sage", label: "Konto & Daten", icon: IC.konto_daten, keywords: "abo bezahlen sicherung backup export fahrtenbuch kalender abonnieren", status: (mySubscription && mySubscription.subscription_active) ? "Abo aktiv" : "Backup, Export, Kalender" },
+            { id: "konto-daten", section: "mein-bereich", tone: "sage", label: "Daten & Sicherung", icon: IC.konto_daten, keywords: "sicherung backup export fahrtenbuch csv kalender abonnieren ics", status: "Backup, Export, Kalender" },
             { id: "meine-fahrschule", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Meine Fahrschule", icon: IC.fahrschule, keywords: "name logo farbe schule", status: (school && school.name) || "Fahrschule" },
             { id: "team-einladung", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Team & Einladung", icon: IC.team, keywords: "einladung code fahrlehrer whatsapp registrieren", status: (school && school.invite_code) ? "Code aktiv" : "Kein Code" },
             { id: "standorte", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Standorte", icon: IC.standorte, keywords: "standort filiale adresse", status: locations.length + (locations.length === 1 ? " Standort" : " Standorte") },
             { id: "klassen", section: "fahrschule", cluster: "Ausbildung & Struktur", tone: "clay", label: "Führerscheinklassen", icon: IC.klassen, keywords: "klassen führerschein b be c", status: klassen.length + " Klassen" },
             { id: "arten", section: "fahrschule", cluster: "Ausbildung & Struktur", tone: "clay", label: "Ausbildungsfahrt-Arten", icon: IC.arten, keywords: "arten termine farbe fahrstunde", status: arten.length + " Arten" },
             { id: "sonderfahrten-soll", section: "fahrschule", cluster: "Ausbildung & Struktur", tone: "clay", label: "Sonderfahrten-Soll", icon: IC.soll, keywords: "überland autobahn dämmerung soll pflicht ue", status: { ring: sonderfahrtenPct } },
-            { id: "reform", section: "fahrschule", cluster: "Ausbildung & Struktur", tone: "clay", label: "Führerschein-Reform 2027", icon: IC.reform, keywords: "reform gesetz stichtag übergang", status: (school && school.reform_stichtag) ? "Stichtag " + new Date(school.reform_stichtag).toLocaleDateString("de-DE") : "Kein Stichtag gesetzt" },
-            { id: "kosten", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Kosten", icon: IC.kosten, keywords: "preis ue paket gebühr empfehlungsbonus ausfallgebühr preismeldung", status: (pricePerHour ? pricePerHour + " €/UE" : "Kein Preis hinterlegt") + (packages.length ? " · " + packages.length + " Pakete" : "") },
-            { id: "rechnungsdaten", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Rechnungsdaten", icon: IC.rechnung, keywords: "rechnung firma iban steuernummer kleinunternehmer", status: { ring: invoicePct } },
-            { id: "datev", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "DATEV-Export", icon: IC.rechnung, keywords: "datev steuerberater buchungsstapel extf kontenrahmen skr03 skr04 berater mandant", status: (datev.berater && datev.mandant) ? "Eingerichtet" : "Nicht eingerichtet" },
-            { id: "gutscheine", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Geschenkgutscheine", icon: IC.kosten, keywords: "gutschein geschenk verschenken code einloesen", status: (() => { const o = (vouchers || []).filter(v => v.status === "offen"); return o.length ? (o.length + " offen · " + eurFmt(o.reduce((s2, v) => s2 + (Number(v.betrag) || 0), 0))) : "Keine offenen"; })() },
-            { id: "loeschprotokoll", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Löschprotokoll", icon: IC.rechnung, keywords: "löschen dsgvo datenschutz fahrlg protokoll aufbewahrung frist", status: loeschProtokoll.length ? (loeschProtokoll.length + " Löschung" + (loeschProtokoll.length === 1 ? "" : "en")) : "Keine Löschungen" },
-            { id: "personalunterlagen", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Personalunterlagen", icon: IC.personal, keywords: "personal unterlagen fahrlehrer dateien", status: staffTeachers ? staffTeachers.length + " Fahrlehrer" : "Nicht geladen" },
-            { id: "fuhrpark", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Fuhrpark & Auswertung", icon: IC.fuhrpark, keywords: "fahrzeug kalender leistungen offene beträge auswertung", status: "Kalender · Leistungen · Beträge" },
+            { id: "reform", section: "fahrschule", cluster: "Recht & Datenschutz", tone: "clay", label: "Führerschein-Reform 2027", icon: IC.reform, keywords: "reform gesetz stichtag übergang", status: (school && school.reform_stichtag) ? "Stichtag " + new Date(school.reform_stichtag).toLocaleDateString("de-DE") : "Kein Stichtag gesetzt" },
+            { id: "kosten", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "Kosten", icon: IC.kosten, keywords: "preis ue paket gebühr empfehlungsbonus ausfallgebühr preismeldung", status: (pricePerHour ? pricePerHour + " €/UE" : "Kein Preis hinterlegt") + (packages.length ? " · " + packages.length + " Pakete" : "") },
+            { id: "rechnungsdaten", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "Rechnungsdaten", icon: IC.rechnung, keywords: "rechnung firma iban steuernummer kleinunternehmer", status: { ring: invoicePct } },
+            { id: "datev", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "DATEV-Export", icon: IC.rechnung, keywords: "datev steuerberater buchungsstapel extf kontenrahmen skr03 skr04 berater mandant", status: (datev.berater && datev.mandant) ? "Eingerichtet" : "Nicht eingerichtet" },
+            { id: "gutscheine", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "Geschenkgutscheine", icon: IC.kosten, keywords: "gutschein geschenk verschenken code einloesen", status: (() => { const o = (vouchers || []).filter(v => v.status === "offen"); return o.length ? (o.length + " offen · " + eurFmt(o.reduce((s2, v) => s2 + (Number(v.betrag) || 0), 0))) : "Keine offenen"; })() },
+            { id: "loeschprotokoll", section: "fahrschule", cluster: "Recht & Datenschutz", tone: "clay", label: "Löschprotokoll", icon: IC.rechnung, keywords: "löschen dsgvo datenschutz fahrlg protokoll aufbewahrung frist", status: loeschProtokoll.length ? (loeschProtokoll.length + " Löschung" + (loeschProtokoll.length === 1 ? "" : "en")) : "Keine Löschungen" },
+            { id: "personalunterlagen", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Personalunterlagen", icon: IC.personal, keywords: "personal unterlagen fahrlehrer dateien", status: staffTeachers ? staffTeachers.length + " Fahrlehrer" : "Nicht geladen" },
+            { id: "fuhrpark", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "Fuhrpark & Auswertung", icon: IC.fuhrpark, keywords: "fahrzeug kalender leistungen offene beträge auswertung", status: "Kalender · Leistungen · Beträge" },
             { id: "konto", section: "konto", tone: "sky", label: "Konto", icon: IC.konto, keywords: "email abmelden konto schüler", status: session.user.email + " · " + myStudents + " Schüler" },
+            { id: "abo", section: "konto", tone: "sky", label: "Abonnement", icon: IC.kosten, keywords: "abo abonnement bezahlen monatsbeitrag paypal lifetime zugang freischalten kosten rechnung mitgliedschaft",
+                status: (mySubscription && mySubscription.subscription_lifetime) ? "Lifetime" : ((mySubscription && mySubscription.subscription_active) ? ((mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Aktiv")) : "Kein Abo hinterlegt") },
             nativeApp && { id: "geraet", section: "konto", tone: "sky", label: "Gerät & Benachrichtigungen", icon: IC.geraet, keywords: "push benachrichtigung widget", status: deviceToken ? "Aktiv" : "Nicht aktiv" },
             canModerateApp && { id: "admin", section: "konto", tone: "sky", label: "Fahrschulen verwalten", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator", status: "Alle Fahrschulen", direct: () => setView("admin") },
             { id: "hilfe", section: "konto", tone: "sky", label: "Hilfe & FAQ", icon: IC.hilfe, keywords: "faq hilfe frage", status: FAQ_ITEMS.length + " Fragen" },
@@ -20419,7 +20472,7 @@ function App() {
                         React.createElement("div", { className: "card", style: { padding: "0 14px" } }, rowsFor("mein-bereich").map(renderRow))),
                     (isAdmin(session) || isSchoolAdmin) && rowsFor("fahrschule").length > 0 && React.createElement(React.Fragment, null,
                         React.createElement("div", { className: "eyebrow", style: { color: "var(--clay-deep)" } }, "Fahrschule"),
-                        ["Identität & Team", "Ausbildung & Struktur", "Geld & Fuhrpark"].map(cluster => {
+                        ["Identität & Team", "Ausbildung & Struktur", "Geld & Abrechnung", "Recht & Datenschutz"].map(cluster => {
                             const rows = rowsFor("fahrschule", cluster);
                             if (!rows.length)
                                 return null;
@@ -20623,32 +20676,67 @@ function App() {
                                                 React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
                                                 React.createElement("path", { d: "M14 2v6h6" })),
                                             React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)))); }))),
-                    settingsScreen === "konto-daten" && React.createElement(SettingsScreen, { title: "Konto & Daten", onBack: closeScreen },
-                        mySubscription && mySubscription.subscription_active && React.createElement(React.Fragment, null,
-                            React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Monatsabo"),
-                            React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
-                                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 } },
-                                    React.createElement("span", { style: { fontSize: 14, fontWeight: 700 } }, "Monatsbeitrag"),
-                                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €" : "–")),
-                                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, mySubscription.subscription_last_paid
-                                    ? "Zuletzt bezahlt am " + new Date(mySubscription.subscription_last_paid).toLocaleDateString("de-DE") + "."
-                                    : "Noch keine Zahlung hinterlegt."),
-                                paypalLink && (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
-                                    ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
-                                    : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
-                                        "Bitte den Betrag manuell per PayPal an ", React.createElement("b", null, paypalLink), " senden.")),
-                                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
-                                        if (!await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde." }))
-                                            return;
-                                        try {
-                                            const d = await markOwnPaymentDone(uid);
-                                            setMySubscription(s => ({ ...s, subscription_last_paid: d }));
-                                            showFlash("✓ Als bezahlt markiert");
-                                        }
-                                        catch (e) {
-                                            showToast("Fehler:\n" + e.message);
-                                        }
-                                    } }, "Ich habe bezahlt"))),
+                    settingsScreen === "abo" && React.createElement(SettingsScreen, { title: "Abonnement", onBack: closeScreen },
+                        (() => {
+                            const sub = mySubscription || {};
+                            const lifetime = !!sub.subscription_lifetime;
+                            const aktiv = !!sub.subscription_active;
+                            const betrag = sub.subscription_amount != null ? Number(sub.subscription_amount).toFixed(2).replace(".", ",") + " €" : null;
+                            const zuletzt = sub.subscription_last_paid ? new Date(sub.subscription_last_paid).toLocaleDateString("de-DE") : null;
+                            // Ein Konto ohne aktives Abo ist derzeit nicht gesperrt (siehe
+                            // subscriptionGateStatus) - das gehoert offen dazugesagt, statt einen
+                            // Status zu zeigen, der etwas anderes verspricht.
+                            const kopf = lifetime
+                                ? { titel: "Lifetime-Zugang", farbe: "var(--sage-deep)", grund: "var(--sage-bg)", text: "Dauerhaft freigeschaltet. Kein Monatsbeitrag, keine Zahlungsfrist, alle Funktionen und Zusatzpakete eingeschlossen." }
+                                : aktiv
+                                    ? { titel: "Monatsabo aktiv", farbe: "var(--orange-deep)", grund: "var(--orange-soft)", text: "Dein Zugang ist an die monatliche Zahlung gebunden." }
+                                    : { titel: "Kein Abo hinterlegt", farbe: "var(--muted)", grund: "var(--field-bg)", text: "Für dieses Konto ist derzeit kein Monatsbeitrag eingerichtet. Alle Funktionen stehen offen." };
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Dein Zugang"),
+                                React.createElement("div", { className: "card", style: { padding: "15px 15px 14px", marginBottom: 18, background: kopf.grund, border: "none" } },
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, color: kopf.farbe, marginBottom: 5 } }, kopf.titel),
+                                    React.createElement("p", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)", margin: 0 } }, kopf.text),
+                                    (betrag || zuletzt) && !lifetime && React.createElement("div", { style: { display: "flex", gap: 18, marginTop: 12, flexWrap: "wrap" } },
+                                        betrag && React.createElement("div", null,
+                                            React.createElement("div", { style: { fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", fontWeight: 700 } }, "Monatsbeitrag"),
+                                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, betrag)),
+                                        React.createElement("div", null,
+                                            React.createElement("div", { style: { fontSize: 11, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", fontWeight: 700 } }, "Zuletzt bezahlt"),
+                                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, zuletzt || "–")))),
+                                aktiv && !lifetime && React.createElement(React.Fragment, null,
+                                    React.createElement("div", { className: "eyebrow" }, "Bezahlen"),
+                                    React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
+                                        paypalLink
+                                            ? (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
+                                                ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
+                                                : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
+                                                    "Bitte den Betrag manuell per PayPal an ", React.createElement("b", null, paypalLink), " senden."))
+                                            : React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
+                                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
+                                                if (!await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde." }))
+                                                    return;
+                                                try {
+                                                    const d = await markOwnPaymentDone(uid);
+                                                    setMySubscription(sx => ({ ...sx, subscription_last_paid: d }));
+                                                    showFlash("✓ Als bezahlt markiert");
+                                                }
+                                                catch (e) {
+                                                    showToast("Fehler:\n" + e.message);
+                                                }
+                                            } }, "Ich habe bezahlt"))),
+                                React.createElement("div", { className: "eyebrow" }, "Im Zugang enthalten"),
+                                React.createElement("div", { className: "card", style: { padding: "13px 15px", marginBottom: 18 } },
+                                    ["Schülerverwaltung, ADK und Strecken", "Kalender, Buchungslink und Terminvorschläge", "Rechnungen, Zahlungen, Pakete und Gutscheine", "Fahrschülerbereich und Fahrschüler-App", "KI-Helfer, Briefings und Foto-Erfassung"]
+                                        .map((t, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 9, alignItems: "flex-start", padding: "4px 0", fontSize: 13.5, lineHeight: 1.5 } },
+                                            React.createElement("span", { style: { color: "var(--green)", fontWeight: 800, flexShrink: 0 } }, "✓"),
+                                            React.createElement("span", null, t))),
+                                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "8px 0 0" } },
+                                        lifetime
+                                            ? "Der Lifetime-Zugang schließt auch künftige kostenpflichtige Zusatzpakete ein."
+                                            : "Kostenpflichtige Zusatzpakete (z.B. Theorie üben) werden separat freigeschaltet.")),
+                                isAdmin(session) && renderAboVerwaltung());
+                        })()),
+                    settingsScreen === "konto-daten" && React.createElement(SettingsScreen, { title: "Daten & Sicherung", onBack: closeScreen },
                         React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Daten & Sicherung"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between", padding: "14px" }, onClick: backupDownload },
                             React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 10 } },

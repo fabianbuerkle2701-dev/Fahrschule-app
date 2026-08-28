@@ -27,12 +27,14 @@ async function subscriptionGate(uid, token) {
   if (!uid || !token) return { ok: true };
   try {
     const resp = await fetch(
-      SUPABASE_URL + "/rest/v1/profiles?id=eq." + encodeURIComponent(uid) + "&select=subscription_active",
+      SUPABASE_URL + "/rest/v1/profiles?id=eq." + encodeURIComponent(uid) + "&select=subscription_active,subscription_lifetime",
       { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + token } }
     );
     if (resp.ok) {
       const rows = await resp.json().catch(() => null);
       const prof = Array.isArray(rows) ? rows[0] : null;
+      // Lifetime schliesst alles ein - siehe Abonnement-Bildschirm in der App.
+      if (prof && prof.subscription_lifetime === true) return { ok: true };
       if (prof && prof.subscription_active !== true) {
         return {
           ok: false,

@@ -45,6 +45,10 @@ exports.handler = async function (event) {
     // "Heute" aus deutscher Zeit, nicht UTC - sonst landet zwischen 0 und 2 Uhr nachts das Vortagsdatum in der DB
     if (body.mark_paid_today === true) patch.subscription_last_paid = new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
     if (typeof body.theory_addon_active === "boolean") patch.theory_addon_active = body.theory_addon_active;
+    // Lifetime: dauerhaft freigeschaltet, unabhaengig von Betrag, Zahlungsdatum und Probezeit.
+    // Bewusst nur hier setzbar - der Schutz-Trigger in der Datenbank verwirft jeden Versuch,
+    // der nicht vom zentralen Admin oder vom Service-Role-Key kommt.
+    if (typeof body.subscription_lifetime === "boolean") patch.subscription_lifetime = body.subscription_lifetime;
 
     if (Object.keys(patch).length === 0) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine gültigen Felder übergeben" }) };
 

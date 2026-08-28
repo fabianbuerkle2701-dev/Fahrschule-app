@@ -45,7 +45,7 @@ exports.handler = async function (event) {
     }
 
     // Profile dazu laden (Fahrschule, Admin-Status, Abo-Status)
-    const profResp = await fetch(SUPABASE_URL + "/rest/v1/profiles?select=id,email,school_id,school_admin,subscription_active,subscription_amount,subscription_last_paid,theory_addon_active", {
+    const profResp = await fetch(SUPABASE_URL + "/rest/v1/profiles?select=id,email,school_id,school_admin,subscription_active,subscription_amount,subscription_last_paid,theory_addon_active,subscription_lifetime", {
       headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
     });
     const profiles = profResp.ok ? await profResp.json() : [];
