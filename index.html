@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.169.0";
+const APP_VERSION = "1.170.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -2716,6 +2716,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.170.0", date: "August 2026", changes: [
+            "Neu: Prüfplätze in der Prüfungsplanung (Auswertung). Trag ein, welche Prüftermine ihr von TÜV/DEKRA zugeteilt bekommen habt, und weise sie prüfungsreifen Schülern zu - inklusive fertiger WhatsApp-Nachricht. Sagt ein Schüler kurzfristig ab, schlägt die App sofort den nächsten wartenden Kandidaten als Nachrücker vor, statt den Platz ungenutzt zu lassen. Kein automatisches Anmelden bei TÜV/DEKRA (keine öffentliche Schnittstelle dafür), nur bessere interne Organisation der knappen Kontingente",
+        ] },
     { v: "1.169.0", date: "August 2026", changes: [
             "Neu: Girocode auf jeder Rechnung. Ist in den Rechnungsdaten eine IBAN hinterlegt, zeigt die gedruckte Rechnung jetzt einen QR-Code zum Scannen mit der Banking-App - Empfänger, IBAN, offener Betrag und Rechnungsnummer sind darüber automatisch ausgefüllt. Läuft komplett lokal in der App, ohne einen Drittanbieter-Dienst",
             "Neu: Dämmerungs-Hinweis beim Anlegen einer Nachtfahrt. Ist der gewählte Termin zu früh für ausreichende Dunkelheit, schlägt die App die passende Startzeit vor",
@@ -5581,6 +5584,50 @@ async function dbDeleteAppt(id) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Löschen ist deaktiviert."); return; }
     await withNetworkRetry(async () => {
         const { error } = await sb.from("appointments").delete().eq("id", id);
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    });
+}
+/* ── Prüfplätze: von TÜV/DEKRA zugeteilte Prüftermin-Kontingente, siehe exam_slots-Tabelle
+   und renderExamSlotsSection(). Eigene, schlanke CRUD-Funktionen statt Wiederverwendung von
+   dbInsertAppt/dbUpdateAppt - ein Prüfplatz ist kein Termin (kein Kalendereintrag, keine
+   Erinnerung, keine Abrechnung), nur die Namensähnlichkeit zu appointments wäre irreführend. ── */
+async function fetchExamSlots(uid) {
+    const { data, error } = await sb.from("exam_slots").select("*").eq("owner", uid).order("datum", { ascending: true });
+    if (error) {
+        console.error(error);
+        return [];
+    }
+    return data || [];
+}
+async function dbInsertExamSlot(uid, slot) {
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Prüfplätze werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit||null, ort: slot.ort||null, student_id: null, status: "frei" }; }
+    const row = { owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit || null, ort: slot.ort || null };
+    return await withNetworkRetry(async () => {
+        const { data, error } = await sb.from("exam_slots").insert(row).select().single();
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+        return data;
+    });
+}
+async function dbUpdateExamSlot(id, patch) {
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
+    await withNetworkRetry(async () => {
+        const { error } = await sb.from("exam_slots").update({ ...patch, updated_at: new Date().toISOString() }).eq("id", id);
+        if (error) {
+            console.error(error);
+            throw new Error(error.message);
+        }
+    });
+}
+async function dbDeleteExamSlot(id) {
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Löschen ist deaktiviert."); return; }
+    await withNetworkRetry(async () => {
+        const { error } = await sb.from("exam_slots").delete().eq("id", id);
         if (error) {
             console.error(error);
             throw new Error(error.message);
@@ -9232,6 +9279,16 @@ function App() {
             setInteressentenMissing(missing);
         });
     }, [uid]);
+    // Prüfplatz-Kontingente, siehe renderExamSlotsSection(). Eigener useEffect statt Teil der
+    // großen Promise.all-Ladekette (wie interessenten) - unabhängige, sekundäre Datenquelle.
+    const [examSlots, setExamSlots] = useState([]);
+    useEffect(() => {
+        if (!uid)
+            return;
+        fetchExamSlots(uid).then(setExamSlots).catch(() => { });
+    }, [uid]);
+    const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
+    const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
     // Einmal pro Sitzung prüfen, ob eine Streckenaufzeichnung durch App-Kill/Tab-Schließen
     // unterbrochen wurde (siehe recBufferKey) - falls ja, anbieten, sie fortzusetzen, statt die
     // bereits aufgezeichneten Punkte kommentarlos zu verlieren.
@@ -16052,8 +16109,122 @@ function App() {
                             style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderTop: i > 0 ? "1px solid var(--line)" : "none", background: "none", border: "none" } },
                         React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, dispName(s)),
                         React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "var(--green)", textTransform: "uppercase", letterSpacing: ".03em" } }, "Prüfungsreif")))),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0 0", paddingBottom: 4 } },
+                "Prüfungsreif = grüne Ampel (Theorie bestanden, ADK/Strecken ab 90%, alle Sonderfahrten erfüllt sofern ein Soll hinterlegt ist). Ein Klick öffnet den Führerschein-Reiter, um „Praxisprüfung angemeldet\" zu setzen oder einen Termin unter Prüfungsversuche einzutragen."),
+            renderExamSlotsSection());
+    }
+    /* ── Prüfplätze: Verwaltung der von TÜV/DEKRA zugeteilten Prüftermin-Kontingente (knappe
+       Ressource, siehe exam_slots-Tabelle). Der Fahrlehrer trägt jeden zugeteilten Termin ein
+       und weist ihn einem prüfungsreifen Schüler zu; sagt der Schüler kurzfristig ab oder wird
+       der Termin frei, schlägt die App sofort den nächsten Nachrücker vor, statt den Platz
+       ungenutzt zu lassen. NICHT automatisiert: es gibt keine öffentliche TÜV/DEKRA-Buchungs-
+       API, das hier ist bessere interne Organisation, keine automatische Anmeldung. ── */
+    // Kandidaten für einen Prüfplatz. Praxis: dieselbe grüne Ampel wie "Bereit, nicht
+    // angemeldet" oben. Theorie: dafür gibt es in der App keine vergleichbare Ampel (kein
+    // erfasster "bereit für die Theorieprüfung"-Zeitpunkt), deshalb dort bewusst alle eigenen,
+    // aktiven Schüler ohne bestandene Theorieprüfung, statt eine Genauigkeit vorzutäuschen, die
+    // nicht existiert. Sortierung nach _createdAt (Anlegedatum) als ehrliche Näherung für
+    // "wartet am längsten" - der Zeitpunkt "wurde prüfreif" wird nirgends erfasst.
+    function examSlotCandidates(art) {
+        const pool = art === "praxis" ? examPlanning().readyNotRegistered
+            : (students || []).filter(s => s._isMine && !s.archived && !s.theorie);
+        return pool.slice().sort((a, b) => (a._createdAt || "").localeCompare(b._createdAt || ""));
+    }
+    async function addExamSlotSubmit() {
+        const f = examSlotForm;
+        if (!f || !f.datum)
+            return;
+        try {
+            const created = await dbInsertExamSlot(uid, { art: f.art, datum: f.datum, zeit: f.zeit, ort: f.ort });
+            setExamSlots(prev => [...prev, created].sort((a, b) => a.datum.localeCompare(b.datum)));
+            setExamSlotForm(null);
+            showToast("Prüfplatz erfasst.");
+        }
+        catch (e) {
+            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+        }
+    }
+    async function assignExamSlot(slot, student) {
+        try {
+            await dbUpdateExamSlot(slot.id, { student_id: student.id, status: "vergeben" });
+            setExamSlots(prev => prev.map(s => s.id === slot.id ? { ...s, student_id: student.id, status: "vergeben" } : s));
+            setExamSlotAssign({ slot: { ...slot, student_id: student.id, status: "vergeben" }, assignedTo: student });
+        }
+        catch (e) {
+            showToast("Konnte nicht zugewiesen werden:\n" + e.message);
+        }
+    }
+    // Platz freigeben (Schüler kann kurzfristig nicht, oder Zuteilung war ein Irrtum) - öffnet
+    // sofort wieder die Kandidatenliste für denselben Platz, statt ihn kommentarlos leer zu lassen.
+    async function freeExamSlot(slot) {
+        try {
+            await dbUpdateExamSlot(slot.id, { student_id: null, status: "frei" });
+            const freed = { ...slot, student_id: null, status: "frei" };
+            setExamSlots(prev => prev.map(s => s.id === slot.id ? freed : s));
+            setExamSlotAssign({ slot: freed, assignedTo: null });
+        }
+        catch (e) {
+            showToast("Konnte nicht freigegeben werden:\n" + e.message);
+        }
+    }
+    async function markExamSlotAbgesagt(slot) {
+        if (!(await askConfirm({ message: "Diesen Prüfplatz als vom TÜV/von der DEKRA abgesagt markieren? Er zählt dann nicht mehr als verfügbar." })))
+            return;
+        try {
+            await dbUpdateExamSlot(slot.id, { student_id: null, status: "abgesagt" });
+            setExamSlots(prev => prev.map(s => s.id === slot.id ? { ...s, student_id: null, status: "abgesagt" } : s));
+        }
+        catch (e) {
+            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+        }
+    }
+    async function deleteExamSlot(slot) {
+        if (!(await askConfirm({ message: "Prüfplatz wirklich löschen?" })))
+            return;
+        try {
+            await dbDeleteExamSlot(slot.id);
+            setExamSlots(prev => prev.filter(s => s.id !== slot.id));
+        }
+        catch (e) {
+            showToast("Konnte nicht gelöscht werden:\n" + e.message);
+        }
+    }
+    function examSlotWaText(slot, student) {
+        const datumStr = new Date(slot.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit" });
+        return "Hallo " + (student.vorname || student.name) + ", gute Nachricht: wir haben für dich einen Prüfplatz für die "
+            + (slot.art === "praxis" ? "praktische" : "theoretische") + " Prüfung am " + datumStr
+            + (slot.zeit ? " um " + slot.zeit + " Uhr" : "") + (slot.ort ? " in " + slot.ort : "")
+            + " bekommen. Meld dich, wenn das bei dir klappt!";
+    }
+    function renderExamSlotsSection() {
+        const todayStr = ymd(new Date());
+        const active = (examSlots || []).filter(s => s.datum >= todayStr).sort((a, b) => a.datum.localeCompare(b.datum) || (a.zeit || "").localeCompare(b.zeit || ""));
+        return React.createElement(React.Fragment, null,
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", margin: "20px 2px 8px" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, "Prüfplätze"),
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 10px", fontSize: 12.5 }, onClick: () => setExamSlotForm({ art: "praxis", datum: "", zeit: "", ort: "" }) }, "+ Prüfplatz")),
+            active.length === 0
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } },
+                    "Noch keine Prüfplätze erfasst. Trage hier ein, wie viele Termine ihr von TÜV/DEKRA zugeteilt bekommen habt, und weise sie prüfungsreifen Schülern zu.")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px" } },
+                    active.map((slot, i) => {
+                        const stu = slot.student_id ? (students || []).find(s => s.id === slot.student_id) : null;
+                        return React.createElement("div", { key: slot.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } },
+                                    new Date(slot.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "short", day: "2-digit", month: "2-digit" }),
+                                    slot.zeit ? " · " + slot.zeit + " Uhr" : "", slot.ort ? " · " + slot.ort : ""),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                    (slot.art === "praxis" ? "Praxis" : "Theorie") + " · " +
+                                    (slot.status === "vergeben" ? (stu ? dispName(stu) : "vergeben") : slot.status === "abgesagt" ? "vom TÜV/DEKRA abgesagt" : "frei"))),
+                            slot.status === "frei" && React.createElement(React.Fragment, null,
+                                React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 }, onClick: () => setExamSlotAssign({ slot, assignedTo: null }) }, "Zuweisen"),
+                                React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 8px", fontSize: 12.5, color: "var(--muted)" }, onClick: () => markExamSlotAbgesagt(slot) }, "TÜV-Absage")),
+                            slot.status === "vergeben" && React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 }, onClick: () => freeExamSlot(slot) }, "Absagen"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 8px", fontSize: 12.5, color: "#B3362A" }, onClick: () => deleteExamSlot(slot) }, "Löschen"));
+                    })),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
-                "Prüfungsreif = grüne Ampel (Theorie bestanden, ADK/Strecken ab 90%, alle Sonderfahrten erfüllt sofern ein Soll hinterlegt ist). Ein Klick öffnet den Führerschein-Reiter, um „Praxisprüfung angemeldet\" zu setzen oder einen Termin unter Prüfungsversuche einzutragen."));
+                "Kein automatisches Anmelden bei TÜV/DEKRA - das hier organisiert nur, wer von euren prüfungsreifen Schülern die zugeteilten Termine bekommt, und schlägt bei Absagen sofort den nächsten Nachrücker vor."));
     }
     // Innerer Inhalt von Lücken-Radar OHNE eigenen Seitentitel - siehe renderTagesabschlussBody().
     function renderLueckenRadarBody() {
@@ -21671,6 +21842,57 @@ function App() {
                 paymentForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginTop: 8 } }, paymentForm.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, onClick: savePaymentForm }, "Hinzufügen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setPaymentForm(null) }, "Abbrechen"))),
+        examSlotForm && React.createElement("div", { onClick: () => setExamSlotForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, "Prüfplatz erfassen"),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", { id: "field-examslot-art-label" }, "Art"),
+                    React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "field-examslot-art-label" },
+                        React.createElement("button", { className: examSlotForm.art === "praxis" ? "on" : "", onClick: () => setExamSlotForm({ ...examSlotForm, art: "praxis" }) }, "Praxis"),
+                        React.createElement("button", { className: examSlotForm.art === "theorie" ? "on" : "", onClick: () => setExamSlotForm({ ...examSlotForm, art: "theorie" }) }, "Theorie"))),
+                React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
+                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                        React.createElement("label", null, "Datum",
+                        React.createElement("input", { type: "date", value: examSlotForm.datum, autoFocus: true, onChange: e => setExamSlotForm({ ...examSlotForm, datum: e.target.value }) }))),
+                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                        React.createElement("label", null, "Zeit (optional)",
+                        React.createElement("input", { type: "time", value: examSlotForm.zeit, onChange: e => setExamSlotForm({ ...examSlotForm, zeit: e.target.value }) })))),
+                React.createElement("div", { className: "field" },
+                    React.createElement("label", null, "Ort (optional)",
+                    React.createElement("input", { type: "text", value: examSlotForm.ort, placeholder: "z.B. Prüfstelle Musterstadt", onChange: e => setExamSlotForm({ ...examSlotForm, ort: e.target.value }), onKeyDown: e => { if (e.key === "Enter")
+                                addExamSlotSubmit(); } }))),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: !examSlotForm.datum, onClick: addExamSlotSubmit }, "Speichern"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setExamSlotForm(null) }, "Abbrechen"))),
+        examSlotAssign && React.createElement("div", { onClick: () => setExamSlotAssign(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "85dvh", overflowY: "auto" } },
+                examSlotAssign.assignedTo
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, dispName(examSlotAssign.assignedTo) + " ist eingetragen"),
+                        React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Am besten gleich Bescheid geben, damit der Termin nicht ungenutzt bleibt."),
+                        (() => {
+                            const num = waNumber(examSlotAssign.assignedTo.tel);
+                            return num
+                                ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(examSlotWaText(examSlotAssign.slot, examSlotAssign.assignedTo)), target: "_blank", rel: "noopener noreferrer",
+                                        className: "btn btn-block", style: { marginBottom: 8, background: "#25D366", color: "#fff" } }, "Per WhatsApp Bescheid geben")
+                                : React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8 } }, "Keine Telefonnummer hinterlegt.");
+                        })(),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setExamSlotAssign(null) }, "Fertig"))
+                    : (() => {
+                        const candidates = examSlotCandidates(examSlotAssign.slot.art);
+                        return React.createElement(React.Fragment, null,
+                            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Wer bekommt den Prüfplatz?"),
+                            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                                new Date(examSlotAssign.slot.datum + "T12:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "2-digit", month: "2-digit" })
+                                + (examSlotAssign.slot.zeit ? ", " + examSlotAssign.slot.zeit + " Uhr" : "")),
+                            candidates.length === 0
+                                ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "10px 0" } },
+                                    examSlotAssign.slot.art === "praxis" ? "Aktuell niemand prüfungsreif." : "Aktuell niemand ohne bestandene Theorieprüfung.")
+                                : candidates.map((s, i) => React.createElement("button", { key: s.id, onClick: () => assignExamSlot(examSlotAssign.slot, s),
+                                        style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderTop: i > 0 ? "1px solid var(--line)" : "none", background: "none", border: "none" } },
+                                    React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, dispName(s)),
+                                    React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "Auswählen ›"))),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setExamSlotAssign(null) }, "Abbrechen"));
+                    })())),
         leistungForm && leistungForm.step === "form" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const autoPrice = leistungPriceAuto(leistungForm);
