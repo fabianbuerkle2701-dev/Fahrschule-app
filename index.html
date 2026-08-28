@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.170.0";
+const APP_VERSION = "1.171.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -2716,6 +2716,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.171.0", date: "August 2026", changes: [
+            "Neu: Sofort-Buchung für zuverlässige Schüler. Bei der Zuverlässigkeit eines Schülers lässt sich jetzt „Sofort-Buchung erlauben“ aktivieren - freie Termine innerhalb deiner Arbeitszeiten werden dann direkt fest gebucht, statt erst als Vorschlag zu warten. Läuft komplett serverseitig ab (Überschneidung, Tages-/Wochenlimit und Arbeitszeit werden bei jeder Buchung erneut geprüft), für alle anderen Schüler ändert sich nichts",
+        ] },
     { v: "1.170.0", date: "August 2026", changes: [
             "Neu: Prüfplätze in der Prüfungsplanung (Auswertung). Trag ein, welche Prüftermine ihr von TÜV/DEKRA zugeteilt bekommen habt, und weise sie prüfungsreifen Schülern zu - inklusive fertiger WhatsApp-Nachricht. Sagt ein Schüler kurzfristig ab, schlägt die App sofort den nächsten wartenden Kandidaten als Nachrücker vor, statt den Platz ungenutzt zu lassen. Kein automatisches Anmelden bei TÜV/DEKRA (keine öffentliche Schnittstelle dafür), nur bessere interne Organisation der knappen Kontingente",
         ] },
@@ -5857,6 +5860,19 @@ async function publicProposeAppointment(code, p_start, p_end, p_name, p_note, p_
         throw new Error(error.message);
     }
     return data;
+}
+// Wie publicProposeAppointment, aber bucht sofort verbindlich (status "confirmed"), wenn der
+// Schüler per PIN verifiziert ist, sein Fahrlehrer "Sofort-Buchung" für ihn freigeschaltet hat
+// (students.data.instantBookOptIn) und die Zeit innerhalb der Arbeitszeiten liegt - sonst genau
+// derselbe Terminvorschlag-Fallback wie bisher. Alle Prüfungen laufen serverseitig in der RPC
+// (siehe Migration create_public_book_or_propose_appointment), der Client zeigt nur das Ergebnis.
+async function publicBookOrProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin) {
+    const { data, error } = await sb.rpc("public_book_or_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data; // { id, status: "confirmed" | "pending" }
 }
 // Eigene Termine eines Fahrschülers anhand seines Namens (datenschutzfreundlich, nur eigene).
 // Ohne PIN werden nur noch eigene offene Vorschläge erkannt (student_id ist dabei noch nicht
@@ -14171,7 +14187,18 @@ function App() {
             noShows.length > 0 && noShows.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).map((n, i) => React.createElement("div", { key: n.id, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0 0", marginTop: 6, borderTop: "1px solid var(--line)" } },
                 React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", minWidth: 68, flexShrink: 0 } }, n.date ? new Date(n.date).toLocaleDateString("de-DE") : ""),
                 React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, n.note || "–"),
-                React.createElement("button", { onClick: () => removeNoShow(n.id), "aria-label": "Eintrag entfernen", style: { border: "none", background: "none", color: "var(--muted)", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 } }, "\u00D7"))));
+                React.createElement("button", { onClick: () => removeNoShow(n.id), "aria-label": "Eintrag entfernen", style: { border: "none", background: "none", color: "var(--muted)", fontSize: 15, padding: "2px 4px", lineHeight: 1, flexShrink: 0 } }, "\u00D7"))),
+            // Sofort-Buchung: bewusst hier bei der Zuverl\u00E4ssigkeit statt in den Einstellungen, weil
+            // genau dieses Signal die Entscheidung tr\u00E4gt, wem man das Buchen ohne eigene Pr\u00FCfung
+            // zutraut. Freigeschaltete Sch\u00FCler k\u00F6nnen im Fahrsch\u00FClerbereich einen freien, innerhalb
+            // der Arbeitszeiten liegenden Termin direkt verbindlich buchen statt nur vorzuschlagen -
+            // die RPC pr\u00FCft serverseitig erneut \u00DCberschneidung/Tages-/Wochenlimit/Arbeitszeit.
+            React.createElement("label", { className: "check", style: { margin: "10px 2px 0", paddingTop: 10, borderTop: "1px solid var(--line)", display: "flex", alignItems: "flex-start" } },
+                React.createElement("input", { type: "checkbox", checked: !!active.instantBookOptIn, onChange: e => updateActive({ instantBookOptIn: e.target.checked }) }),
+                React.createElement("span", null,
+                    "Sofort-Buchung erlauben",
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", fontWeight: 400, marginTop: 2 } },
+                        "Freie Termine innerhalb deiner Arbeitszeiten werden bei diesem Sch\u00FCler direkt fest gebucht, ohne dass du erst best\u00E4tigen musst."))));
     }
     function studentHeader(opts) {
         const showReliability = !!(opts && opts.showReliability);
@@ -26307,6 +26334,8 @@ function BookingPage({ code, appMode, onLogout }) {
         setChatBusy(false);
     }
     const [done, setDone] = React.useState(false);
+    const [doneInstant, setDoneInstant] = React.useState(0); // wie viele der zuletzt gesendeten Termine sofort verbindlich gebucht wurden (statt nur angefragt)
+    const [doneTotal, setDoneTotal] = React.useState(0);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
     // In der App beginnt man auf der Startseite (wie in der Fahrlehrer-App), auf der
@@ -26553,8 +26582,8 @@ function BookingPage({ code, appMode, onLogout }) {
         for (const s of form.slots) {
             try {
                 const startISO = combineDT(s.date, s.start);
-                await publicProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin);
-                results.push({ ok: true, s });
+                const res = await publicBookOrProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin);
+                results.push({ ok: true, s, status: res && res.status });
                 newMine.push(startISO);
             }
             catch (e) {
@@ -26594,6 +26623,8 @@ function BookingPage({ code, appMode, onLogout }) {
         publicBusyTimes(code, von, bis).then(rows => setBusy(rows || [])).catch(() => { });
         if (fail.length === 0) {
             setForm(null);
+            setDoneInstant(results.filter(r => r.status === "confirmed").length);
+            setDoneTotal(ok);
             setDone(true);
             setTimeout(() => setDone(false), 4000);
         }
@@ -26712,8 +26743,11 @@ function BookingPage({ code, appMode, onLogout }) {
                         React.createElement("div", { className: "home-num" }, k.value),
                         React.createElement("div", { className: "home-eyebrow" }, k.label))))),
                 done && React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14, background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--green)" } }, "\u2713 Vielen Dank!"),
-                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } }, "Deine Anfrage ist eingegangen. Dein Fahrlehrer pr\u00FCft den Termin und best\u00E4tigt ihn. Du bekommst dann Bescheid.")),
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--green)" } }, doneInstant > 0 ? "\u2713 Direkt gebucht!" : "\u2713 Vielen Dank!"),
+                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } },
+                        doneInstant === 0 ? "Deine Anfrage ist eingegangen. Dein Fahrlehrer pr\u00FCft den Termin und best\u00E4tigt ihn. Du bekommst dann Bescheid."
+                            : "Dein Termin steht schon fest, ohne dass dein Fahrlehrer erst best\u00E4tigen muss. Du bekommst keine gesonderte Nachricht mehr."
+                                + (doneInstant < doneTotal ? " F\u00FCr die \u00FCbrigen " + (doneTotal - doneInstant) + " gilt wie gewohnt: dein Fahrlehrer pr\u00FCft sie noch." : ""))),
                 React.createElement("div", { className: "card", style: { padding: 0, marginBottom: 14, borderLeft: "4px solid var(--orange)", overflow: "hidden" } },
                     React.createElement("button", { onClick: () => setHowtoOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 12,
                             padding: "14px 16px", background: "transparent", border: "none", textAlign: "left" } },
