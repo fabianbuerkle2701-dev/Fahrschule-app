@@ -34,6 +34,9 @@ exports.handler = async function (event) {
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
 
   const frage = (body.frage || "").toString().slice(0, 600);
+  // Antwortstamm: der angefangene Satz, den jede Antwort fortsetzt ("Weil der ...").
+  // Fehlt er, liest die KI nur Fragmente und erklaert am Kern vorbei.
+  const stamm = (body.stamm || "").toString().slice(0, 200);
   const optionen = Array.isArray(body.optionen) ? body.optionen.slice(0, 6) : [];
   const gewaehlt = Array.isArray(body.gewaehlt) ? body.gewaehlt.slice(0, 6) : [];
   if (!frage || optionen.length === 0) {
@@ -63,6 +66,7 @@ exports.handler = async function (event) {
   const instruction = `Du erklärst einem Fahrschüler eine Frage aus der deutschen Theorieprüfung. Antworte auf Deutsch, in Du-Form, sachlich und ohne Werbesprache.
 
 Frage: ${frage}
+${stamm ? "Alle Antworten setzen diesen angefangenen Satz fort: \"" + stamm + " ...\" - lies sie zusammen mit ihm." : ""}
 Richtige Antwort(en): ${richtige.join(" | ") || "(keine)"}
 Falsche Antwort(en): ${falsche.join(" | ") || "(keine)"}
 ${gewaehlt.length ? "Der Schüler hatte angekreuzt: " + gewaehlt.join(" | ") : "Der Schüler hat noch nicht geantwortet."}
