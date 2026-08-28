@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.172.0";
+const APP_VERSION = "1.173.0";
 // Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
 // Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
 // Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
@@ -2716,6 +2716,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.173.0", date: "August 2026", changes: [
+            "Neu: Rückwärts-Fahrplan im Führerschein-Reiter. Zielmonat für die Praxisprüfung eintragen, die App schätzt daraus die nötige Wochenfrequenz - aus dem bisherigen eigenen Tempo des Schülers plus einem einstellbaren Planungspuffer für Behörde und Prüfungstermin (Einstellungen, Kosten, Standard 6 Wochen). Ein Knopf schlägt direkt eine passende Terminserie vor. Ausdrücklich eine grobe Schätzung, keine Zusage",
+        ] },
     { v: "1.172.0", date: "August 2026", changes: [
             "Neu: Anwesenheit per QR-Code beim Theorieunterricht. Bei einem Termin der Art „Theorieunterricht“ lässt sich unter „Anwesenheit (QR-Check-in)“ das behandelte Thema wählen (alle 12 Grundstoff- und die klassenspezifischen Zusatzstoff-Themen nach Anlage 1 FahrschAusbO) und ein 15 Minuten gültiger QR-Code anzeigen. Fahrschüler scannen ihn im Fahrschülerbereich und sind automatisch eingetragen, sofern sie eingeloggt sind; alternativ trägt der Fahrlehrer sie manuell ein",
         ] },
@@ -5262,7 +5265,7 @@ async function saveSchool(school) {
         // gespeichert) - die Standard-Ausfallgebühr wirkte in derselben Sitzung, ging aber nach
         // einem Neuladen wieder verloren. storno_frist_stunden ist neu, braucht dieselbe Behandlung.
         no_show_fee_default: numOrNull(school.no_show_fee_default), storno_frist_stunden: numOrNull(school.storno_frist_stunden),
-        zahlungsziel_tage: numOrNull(school.zahlungsziel_tage) };
+        zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen) };
     // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
     // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
     // Sitzungen sich sonst stillschweigend gegenseitig überschreiben. Kennt der Client noch kein
@@ -6341,6 +6344,40 @@ function sonderfahrtenBilanz(stu, klasse, sollMap) {
         return { ...a, ue, sollUe, anzahl: treffer.length, erfuellt: ue >= sollUe,
             langeFahrtDabei: treffer.some(l => (Number(l.minutes) || 0) >= 90) };
     }).filter(Boolean);
+}
+/* ── Rückwärts-Fahrplan: aus einem gewünschten Prüfungsmonat rückwärts rechnen, wie viele UE pro
+   Woche nötig sind. Reine Schätzung aus dem BISHERIGEN eigenen Tempo des Schülers (Prozent
+   ADK/Strecken-Fortschritt pro bisher gefahrener Stunde) - keine Zusage, siehe
+   renderRueckwaertsFahrplan(). Bewusst countStunden() (dieselbe "X Std."-Zahl, die überall sonst
+   in der App gezeigt wird) statt lessonUE()/Fahrtenbuch: Letzteres bleibt bei vielen Schülern leer,
+   weil das Fahrtenbuch eine separate, nicht von jeder Fahrschule konsequent gepflegte Funktion ist -
+   der ADK/Strecken-Fortschritt selbst wird dagegen zuverlässig erfasst. Ohne belastbare
+   Datengrundlage (zu wenige Fahrstunden oder kaum Fortschritt) liefert die Funktion bewusst kein
+   Ergebnis, statt aus dünner Luft eine falsche Genauigkeit vorzutäuschen. ── */
+function rueckwaertsFahrplan(stu, vk, tpl, sonderfahrtenSoll, pufferWochen, zielmonat) {
+    if (!zielmonat)
+        return null;
+    // Wie überall sonst im Schülerprofil (studentCard, renderDaten): datiert erfasste Stunden PLUS
+    // die manuell eingetragene Zahl (manualHours) - viele Fahrschulen pflegen nur Letzteres, ohne
+    // jeden ADK-Punkt einzeln zu datieren.
+    const gefahreneStd = countStunden(stu) + (parseInt(stu.manualHours, 10) || 0);
+    const lp = calcLern(stu.items, tpl.adk, stu), bp = calcBack(stu, tpl.strecken);
+    const gesamt = Math.max(lp, bp);
+    if (gefahreneStd < 3 || gesamt < 5)
+        return { moeglich: false, grund: "ZU_FRUEH" };
+    const restProzent = Math.max(0, 90 - gesamt);
+    const prozentProUE = gesamt / gefahreneStd;
+    const restUEAusbildung = prozentProUE > 0 ? restProzent / prozentProUE : 0;
+    const sfBilanz = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll || {});
+    const restUESonderfahrten = sfBilanz.filter(x => !x.erfuellt).reduce((sum, x) => sum + Math.max(0, x.sollUe - x.ue), 0);
+    const restUE = restUEAusbildung + restUESonderfahrten;
+    const [zj, zm] = zielmonat.split("-").map(Number);
+    const zielDatum = new Date(zj, (zm || 1) - 1, 1);
+    const pufferMs = (pufferWochen || 0) * 7 * 86400000;
+    const verfuegbareWochen = (zielDatum.getTime() - pufferMs - Date.now()) / (7 * 86400000);
+    if (verfuegbareWochen <= 0)
+        return { moeglich: false, grund: "ZIEL_ZU_NAH", restUE };
+    return { moeglich: true, restUE, verfuegbareWochen, ueProWoche: restUE / verfuegbareWochen, gesamt };
 }
 // Führerscheinreform 2027 (Bundestag-Drucksache 21/7404, Kabinettsbeschluss Juni 2026, Stand
 // August 2026, Inkrafttreten voraussichtlich Anfang 2027): der Entwurf sieht eine Übergangsregel
@@ -8985,6 +9022,12 @@ function App() {
     const zahlungszielTage = (school && school.zahlungsziel_tage != null) ? Number(school.zahlungsziel_tage) : 14;
     function saveZahlungszielTage(v) { if (school)
         writeSchool({ ...school, zahlungsziel_tage: (v === "" ? null : Number(v)) }); }
+    // Puffer für den Rückwärts-Fahrplan (Behördenbearbeitung + Prüfungstermin-Wartezeit), oben auf
+    // die reine Fahrstundenzeit gerechnet - 6 Wochen als vorsichtiger Standard (siehe Marktstudie:
+    // Behördenstau bis zu 3 Monate in Einzelfällen, hier bewusst konservativ statt spekulativ hoch).
+    const planungPufferWochen = (school && school.planung_puffer_wochen != null) ? Number(school.planung_puffer_wochen) : 6;
+    function savePlanungPufferWochen(v) { if (school)
+        writeSchool({ ...school, planung_puffer_wochen: (v === "" ? null : Number(v)) }); }
     function savePricePerHour(v) { if (school)
         writeSchool({ ...school, price_hour: (v === "" ? "" : v) }); }
     function savePackages(list) { if (school)
@@ -16569,6 +16612,7 @@ function App() {
                         done && React.createElement("input", { type: "date", value: date, onChange: e => setStepDate(st.key, e.target.value), style: { border: "1.5px solid var(--line)", borderRadius: 9, padding: "6px 8px", fontSize: 16, width: 142, flexShrink: 0 } }));
                 })),
             renderPruefungsversuche(),
+            renderRueckwaertsFahrplan(),
             renderStudentFiles(),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
                 "Rein informell für deinen Überblick – ersetzt keine offiziellen Unterlagen der Führerscheinstelle."));
@@ -16649,6 +16693,49 @@ function App() {
             React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
                 React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => addExam("theorie") }, "+ Theorie"),
                 React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => addExam("praxis") }, "+ Praxis")));
+    }
+    /* ── Rückwärts-Fahrplan: aus einem gewünschten Prüfungsmonat die nötige Wochenfrequenz
+       schätzen, statt Woche für Woche ohne erkennbares Ziel zu planen. Ausdrücklich eine Schätzung
+       aus dem bisherigen Tempo, keine Zusage - siehe rueckwaertsFahrplan(). ── */
+    function proposeFahrplanSerie(plan) {
+        if (!plan || !plan.moeglich)
+            return;
+        const sessionUE = 2; // 90 Min als üblicher Fahrstunden-Block
+        const anzahl = Math.max(2, Math.min(52, Math.ceil(plan.restUE / sessionUE)));
+        const wiederholung = plan.ueProWoche > 1.2 ? "weekly" : "biweekly";
+        setApptForm({ id: null, date: ymd(addDays(new Date(), 1)), start: "16:00", end: "17:30", student_id: active.id, note: "", title: "", sonstige: false, art: "ÜST",
+            serie: { on: true, wiederholung, anzahl } });
+    }
+    function renderRueckwaertsFahrplan() {
+        const vk = active.klasse || DEFAULT_KLASSE;
+        const zielmonat = active.zielmonatPruefung || "";
+        const plan = zielmonat ? rueckwaertsFahrplan(active, vk, tplFor(vk), sonderfahrtenSoll, planungPufferWochen, zielmonat) : null;
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 3 } },
+                React.createElement("span", { className: "home-iconchip", style: { background: "var(--sky-bg)", color: "var(--sky-deep)", width: 28, height: 28, flexShrink: 0 } },
+                    React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("path", { d: "M3 12h18M3 12l6-6M3 12l6 6" }))),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Rückwärts-Fahrplan")),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "6px 0 12px" } },
+                "Ziel-Prüfungsmonat eintragen, die App schätzt daraus die nötige Wochenfrequenz - anhand des bisherigen Tempos, nicht als Zusage."),
+            React.createElement("div", { className: "field", style: { marginBottom: zielmonat ? 12 : 0 } },
+                React.createElement("label", null, "Ziel: Praxisprüfung im Monat",
+                React.createElement("input", { type: "month", value: zielmonat, onChange: e => updateActive({ zielmonatPruefung: e.target.value }) }))),
+            zielmonat && plan && !plan.moeglich && plan.grund === "ZU_FRUEH" && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } },
+                "Noch zu wenige gefahrene Stunden für eine verlässliche Schätzung."),
+            zielmonat && plan && !plan.moeglich && plan.grund === "ZIEL_ZU_NAH" && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A" } },
+                "Der Zielmonat liegt zu nah - mit " + planungPufferWochen + " Wochen Puffer für Behörde/Prüfungstermin bleibt keine Zeit mehr zum Fahren. Noch etwa " + Math.round(plan.restUE) + " UE offen."),
+            zielmonat && plan && plan.moeglich && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
+                    React.createElement("div", { className: "card home-tile", style: { flex: 1, cursor: "default", padding: "10px 12px" } },
+                        React.createElement("div", { className: "home-num", style: { fontSize: 20 } }, Math.round(plan.restUE)),
+                        React.createElement("div", { className: "home-eyebrow" }, "UE offen (geschätzt)")),
+                    React.createElement("div", { className: "card home-tile", style: { flex: 1, cursor: "default", padding: "10px 12px" } },
+                        React.createElement("div", { className: "home-num", style: { fontSize: 20 } }, plan.ueProWoche.toLocaleString("de-DE", { maximumFractionDigits: 1 })),
+                        React.createElement("div", { className: "home-eyebrow" }, "UE/Woche nötig"))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 }, onClick: () => proposeFahrplanSerie(plan) }, "Terminserie vorschlagen"),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
+                    "Geschätzt aus dem bisherigen eigenen Tempo (" + Math.round(plan.gesamt) + "% ADK/Strecken-Fortschritt bislang) plus " + planungPufferWochen + " Wochen Puffer für Behörde und Prüfungstermin. Keine Zusage - nur eine grobe Orientierung.")));
     }
     // Theorie-Übungsfortschritt des Schülers, gruppiert nach Thema - Rohdaten kommen aus
     // students.data.theoryProgress (vom Fahrschülerbereich gefüllt, siehe TheoryPractice/
@@ -19990,6 +20077,12 @@ function App() {
                                     React.createElement("input", { id: "field-zahlungsziel", type: "text", inputMode: "numeric", value: String(zahlungszielTage), onChange: e => saveZahlungszielTage(e.target.value.replace(/\D/g, "")), placeholder: "14", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Tage"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Ab wie vielen Tagen nach dem Rechnungsdatum eine unbezahlte Rechnung im Mahnungen-Cockpit und in der Abrechnung als überfällig gilt. Standard 14 Tage."),
+                            React.createElement("div", { className: "field" },
+                                React.createElement("label", { htmlFor: "field-planung-puffer" }, "Planungspuffer (Rückwärts-Fahrplan)"),
+                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                                    React.createElement("input", { id: "field-planung-puffer", type: "text", inputMode: "numeric", value: String(planungPufferWochen), onChange: e => savePlanungPufferWochen(e.target.value.replace(/\D/g, "")), placeholder: "6", style: { flex: 1 } }),
+                                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Wochen"))),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Zeit, die der Rückwärts-Fahrplan je Schüler zusätzlich zur reinen Fahrstundenzeit einplant - für Bearbeitungszeit bei der Führerscheinstelle und die Wartezeit auf einen Prüfungstermin. Standard 6 Wochen, im Einzelfall regional sehr unterschiedlich."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
                             packages.length === 0
                                 ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Noch keine Pakete angelegt.")
