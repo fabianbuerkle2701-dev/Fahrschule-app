@@ -2639,7 +2639,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.186.0";
+const APP_VERSION = "1.187.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2764,6 +2764,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.187.0", date: "August 2026", changes: [
+            "Wichtig: Kostenposten (Grundbetrag, Lernmaterial, Ausfallgebühr …) wurden intern über ihre Position in der Liste angesprochen. Wurde irgendwo ein Posten gelöscht, verschoben sich alle folgenden - wer währenddessen den Rechnungsdialog offen hatte, rechnete danach die falschen Posten ab: berechnet wurde Posten A, als abgerechnet markiert wurde Posten B. Jeder Kostenposten hat jetzt eine feste Kennung, bestehende wurden nachträglich damit versehen",
+            "Kleinigkeit: Die Demo-Ansicht versuchte bei jedem Start, die ADK-Vorlage zu speichern, obwohl sie schreibgeschützt ist - zwei Fehlermeldungen in der Entwicklerkonsole bei jedem Aufruf, ohne dass etwas kaputt war",
+        ] },
     { v: "1.186.0", date: "August 2026", changes: [
             "Wichtig: Zwei Rechnungen über dieselbe Fahrstunde waren möglich. Die zweite hat die Markierung der ersten einfach überschrieben, beide Rechnungen blieben bestehen - der Schüler wäre doppelt belastet worden. Passieren konnte das bei zwei offenen Tabs, einem Doppeltipp oder einer veralteten Liste. Wird jetzt serverseitig abgelehnt, ohne dabei eine Rechnungsnummer zu verbrauchen",
             "Sicherheit: Wer beim Terminvorschlag das Namensfeld leer ließ, umging damit sämtliche Sperren auf einmal - Tageslimit, Wochenlimit und die Sperre bei offener Rechnung. Der Name ist jetzt auch serverseitig Pflicht, nicht nur im Formular",
@@ -4748,6 +4752,11 @@ async function fetchTemplate(uid, schoolName) {
         ? { adk: deepCopy(DEFAULT_ADK), strecken: deepCopy(DEFAULT_STRECKEN), adkTitel: "", streckenTitel: "" }
         : { adk: deepCopy(BVF_ADK), strecken: [], adkTitel: "", streckenTitel: "" };
     const fresh = { byKlasse: { [DEFAULT_KLASSE]: freshSlice } };
+    // In der Demo gar nicht erst schreiben: das Konto ist per RLS schreibgeschuetzt, der Versuch
+    // scheiterte bei JEDEM Start mit zwei 403ern und zwei roten Fehlern in der Konsole. Die
+    // Vorlage kommt dort ohnehin aus dem Speicher - sichtbar aendert sich nichts.
+    if (IS_DEMO())
+        return fresh;
     const { error: e2 } = await sb.from("templates").upsert({ owner: uid, adk: { [DEFAULT_KLASSE]: freshSlice.adk }, strecken: { [DEFAULT_KLASSE]: freshSlice.strecken } });
     if (e2)
         console.error(e2);
@@ -4775,6 +4784,11 @@ async function fetchSchoolAdminTemplate(schoolId, ownUid) {
     return null;
 }
 async function saveTemplate(uid, tpl) {
+    // Die Demo ist per RLS schreibgeschuetzt. Ohne diese Zeile lief bei jedem Demo-Start ein
+    // Speicherversuch der ADK-Vorlage ins Leere - 403 plus rote Konsolenfehler, obwohl gar
+    // nichts kaputt war. Aenderungen an der Vorlage bleiben in der Demo im Speicher.
+    if (IS_DEMO())
+        return null;
     const byKlasse = tpl.byKlasse || {};
     const adk = {}, strecken = {}, adkTitel = {}, streckenTitel = {};
     Object.keys(byKlasse).forEach(k => {
@@ -5638,10 +5652,17 @@ async function nextDocumentNumber(schoolId, kind) {
 // verbraucht, aber keine Rechnung existierte dafür: eine Lücke in der nach §14 UStG
 // vorgeschriebenen lückenlosen Nummernfolge. Schlägt jetzt einer der beiden Schritte fehl, wird
 // die ganze Transaktion zurückgerollt und die Nummer bleibt unverbraucht.
-async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIdx, note) {
+// Kostenposten bekommen eine eigene id, genau wie Fahrstunden. Ohne sie wurden sie ueber ihre
+// POSITION im Array angesprochen - und die verschiebt sich, sobald irgendwo ein Posten geloescht
+// wird. Wer den Rechnungsdialog offen hat, waehrend an anderer Stelle ein Posten verschwindet,
+// haette danach die falschen Posten abgerechnet.
+function neuerKostenposten(felder) {
+    return { id: "ci" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), ...felder };
+}
+async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIds, note) {
     const { data, error } = await sb.rpc("create_invoice", {
         p_student_id: studentId, p_school_id: schoolId, p_items: items,
-        p_lesson_ids: lessonIds, p_cost_idx: costIdx, p_note: note || "",
+        p_lesson_ids: lessonIds, p_cost_ids: costIds, p_note: note || "",
     });
     if (error) {
         console.error(error);
@@ -7220,7 +7241,7 @@ function offeneLeistungen(s, stdPrice, abDatum) {
         const betrag = Number(it.amount) || 0;
         if (Math.abs(betrag) <= 0.005)
             return;
-        posten.push({ art: "posten", idx: idx, datum: "", betrag: betrag,
+        posten.push({ art: "posten", id: it.id || null, idx: idx, datum: "", betrag: betrag,
             text: it.label || (betrag < 0 ? "Gutschrift" : "Posten") });
     });
     return posten.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
@@ -11376,7 +11397,7 @@ function App() {
         const stu = students.find(s => s.id === activeId) || active;
         if (!stu)
             return;
-        writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: f.label.trim(), amount }] });
+        writeStudent({ ...stu, costItems: [...(stu.costItems || []), neuerKostenposten({ label: f.label.trim(), amount })] });
         setItemForm(null);
     }
     // Zahlung beim aktiven Schüler speichern. Gleicher Bugfix wie saveItemForm oben: das paymentForm-
@@ -11769,11 +11790,11 @@ function App() {
                 // doppelte Gutschrift, falls dieser Codepfad (Netzwerk-Retry, erneuter Aufruf) zweimal läuft.
                 const alreadyCredited = (referrer.referrals || []).some(r => r.studentId === s.id);
                 if (!alreadyCredited) {
-                    writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward }],
+                    writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), neuerKostenposten({ label: "Empfehlungsbonus: " + dispName(s) + " geworben", amount: -referralReward })],
                         referrals: [...(referrer.referrals || []), { studentId: s.id, name: dispName(s), date: ymd(new Date()) }] });
                 }
                 writeStudent({ ...s, pending: false, referralRewardApplied: true,
-                    costItems: [...(s.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }] });
+                    costItems: [...(s.costItems || []), neuerKostenposten({ label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward })] });
                 showToast(dispName(s) + " übernommen. Empfehlungsbonus (" + eurFmt(referralReward) + ") für beide gutgeschrieben.");
                 setWelcomeOffer(s);
                 return;
@@ -11830,10 +11851,10 @@ function App() {
         // nicht an "hat der Werber schon irgendwann einen Bonus bekommen".
         const alreadyCredited = (referrer.referrals || []).some(r => r.studentId === stu.id);
         if (!alreadyCredited) {
-            writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), { label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward }],
+            writeStudent({ ...referrer, costItems: [...(referrer.costItems || []), neuerKostenposten({ label: "Empfehlungsbonus: " + dispName(stu) + " geworben", amount: -referralReward })],
                 referrals: [...(referrer.referrals || []), { studentId: stu.id, name: dispName(stu), date: ymd(new Date()) }] });
         }
-        writeStudent({ ...stu, costItems: [...(stu.costItems || []), { label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward }],
+        writeStudent({ ...stu, costItems: [...(stu.costItems || []), neuerKostenposten({ label: "Empfehlungsbonus (geworben durch " + dispName(referrer) + ")", amount: -referralReward })],
             referredByCode: code, referralRewardApplied: true });
         setReferralRedeemCode("");
         showToast("Bonus gutgeschrieben: " + eurFmt(referralReward) + " für " + dispName(stu) + " und " + dispName(referrer) + ".");
@@ -14291,7 +14312,7 @@ function App() {
         setStudents(prev => prev.map(s => {
             if (s.id !== sid)
                 return s;
-            patchedStudent = { ...s, costItems: [...(s.costItems || []), { label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE"), amount: parsed }] };
+            patchedStudent = { ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE"), amount: parsed })] };
             return patchedStudent;
         }));
         if (patchedStudent) {
@@ -15083,7 +15104,7 @@ function App() {
         const entry = { id: uniqueId("ns"), date: ymd(new Date()), note: note.trim() };
         const patch = { noShows: [...(active.noShows || []), entry] };
         if (amount !== null)
-            patch.costItems = [...(active.costItems || []), { label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE"), amount }];
+            patch.costItems = [...(active.costItems || []), neuerKostenposten({ label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE"), amount })];
         updateActive(patch);
         showFlash(amount !== null ? "✓ Vermerkt + Gebühr gebucht" : "✓ Vermerkt");
     }
@@ -16223,7 +16244,7 @@ function App() {
                 date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
         });
         (active.costItems || []).forEach((it, idx) => { if (!it.invoiced) {
-            rows.push({ key: "cost:" + idx, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
+            rows.push({ key: "cost:" + (it.id || idx), id: it.id || null, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
         } });
         if (rows.length === 0) {
             showToast("Keine offenen Posten für eine neue Rechnung. Für " + dispName(active) + " ist bereits alles abgerechnet.");
@@ -16252,11 +16273,20 @@ function App() {
         setInvoiceDraft(prev => prev && ({ ...prev, busy: true }));
         const chosenLessonIds = [];
         chosen.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => chosenLessonIds.push(id)));
-        const chosenCostIdx = chosen.filter(r => r.kind === "cost").map(r => r.idx);
+        // Ueber die id, nicht ueber die Position - siehe neuerKostenposten(). Posten ohne id
+        // kann es nach der Nachtragsmigration nicht mehr geben; faende sich doch einer, waere
+        // Abbrechen richtiger als das Abrechnen des falschen Postens.
+        const costRows = chosen.filter(r => r.kind === "cost");
+        if (costRows.some(r => !r.id)) {
+            setInvoiceDraft(prev => prev && ({ ...prev, busy: false }));
+            showToast("Diese Kostenposten sind noch nicht aktualisiert. Bitte die App neu laden.");
+            return;
+        }
+        const chosenCostIds = costRows.map(r => r.id);
         const items = chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" }));
         let inv;
         try {
-            inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIdx, d.note || "");
+            inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIds, d.note || "");
         }
         catch (e) {
             setInvoiceDraft(prev => prev && ({ ...prev, busy: false }));
@@ -16280,7 +16310,7 @@ function App() {
             const coveredById = {};
             lessonBillables(s, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
             const drivenLessons = (s.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
-            const costItems = (s.costItems || []).map((it, idx) => chosenCostIdx.indexOf(idx) >= 0 ? { ...it, invoiced: inv.number } : it);
+            const costItems = (s.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
             const invoices = [...(s.invoices || []), inv];
             return { ...s, drivenLessons, costItems, invoices };
         }));
@@ -16502,7 +16532,9 @@ function App() {
                 showToast("Dieser Posten steht bereits auf Rechnung " + items[idx].invoiced + " und kann nicht gelöscht werden. Bitte die Rechnung stornieren, falls der Posten falsch ist.");
                 return;
             }
-            updateActive({ costItems: items.filter((_, i) => i !== idx) });
+            // Ueber die id treffen, falls vorhanden - die Position koennte inzwischen eine andere sein.
+            const ziel = items[idx];
+            updateActive({ costItems: ziel && ziel.id ? items.filter(it => it.id !== ziel.id) : items.filter((_, i) => i !== idx) });
         }
         // Beleg-Foto → Kostenposition: liest ein Foto einer Quittung/eines Kassenbons aus und
         // öffnet damit vorbefüllt genau dasselbe "Posten hinzufügen"-Formular wie addItem() -
@@ -16687,7 +16719,7 @@ function App() {
                         setStudents(prev => (prev || []).map(s => {
                             if (s.id !== active.id)
                                 return s;
-                            patchedStudent = { ...s, costItems: [...(s.costItems || []), { label: p.name, amount: p.amount }],
+                            patchedStudent = { ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: p.name, amount: p.amount })],
                                 packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()) }] };
                             return patchedStudent;
                         }));
@@ -19891,7 +19923,7 @@ function App() {
         if (posten.art === "fahrstunde")
             patch.drivenLessons = (stu.drivenLessons || []).map(l => l.id === posten.id ? { ...l, nichtBerechnen: true } : l);
         else
-            patch.costItems = (stu.costItems || []).map((it, i) => i === posten.idx ? { ...it, nichtBerechnen: true } : it);
+            patch.costItems = (stu.costItems || []).map((it, i) => (posten.id ? it.id === posten.id : i === posten.idx) ? { ...it, nichtBerechnen: true } : it);
         writeStudent({ ...stu, ...patch });
         // Auch die Rohdaten des Modals nachziehen: sie halten eine eigene Kopie des Schülers,
         // die von writeStudent nicht miterfasst wird.
