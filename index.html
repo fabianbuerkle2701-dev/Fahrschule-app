@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.175.1";
+const APP_VERSION = "1.176.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2721,6 +2721,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.176.0", date: "August 2026", changes: [
+            "Neu: Guthaben-Modus je Schüler (Schülerdaten › Kasse). Dreistufig: „Aus“ wie bisher, „Hinweis“ zeigt dem Schüler im Fahrschülerbereich bei offener Rechnung einen Hinweis mit QR-Code zum Bezahlen (buchen kann er weiter), „Deckung nötig“ sperrt Selbstbuchung und Terminvorschläge, bis die Rechnung bezahlt ist. Du selbst kannst immer buchen",
+            "Maßgeblich ist ausschließlich der offene Betrag aus tatsächlich gestellten Rechnungen - gefahrene, aber noch nicht berechnete Stunden sperren niemanden aus. Stornierte Rechnungen zählen nicht mit",
+            "Die Prüfung läuft vollständig auf dem Server: Ausloggen oder eine ältere App-Version umgehen die Sperre nicht",
+        ] },
     { v: "1.175.1", date: "August 2026", changes: [
             "Geändert: Die bisherigen selbst verfassten Übungsfragen sind im Theoriebereich nicht mehr sichtbar - geübt wird jetzt ausschließlich mit den amtlichen Prüfungsfragen. Für Klasse B sind das 455 Fragen in 6 Sachgebieten. Die alten Fragen wurden nicht gelöscht, sondern nur ausgeblendet, damit bereits erfasster Übungsfortschritt erhalten bleibt",
             "Die Sachgebiete „Vorfahrt, Vorrang“ und „Verkehrszeichen“ erscheinen dadurch vorerst nicht mehr - dort ist praktisch jede amtliche Frage an eine Abbildung gebunden, und die Abbildungen sind lizenzpflichtig",
@@ -5996,6 +6001,18 @@ async function publicStudentOverview(code, name, pin) {
         throw new Error(error.message);
     }
     return (data && data[0]) || null;
+}
+// Zahlstatus des Schülers für den Guthaben-Modus: { modus: "aus"|"hinweis"|"deckung", offen: number }.
+// Bewusst eine eigene RPC statt public_student_overview zu erweitern - deren Rückgabetyp zu
+// ändern erzwingt DROP+CREATE der zentralen Portal-Datenquelle. Gibt null zurück, wenn der
+// Schüler nicht eindeutig per Name+PIN identifiziert werden konnte.
+async function publicStudentPaymentStatus(code, name, pin) {
+    const { data, error } = await sb.rpc("public_student_payment_status", { code, p_name: name, p_pin: pin });
+    if (error) {
+        console.error(error);
+        return null;
+    }
+    return data || null;
 }
 // Schüler ändert seinen PIN selbst (alter PIN muss stimmen). Gibt true bei Erfolg.
 async function publicStudentSetPin(code, name, oldPin, newPin) {
@@ -15775,6 +15792,26 @@ function App() {
                     " (Stufe ",
                     reminders[reminders.length - 1].stage,
                     ")")),
+            // Guthaben-Modus (Deckungscheck): steuert, ob eine offene RECHNUNG die Selbstbuchung
+            // des Schuelers im Fahrschuelerbereich blockiert. Bewusst je Schueler und dreistufig
+            // statt global erzwungenem Prepaid - Letzteres ist der dokumentierte Fehler eines
+            // Wettbewerbers, ueber den sich Schueler oeffentlich beschweren. Die eigentliche
+            // Pruefung passiert serverseitig in den Buchungs-RPCs (_open_invoiced_amount), dieser
+            // Schalter setzt nur das Flag; dem Client wird dabei nichts geglaubt.
+            React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 16 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, marginBottom: 2 } }, "Guthaben-Modus"),
+                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginBottom: 9, lineHeight: 1.45 } },
+                    "Gilt nur f\u00FCr Buchungen, die der Sch\u00FCler selbst im Fahrsch\u00FClerbereich ausl\u00F6st. Du selbst kannst immer buchen."),
+                React.createElement("div", { className: "seg", role: "group", style: { marginBottom: 0 } },
+                    [["aus", "Aus"], ["hinweis", "Hinweis"], ["deckung", "Deckung n\u00F6tig"]].map(o => React.createElement("button", { key: o[0],
+                            className: (active.guthabenModus || "aus") === o[0] ? "on" : "",
+                            onClick: () => updateActive({ guthabenModus: o[0] }) }, o[1]))),
+                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.45 } },
+                    (active.guthabenModus || "aus") === "aus"
+                        ? "Offene Rechnungen haben keine Auswirkung auf Buchungen."
+                        : (active.guthabenModus || "aus") === "hinweis"
+                            ? "Bei offener Rechnung sieht der Sch\u00FCler im Fahrsch\u00FClerbereich einen Hinweis mit QR-Code zum Bezahlen. Buchen kann er trotzdem."
+                            : "Bei offener Rechnung kann der Sch\u00FCler weder selbst buchen noch einen Termin vorschlagen, bis bezahlt ist.")),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Gefahrene Fahrstunden"),
             React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 10 } },
                 lessons.length === 0
@@ -26771,6 +26808,15 @@ function BookingPage({ code, appMode, onLogout }) {
     const [done, setDone] = React.useState(false);
     const [doneInstant, setDoneInstant] = React.useState(0); // wie viele der zuletzt gesendeten Termine sofort verbindlich gebucht wurden (statt nur angefragt)
     const [doneTotal, setDoneTotal] = React.useState(0);
+    // Guthaben-Modus: Zahlstatus des angemeldeten Schuelers. Wird ueber "done" mit neu geladen,
+    // damit der Hinweis nach einer Buchung bzw. nach einer verbuchten Zahlung aktuell ist.
+    const [payStatus, setPayStatus] = React.useState(null); // null | {modus, offen, iban, empfaenger}
+    React.useEffect(() => {
+        let pin = "";
+        try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
+        if (!myName.trim() || !pin) { setPayStatus(null); return; }
+        publicStudentPaymentStatus(code, myName.trim(), pin).then(setPayStatus).catch(() => setPayStatus(null));
+    }, [code, myName, done]);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
     // In der App beginnt man auf der Startseite (wie in der Fahrlehrer-App), auf der
@@ -27032,7 +27078,9 @@ function BookingPage({ code, appMode, onLogout }) {
                     reason = "Tageslimit für dich erreicht";
                 else if (/WEEKLIMIT/i.test(msg))
                     reason = "Wochenlimit für dich erreicht";
-                results.push({ ok: false, s, reason });
+                else if (/UNPAID/i.test(msg))
+                    reason = "wegen einer offenen Rechnung gesperrt";
+                results.push({ ok: false, s, reason, unpaid: /UNPAID/i.test(msg) });
             }
         }
         // Eigene Termine im Browser merken (dieses Gerät) und Namen für geräteübergreifende Wiedererkennung speichern
@@ -27067,6 +27115,11 @@ function BookingPage({ code, appMode, onLogout }) {
             // Einige gingen, einige nicht: nur die fehlgeschlagenen im Formular lassen
             setForm(f => ({ ...f, slots: fail.map(r => r.s) }));
             setErr(ok + " Termin" + (ok === 1 ? "" : "e") + " gesendet. " + fail.length + " Zeit" + (fail.length === 1 ? "" : "en") + " war" + (fail.length === 1 ? "" : "en") + " " + fail[0].reason + ". Bitte ändern.");
+        }
+        else if (fail.every(f => f.unpaid)) {
+            // Eine andere Uhrzeit hilft hier nicht - deshalb bewusst NICHT der generische
+            // "bitte andere Uhrzeiten waehlen"-Text, der in die Irre fuehren wuerde.
+            setErr("Buchen ist gerade nicht m\u00F6glich, weil noch eine Rechnung offen ist. Sobald deine Zahlung verbucht ist, geht es wieder. Bei Fragen melde dich bei deinem Fahrlehrer.");
         }
         else {
             setErr("Diese Zeiten sind " + fail[0].reason + ". Bitte andere Uhrzeiten wählen.");
@@ -27177,6 +27230,33 @@ function BookingPage({ code, appMode, onLogout }) {
                     React.createElement("div", null,
                         React.createElement("div", { className: "home-num" }, k.value),
                         React.createElement("div", { className: "home-eyebrow" }, k.label))))),
+                // Guthaben-Modus: Hinweis auf die offene Rechnung, mit Girocode zum Scannen.
+                // Bei "deckung" zusaetzlich der Grund, warum gerade nicht gebucht werden kann -
+                // die eigentliche Sperre setzt serverseitig die Buchungs-RPC durch.
+                payStatus && payStatus.offen > 0.005 && payStatus.modus !== "aus" && (() => {
+                    const streng = payStatus.modus === "deckung";
+                    let qr = null;
+                    try {
+                        if (payStatus.iban) {
+                            const epc = buildEpcQrText({ iban: payStatus.iban, empfaengerName: payStatus.empfaenger || "Fahrschule",
+                                betragEUR: payStatus.offen, verwendungszweck: "Offener Betrag " + (myName || "").trim() });
+                            if (epc.valid) qr = qrToDataUrl(epc.text, { size: 168, margin: 2 });
+                        }
+                    } catch (e) { qr = null; }
+                    return React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14,
+                            background: streng ? "var(--amber-bg)" : "var(--card)", border: "1.5px solid " + (streng ? "var(--amber)" : "var(--line)") } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: streng ? "var(--amber)" : "var(--ink)" } },
+                            streng ? "Offene Rechnung – Buchen gerade nicht m\u00F6glich" : "Du hast noch eine offene Rechnung"),
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 26, margin: "6px 0 2px" } }, eurFmt(payStatus.offen)),
+                        React.createElement("div", { style: { fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5 } },
+                            streng ? "Sobald die Zahlung bei deiner Fahrschule verbucht ist, kannst du hier wieder selbst Termine buchen. Bei Fragen melde dich direkt bei deinem Fahrlehrer."
+                                   : "Du kannst wie gewohnt weiter buchen \u2013 wir wollten dich nur daran erinnern."),
+                        qr && React.createElement("div", { style: { textAlign: "center", marginTop: 12 } },
+                            React.createElement("img", { src: qr, alt: "QR-Code f\u00FCr die \u00DCberweisung", width: 168, height: 168,
+                                style: { borderRadius: 12, border: "1.5px solid var(--line)" } }),
+                            React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } },
+                                "Mit der Banking-App scannen \u2013 Betrag und Empf\u00E4nger sind schon ausgef\u00FCllt")));
+                })(),
                 theoryCheckinResult && React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14,
                         background: theoryCheckinResult.ok ? "var(--green-bg)" : "var(--amber-bg)", border: "1.5px solid " + (theoryCheckinResult.ok ? "var(--green)" : "var(--amber)") } },
                     theoryCheckinResult.busy
