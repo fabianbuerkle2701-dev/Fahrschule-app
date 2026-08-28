@@ -2639,7 +2639,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.180.0";
+const APP_VERSION = "1.181.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2764,6 +2764,13 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.181.0", date: "August 2026", changes: [
+            "Neu: Löschung der Ausbildungsdaten nach § 31 FahrlG. Im Archiv der Schülerliste erscheinen Schüler, deren Fünfjahresfrist abgelaufen ist. Vor dem Löschen siehst du eine vollständige Liste, was entfernt wird und was bleibt - bestätigt wird durch Eintippen des Namens",
+            "Rechnungen, Zahlungen, Name und Anschrift bleiben erhalten: die unterliegen der steuerlichen Aufbewahrung und wären als Beleg ohne Namen wertlos. Genau dieser Konflikt der beiden Fristen ist der Grund, warum ausgedünnt und nicht gelöscht wird",
+            "Jede Löschung wird protokolliert (Einstellungen › Löschprotokoll) - als Nachweis gegenüber Aufsicht und Datenschutzbehörde. Einträge lassen sich nicht entfernen",
+            "Bewusst ohne Automatik: gelöscht wird nur, was du einzeln bestätigst",
+            "Sicherheitskorrektur: Die Demo-Ansicht auf der Website konnte über neu hinzugekommene Serverfunktionen schreiben (Gutscheine einlösen, Vergütung setzen, Daten löschen), weil die Demo-Schreibsperre dort nicht griff. Alle betroffenen Funktionen prüfen das jetzt selbst",
+        ] },
     { v: "1.180.0", date: "August 2026", changes: [
             "Neu: Geschenkgutscheine (Einstellungen › Geschenkgutscheine). Gutschein mit Betrag, Empfänger und Absender anlegen, ansprechend ausdrucken und später beim Schüler unter Kasse per Code einlösen - der Betrag wird dort direkt als Zahlung gutgeschrieben",
             "Die Übersicht zeigt, wie viel an offenen Gutscheinen noch aussteht. Ein Gutschein lässt sich nur einmal einlösen, auch wenn der Code zweimal gleichzeitig eingegeben wird",
@@ -8520,6 +8527,15 @@ function loeschDatum(stu) {
     const daten = aufbewahrungsfristen(stu).map(f => f.faellig).filter(Boolean);
     return daten.length ? new Date(Math.max(...daten.map(d => d.getTime()))) : null;
 }
+// Ist die 5-Jahres-Frist für die AUSBILDUNGSdaten abgelaufen? Bewusst nur diese eine Frist,
+// nicht loeschDatum(): dort zählt die SPÄTESTE aller Fristen (inkl. 10 Jahre für Rechnungen),
+// weil dort das Löschen des GESAMTEN Datensatzes gemeint ist. Die Ausbildungsdaten dürfen und
+// müssen aber schon nach 5 Jahren weg, auch wenn die Rechnungen noch aufzubewahren sind -
+// genau dieser Unterschied ist der Grund für die getrennte Löschung.
+function ausbildungLoeschreif(stu) {
+    const f = aufbewahrungsfristen(stu).find(x => x.klasse === "ausbildung");
+    return !!(f && f.faellig && f.faellig.getTime() <= Date.now());
+}
 // Tage bis zur nächsten HU (negativ = überfällig). null, wenn kein Termin hinterlegt.
 function tuvDaysLeft(v) {
     if (!v.tuvDate)
@@ -8587,7 +8603,7 @@ function clusterLabel(text, tone) {
 }
 // Welche Einstellungs-Zeilen nur für einen Fahrschul-Admin bzw. den zentralen App-Admin sichtbar/
 // erreichbar sind - ersetzt die alte settingsTab==="admin"-Prüfung, jetzt pro Zeile statt pro Tab.
-const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "gutscheine", "personalunterlagen"]);
+const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "gutscheine", "loeschprotokoll", "personalunterlagen"]);
 /* ─────────────────────────────────────────────────────────────
    Karte: Live-Streckentracking + Stecknadeln pro Fahrschüler
    Nutzt Leaflet + OpenStreetMap (kostenlos, ohne API-Schlüssel).
@@ -9364,6 +9380,8 @@ function App() {
     // Geschenkgutscheine. Hooks gehoeren hier oben zu den uebrigen, nicht unten zur Logik -
     // siehe Kommentar bei csvImport (React-Fehler #310).
     const [vouchers, setVouchers] = useState([]);
+    const [loeschDialog, setLoeschDialog] = useState(null); // null | {stu, eingabe, busy, error, fertig}
+    const [loeschProtokoll, setLoeschProtokoll] = useState([]);
     const [voucherForm, setVoucherForm] = useState(null);   // null | {betrag, empfaenger, von, busy}
     const [voucherRedeem, setVoucherRedeem] = useState(null); // null | {code, busy, error}
     const [voucherPrint, setVoucherPrint] = useState(null); // null | Gutschein-Datensatz für den Druck
@@ -9612,6 +9630,13 @@ function App() {
         if (!school || !school.id) { setVouchers([]); return; }
         fetchVouchers(school.id).then(setVouchers).catch(() => { });
     }, [school && school.id]);
+    // Löschprotokoll laden (Nachweis nach § 31 FahrlG, siehe Einstellungen).
+    useEffect(() => {
+        if (!school || !school.id) { setLoeschProtokoll([]); return; }
+        sb.from("deletion_log").select("*").eq("school_id", school.id).order("deleted_at", { ascending: false })
+          .then(({ data, error }) => { if (!error) setLoeschProtokoll(data || []); });
+    }, [school && school.id]);
+
 
     const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
@@ -11987,6 +12012,67 @@ function App() {
             setCsvImport(c => c && ({ ...c, fertig }));
         }
         setCsvImport(c => c && ({ ...c, schritt: "fertig", busy: false, fehler, uebersprungen, angelegt: fertig - fehler.length }));
+    }
+    /* ── Löschung der Ausbildungsdaten (§ 31 FahrlG) ────────────────────────────────────────
+       BEWUSST KEINE AUTOMATIK, obwohl in der Studie "Löschautomatik" genannt: die Löschung ist
+       unumkehrbar und die Abgrenzung, welche Kategorie wann fällt, gehört einmal juristisch
+       gegengelesen. Es wird deshalb nichts von allein gelöscht - jede Löschung wird einzeln
+       angestoßen, vorher vollständig aufgelistet und muss durch Eintippen des Namens bestätigt
+       werden. Ausgeführt wird sie serverseitig in student_data_delete(), zusammen mit dem
+       Protokolleintrag in einer Transaktion. ── */
+    const LOESCH_KATEGORIEN = [
+        ["ADK-Stände und Streckenfahrten", true],
+        ["Fahrstunden mit Bewertungen und Notizen", true],
+        ["Prüfungsversuche und Schaltkompetenz", true],
+        ["Begleitete Übungsfahrten", true],
+        ["Theorie-Übungsstand", true],
+        ["Bemerkungen und letzte Notiz", true],
+        ["Profilbild", true],
+        ["Geburtsdatum, Telefon, Gesundheitsangaben", true],
+        ["Zugangsdaten für den Fahrschülerbereich", true],
+        ["Hochgeladene Dateien", true],
+        ["Rechnungen und Zahlungen", false],
+        ["Name und Anschrift", false],
+    ];
+    async function ladeLoeschProtokoll() {
+        if (!school || !school.id) return;
+        const { data, error } = await sb.from("deletion_log").select("*").eq("school_id", school.id).order("deleted_at", { ascending: false });
+        if (!error) setLoeschProtokoll(data || []);
+    }
+    async function ausbildungsdatenLoeschen() {
+        const d = loeschDialog;
+        if (!d || d.busy) return;
+        const soll = dispName(d.stu).trim().toLowerCase();
+        if ((d.eingabe || "").trim().toLowerCase() !== soll) {
+            setLoeschDialog({ ...d, error: "Der eingegebene Name stimmt nicht überein." });
+            return;
+        }
+        setLoeschDialog({ ...d, busy: true, error: "" });
+        try {
+            const { data, error } = await sb.rpc("student_data_delete", { p_student_id: d.stu.id });
+            if (error) throw new Error(error.message);
+            if (!data || !data.ok) throw new Error("Löschung wurde abgelehnt.");
+            // Lokalen Stand nachziehen: dieselben Felder entfernen, die der Server entfernt hat.
+            const weg = ["adkDates","adkLog","adkNotes","items","customCounts","strecken","streckenLog",
+                "streckenNotes","routes","drivenLessons","lessons","manualHours","noShows","exams",
+                "schaltkompetenzTests","licenseSteps","begleitfahrten","begleitplan","theorie",
+                "theoryProgress","theoryMockExams","bemerkungen","lastNote","messages","avatarUrl",
+                "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
+                "pinChanged","pins","referralCode","wunschliste","dismissedAppts","termin",
+                "terminLabel","klasse","location_id"];
+            setStudents(prev => (prev || []).map(st => {
+                if (st.id !== d.stu.id) return st;
+                const neu = { ...st };
+                weg.forEach(k => { delete neu[k]; });
+                neu.dataDeletedAt = new Date().toISOString();
+                return neu;
+            }));
+            setLoeschDialog({ ...d, busy: false, fertig: { name: data.name, dateien: data.dateien } });
+            ladeLoeschProtokoll();
+        }
+        catch (e) {
+            setLoeschDialog({ ...d, busy: false, error: e.message || "Löschung fehlgeschlagen" });
+        }
     }
     /* ── Geschenkgutscheine ─────────────────────────────────────────────────────────────────
        Verkauf laeuft ausserhalb der App (bar oder Ueberweisung) - die App verkauft nicht selbst,
@@ -14622,7 +14708,25 @@ function App() {
                         "Archiv (bestanden) \u00B7 ",
                         students.filter(s => s.archived).length),
                     React.createElement("span", null, showArchived ? "▲" : "▼")),
-                showArchived && React.createElement("div", { style: { marginTop: 10, opacity: 0.85 } }, filtered.filter(s => s.archived).map(s => studentCard(s, true)))),
+                showArchived && React.createElement("div", { style: { marginTop: 10 } },
+                    (() => {
+                        // Löschreife Schüler: 5-Jahres-Frist abgelaufen und noch nicht gelöscht.
+                        const reif = students.filter(s => s.archived && s._isMine && !s.dataDeletedAt && ausbildungLoeschreif(s));
+                        if (reif.length === 0) return null;
+                        return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 12, border: "1.5px solid var(--amber)", background: "var(--amber-bg)" } },
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 4 } },
+                                reif.length === 1 ? "1 Schüler mit abgelaufener Löschfrist" : (reif.length + " Schüler mit abgelaufener Löschfrist")),
+                            React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 10 } },
+                                "Die Ausbildungsdaten sind nach § 31 FahrlG fünf Jahre nach der Archivierung zu löschen. Rechnungen und Zahlungen bleiben erhalten, die unterliegen der steuerlichen Aufbewahrung."),
+                            reif.map((s, i) => React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700 } }, dispName(s)),
+                                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
+                                        "archiviert " + (s.archivedAt ? new Date(s.archivedAt).toLocaleDateString("de-DE") : "–"))),
+                                React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 11px", fontSize: 12.5, color: "#B3362A" },
+                                        onClick: () => setLoeschDialog({ stu: s, eingabe: "", error: "" }) }, "Daten löschen"))));
+                    })(),
+                    React.createElement("div", { style: { opacity: 0.85 } }, filtered.filter(s => s.archived).map(s => studentCard(s, true))))),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", textAlign: "center", marginTop: 18 } },
                 "Daten werden automatisch in der Cloud gespeichert",
                 syncing ? " · synchronisiert…" : "",
@@ -19861,6 +19965,7 @@ function App() {
             { id: "rechnungsdaten", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Rechnungsdaten", icon: IC.rechnung, keywords: "rechnung firma iban steuernummer kleinunternehmer", status: { ring: invoicePct } },
             { id: "datev", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "DATEV-Export", icon: IC.rechnung, keywords: "datev steuerberater buchungsstapel extf kontenrahmen skr03 skr04 berater mandant", status: (datev.berater && datev.mandant) ? "Eingerichtet" : "Nicht eingerichtet" },
             { id: "gutscheine", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Geschenkgutscheine", icon: IC.kosten, keywords: "gutschein geschenk verschenken code einloesen", status: (() => { const o = (vouchers || []).filter(v => v.status === "offen"); return o.length ? (o.length + " offen · " + eurFmt(o.reduce((s2, v) => s2 + (Number(v.betrag) || 0), 0))) : "Keine offenen"; })() },
+            { id: "loeschprotokoll", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Löschprotokoll", icon: IC.rechnung, keywords: "löschen dsgvo datenschutz fahrlg protokoll aufbewahrung frist", status: loeschProtokoll.length ? (loeschProtokoll.length + " Löschung" + (loeschProtokoll.length === 1 ? "" : "en")) : "Keine Löschungen" },
             { id: "personalunterlagen", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Personalunterlagen", icon: IC.personal, keywords: "personal unterlagen fahrlehrer dateien", status: staffTeachers ? staffTeachers.length + " Fahrlehrer" : "Nicht geladen" },
             { id: "fuhrpark", section: "fahrschule", cluster: "Geld & Fuhrpark", tone: "clay", label: "Fuhrpark & Auswertung", icon: IC.fuhrpark, keywords: "fahrzeug kalender leistungen offene beträge auswertung", status: "Kalender · Leistungen · Beträge" },
             { id: "konto", section: "konto", tone: "sky", label: "Konto", icon: IC.konto, keywords: "email abmelden konto schüler", status: session.user.email + " · " + myStudents + " Schüler" },
@@ -20631,6 +20736,19 @@ function App() {
                                 packages.length > 0 && React.createElement("div", { style: { fontSize: 13.5, marginBottom: 8 } },
                                     React.createElement("b", null, "Pakete:"), " ", packages.map(p => p.name + " (" + eurFmt(p.amount) + ")").join(", ")),
                                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Die Preise legt ein Fahrschul-Admin fest. Du kannst sie bei jedem Schüler verwenden, aber nicht ändern."))),
+                    settingsScreen === "loeschprotokoll" && React.createElement(SettingsScreen, { title: "Löschprotokoll", onBack: closeScreen },
+                        React.createElement(React.Fragment, null,
+                            React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 12 } },
+                                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5 } },
+                                    "Nachweis über gelöschte Ausbildungsdaten nach § 31 FahrlG. Die Löschung selbst stößt du im Archiv der Schülerliste an, sobald die Fünfjahresfrist abgelaufen ist. Einträge lassen sich nicht entfernen \u2013 das ist der Zweck eines Protokolls.")),
+                            loeschProtokoll.length === 0
+                                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Löschungen protokolliert.")
+                                : React.createElement("div", { className: "card", style: { padding: "6px 14px" } },
+                                    loeschProtokoll.map((e, i) => React.createElement("div", { key: e.id, style: { padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                        React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700 } }, e.student_name || "(ohne Namen)"),
+                                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
+                                            new Date(e.deleted_at).toLocaleString("de-DE") + " · " + ((e.kategorien || []).length) + " Kategorien"
+                                            + (e.dateien_geloescht > 0 ? (" · " + e.dateien_geloescht + " Datei(en)") : ""))))))),
                     settingsScreen === "gutscheine" && React.createElement(SettingsScreen, { title: "Geschenkgutscheine", onBack: closeScreen },
                         (() => {
                             const offene = (vouchers || []).filter(v => v.status === "offen");
@@ -22644,6 +22762,36 @@ function App() {
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, onClick: () => runAssistantAction(p) }, "Best\u00E4tigen und eintragen"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAssistant(a => ({ ...a, proposal: null })) }, "Doch anders"));
                 })())),
+        loeschDialog && React.createElement("div", { onClick: () => { if (!loeschDialog.busy) setLoeschDialog(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.7)", zIndex: 185, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 460, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
+                loeschDialog.fertig
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6 } }, "Ausbildungsdaten gelöscht"),
+                        React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.55, marginBottom: 6 } },
+                            "Die Ausbildungsdaten von " + loeschDialog.fertig.name + " wurden entfernt"
+                            + (loeschDialog.fertig.dateien > 0 ? (", dazu " + loeschDialog.fertig.dateien + " hochgeladene Datei(en)") : "") + "."),
+                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
+                            "Rechnungen und Zahlungen sind erhalten geblieben. Der Vorgang steht im Löschprotokoll unter Einstellungen."),
+                        React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setLoeschDialog(null) }, "Schließen"))
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ausbildungsdaten löschen"),
+                        React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, dispName(loeschDialog.stu)),
+                        React.createElement("div", { className: "card", style: { padding: "10px 12px", marginBottom: 12 } },
+                            LOESCH_KATEGORIEN.map((k, i) => React.createElement("div", { key: k[0], style: { display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                React.createElement("span", { style: { fontSize: 12.5, fontWeight: 800, color: k[1] ? "#B3362A" : "var(--green)", minWidth: 68, flexShrink: 0 } }, k[1] ? "gelöscht" : "bleibt"),
+                                React.createElement("span", { style: { fontSize: 12.5, lineHeight: 1.4 } }, k[0])))),
+                        React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, marginBottom: 12 } },
+                            "Das lässt sich nicht rückgängig machen. Rechnungen und Zahlungen bleiben erhalten, weil sie steuerlich aufzubewahren sind."),
+                        React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                            React.createElement("label", null, "Zum Bestätigen den Namen eintippen: " + dispName(loeschDialog.stu),
+                            React.createElement("input", { type: "text", value: loeschDialog.eingabe, autoFocus: true,
+                                onChange: e => setLoeschDialog({ ...loeschDialog, eingabe: e.target.value, error: "" }) }))),
+                        loeschDialog.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 8 } }, loeschDialog.error),
+                        React.createElement("button", { className: "btn btn-block", style: { marginBottom: 8, background: "#B3362A", color: "#fff", border: "none" },
+                                disabled: !!loeschDialog.busy, onClick: ausbildungsdatenLoeschen },
+                            loeschDialog.busy ? "Wird gelöscht…" : "Endgültig löschen"),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!loeschDialog.busy, onClick: () => setLoeschDialog(null) }, "Abbrechen")))),
         voucherForm && React.createElement("div", { onClick: () => { if (!voucherForm.busy) setVoucherForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 175, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },
