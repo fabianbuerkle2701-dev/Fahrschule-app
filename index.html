@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.177.0";
+const APP_VERSION = "1.178.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2721,6 +2721,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.178.0", date: "August 2026", changes: [
+            "Neu: Bestand übernehmen. In der Schülerliste lädst du eine CSV-Datei aus deiner alten Software hoch - die App ordnet die Spalten selbst zu und legt die Schüler im Stapel an. Aus Excel vorher als CSV speichern",
+            "Vor dem Anlegen siehst du eine Vorschau: erkannte Spaltenzuordnung (jede Zeile von Hand korrigierbar), eine Stichprobe der ersten Einträge und wie viele Schüler bereits vorhanden sind",
+            "Schüler, die unter demselben Namen schon existieren, werden übersprungen statt doppelt angelegt. Steht der volle Name in einer Spalte (\"Müller, Anna\"), wird er automatisch geteilt; deutsche und ISO-Datumsformate werden beide erkannt",
+            "Zur Spaltenzuordnung gehen nur die Überschriften und fünf Beispielzeilen an die KI, nicht dein gesamter Bestand",
+        ] },
     { v: "1.177.0", date: "August 2026", changes: [
             "Neu: DATEV-Export für den Steuerberater. Unter Auswertung neben dem CSV-Export lädst du den abgeschlossenen Vormonat als EXTF-Buchungsstapel herunter - Rechnungen und Zahlungen als fertige Buchungssätze. Berater-/Mandantennummer, Kontenrahmen (SKR03/SKR04) und Konten stellst du einmalig unter Einstellungen › DATEV-Export ein",
             "Wichtig: Der Export ist ein Buchungsvorschlag. Lass den ersten Durchlauf einmal von deinem Steuerberater prüfen, bevor du ihn regelmäßig nutzt",
@@ -9246,6 +9252,11 @@ function App() {
     // null | {step:"form"|"sign", apptId, studentId, art, vehicleId, klasse, stufe, minutes, date, von, bis, price, priceAuto, note, signature}
     const [leistungForm, setLeistungForm] = useState(null);
     const [importState, setImportState] = useState(null); // null | {busy, error, data} Screenshot-Import
+    // CSV-Datenuebernahme (siehe csvDateiGewaehlt). MUSS hier oben bei den uebrigen Hooks
+    // stehen, nicht unten bei der zugehoerigen Logik: dort liegt der Code hinter den fruehen
+    // returns fuer session===undefined/null, und ein useState dahinter aendert die Hook-Anzahl
+    // zwischen zwei Renders (React-Fehler #310).
+    const [csvImport, setCsvImport] = useState(null); // null | {schritt, header, daten, mapping, ...}
     // Interessent aus Screenshot: bewusst kein eigener Vorschau-Schritt wie beim Schüler-Import
     // - das bestehende interessentForm ist selbst schon editierbar, ein zusätzlicher
     // Read-only-Vorschau-Schritt davor wäre nur ein weiterer Klick ohne echten Mehrwert.
@@ -11751,13 +11762,122 @@ function App() {
             studentImportBusyRef.current = false;
         }
     }
-    async function createStudentFromImportInner(d) {
+    /* ── Datenübernahme-Assistent: CSV aus der Altsoftware einlesen ─────────────────────────
+       Ablauf: Datei wählen -> clientseitig parsen -> Spaltenzuordnung von der KI vorschlagen
+       lassen (nur Kopfzeile + 5 Beispielzeilen verlassen das Gerät, nicht der ganze Bestand)
+       -> Pflicht-Vorschau mit Dublettenwarnung -> Anlage in Blöcken mit Fortschritt.
+       Die Feldzuordnung selbst läuft über draftFromImportData(), dieselbe Funktion wie beim
+       Foto-Import - so kann der CSV-Import nicht von der Einzelanlage abweichen. ── */
+    // RFC4180-nah. Trenner wird aus der Kopfzeile geraten (deutsches Excel schreibt Semikolon),
+    // Anführungszeichen, eingebettete Trenner/Zeilenumbrüche und BOM werden berücksichtigt.
+    function parseCsvText(text) {
+        let t = String(text || "").replace(/^\uFEFF/, "");
+        const ersteZeile = t.split(/\r?\n/)[0] || "";
+        const zaehle = (ch) => { let n = 0, q = false;
+            for (let i = 0; i < ersteZeile.length; i++) { const c = ersteZeile[i];
+                if (c === '"') q = !q; else if (c === ch && !q) n++; } return n; };
+        const sep = zaehle(";") >= zaehle(",") ? ";" : ",";
+        const rows = []; let row = []; let cur = ""; let q = false;
+        for (let i = 0; i < t.length; i++) {
+            const c = t[i];
+            if (q) { if (c === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c; }
+            else if (c === '"') q = true;
+            else if (c === sep) { row.push(cur); cur = ""; }
+            else if (c === "\n") { row.push(cur); rows.push(row); row = []; cur = ""; }
+            else if (c === "\r") { /* ignorieren */ }
+            else cur += c;
+        }
+        if (cur.length || row.length) { row.push(cur); rows.push(row); }
+        return { sep, rows: rows.filter(r => r.some(z => String(z).trim() !== "")) };
+    }
+    // Import-Datumsformate auf TT.MM.JJJJ bringen - das erwartet draftFromImportData().
+    // Deckt deutsche (TT.MM.JJJJ, TT.MM.JJ) und ISO-Schreibweise (JJJJ-MM-TT) ab.
+    function normDatum(v) {
+        const t = String(v == null ? "" : v).trim();
+        if (!t) return "";
+        let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        if (m) return m[3].padStart(2, "0") + "." + m[2].padStart(2, "0") + "." + m[1];
+        m = t.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
+        if (m) return m[1].padStart(2, "0") + "." + m[2].padStart(2, "0") + "." + m[3];
+        m = t.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2})$/);
+        if (m) { const j = parseInt(m[3], 10); return m[1].padStart(2, "0") + "." + m[2].padStart(2, "0") + "." + (j > 40 ? 1900 + j : 2000 + j); }
+        return "";
+    }
+    // Aus einer Zeile die Import-Zwischenform bauen. Steht der volle Name in einer Spalte,
+    // wird er geteilt: "Müller, Anna" -> Nachname zuerst, "Anna Müller" -> Vorname zuerst.
+    function zeileZuImport(row, map) {
+        const cell = (idx) => (idx == null || idx < 0) ? "" : String(row[idx] == null ? "" : row[idx]).trim();
+        let vorname = cell(map.vorname), name = cell(map.name);
+        if (!vorname && name) {
+            if (name.indexOf(",") >= 0) { const p = name.split(","); name = p[0].trim(); vorname = p.slice(1).join(",").trim(); }
+            else { const p = name.split(/\s+/); if (p.length > 1) { name = p[p.length - 1]; vorname = p.slice(0, -1).join(" "); } }
+        }
+        return { vorname, name, geburtstag: normDatum(cell(map.geburtstag)),
+            handy: cell(map.handy), festnetz: cell(map.festnetz), email: cell(map.email),
+            adresse: cell(map.adresse), anmeldedatum: normDatum(cell(map.anmeldedatum)),
+            klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)) };
+    }
+    const normName = (v) => String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
+    async function csvDateiGewaehlt(file) {
+        if (!file) return;
+        setCsvImport({ schritt: "laedt", busy: true, error: "" });
+        try {
+            const text = await file.text();
+            const { rows } = parseCsvText(text);
+            if (rows.length < 2) {
+                setCsvImport({ schritt: "fehler", error: "Die Datei enthält keine Datenzeilen. Exportiere aus Excel bitte als CSV (Semikolon-getrennt)." });
+                return;
+            }
+            const header = rows[0].map(h => String(h || "").trim());
+            const daten = rows.slice(1);
+            const resp = await fetch("/.netlify/functions/map-import-columns", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({ header, samples: daten.slice(0, 5) }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out || !out.mapping) {
+                setCsvImport({ schritt: "fehler", error: (out && out.error) || "Spalten konnten nicht zugeordnet werden." });
+                return;
+            }
+            setCsvImport({ schritt: "vorschau", header, daten, mapping: out.mapping, hinweis: out.hinweis || "", error: "" });
+        }
+        catch (e) {
+            setCsvImport({ schritt: "fehler", error: "Datei konnte nicht gelesen werden: " + (e.message || "unbekannt") });
+        }
+    }
+    async function csvImportStarten() {
+        const st = csvImport;
+        if (!st || st.busy) return;
+        const vorhanden = new Set((students || []).map(s => normName(dispName(s))));
+        // Dubletten werden uebersprungen, nicht angelegt - ein doppelter Bestand ist schlimmer
+        // als ein fehlender Schueler, und nachtragen kann man einzeln.
+        const zeilen = st.daten.map(r => zeileZuImport(r, st.mapping))
+            .filter(d => (d.vorname || d.name));
+        const neu = zeilen.filter(d => !vorhanden.has(normName((d.vorname + " " + d.name).trim())));
+        const uebersprungen = zeilen.length - neu.length;
+        setCsvImport({ ...st, schritt: "laeuft", busy: true, fertig: 0, gesamt: neu.length, fehler: [] });
+        const fehler = [];
+        let fertig = 0;
+        for (const d of neu) {
+            try {
+                const created = await dbInsert(uid, draftFromImportData(d));
+                if (created) setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                else fehler.push((d.vorname + " " + d.name).trim() || "(ohne Namen)");
+            }
+            catch (e) { fehler.push((d.vorname + " " + d.name).trim() || "(ohne Namen)"); }
+            fertig++;
+            setCsvImport(c => c && ({ ...c, fertig }));
+        }
+        setCsvImport(c => c && ({ ...c, schritt: "fertig", busy: false, fehler, uebersprungen, angelegt: fertig - fehler.length }));
+    }
+    // Baut aus der Import-Zwischenform (siehe extract-student.js) einen fertigen Schueler-Entwurf.
+    // Bewusst ohne Datenbank- und Oberflaechen-Nebenwirkungen, damit sowohl der Foto-Import
+    // (ein Schueler) als auch der CSV-Import (Stapel) exakt dieselbe Feldzuordnung benutzen.
+    function draftFromImportData(d) {
         const deToIso = (s) => { const m = (s || "").match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/); return m ? m[3] + "-" + m[2].padStart(2, "0") + "-" + m[1].padStart(2, "0") : ""; };
         const draft = newStudent();
         draft.location_id = validMyLocationId || "";
-        // Erkannte Klasse aus dem gescannten Antrag hat Vorrang vor der geratenen Klasse aus
-        // dem Fahrschul-Untertitel (vorher wurde die erkannte Klasse nur als Text in die
-        // Bemerkungen geschrieben, aber nie tatsächlich gesetzt).
         draft.klasse = guessKlasseFromText(d.klasse, klassen) || guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         draft.vorname = d.vorname || "";
         draft.name = d.name || "";
@@ -11769,9 +11889,6 @@ function App() {
         draft.anschrift = d.adresse || "";
         if (d.sehhilfe)
             draft.sehhilfe = true;
-        // E-Mail hat kein eigenes Feld im Schüler-Datenmodell, bleibt daher als Notiz erhalten.
-        // Handy/Festnetz/Anmeldedatum/Theorie bestanden haben jetzt eigene Felder (siehe oben) und
-        // werden nicht mehr zusätzlich dupliziert.
         const extra = [];
         if (d.email)
             extra.push("E-Mail: " + d.email);
@@ -11779,11 +11896,14 @@ function App() {
             extra.push("Klasse: " + d.klasse);
         if (extra.length)
             draft.bemerkungen = extra.join("\n");
-        // Bisher gefahrene Fahrstunden als Startwert
         const manualCount = (parseInt(d.uebungsfahrten, 10) || 0) + (parseInt(d.autobahnfahrten, 10) || 0)
             + (parseInt(d.ueberlandfahrten, 10) || 0) + (parseInt(d.beleuchtungsfahrten, 10) || 0) + (parseInt(d.grundfahraufgaben, 10) || 0);
         if (manualCount > 0)
             draft.manualHours = String(manualCount);
+        return draft;
+    }
+    async function createStudentFromImportInner(d) {
+        const draft = draftFromImportData(d);
         const created = await dbInsert(uid, draft);
         if (!created) {
             showToast("Konnte nicht speichern. Internetverbindung prüfen.");
@@ -14236,6 +14356,12 @@ function App() {
                             React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
                             React.createElement("circle", { cx: "9", cy: "9", r: "2" }),
                             React.createElement("path", { d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" }))),
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px", color: "var(--orange-deep)" }, onClick: () => setCsvImport({ schritt: "start" }), "aria-label": "Sch\u00FCler aus CSV-Datei \u00FCbernehmen", title: "Bestand aus alter Software \u00FCbernehmen" },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
+                            React.createElement("path", { d: "M14 2v6h6" }),
+                            React.createElement("path", { d: "M12 18v-6" }),
+                            React.createElement("path", { d: "m9 15 3 3 3-3" }))),
                     React.createElement("button", { className: "btn btn-primary", onClick: addStudent }, "+ Sch\u00FCler"))),
             pendingList.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, border: "1.5px solid var(--orange)" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10, color: "var(--orange-deep)" } },
@@ -22244,6 +22370,68 @@ function App() {
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, onClick: () => runAssistantAction(p) }, "Best\u00E4tigen und eintragen"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAssistant(a => ({ ...a, proposal: null })) }, "Doch anders"));
                 })())),
+        csvImport && React.createElement("div", { onClick: () => { if (!csvImport.busy) setCsvImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 170, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Bestand \u00FCbernehmen"),
+                csvImport.schritt === "start" && React.createElement(React.Fragment, null,
+                    React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55, marginBottom: 14 } },
+                        "Exportiere deine Sch\u00FClerliste aus der alten Software als CSV-Datei (in Excel: Speichern unter \u2192 CSV). Die Spalten ordnet die App selbst zu \u2013 du siehst vor dem Anlegen eine Vorschau."),
+                    React.createElement("label", { className: "btn btn-primary btn-block", style: { marginBottom: 10, cursor: "pointer" } }, "CSV-Datei w\u00E4hlen",
+                        React.createElement("input", { type: "file", accept: ".csv,text/csv,text/plain", style: { display: "none" },
+                            onChange: e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; csvDateiGewaehlt(f); } })),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
+                        "Zur Zuordnung werden nur die Spalten\u00FCberschriften und f\u00FCnf Beispielzeilen an die KI geschickt, nicht dein gesamter Bestand."),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12 }, onClick: () => setCsvImport(null) }, "Abbrechen")),
+                csvImport.schritt === "laedt" && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "14px 0" } }, "Datei wird gelesen und Spalten werden zugeordnet\u2026"),
+                csvImport.schritt === "fehler" && React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { fontSize: 13, color: "#B3362A", lineHeight: 1.5, margin: "10px 0 14px", whiteSpace: "pre-wrap" } }, csvImport.error),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setCsvImport({ schritt: "start" }) }, "Nochmal versuchen")),
+                csvImport.schritt === "vorschau" && (() => {
+                    const map = csvImport.mapping;
+                    const vorhanden = new Set((students || []).map(x => normName(dispName(x))));
+                    const zeilen = csvImport.daten.map(r => zeileZuImport(r, map)).filter(d => (d.vorname || d.name));
+                    const dubletten = zeilen.filter(d => vorhanden.has(normName((d.vorname + " " + d.name).trim())));
+                    const neu = zeilen.length - dubletten.length;
+                    const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Adresse"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
+                    return React.createElement(React.Fragment, null,
+                        React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } },
+                            csvImport.daten.length + " Zeilen gelesen \u00B7 " + neu + " werden angelegt"
+                            + (dubletten.length ? " \u00B7 " + dubletten.length + " bereits vorhanden" : "")),
+                        csvImport.hinweis && React.createElement("div", { style: { fontSize: 12.5, background: "var(--amber-bg)", border: "1px solid var(--amber)", borderRadius: 10, padding: "9px 11px", marginBottom: 12, lineHeight: 1.45 } }, csvImport.hinweis),
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Spaltenzuordnung"),
+                        React.createElement("div", { className: "card", style: { padding: "6px 12px", marginBottom: 14 } },
+                            felder.map((f, i) => React.createElement("div", { key: f[0], style: { display: "flex", alignItems: "center", gap: 8, padding: "7px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                React.createElement("span", { style: { flex: 1, fontSize: 13 } }, f[1]),
+                                React.createElement("select", { value: map[f[0]] == null ? "" : String(map[f[0]]),
+                                        onChange: e => { const v = e.target.value === "" ? null : parseInt(e.target.value, 10);
+                                            setCsvImport(c => c && ({ ...c, mapping: { ...c.mapping, [f[0]]: v } })); },
+                                        style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 9, padding: "6px 8px", fontSize: 13, background: "var(--card)" } },
+                                    React.createElement("option", { value: "" }, "\u2013 nicht importieren \u2013"),
+                                    csvImport.header.map((h, idx) => React.createElement("option", { key: idx, value: String(idx) }, h || ("Spalte " + (idx + 1)))))))),
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Stichprobe"),
+                        React.createElement("div", { className: "card", style: { padding: "6px 12px", marginBottom: 14 } },
+                            zeilen.slice(0, 3).map((d, i) => React.createElement("div", { key: i, style: { padding: "8px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none", fontSize: 12.5, lineHeight: 1.5 } },
+                                React.createElement("div", { style: { fontWeight: 700, fontSize: 13.5 } }, (d.vorname + " " + d.name).trim() || "(kein Name erkannt)"),
+                                React.createElement("div", { style: { color: "var(--muted)" } },
+                                    [d.geburtstag && ("geb. " + d.geburtstag), d.handy, d.klasse && ("Klasse " + d.klasse), d.adresse].filter(Boolean).join(" \u00B7 ") || "keine weiteren Felder erkannt")))),
+                        neu === 0
+                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 10 } }, "Es bleibt nichts anzulegen \u2013 pr\u00FCfe die Spaltenzuordnung oben.")
+                            : React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: csvImportStarten },
+                                neu === 1 ? "1 Sch\u00FCler anlegen" : (neu + " Sch\u00FCler anlegen")),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setCsvImport(null) }, "Abbrechen"));
+                })(),
+                csvImport.schritt === "laeuft" && React.createElement(React.Fragment, null,
+                    React.createElement("p", { style: { fontSize: 13.5, margin: "12px 0 10px" } }, "Wird angelegt: " + (csvImport.fertig || 0) + " von " + csvImport.gesamt),
+                    React.createElement("div", { style: { height: 8, borderRadius: 99, background: "var(--field-bg)", overflow: "hidden" } },
+                        React.createElement("div", { style: { height: "100%", width: Math.round(100 * (csvImport.fertig || 0) / Math.max(1, csvImport.gesamt)) + "%", background: "var(--orange)", transition: "width .2s" } })),
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 10 } }, "Bitte das Fenster offen lassen.")),
+                csvImport.schritt === "fertig" && React.createElement(React.Fragment, null,
+                    React.createElement("p", { style: { fontSize: 14, margin: "12px 0 6px", fontWeight: 700 } }, csvImport.angelegt + " Sch\u00FCler angelegt."),
+                    csvImport.uebersprungen > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 6 } }, csvImport.uebersprungen + " \u00FCbersprungen, weil unter diesem Namen schon ein Sch\u00FCler existiert."),
+                    csvImport.fehler && csvImport.fehler.length > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginBottom: 8, lineHeight: 1.5 } },
+                        csvImport.fehler.length + " konnten nicht angelegt werden: " + csvImport.fehler.slice(0, 8).join(", ") + (csvImport.fehler.length > 8 ? " \u2026" : "")),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 8 }, onClick: () => setCsvImport(null) }, "Fertig")))),
         importState && React.createElement("div", { onClick: () => { if (!importState.busy)
                 setImportState(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
