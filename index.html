@@ -2596,10 +2596,15 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.174.0";
-// Master-Schalter für "Theorie üben" mit dem AMTLICHEN Fragenkatalog: bleibt false, bis der
-// Katalog lizenziert ist. Auf true stellen, um die Funktion regulär freizuschalten (pro
-// Fahrschule zusätzlich über profiles.theory_addon_active, siehe public_booking_info/mySubscription).
+const APP_VERSION = "1.175.0";
+// Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
+// seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
+// TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
+// und "Verkehrszeichen") sowie alle bildgebundenen Fragen der übrigen Gebiete. Als bezahlte
+// Prüfungsvorbereitung ist der Bestand damit noch nicht vollständig genug - als kostenlose
+// Übungsfunktion in der Schüler-App (THEORY_UEBEN_APP_VORSCHAU) dagegen sehr wohl.
+// Auf true stellen, sobald die Abbildungen lizenziert sind (dann greift zusätzlich
+// profiles.theory_addon_active, siehe public_booking_info/mySubscription).
 const THEORY_UEBEN_RELEASED = false;
 // Vorschau-Phase: In der Fahrschüler-App ist der Lernbereich schon nutzbar - allerdings nur mit
 // den selbst verfassten Beispielfragen (is_sample=true in theory_questions), nicht mit amtlichen
@@ -2716,6 +2721,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.175.0", date: "August 2026", changes: [
+            "Neu: 930 amtliche Theorie-Prüfungsfragen im Übungsbereich. Der Fragentext der amtlichen Fahrerlaubnisprüfung ist im Verkehrsblatt veröffentlicht und laut schriftlicher Auskunft der TÜV|DEKRA arge tp 21 frei zugänglich - übernommen wurden alle Fragen, die ohne Abbildung auskommen, mit amtlicher Fragennummer, Sachgebiet, Fehlerpunkten und Mehrfachauswahl genau wie im Katalog. Für Klasse B stehen damit 455 amtliche Fragen zusätzlich zu den bisherigen Übungsfragen bereit",
+            "Hinweis: Fragen MIT Abbildung fehlen bewusst. Die Bilder des Fragenkatalogs sind urheberrechtlich geschützt und lizenzpflichtig - deshalb sind die Sachgebiete „Vorfahrt, Vorrang“ und „Verkehrszeichen“ weiterhin nur mit eigenen Übungsfragen belegt",
+            "Verbessert: Ohne bekannte Führerscheinklasse (Gast-Modus) wird der Fragenpool jetzt auf Klasse B gefiltert statt alle 13 Klassen zu mischen - vorher hätte ein Pkw-Schüler überwiegend Lkw-, Bus- und Motorradfragen bekommen",
+        ] },
     { v: "1.174.0", date: "August 2026", changes: [
             "Neu: Schüler-Selbsteinschätzung im Fahrtenbuch. Fahrschüler können sich im Fahrschülerbereich zu jeder Fahrstunde selbst einschätzen (dieselben 5 Kriterien und Smileys wie deine eigene Bewertung) - deine Bewertung dieser Stunde sehen sie dabei bewusst erst, NACHDEM sie selbst eingeschätzt haben, damit niemand einfach abschreibt. Im Fahrtenbuch siehst du zu jeder Stunde, wie der Schüler sich selbst eingeschätzt hat, inklusive Hinweis, wenn ein Kriterium deutlich (2 Stufen oder mehr) von deiner Bewertung abweicht",
         ] },
@@ -25361,8 +25371,17 @@ function renderHazardScenario(key) {
 }
 
 // ════════ Theorie üben (öffentlich, per Fahrschul-Code; Fortschritt nur bei Login) ════════
-// Fragen sind Beispielinhalte (is_sample=true in der DB), solange der amtliche Fragenkatalog
-// nicht lizenziert ist (siehe Aufgabenliste) - Struktur ist bereits auf echte Inhalte ausgelegt.
+// Fragenbestand seit August 2026 gemischt (theory_questions.quelle):
+//   quelle='vkbl'  -> amtliche Prüfungsfragen, Fragentext aus dem Verkehrsblatt. Laut schriftlicher
+//                     Auskunft der TÜV|DEKRA arge tp 21 ist der deutsche AUFGABENTEXT amtlich
+//                     veröffentlicht und frei zugänglich. Übernommen sind deshalb ausschließlich
+//                     textautarke Fragen (930 Stück).
+//   quelle=NULL    -> selbst verfasste Beispielfragen (is_sample=true) aus der Vorschau-Phase.
+// BEWUSST NICHT übernommen: alle Fragen, die eine Abbildung brauchen. Die Abbildungen sind laut
+// derselben Auskunft urheberrechtlich geschützt (407 computergenerierte Bilder, 5 alte Grafiken,
+// 187 Verkehrszeichen, 272 Standardvariantenpaare) und lizenzpflichtig. Deshalb fehlen die
+// Sachgebiete "Vorfahrt, Vorrang" und "Verkehrszeichen" im amtlichen Bestand komplett - dort ist
+// praktisch jede Frage bildgebunden. Erst mit einer Bildlizenz sinnvoll ergänzbar.
 function TheoryPractice({ code }) {
     const [questions, setQuestions] = React.useState(undefined); // undefined=lädt, null=Fehler, []=leer
     const [screen, setScreen] = React.useState("themen"); // themen|uebung|pruefung_intro|pruefung|pruefung_ergebnis
@@ -25401,7 +25420,12 @@ function TheoryPractice({ code }) {
     React.useEffect(() => {
         if (myKlasse === undefined)
             return;
-        publicTheoryQuestions(code, myKlasse || null).then(setQuestions).catch(() => setQuestions(null));
+        // Ohne bekannte Klasse (Gast oder Schüler ohne hinterlegte Klasse) bewusst auf
+        // DEFAULT_KLASSE filtern statt ungefiltert alle Klassen zu laden: seit dem Import des
+        // amtlichen Fragenbestands liegen Fragen für 13 Klassen in der Datenbank, ein ungefilterter
+        // Pool bestünde überwiegend aus Lkw-/Bus-/Motorrad-Fragen und wäre für den typischen
+        // Pkw-Schüler unbrauchbar. Grundstoff (klasse="ALL") ist davon nicht betroffen.
+        publicTheoryQuestions(code, myKlasse || DEFAULT_KLASSE).then(setQuestions).catch(() => setQuestions(null));
     }, [code, myKlasse]);
     React.useEffect(() => {
         if (!loggedIn)
@@ -25647,7 +25671,7 @@ function TheoryPractice({ code }) {
                     React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, topic),
                     React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, pct !== null ? (pct + "% · " + qs.length + " Fragen") : (qs.length + " Fragen")));
             })),
-        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Eigene Übungsfragen, sortiert nach den Sachgebieten des amtlichen Fragenkatalogs (Anlage 7 FeV). Der Fragentext selbst ist noch selbst verfasst und ersetzt den amtlichen Fragenkatalog nicht – der kommt dazu, sobald er verfügbar ist."));
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", textAlign: "center", marginTop: 14, lineHeight: 1.5 } }, "Enthält die amtlichen Prüfungsfragen, deren Text im Verkehrsblatt veröffentlicht ist, ergänzt um eigene Übungsfragen. Fragen mit Bild (u.a. Vorfahrt und Verkehrszeichen) fehlen noch – die Abbildungen sind urheberrechtlich geschützt. Ersetzt keine vollständige Prüfungsvorbereitung."));
 }
 // ════════ Fahrschüler-Bereich (öffentlich, Login per Name + PIN) ════════
 // Reine Ansichtskarte für den Schülerbereich: zeigt alle aufgezeichneten Strecken
