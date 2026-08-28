@@ -2596,7 +2596,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.178.0";
+const APP_VERSION = "1.179.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2721,6 +2721,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.179.0", date: "August 2026", changes: [
+            "Neu: Monatsabrechnung für Fahrlehrer unter Auswertung. Je Fahrlehrer Fahrstunden, UE, Umsatz und Vergütung für einen frei wählbaren Monat. Das Vergütungsmodell (fester Betrag je UE oder Anteil am Umsatz) legst du direkt in der Liste fest",
+            "Als Fahrschul-Admin siehst du alle Fahrlehrer, als angestellter Fahrlehrer deine eigene Übersicht - das setzt der Server durch, nicht die Oberfläche",
+            "Wichtig: Das ist eine Abrechnungsgrundlage, keine Lohnabrechnung. Steuern und Sozialabgaben sind nicht berücksichtigt",
+            "Die Stunden werden dem Fahrlehrer des Termins zugerechnet, nicht dem Eigentümer des Schülers - bei geteilten Schülern sind das verschiedene Personen. Nachträglich von Hand erfasste Stunden ohne Termin werden eigens ausgewiesen",
+        ] },
     { v: "1.178.0", date: "August 2026", changes: [
             "Neu: Bestand übernehmen. In der Schülerliste lädst du eine CSV-Datei aus deiner alten Software hoch - die App ordnet die Spalten selbst zu und legt die Schüler im Stapel an. Aus Excel vorher als CSV speichern",
             "Vor dem Anlegen siehst du eine Vorschau: erkannte Spaltenzuordnung (jede Zeile von Hand korrigierbar), eine Stichprobe der ersten Einträge und wie viele Schüler bereits vorhanden sind",
@@ -5492,6 +5498,29 @@ async function fetchSchoolTeacherHours(schoolId) {
     if (error) {
         console.error(error);
         throw new Error(error.message || "Daten konnten nicht geladen werden");
+    }
+    return data || [];
+}
+// Vergütungsmodelle aller Fahrlehrer einer Fahrschule (nur Admin).
+async function fetchVerguetungen(schoolId) {
+    const { data, error } = await sb.rpc("school_verguetung_list", { p_school_id: schoolId });
+    if (error) { console.error(error); return []; }
+    return data || [];
+}
+async function saveVerguetung(teacherId, modell, satz) {
+    const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz: satz == null || satz === "" ? null : Number(satz) });
+    if (error) { console.error(error); throw new Error(error.message || "Konnte nicht gespeichert werden"); }
+}
+// Gefahrene Fahrstunden eines Monats je Fahrlehrer (Monatsabrechnung). Anders als
+// fetchSchoolTeacherHours ordnet die RPC jede Stunde dem EIGENTÜMER DES TERMINS zu, nicht dem
+// des Schülers - bei geteilten Schülern sind das verschiedene Personen, und bei einer
+// Vergütungsabrechnung würde sonst der Falsche bezahlt. Admins bekommen alle Fahrlehrer,
+// angestellte Fahrlehrer nur ihre eigenen Stunden.
+async function fetchSchoolTeacherMonth(schoolId, jahr, monat) {
+    const { data, error } = await sb.rpc("school_teacher_month", { p_school_id: schoolId, p_jahr: jahr, p_monat: monat });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Monatsdaten konnten nicht geladen werden");
     }
     return data || [];
 }
@@ -16209,7 +16238,14 @@ function App() {
             renderAbrechnungBody(),
             canEditSchool && school && school.id && React.createElement(React.Fragment, null,
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Fahrlehrer-Auslastung"),
-                React.createElement(FahrlehrerAuslastung, { schoolId: school.id })));
+                React.createElement(FahrlehrerAuslastung, { schoolId: school.id })),
+            // Monatsabrechnung sieht jeder, der zu einer Fahrschule gehoert - der Admin alle
+            // Fahrlehrer, ein angestellter Fahrlehrer nur sich selbst. Die Einschraenkung setzt
+            // die RPC durch, nicht diese Bedingung hier.
+            school && school.id && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } },
+                    canEditSchool ? "Monatsabrechnung Fahrlehrer" : "Meine Monatsabrechnung"),
+                React.createElement(Monatsabrechnung, { schoolId: school.id, istAdmin: canEditSchool, stdPreis: pricePerHour })));
     }
     // Innerer Inhalt von Statistik OHNE eigenen Seitentitel - siehe renderAuswertung().
     function renderStatistikBody() {
@@ -27994,6 +28030,140 @@ function colorForName(name) {
 // Mehrlehrer-Fahrschulen. Nutzt dieselbe schulweite RPC-Berechtigungsprüfung (Fahrschul-Admin
 // oder zentraler Admin) wie school_exam_stats/Quotenpilot - der Aufrufer hier gated zusätzlich
 // clientseitig auf canEditSchool, damit die RPC für nicht-Admins gar nicht erst versucht wird.
+/* ── Fahrlehrer-Monatsabrechnung ────────────────────────────────────────────────────────────
+   Ausdrücklich eine ABRECHNUNGSGRUNDLAGE, keine Lohnabrechnung: hier stehen Brutto-Basisdaten
+   (Stunden, UE, Umsatz, vereinbarte Vergütung). Steuer- und Sozialversicherungsrecht bleibt
+   bewusst draußen - das gehört in die Lohnbuchhaltung, nicht in eine Fahrschulsoftware.
+
+   Zuordnung: siehe school_teacher_month(). Massgeblich ist der Fahrlehrer des TERMINS, nicht
+   der Eigentümer des Schülers. Stunden ohne Termin (manuell nachgetragen) fallen auf den
+   Schüler-Eigentümer zurück und werden hier eigens ausgewiesen, damit die Zahl nachvollziehbar
+   bleibt statt still zu wandern.
+   verguetung am profiles-Datensatz: { modell: "fest_ue"|"prozent", satz: number }. ── */
+function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
+    const [teacherModelle, setTeacherModelle] = React.useState({});
+    const [modellEdit, setModellEdit] = React.useState(null); // null | {id, name, modell, satz}
+    const ladeModelle = React.useCallback(() => {
+        if (!schoolId || !istAdmin) return;
+        fetchVerguetungen(schoolId).then(rows => {
+            const map = {};
+            (rows || []).forEach(r => { if (r.verguetung && r.verguetung.modell) map[r.teacher_id] = r.verguetung; });
+            setTeacherModelle(map);
+        }).catch(() => { });
+    }, [schoolId, istAdmin]);
+    React.useEffect(() => { ladeModelle(); }, [ladeModelle]);
+    const jetzt = new Date();
+    const vorMonat = new Date(jetzt.getFullYear(), jetzt.getMonth() - 1, 1);
+    const [jahr, setJahr] = React.useState(vorMonat.getFullYear());
+    const [monat, setMonat] = React.useState(vorMonat.getMonth() + 1);
+    const [state, setState] = React.useState({ busy: true, error: "", rows: [] });
+    React.useEffect(() => {
+        if (!schoolId) { setState({ busy: false, error: "", rows: [] }); return; }
+        let on = true;
+        setState(s => ({ ...s, busy: true, error: "" }));
+        fetchSchoolTeacherMonth(schoolId, jahr, monat)
+            .then(rows => { if (on) setState({ busy: false, error: "", rows }); })
+            .catch(e => { if (on) setState({ busy: false, error: e.message || "Fehler beim Laden", rows: [] }); });
+        return () => { on = false; };
+    }, [schoolId, jahr, monat]);
+
+    const monatWechseln = (delta) => {
+        const d = new Date(jahr, monat - 1 + delta, 1);
+        setJahr(d.getFullYear());
+        setMonat(d.getMonth() + 1);
+    };
+    const monatsName = new Date(jahr, monat - 1, 1).toLocaleDateString("de-DE", { month: "long", year: "numeric" });
+
+    const je = {};
+    (state.rows || []).forEach(r => {
+        const id = r.teacher_id;
+        je[id] = je[id] || { name: r.teacher_name || "Unbekannt", stunden: 0, minuten: 0, umsatz: 0, ohneTermin: 0 };
+        const min = Number(r.minutes) || 0;
+        const preis = (r.price != null && r.price !== "") ? Number(r.price) : (Number(stdPreis) || 0);
+        je[id].stunden += 1;
+        je[id].minuten += min;
+        je[id].umsatz += (min / 45) * preis;
+        if (r.zuordnung !== "termin") je[id].ohneTermin += 1;
+    });
+    const liste = Object.keys(je).map(id => {
+        const v = je[id];
+        const modell = (teacherModelle && teacherModelle[id]) || {};
+        const ue = v.minuten / 45;
+        let verguetung = null;
+        if (modell.modell === "fest_ue" && modell.satz != null && modell.satz !== "")
+            verguetung = ue * Number(modell.satz);
+        else if (modell.modell === "prozent" && modell.satz != null && modell.satz !== "")
+            verguetung = v.umsatz * (Number(modell.satz) / 100);
+        return { id, ...v, ue, verguetung, modell };
+    }).sort((a, b) => b.minuten - a.minuten);
+
+    const summeUmsatz = liste.reduce((s, x) => s + x.umsatz, 0);
+    const summeVerg = liste.reduce((s, x) => s + (x.verguetung || 0), 0);
+    const ohneModell = liste.filter(x => x.verguetung == null).length;
+
+    return React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
+            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px" }, onClick: () => monatWechseln(-1), "aria-label": "Vorheriger Monat" }, "‹"),
+            React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, monatsName),
+            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px" }, onClick: () => monatWechseln(1), "aria-label": "Nächster Monat" }, "›")),
+        state.busy
+            ? React.createElement("div", { className: "card", style: { padding: "13px 14px", fontSize: 12.5, color: "var(--muted)" } }, "Lädt…")
+            : state.error
+                ? React.createElement("div", { className: "card", style: { padding: "13px 14px", fontSize: 12.5, color: "#B3362A" } }, state.error)
+                : liste.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "In diesem Monat wurden keine Fahrstunden erfasst.")
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 10 } },
+                            liste.map((x, i) => React.createElement("div", { key: x.id, style: { padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8 } },
+                                    React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 700 } }, x.name),
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } },
+                                        x.verguetung == null ? "–" : eurFmt(x.verguetung))),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
+                                    x.stunden + (x.stunden === 1 ? " Fahrstunde" : " Fahrstunden") + " · " + ueFmt(x.ue) + " UE · Umsatz " + eurFmt(x.umsatz)),
+                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
+                                    x.verguetung == null
+                                        ? "Kein Vergütungsmodell hinterlegt"
+                                        : (x.modell.modell === "fest_ue" ? (eurFmt(x.modell.satz) + " je UE") : (x.modell.satz + " % vom Umsatz")),
+                                    x.ohneTermin > 0 ? (" · " + x.ohneTermin + " Std. ohne Termin, dem Schüler-Fahrlehrer zugeordnet") : ""),
+                                istAdmin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 9px", fontSize: 11.5, marginTop: 6 },
+                                        onClick: () => setModellEdit({ id: x.id, name: x.name, modell: x.modell.modell || "", satz: x.modell.satz == null ? "" : String(x.modell.satz) }) },
+                                    x.verguetung == null ? "Vergütung festlegen" : "Vergütung ändern"))) ),
+                        React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 10, display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
+                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, "Summe"),
+                            React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)" } }, "Umsatz " + eurFmt(summeUmsatz)),
+                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(summeVerg))),
+                        ohneModell > 0 && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px 8px" } },
+                            ohneModell === 1 ? "Für einen Fahrlehrer ist kein Vergütungsmodell hinterlegt - er zählt nicht in die Summe."
+                                             : ("Für " + ohneModell + " Fahrlehrer ist kein Vergütungsmodell hinterlegt - sie zählen nicht in die Summe.")),
+                        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
+                            "Abrechnungsgrundlage, keine Lohnabrechnung: Steuern und Sozialabgaben sind hier nicht berücksichtigt.")),
+        modellEdit && React.createElement("div", { onClick: () => setModellEdit(null), className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.6)", zIndex: 180, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 2 } }, "Vergütung"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, modellEdit.name),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", { id: "verg-modell-label" }, "Modell"),
+                    React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "verg-modell-label", style: { marginBottom: 0 } },
+                        [["", "Keins"], ["fest_ue", "€ je UE"], ["prozent", "% vom Umsatz"]].map(o => React.createElement("button", { key: o[0] || "keins",
+                            className: modellEdit.modell === o[0] ? "on" : "",
+                            onClick: () => setModellEdit(m => ({ ...m, modell: o[0] })) }, o[1])))),
+                modellEdit.modell && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, modellEdit.modell === "fest_ue" ? "Betrag je UE (€)" : "Anteil am Umsatz (%)",
+                    React.createElement("input", { type: "text", inputMode: "decimal", value: modellEdit.satz, autoFocus: true,
+                        onChange: e => setModellEdit(m => ({ ...m, satz: normDecimal(e.target.value) })) }))),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 },
+                        onClick: async () => {
+                            try {
+                                await saveVerguetung(modellEdit.id, modellEdit.modell, modellEdit.satz);
+                                setModellEdit(null);
+                                ladeModelle();
+                            }
+                            catch (e) { showToast(e.message || "Konnte nicht gespeichert werden"); }
+                        } }, "Speichern"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setModellEdit(null) }, "Abbrechen"))));
+}
 function FahrlehrerAuslastung({ schoolId }) {
     const [state, setState] = React.useState({ busy: true, error: "", rows: [] });
     React.useEffect(() => {
