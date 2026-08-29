@@ -2653,7 +2653,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.192.0";
+const APP_VERSION = "1.193.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2780,6 +2780,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.193.0", date: "August 2026", changes: [
+            "Neu im Schülerprofil: „Theorieprüfung – Ersterwerb oder Erweiterung“, direkt unter der Führerscheinklasse. Danach richtet sich die echte Prüfung: Ersterwerb sind 20 Grundstoff- und 10 klassenspezifische Fragen bei 110 Punkten und höchstens 10 Fehlerpunkten, eine Erweiterung nur 10 und 10 bei 72 Punkten und höchstens 6 Fehlerpunkten",
+            "Die Probeprüfung im Fahrschülerbereich richtet sich jetzt danach: Umfang, Bestehensgrenze und alle Texte kommen aus der hinterlegten Prüfungsart. Auch die Lernstand-Einschätzung rechnet mit den richtigen Zahlen - vorher hat sie einem Erweiterungs-Schüler eine Prüfung vorgerechnet, die er so nie schreibt",
+            "Die Sonderregel „zwei falsche 5-Punkte-Fragen bedeuten durchgefallen“ wird nur noch beim Ersterwerb angezeigt. Bei einer Erweiterung liegt die Grenze ohnehin bei 6 Punkten, dort wären zwei solche Fragen schon rechnerisch ein Durchfaller",
+        ] },
     { v: "1.192.0", date: "August 2026", changes: [
             "Bilder sind zurück im Theoriebereich: 250 Fragen mit Verkehrszeichen und Gefahrenszenen sind wieder freigeschaltet. Damit sind auch die beiden bisher leeren Sachgebiete „Vorfahrt, Vorrang“ (50 Fragen) und „Verkehrszeichen“ (40 Fragen) wieder da. Die Bilder sind selbst gezeichnet, nicht die amtlichen - die sind weiterhin lizenzpflichtig. Jede dieser Fragen trägt deshalb den Hinweis „Übungsfrage der Fahrschule“, damit klar bleibt, was amtlich ist und was nicht",
             "Neu: „Meine Probeprüfungen“. Jede abgelegte Probeprüfung wird mit Datum, Uhrzeit, Ergebnis und Fehlerpunkten gespeichert und ist in einem eigenen Bereich abrufbar - mit Zusammenfassung (wie oft abgelegt, wie oft bestanden, bestes Ergebnis) und einem kleinen Verlauf der letzten fünf. Gespeichert wird am Fahrschüler-Konto, die Ergebnisse sind also auch auf einem anderen Gerät da",
@@ -4946,10 +4951,25 @@ function lernReihenfolge(fragen, progress) {
    eigens geschaetzt, weil sie sonst unsichtbar bliebe - man kann rechnerisch unter 10 liegen
    und trotzdem durchfallen.
    Quelle der Regeln: Bewertungskriterien der theoretischen Fahrerlaubnispruefung. */
-const PRUEFUNG_GRUNDSTOFF_ANZAHL = 20;
-const PRUEFUNG_ZUSATZSTOFF_ANZAHL = 10;
-const PRUEFUNG_MAX_FEHLERPUNKTE = 10;
-function pruefungsSchaetzung(fragen, progress) {
+// Zwei Pruefungsarten, unterschiedlicher Umfang und unterschiedliche Bestehensgrenze:
+//   Ersterwerb  30 Fragen (20 Grundstoff + 10 Zusatzstoff), 110 Punkte, max 10 Fehlerpunkte
+//   Erweiterung 20 Fragen (10 Grundstoff + 10 Zusatzstoff),  72 Punkte, max  6 Fehlerpunkte
+// Wer schon eine Fahrerlaubnis hat und erweitert (z.B. von B auf A), bekommt weniger
+// Grundstoff-Fragen, weil der Grundstoff bereits geprueft wurde.
+const PRUEFUNGSREGELN = {
+    ersterwerb:  { grundstoff: 20, zusatzstoff: 10, maxFehler: 10, punkte: 110, label: "Ersterwerb" },
+    erweiterung: { grundstoff: 10, zusatzstoff: 10, maxFehler: 6,  punkte: 72,  label: "Erweiterung" },
+};
+function pruefungsRegeln(ersterwerb) {
+    // Ohne Angabe gilt Ersterwerb: der haeufigere Fall und die strengere Uebung.
+    return ersterwerb === false ? PRUEFUNGSREGELN.erweiterung : PRUEFUNGSREGELN.ersterwerb;
+}
+// Rueckwaertskompatible Namen fuer Stellen, die weiterhin vom Ersterwerb ausgehen.
+const PRUEFUNG_GRUNDSTOFF_ANZAHL = PRUEFUNGSREGELN.ersterwerb.grundstoff;
+const PRUEFUNG_ZUSATZSTOFF_ANZAHL = PRUEFUNGSREGELN.ersterwerb.zusatzstoff;
+const PRUEFUNG_MAX_FEHLERPUNKTE = PRUEFUNGSREGELN.ersterwerb.maxFehler;
+function pruefungsSchaetzung(fragen, progress, ersterwerb) {
+    const R = pruefungsRegeln(ersterwerb);
     if (!fragen || fragen.length === 0) return null;
     const grund = fragen.filter(q => q.klasse === "ALL");
     const zusatz = fragen.filter(q => q.klasse !== "ALL");
@@ -4957,8 +4977,8 @@ function pruefungsSchaetzung(fragen, progress) {
     const mittel = (pool) => pool.length
         ? pool.reduce((sum, q) => sum + (1 - lernStand(q, progress).treffer) * (Number(q.points) || 3), 0) / pool.length
         : 0;
-    const erwartet = Math.round((mittel(grund) * PRUEFUNG_GRUNDSTOFF_ANZAHL
-        + mittel(zusatz) * PRUEFUNG_ZUSATZSTOFF_ANZAHL) * 10) / 10;
+    const erwartet = Math.round((mittel(grund) * R.grundstoff
+        + mittel(zusatz) * R.zusatzstoff) * 10) / 10;
     // Sonderregel: Wahrscheinlichkeit, mindestens zwei 5-Punkte-Fragen falsch zu haben.
     // Erwartungswert der falschen 5-Punkte-Fragen in einer Pruefung, daraus ueber die
     // Poisson-Naeherung P(>=2). Bewusst eine Naeherung und als solche benannt.
@@ -4966,14 +4986,19 @@ function pruefungsSchaetzung(fragen, progress) {
     const anteilFuenfer = fragen.length ? fuenfer.length / fragen.length : 0;
     const fehlerQuoteFuenfer = fuenfer.length
         ? fuenfer.reduce((s, q) => s + (1 - lernStand(q, progress).treffer), 0) / fuenfer.length : 0;
-    const lambda = 30 * anteilFuenfer * fehlerQuoteFuenfer;
+    const lambda = (R.grundstoff + R.zusatzstoff) * anteilFuenfer * fehlerQuoteFuenfer;
     const pZweiFuenfer = 1 - Math.exp(-lambda) * (1 + lambda);
     const gesehen = fragen.filter(q => lernStand(q, progress).gesehen).length;
     const sitzt = fragen.filter(q => lernStand(q, progress).box >= 4).length;
     return {
         erwartet,
-        grenze: PRUEFUNG_MAX_FEHLERPUNKTE,
-        bestehtVoraussichtlich: erwartet <= PRUEFUNG_MAX_FEHLERPUNKTE && pZweiFuenfer < 0.5,
+        grenze: R.maxFehler,
+        regeln: R,
+        // Die Sonderregel "zwei falsche 5-Punkte-Fragen = durchgefallen" ist nur beim
+        // Ersterwerb eine EIGENE Huerde. Bei der Erweiterung liegt die Grenze ohnehin bei 6,
+        // zwei Fuenfer sind dort schon rechnerisch ein Durchfaller.
+        sonderregelGreift: ersterwerb !== false,
+        bestehtVoraussichtlich: erwartet <= R.maxFehler && (ersterwerb === false || pZweiFuenfer < 0.5),
         risikoZweiFuenfer: Math.round(pZweiFuenfer * 100),
         gesehen, sitzt, gesamt: fragen.length,
         grundstoff: grund.length, zusatzstoff: zusatz.length,
@@ -18326,6 +18351,17 @@ function App() {
                         React.createElement("option", { value: "" }, "– Noch nicht gewählt –"),
                         klassen.map(k => React.createElement("option", { key: k, value: k }, k)))),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Bestimmt, welche ADK und Strecken bei diesem Schüler angezeigt werden. Ohne Auswahl gilt Klasse " + DEFAULT_KLASSE + ".")),
+                // Ersterwerb oder Erweiterung: aendert Umfang und Bestehensgrenze der
+                // Theoriepruefung und damit auch die Probepruefung im Fahrschuelerbereich.
+                React.createElement("div", { className: "field" },
+                    React.createElement("label", { id: "field-ersterwerb-label" }, "Theorieprüfung"),
+                    React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "field-ersterwerb-label", style: { marginBottom: 0 } },
+                        React.createElement("button", { className: active.ersterwerb === false ? "" : "on", onClick: () => updateActive({ ersterwerb: true }) }, "Ersterwerb"),
+                        React.createElement("button", { className: active.ersterwerb === false ? "on" : "", onClick: () => updateActive({ ersterwerb: false }) }, "Erweiterung")),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } },
+                        active.ersterwerb === false
+                            ? "Erweiterung: " + PRUEFUNGSREGELN.erweiterung.grundstoff + " Grundstoff- und " + PRUEFUNGSREGELN.erweiterung.zusatzstoff + " klassenspezifische Fragen, " + PRUEFUNGSREGELN.erweiterung.punkte + " Punkte, bestanden bis " + PRUEFUNGSREGELN.erweiterung.maxFehler + " Fehlerpunkte. Gilt, wenn schon eine Fahrerlaubnis vorhanden ist."
+                            : "Ersterwerb: " + PRUEFUNGSREGELN.ersterwerb.grundstoff + " Grundstoff- und " + PRUEFUNGSREGELN.ersterwerb.zusatzstoff + " klassenspezifische Fragen, " + PRUEFUNGSREGELN.ersterwerb.punkte + " Punkte, bestanden bis " + PRUEFUNGSREGELN.ersterwerb.maxFehler + " Fehlerpunkte. Gilt für den ersten Führerschein.")),
                 locations.length > 0 && React.createElement("div", { className: "field" },
                     React.createElement("label", { htmlFor: "field-student-standort" }, "Standort / Filiale"),
                     // Nur der Besitzer darf den Standort ändern - der bestimmt u.a., welche
@@ -26838,6 +26874,9 @@ function TheoryPractice({ code }) {
     // Fragen-Fetch wartet auf einen der beiden Werte, damit nicht erst ungefiltert und dann
     // nochmal gefiltert geladen wird.
     const [myKlasse, setMyKlasse] = React.useState(undefined);
+    // true = Ersterwerb (30 Fragen, max 10 Fehlerpunkte), false = Erweiterung (20 / max 6).
+    // Kommt aus dem Schuelerprofil; ohne Anmeldung bleibt es beim Ersterwerb.
+    const [myErsterwerb, setMyErsterwerb] = React.useState(true);
     const LS_NAME = "v3_sa_name_" + code, LS_PIN = "v3_sa_pin_" + code;
     let loggedInName = "", loggedInPin = "";
     try {
@@ -26854,7 +26893,10 @@ function TheoryPractice({ code }) {
         // Eigene Klasse ermitteln, damit klassenspezifischer Zusatzstoff nicht mit dem anderer
         // Klassen vermischt wird (Grundstoff bleibt über klasse="ALL" serverseitig für alle sichtbar).
         publicStudentOverview(code, loggedInName, loggedInPin)
-            .then(d => setMyKlasse((d && d.student && d.student.klasse) || ""))
+            .then(d => {
+                setMyKlasse((d && d.student && d.student.klasse) || "");
+                setMyErsterwerb(!(d && d.student && d.student.ersterwerb === false));
+            })
             .catch(() => setMyKlasse(""));
     }, [code, loggedIn, loggedInName, loggedInPin]);
     React.useEffect(() => {
@@ -26918,8 +26960,9 @@ function TheoryPractice({ code }) {
     // Reihenfolge bewusst NICHT komplett neu gemischt: die klassenspezifischen Zusatzstoff-Fragen
     // bleiben immer die letzten 10, wie im Aufbau der echten Prüfung.
     function startExam() {
-        const g = shuffled(grundstoffPool).slice(0, Math.min(20, grundstoffPool.length));
-        const z = shuffled(zusatzstoffPool).slice(0, Math.min(10, zusatzstoffPool.length));
+        const R = pruefungsRegeln(myErsterwerb);
+        const g = shuffled(grundstoffPool).slice(0, Math.min(R.grundstoff, grundstoffPool.length));
+        const z = shuffled(zusatzstoffPool).slice(0, Math.min(R.zusatzstoff, zusatzstoffPool.length));
         setQueue([...g, ...z]);
         setQIndex(0);
         setSelected([]);
@@ -27000,7 +27043,9 @@ function TheoryPractice({ code }) {
         }
         const errorPoints = nextAnswers.filter(a => !a.correct).reduce((s, a) => s + a.points, 0);
         const richtig = nextAnswers.filter(a => a.correct).length;
-        const result = { total: nextAnswers.length, errorPoints, passed: errorPoints <= 10, richtig };
+        const R = pruefungsRegeln(myErsterwerb);
+        const result = { total: nextAnswers.length, errorPoints, passed: errorPoints <= R.maxFehler, richtig,
+            art: R.label, grenze: R.maxFehler };
         setExamResult(result);
         if (loggedIn) {
             publicTheoryExamSubmit(code, loggedInName, loggedInPin, result);
@@ -27036,9 +27081,17 @@ function TheoryPractice({ code }) {
         return React.createElement("div", null,
             React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13, marginBottom: 12 }, onClick: () => setScreen("themen") }, "‹ Themen"),
             React.createElement("div", { className: "card", style: { padding: "18px 16px" } },
-                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 8 } }, myKlasse ? ("Probeprüfung Klasse " + myKlasse) : "Probeprüfung"),
-                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 10 } }, "30 Fragen - erst 20 Grundstoff, dann die letzten 10 klassenspezifisch" + (myKlasse ? (" (Zusatzstoff " + myKlasse + ")") : "") + " - angelehnt an den Aufbau der echten Theorieprüfung. Anders als beim Üben gibt es keine sofortige Rückmeldung pro Frage, das Ergebnis siehst du erst am Ende."),
-                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 16 } }, "Bestanden ist die Probeprüfung bei höchstens 10 Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - wie in der echten Prüfung. Die Fragen ohne Bild stammen aus dem amtlichen Katalog, die mit Bild sind Übungsfragen der Fahrschule und entsprechend gekennzeichnet. Das Ergebnis ist eine Orientierung, keine Vorhersage."),
+                (() => { const R = pruefungsRegeln(myErsterwerb); return React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } }, myKlasse ? ("Probeprüfung Klasse " + myKlasse) : "Probeprüfung"),
+                React.createElement("div", { style: { display: "inline-block", fontSize: 10.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase",
+                        color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 6, padding: "3px 8px", marginBottom: 10 } },
+                    R.label),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 10 } },
+                    (R.grundstoff + R.zusatzstoff) + " Fragen - erst " + R.grundstoff + " Grundstoff, dann " + R.zusatzstoff + " klassenspezifisch" + (myKlasse ? (" (Zusatzstoff " + myKlasse + ")") : "") + " - angelehnt an den Aufbau der echten Theorieprüfung. Anders als beim Üben gibt es keine sofortige Rückmeldung pro Frage, das Ergebnis siehst du erst am Ende."),
+                myErsterwerb === false && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55, marginBottom: 10 } },
+                    "Bei dir ist im Fahrschülerprofil eine Erweiterung hinterlegt - du hast also schon eine Fahrerlaubnis. Deshalb weniger Grundstoff-Fragen und eine strengere Grenze. Stimmt das nicht, sag deiner Fahrschule Bescheid."),
+                React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 16 } },
+                    "Bestanden ist die Probeprüfung bei höchstens " + R.maxFehler + " Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - wie in der echten Prüfung. Die Fragen ohne Bild stammen aus dem amtlichen Katalog, die mit Bild sind Übungsfragen der Fahrschule und entsprechend gekennzeichnet. Das Ergebnis ist eine Orientierung, keine Vorhersage.")); })(),
                 examHistory.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12, justifyContent: "space-between" }, onClick: () => setScreen("pruefung_verlauf") },
                     React.createElement("span", null, examHistory.length + " Probeprüfung" + (examHistory.length === 1 ? "" : "en") + " gespeichert"),
                     React.createElement("span", { style: { color: "var(--muted)", fontWeight: 400 } }, "Verlauf ansehen ›")),
@@ -27106,7 +27159,7 @@ function TheoryPractice({ code }) {
             React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", marginBottom: 14, background: r.passed ? "var(--sage-bg)" : "#FDECEA", border: "1.5px solid " + (r.passed ? "var(--sage-deep)" : "#B3362A") } },
                 React.createElement("div", { style: { fontSize: 30, marginBottom: 8 } }, r.passed ? "🎉" : "📚"),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 6, color: r.passed ? "var(--sage-deep)" : "#B3362A" } }, r.passed ? "Bestanden" : "Nicht bestanden"),
-                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)" } }, r.richtig + " / " + r.total + " richtig · " + r.errorPoints + " Fehlerpunkte (max. 10 zum Bestehen)")),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)" } }, r.richtig + " / " + r.total + " richtig · " + r.errorPoints + " Fehlerpunkte (max. " + (r.grenze != null ? r.grenze : PRUEFUNG_MAX_FEHLERPUNKTE) + " zum Bestehen" + (r.art ? ", " + r.art : "") + ")")),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_intro") }, "Neue Probeprüfung"),
             examHistory.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_verlauf") }, "Alle Ergebnisse ansehen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setScreen("themen") }, "Zurück zu den Themen"));
@@ -27231,7 +27284,7 @@ function TheoryPractice({ code }) {
         (() => {
             // Lernstand: keine abstrakte Prozentzahl, sondern die Groesse, um die es in der
             // echten Pruefung geht - erwartete Fehlerpunkte gegen die Grenze von 10.
-            const sch = pruefungsSchaetzung(questions, progress);
+            const sch = pruefungsSchaetzung(questions, progress, myErsterwerb);
             if (!sch) return null;
             // Unter 30 geuebten Fragen ist die Schaetzung nicht aussagekraeftig - sie wuerde nur
             // den Startwert fuer ungesehene Fragen widerspiegeln und eine Genauigkeit vortaeuschen,
@@ -27260,10 +27313,10 @@ function TheoryPractice({ code }) {
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5 } },
                     sch.sitzt + " von " + sch.gesamt + " Fragen sitzen sicher · " + sch.gesehen + " schon geübt"
                     + (faellig > 0 ? " · " + faellig + " zur Wiederholung fällig" : "")),
-                sch.risikoZweiFuenfer >= 20 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", marginTop: 6, lineHeight: 1.45 } },
+                sch.sonderregelGreift && sch.risikoZweiFuenfer >= 20 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", marginTop: 6, lineHeight: 1.45 } },
                     "Achtung: Zwei falsche 5-Punkte-Fragen bedeuten durchgefallen, auch unter 10 Punkten. Dieses Risiko liegt bei dir gerade bei rund " + sch.risikoZweiFuenfer + " Prozent."),
                 React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.45 } },
-                    "Schätzung aus deinem Übungsstand, keine Vorhersage. Die echte Prüfung stellt " + PRUEFUNG_GRUNDSTOFF_ANZAHL + " Grundstoff- und " + PRUEFUNG_ZUSATZSTOFF_ANZAHL + " klassenspezifische Fragen."));
+                    "Schätzung aus deinem Übungsstand, keine Vorhersage. Beim " + sch.regeln.label + " stellt die echte Prüfung " + sch.regeln.grundstoff + " Grundstoff- und " + sch.regeln.zusatzstoff + " klassenspezifische Fragen, bestanden bis " + sch.regeln.maxFehler + " Fehlerpunkte."));
         })(),
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
