@@ -6633,8 +6633,8 @@ async function publicProposeAppointment(code, p_start, p_end, p_name, p_note, p_
 // (students.data.instantBookOptIn) und die Zeit innerhalb der Arbeitszeiten liegt - sonst genau
 // derselbe Terminvorschlag-Fallback wie bisher. Alle Prüfungen laufen serverseitig in der RPC
 // (siehe Migration create_public_book_or_propose_appointment), der Client zeigt nur das Ergebnis.
-async function publicBookOrProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin) {
-    const { data, error } = await sbPublic.rpc("public_book_or_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null });
+async function publicBookOrProposeAppointment(code, p_start, p_end, p_name, p_note, p_pin, p_art) {
+    const { data, error } = await sbPublic.rpc("public_book_or_propose_appointment", { code, p_start, p_end, p_name: p_name || null, p_note: p_note || null, p_pin: p_pin || null, p_art: p_art || null });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -6678,6 +6678,22 @@ async function publicStudentOverview(code, name, pin) {
         throw new Error(error.message);
     }
     return (data && data[0]) || null;
+}
+// Sonderfahrten-Stand des eingeloggten Schülers (Soll, bereits gefahrene + bereits angefragte/
+// bestätigte UE je Art, ob eine durchgehende 90-Minuten-Fahrt schon dabei war) - Grundlage für
+// die Hinweise beim Buchen einer Sonderfahrt (Doppelstunden-Pflicht, Übersoll-Warnung).
+async function publicStudentSonderfahrtenStatus(code, name, pin) {
+    try {
+        const { data, error } = await sbPublic.rpc("public_student_sonderfahrten_status", { code, p_name: name, p_pin: pin });
+        if (error) {
+            console.warn("public_student_sonderfahrten_status nicht verfügbar:", error.message);
+            return null;
+        }
+        return Array.isArray(data) ? data : [];
+    }
+    catch (e) {
+        return null;
+    }
 }
 // Zahlstatus des Schülers für den Guthaben-Modus: { modus: "aus"|"hinweis"|"deckung", offen: number }.
 // Bewusst eine eigene RPC statt public_student_overview zu erweitern - deren Rückgabetyp zu
@@ -28588,6 +28604,13 @@ function BookingPage({ code, appMode, onLogout }) {
         return () => document.removeEventListener("keydown", onEsc);
     }, [form]);
     const [howtoOpen, setHowtoOpen] = React.useState(false); // Anleitung auf-/zuklappbar
+    // Sonderfahrten-Stand des eingeloggten Schülers (Soll/Ist je Art, Doppelstunden-Pflicht) -
+    // geladen, sobald das Buchungsformular aufgeht und ein PIN vorliegt. null = nicht eingeloggt
+    // oder (noch) nicht geladen; dann bleibt die Art-Auswahl ohne persönliche Hinweise nutzbar.
+    // Bewusst hier oben deklariert, VOR den early returns unten (info===undefined/null) - ein Hook
+    // nach einem bedingten Return würde je nach Ladezustand mal aufgerufen, mal nicht, und React
+    // wirft dann "Rendered more hooks than during the previous render" (Fehler #310).
+    const [sfStatus, setSfStatus] = React.useState(null);
     // Chat-Assistent - auf der öffentlichen Buchungsseite UND in der App gleichermaßen.
     // Beantwortet Standardfragen automatisch, ohne dass jemand ans Telefon muss. Ist ein
     // Schüler eingeloggt (v3_sa_name_/v3_sa_pin_ liegen im localStorage), schickt der Client
@@ -28774,11 +28797,24 @@ function BookingPage({ code, appMode, onLogout }) {
         const vn = parts.length ? parts[0] : "";
         const nn = parts.length > 1 ? parts.slice(1).join(" ") : "";
         setForm({ vorname: vn, nachname: nn, note: "",
-            slots: [{ date: dateStr || ymd(new Date()), start: "09:00", end: "10:00" }] });
+            slots: [{ date: dateStr || ymd(new Date()), start: "09:00", end: "10:00", art: "" }] });
         setErr("");
+        setSfStatus(null);
+        let pin = "";
+        try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
+        // myName (Geräte-Namensgedächtnis für die Terminliste) und der Name aus dem PIN-Login
+        // ("Mein Fortschritt") sind zwei getrennte Werte - außerhalb appMode wird myName nicht
+        // aus dem Login übernommen. Für die persönlichen Sonderfahrten-Hinweise zählt der
+        // eingeloggte Name, daher hier explizit auf beide Quellen zurückfallen.
+        let loginName = "";
+        try { loginName = localStorage.getItem("v3_sa_name_" + code) || ""; } catch (e) { }
+        const personName = myName.trim() || loginName.trim();
+        if (personName && pin) {
+            publicStudentSonderfahrtenStatus(code, personName, pin).then(setSfStatus);
+        }
     }
     function addSlot() {
-        setForm(f => { var _a; return ({ ...f, slots: [...f.slots, { date: ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date()), start: "09:00", end: "10:00" }] }); });
+        setForm(f => { var _a; return ({ ...f, slots: [...f.slots, { date: ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date()), start: "09:00", end: "10:00", art: "" }] }); });
     }
     function removeSlot(i) {
         setForm(f => ({ ...f, slots: f.slots.filter((_, idx) => idx !== i) }));
@@ -28909,7 +28945,7 @@ function BookingPage({ code, appMode, onLogout }) {
         for (const s of form.slots) {
             try {
                 const startISO = combineDT(s.date, s.start);
-                const res = await publicBookOrProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin);
+                const res = await publicBookOrProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin, s.art || null);
                 results.push({ ok: true, s, status: res && res.status });
                 newMine.push(startISO);
             }
@@ -28930,6 +28966,8 @@ function BookingPage({ code, appMode, onLogout }) {
                     reason = "ohne Vor- und Nachname nicht möglich";
                 else if (/TOOMANY/i.test(msg))
                     reason = "heute sind schon sehr viele Anfragen eingegangen - bitte morgen erneut";
+                else if (/INVALID_ART/i.test(msg))
+                    reason = "unbekannte Fahrstunden-Art";
                 results.push({ ok: false, s, reason, unpaid: /UNPAID/i.test(msg) });
             }
         }
@@ -29340,6 +29378,32 @@ function BookingPage({ code, appMode, onLogout }) {
                                     " Fahrstunde",
                                     n > 1 ? "n" : "");
                             }));
+                        })(),
+                        (() => {
+                            // Sonderfahrt-Auswahl: nur informativ (kein Hard-Block) - der Fahrlehrer
+                            // bestätigt Sonderfahrt-Anfragen ohnehin immer manuell (siehe
+                            // public_book_or_propose_appointment, p_art erzwingt "pending"), sieht die
+                            // gleiche Bilanz dort und kann Dauer/Art vor der Bestätigung noch korrigieren.
+                            // sfStatus ist nur gesetzt, wenn der Schüler eingeloggt ist (Name+PIN) - ohne
+                            // ihn bleibt die Art-Auswahl nutzbar, nur ohne die persönlichen Hinweise.
+                            const artOptions = [{ code: "", label: "Normale Fahrstunde" }].concat(SONDERFAHRT_ARTEN.map(a => ({ code: a.code, label: a.label })));
+                            const toMin = (t) => { const [h, m] = (t || "0:0").split(":").map(Number); return h * 60 + m; };
+                            const slotUe = (s.end ? Math.max(0, toMin(s.end) - toMin(s.start || "09:00")) : 45) / 45;
+                            const chosen = s.art && sfStatus ? sfStatus.find(x => x.art_code === s.art) : null;
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("div", { className: "field", style: { marginTop: 10, marginBottom: 0 } },
+                                    React.createElement("label", null, "Art"),
+                                    React.createElement("div", { style: { display: "flex", gap: 7, overflowX: "auto", paddingBottom: 3, marginTop: 6 } }, artOptions.map(opt => {
+                                        const on = (s.art || "") === opt.code;
+                                        return React.createElement("button", { key: opt.code || "normal", onClick: () => updateSlot(i, { art: opt.code }),
+                                                style: { flexShrink: 0, padding: "8px 13px", borderRadius: 9, border: "1.5px solid " + (on ? "var(--orange)" : "var(--line)"),
+                                                    background: on ? "var(--orange-soft)" : "var(--card)", fontSize: 13, fontWeight: 700,
+                                                    color: on ? "var(--orange-deep)" : "var(--ink)" } }, opt.label);
+                                    }))),
+                                chosen && !chosen.laenge_ok && React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
+                                    "Für " + chosen.label + " fehlt dir noch eine durchgehende 90-Minuten-Fahrt (Doppelstunde), wie gesetzlich vorgeschrieben. Wähle dafür am besten „2 Fahrstunden“ oben."),
+                                chosen && (chosen.total_ue + slotUe) > chosen.soll && React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
+                                    "Für " + chosen.label + " hättest du mit dieser Fahrt " + (chosen.total_ue + slotUe).toFixed(2).replace(".", ",") + " von " + chosen.soll + " UE - mehr als vorgeschrieben. Vielleicht lieber eine andere Sonderfahrt-Art wählen?"));
                         })(),
                         (() => {
                             const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
