@@ -10491,16 +10491,21 @@ function App() {
         setAssignLocBusy(true);
         try {
             const zielIds = new Set(ziel.map(s => s.id));
-            const updated = (students || []).map(s => zielIds.has(s.id) ? { ...s, location_id: validMyLocationId } : s);
-            // In der Datenbank speichern
-            for (const s of updated) {
-                if (zielIds.has(s.id)) {
-                    await dbUpdate(s, ["location_id"]);
-                }
+            // In der Datenbank speichern - dbUpdate patcht ohnehin nur das genannte Feld.
+            for (const s of ziel) {
+                await dbUpdate({ ...s, location_id: validMyLocationId }, ["location_id"]);
             }
-            setStudents(updated);
-            if (uid)
-                saveCache(uid, updated);
+            // Funktional gegen den JETZT aktuellen State patchen statt am Ende bedingungslos mit
+            // dem vor der (potenziell mehrere Sekunden dauernden) Speicher-Schleife berechneten
+            // Snapshot zu überschreiben - sonst würden zwischenzeitliche Änderungen (Hintergrund-
+            // Reload, Kollegen-Änderung an einem geteilten Schüler) hier stillschweigend verworfen.
+            let finalList = null;
+            setStudents(prev => {
+                finalList = (prev || []).map(s => zielIds.has(s.id) ? { ...s, location_id: validMyLocationId } : s);
+                return finalList;
+            });
+            if (uid && finalList)
+                saveCache(uid, finalList);
             showFlash("✓ " + ziel.length + " Schüler aktualisiert");
         }
         catch (e) {
@@ -12238,6 +12243,14 @@ function App() {
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
         let count = 0, skipped = 0, skippedClash = 0;
+        // appts ist die beim Render fixierte Konstante und wird waehrend dieser Schleife nicht
+        // aktualisiert, obwohl vorherige Durchlaeufe bereits neue Termine per addAppt() angelegt
+        // haben (der dortige setAppts() loest zwar einen Re-Render aus, die hier noch laufende
+        // Funktion haelt aber weiter die beim Start erfasste, jetzt veraltete Closure). localAppts
+        // faengt die in DIESEM Importlauf bereits angelegten Termine zusaetzlich ein, damit
+        // findOverlaps() auch gegen sie prueft - sonst kann derselbe, zweimal erkannte Termin
+        // doppelt angelegt werden (siehe Kommentar unten am Aufruf).
+        let localAppts = appts;
         for (const it of chosen) {
             const startHM = normHM(it.start);
             if (!startHM) {
@@ -12258,13 +12271,18 @@ function App() {
             // Bestätigungsdialoge nacheinander keine brauchbare UX wären). Fehlten hier bisher
             // komplett, der Import konnte dadurch stillschweigend Doppelbuchungen anlegen.
             const mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
+            // limitProblem() liest appts intern weiter aus der beim Funktionsstart erfassten
+            // Closure (nicht als Parameter) - kann daher Termine, die im selben Importlauf gerade
+            // erst angelegt wurden, für die Tages-/Wochenlimit-Prüfung nicht berücksichtigen.
+            // findOverlaps() bekommt appts dagegen als Parameter und wird deshalb unten bewusst
+            // mit dem mitwachsenden localAppts statt der veralteten Konstante aufgerufen.
             const lp = limitProblem(it.date, mins, null, stu ? stu.id : null);
-            const clash = !lp && findOverlaps(appts, start.toISOString(), end.toISOString(), null);
+            const clash = !lp && findOverlaps(localAppts, start.toISOString(), end.toISOString(), null);
             if (lp || (clash && clash.length)) {
                 skippedClash++;
                 continue;
             }
-            await addAppt({
+            const created = await addAppt({
                 student_id: stu ? stu.id : null,
                 title: stu ? ((stu.vorname || "") + " " + (stu.name || "")).trim() : (it.rawText || "Termin"),
                 start_at: start.toISOString(),
@@ -12272,7 +12290,10 @@ function App() {
                 status: "confirmed",
                 note: "",
             });
-            count++;
+            if (created) {
+                localAppts = [...localAppts, created];
+                count++;
+            }
         }
         setCalImport(null);
         setView("kalender");
@@ -15398,7 +15419,12 @@ function App() {
             React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 13px", fontSize: 13 }, onClick: () => setView("liste") }, "Wechseln"));
     }
     function studentNoteCard() {
-        return React.createElement("div", { className: "card", style: { padding: "10px 13px", marginBottom: 12 } },
+        // key: active.id erzwingt einen Remount des Textarea bei Schülerwechsel - ohne ihn
+        // behält React bei einem reinen active-Wechsel (View bleibt gleich, z.B. via KI-Helfer)
+        // den DOM-Knoten und damit den alten defaultValue bei, ein versehentlicher Blur würde
+        // dann die Notiz des FALSCHEN Schülers überschreiben. Gleiches Muster wie an anderen
+        // Stellen im File (key: active.id / active.id + "-begl").
+        return React.createElement("div", { key: active.id, className: "card", style: { padding: "10px 13px", marginBottom: 12 } },
             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em",
                     textTransform: "uppercase", color: "var(--orange-deep)", display: "block", marginBottom: 5 } }, "Letzte Stunde / weitermachen mit"),
             React.createElement("textarea", { rows: 2, defaultValue: active.lastNote || "", onBlur: e => { if (e.target.value !== (active.lastNote || ""))
@@ -16685,11 +16711,25 @@ function App() {
             showToast("Vertrag konnte nicht erstellt werden:\n" + e.message);
             return;
         }
-        const lastPkg = (active.packages && active.packages.length) ? active.packages[active.packages.length - 1] : null;
-        const c = { id: uniqueId("vtr"), number, date: ymd(new Date()),
-            klasse: active.klasse || DEFAULT_KLASSE, priceUE: price,
-            packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
-        updateActive({ contracts: [...(active.contracts || []), c] });
+        // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
+        // ...patch}), baut auf dem vor den Confirm-Dialogen/RPC-await eingefangenen, jetzt
+        // veralteten "active" auf) - sonst würden während der Wartezeit an diesem Schüler
+        // vorgenommene Änderungen (neue Fahrstunde, Zahlung, paralleler Kollege) hier
+        // stillschweigend verworfen. Gleiches Muster wie printReceipt()/confirmInvoice() oben.
+        let patchedStudent = null, c = null;
+        setStudents(prev => (prev || []).map(s => {
+            if (s.id !== active.id)
+                return s;
+            const lastPkg = (s.packages && s.packages.length) ? s.packages[s.packages.length - 1] : null;
+            c = { id: uniqueId("vtr"), number, date: ymd(new Date()),
+                klasse: s.klasse || DEFAULT_KLASSE, priceUE: price,
+                packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
+            patchedStudent = { ...s, contracts: [...(s.contracts || []), c] };
+            return patchedStudent;
+        }));
+        if (!patchedStudent)
+            return;
+        scheduleSave(patchedStudent);
         setContractPreview(c);
         doPrint("contract");
     }
@@ -16727,7 +16767,18 @@ function App() {
         }
         if (!await askConfirm({ message: "Vertrag " + c.number + " wirklich löschen?" }))
             return;
-        updateActive({ contracts: (active.contracts || []).filter(x => x.id !== c.id) });
+        // Funktional gegen den aktuellen Datensatz statt updateActive() - gleiches Muster wie
+        // createContract(): das vor dem Confirm-Dialog eingefangene "active" kann durch die
+        // Wartezeit auf die Nutzerbestätigung veraltet sein.
+        let patchedStudent = null;
+        setStudents(prev => (prev || []).map(s => {
+            if (!active || s.id !== active.id)
+                return s;
+            patchedStudent = { ...s, contracts: (s.contracts || []).filter(x => x.id !== c.id) };
+            return patchedStudent;
+        }));
+        if (patchedStudent)
+            scheduleSave(patchedStudent);
     }
     // ── Zahlungserinnerungen ──
     // Stufe 1: freundliche Erinnerung · Stufe 2: Zahlungserinnerung · Stufe 3+: bestimmtere Mahnung.
@@ -18145,7 +18196,13 @@ function App() {
             const c = v && (v.costs || []).find(x => x.id === costId);
             if (!await askConfirm({ message: (c ? c.category + " (" + eurFmt(c.amount) + ")" : "Dieser Kostenposten") + " wirklich löschen?" }))
                 return;
-            saveVehicles(vehicles.map(x => x.id === vehId ? { ...x, costs: (x.costs || []).filter(y => y.id !== costId) } : x));
+            // Funktional gegen den aktuellen Schul-Datensatz statt gegen die vor dem Confirm-
+            // Dialog eingefangenen Closure-Variablen "vehicles"/"school" (saveVehicles() baut
+            // sonst {...school, vehicles} auf einem veralteten "school" auf) - sonst würden
+            // während der Wartezeit vorgenommene Änderungen (z.B. durch einen zweiten Admin)
+            // hier stillschweigend verworfen. writeSchool() unterstützt genau dafür bereits
+            // einen funktionalen Updater (siehe dessen Definition).
+            writeSchool(prev => prev && ({ ...prev, vehicles: (prev.vehicles || []).map(x => x.id === vehId ? { ...x, costs: (x.costs || []).filter(y => y.id !== costId) } : x) }));
         }
         function setTuvDate(vehId, date) {
             saveVehicles(vehicles.map(v => v.id === vehId ? { ...v, tuvDate: date } : v));
@@ -22252,7 +22309,11 @@ function App() {
         if (!active && !preismeldungPreview && !voucherPrint)
             return null;
         return React.createElement("div", { className: "print-sheet" },
-            React.createElement("div", { className: "ps-detail" },
+            // Preismeldung/Gutschein duerfen laut Guard oben auch ohne "active" gedruckt werden -
+            // der komplette ps-detail-Block (Ausbildungsdiagrammkarte) dereferenziert active.xxx
+            // aber ungeschuetzt und muss deshalb selbst nochmal auf "active" geprueft werden, sonst
+            // crasht der erste Gutschein-/Preismeldung-Druck einer Fahrschule ohne Schueler.
+            active && React.createElement("div", { className: "ps-detail" },
                 React.createElement("div", { className: "ps-head" },
                     React.createElement("img", { src: logoFor(school), alt: "" }),
                     React.createElement("div", null,
@@ -22858,6 +22919,12 @@ function App() {
                 new Date().toLocaleDateString("de-DE")));
     }
     function friendlySheet() {
+        // Gleicher Guard wie nachweisSheet() & Co. - printSheet() ruft diese Funktion
+        // unconditional auf, auch wenn nur ein Gutschein/eine Preismeldung ohne aktiven Schüler
+        // gedruckt wird (siehe dortiger Kommentar). Ohne diesen Guard crasht genau dieser Fall
+        // weiterhin, nur einen Funktionsaufruf tiefer als der ps-detail-Block.
+        if (!active)
+            return null;
         const adkPct = calcLern(active.items, tplFor(active.klasse).adk, active);
         const strPct = calcBack(active, tplFor(active.klasse).strecken);
         const gesamt = Math.max(adkPct, strPct);
@@ -25931,7 +25998,14 @@ function bfRecStart(onFehler) {
             }
             if (location)
                 punkt(location.latitude, location.longitude);
-        }).then(id => { bfRec.nativeId = id; });
+        }).then(id => { bfRec.nativeId = id; }).catch(e => {
+            // Lehnt addWatcher() selbst ab (statt den Fehler ueber den Callback zu melden, z.B.
+            // weil das native Plugin das Watching aus Plattformgruenden gar nicht starten
+            // konnte), blieb bfRec.aktiv bisher unbemerkt auf true stehen - die UI zeigte
+            // weiterlaufend "zeichnet auf", ohne dass je ein GPS-Punkt erfasst wurde.
+            onFehler("Standortaufzeichnung konnte nicht gestartet werden" + (e && e.message ? ":\n" + e.message : "."));
+            bfRecStop();
+        });
     }
     else {
         bfRec.watchId = navigator.geolocation.watchPosition(pos => punkt(pos.coords.latitude, pos.coords.longitude), err => {
