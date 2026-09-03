@@ -6567,20 +6567,19 @@ async function uploadVideo(uid, schoolId, file, title, category, onProgress) {
     return data;
 }
 async function deleteVideo(video) {
-    // Rückgabewert jetzt ausgewertet (vorher komplett ignoriert) - die zugehörige Storage-Policy
-    // wurde an dieselbe Berechtigung wie das Löschen der DB-Zeile angeglichen (schulweites Video:
-    // jeder Fahrlehrer derselben Schule darf es entfernen), ein Fehlschlag ist damit die Ausnahme
-    // (z.B. Netzwerkfehler) statt des Regelfalls bei schulweiten Videos fremder Kollegen.
-    const { error: storageError } = await sb.storage.from("videos").remove([video.storage_path]);
-    if (storageError)
-        console.error("Video-Datei konnte nicht aus dem Storage entfernt werden:", storageError);
+    // Erst die DB-Zeile löschen, danach die Storage-Datei: schlägt der DB-Delete fehl, bleibt
+    // nur eine harmlose verwaiste Datei im Storage übrig - statt einer toten DB-Zeile, die
+    // weiter in der Bibliothek erscheint und beim Abspielen für andere nur einen Fehler zeigt.
     const { error } = await sb.from("videos").delete().eq("id", video.id);
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
-    if (storageError)
+    const { error: storageError } = await sb.storage.from("videos").remove([video.storage_path]);
+    if (storageError) {
+        console.error("Video-Datei konnte nicht aus dem Storage entfernt werden:", storageError);
         showToast("Video aus der Liste entfernt, die Datei selbst konnte aber nicht gelöscht werden. Bitte bei wiederholtem Auftreten den Support kontaktieren.");
+    }
 }
 function videoPublicUrl(path) {
     const { data } = sb.storage.from("videos").getPublicUrl(path);
@@ -8374,6 +8373,7 @@ function Splash({ text }) {
             React.createElement("div", { style: { fontSize: 12, color: "rgba(255,255,255,.45)", textAlign: "center", marginTop: 5, letterSpacing: ".1em", textTransform: "uppercase" } }, "Deine Fahrschule. Einfach digital.")),
         React.createElement("div", { style: { display: "flex", gap: 7, marginTop: 8 } }, [0, 1, 2].map(i => React.createElement("div", { key: i, style: { width: 7, height: 7, borderRadius: "50%", background: "rgba(255,255,255,.25)",
                 animation: `splash-dot 1.2s ${i * 0.2}s ease-in-out infinite` } }))),
+        text && React.createElement("div", { style: { fontSize: 12.5, color: "rgba(255,255,255,.55)", textAlign: "center", marginTop: 4 } }, text),
         React.createElement("style", null, `
       @keyframes splash-dot{0%,80%,100%{opacity:.25;transform:scale(.8)}40%{opacity:1;transform:scale(1)}}
       .splash-in>*{animation:splash-up .4s cubic-bezier(0.23,1,0.32,1) both}
@@ -8858,6 +8858,10 @@ const STUDENT_I18N = {
         strecke_singular: " kaydedilen güzergah · toplam ", strecke_plural: " kaydedilen güzergah · toplam ",
         verbergen: "Gizle", anzeigen: "Göster", fahrstunde_fallback: "Direksiyon dersi",
         keine_strecke: "Bu direksiyon dersleri için henüz güzergah kaydedilmedi.",
+        reflect_title: "Ders senin için nasıldı?", reflect_hint: "Kendini kısaca değerlendir - eğitmeninin değerlendirmesini hemen ardından göreceksin.",
+        reflect_note_placeholder: "Dikkatini çeken bir şey oldu mu? (isteğe bağlı)", reflect_submit: "Değerlendirmeyi gönder",
+        reflect_done_title: "Senin değerlendirmen", reflect_vs_teacher: "Eğitmen değerlendirmesi",
+        reflect_submitted: "Teşekkürler! Değerlendirmen kaydedildi.", reflect_error: "Kaydedilemedi. Lütfen tekrar dene.",
         meine_termine: "Randevularım",
         keine_termine: "Senin için henüz randevu girilmedi.",
         anstehend: "Yaklaşan", verlauf: "Geçmiş", vergangene_termine: "{n} geçmiş randevu",
@@ -8919,6 +8923,10 @@ const STUDENT_I18N = {
         strecke_singular: " записанный маршрут · всего ", strecke_plural: " записанных маршрутов · всего ",
         verbergen: "Скрыть", anzeigen: "Показать", fahrstunde_fallback: "Занятие по вождению",
         keine_strecke: "Для этих занятий маршрут ещё не был записан.",
+        reflect_title: "Как прошло занятие для тебя?", reflect_hint: "Кратко оцени себя сам - оценку инструктора ты увидишь сразу после этого.",
+        reflect_note_placeholder: "Что тебе запомнилось? (необязательно)", reflect_submit: "Отправить самооценку",
+        reflect_done_title: "Твоя самооценка", reflect_vs_teacher: "Оценка инструктора",
+        reflect_submitted: "Спасибо! Твоя самооценка сохранена.", reflect_error: "Не удалось сохранить. Попробуй ещё раз.",
         meine_termine: "Мои записи",
         keine_termine: "Для тебя пока не назначено ни одной записи.",
         anstehend: "Предстоящие", verlauf: "История", vergangene_termine: "{n} прошедших записей",
@@ -9714,6 +9722,10 @@ function App() {
     const [vorlageKlasse, setVorlageKlasse] = useState(DEFAULT_KLASSE); // welche Führerscheinklasse gerade im Vorlagen-Editor bearbeitet wird
     const [drag, setDrag] = useState(null); // {type:'sec'|'item', si, ii, overSi, overIi, y}
     const dragRef = useRef(null);
+    // Klasse+Art (vorlageKlasse:vorlageKind), die im Vorlagen-Editor gerade sichtbar ist - wird bei jedem
+    // renderVorlage()-Aufruf aktualisiert. startDrag() vergleicht damit beim Loslassen, ob der Nutzer
+    // währenddessen die Klasse/Art gewechselt hat (siehe startDrag()-Kommentar dort).
+    const vorlageDragKeyRef = useRef(null);
     const [showArchived, setShowArchived] = useState(false);
     const [printChoice, setPrintChoice] = useState(false);
     const [invoiceDraft, setInvoiceDraft] = useState(null); // null | {rows:[{key,label,amount,date,kind,idx/id}], selected:[key,...], note}
@@ -14256,6 +14268,10 @@ function App() {
             setSaved(true);
         }
         catch (e) {
+            // Speichern fehlgeschlagen: optimistische Änderung zurücknehmen, damit die Liste zur
+            // Datenbank passt (gleiches Rollback-Muster wie in removeAppt()).
+            if (current)
+                setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Änderung fehlgeschlagen:\n" + e.message);
         }
         finally {
@@ -17220,8 +17236,17 @@ function App() {
         });
 
         const passedPraxis = allOwn.filter(s => (s.exams || []).some(e => e.art === "praxis" && e.passed));
+        // Nur Fahrstunden BIS zum Datum der bestandenen Praxisprüfung zählen, wie die Kachel es
+        // beschriftet - spätere Einträge (Auffrischung, Nacherfassung) sollen den Schnitt nicht
+        // unbegrenzt nach oben verfälschen. Fahrstunden ohne Datum werden weiter mitgezählt (wie
+        // bisher), da sich für sie nicht beweisen lässt, dass sie nach der Prüfung liegen.
         const avgUE = passedPraxis.length
-            ? passedPraxis.reduce((sum, s) => sum + ((s.drivenLessons || []).reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0) / 45), 0) / passedPraxis.length
+            ? passedPraxis.reduce((sum, s) => {
+                const passDate = (s.exams || []).filter(e => e.art === "praxis" && e.passed).map(e => e.date).sort()[0];
+                const minutes = (s.drivenLessons || []).filter(l => !passDate || !l.date || l.date <= passDate)
+                    .reduce((a, l) => a + (parseInt(l.minutes, 10) || 0), 0);
+                return sum + minutes / 45;
+            }, 0) / passedPraxis.length
             : null;
 
         const thisMonthKey = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
@@ -20079,9 +20104,11 @@ function App() {
         if (!await askConfirm({ message: 'Zahlung von ' + acc.email + ' als heute erhalten markieren?' }))
             return;
         try {
-            const today = ymd(new Date());
-            await adminSetSubscription(acc.id, { mark_paid_today: true });
-            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_last_paid: today } : a) } : prev);
+            // Serverseitig (Europe/Berlin) gesetztes Datum aus der Antwort übernehmen statt eines
+            // lokal berechneten - gleiches Muster wie bei markOwnPaymentDone().
+            const profile = await adminSetSubscription(acc.id, { mark_paid_today: true });
+            const paidDate = (profile && profile.subscription_last_paid) || ymd(new Date());
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_last_paid: paidDate } : a) } : prev);
         }
         catch (e) {
             showToast("Konnte nicht gespeichert werden:\n" + e.message);
@@ -20135,8 +20162,11 @@ function App() {
     }
     function openTeachers(sc) {
         setAdminTeachers({ school: sc, list: null });
-        adminFetchTeachers(sc.id).then(list => setAdminTeachers({ school: sc, list }))
-            .catch(e => { showToast("Fahrlehrer konnten nicht geladen werden:\n" + e.message); setAdminTeachers(null); });
+        // Funktionales setState prüft beim Auflösen den TATSÄCHLICH aktuellen State, nicht nur
+        // eine separat mitgeführte Variable - verhindert, dass eine spät eintreffende Antwort für
+        // eine inzwischen verlassene/geschlossene Fahrschule die Anzeige überschreibt.
+        adminFetchTeachers(sc.id).then(list => setAdminTeachers(prev => (prev && prev.school.id === sc.id) ? { school: sc, list } : prev))
+            .catch(e => { showToast("Fahrlehrer konnten nicht geladen werden:\n" + e.message); setAdminTeachers(prev => (prev && prev.school.id === sc.id) ? null : prev); });
     }
     // Schulweite Liste aller unterschriebenen Leistungen öffnen (für den Fahrschul-Admin)
     function openSchoolLeistungen() {
@@ -20432,10 +20462,13 @@ function App() {
                 adminFetchTeacherTemplate(teacher.id),
                 fetchSchoolAdminTemplate(schoolId, teacher.id),
             ]);
-            setAdminTeacherStudents({ teacher, list, tpl, tplFallback });
+            // Stale-Response-Guard: während des await kann der Dialog geschlossen oder ein anderer
+            // Fahrlehrer geöffnet worden sein - dann NICHT mehr überschreiben (State-Check statt
+            // blindem setState, gleiche Technik wie bei setContractPreview() weiter oben).
+            setAdminTeacherStudents(prev => (prev && prev.teacher.id === teacher.id) ? { teacher, list, tpl, tplFallback } : prev);
         }
         catch (e) {
-            setAdminTeacherStudents({ teacher, list: [], error: e.message });
+            setAdminTeacherStudents(prev => (prev && prev.teacher.id === teacher.id) ? { teacher, list: [], error: e.message } : prev);
         }
     }
     async function adminLogoFile(e, sc) {
@@ -22142,6 +22175,7 @@ function App() {
     function renderVorlage() {
         const kind = vorlageKind; // "adk" | "strecken"
         const vk = vorlageKlasse || DEFAULT_KLASSE;
+        vorlageDragKeyRef.current = vk + ":" + kind;
         const list = kind === "adk" ? tplFor(vk).adk : tplFor(vk).strecken;
         const isStrecken = kind === "strecken";
         function commit(newList) {
@@ -22204,6 +22238,7 @@ function App() {
         function startDrag(e, type, si, ii) {
             e.preventDefault();
             e.stopPropagation();
+            const myKey = vorlageDragKeyRef.current; // Klasse+Art beim Drag-Start
             dragRef.current = { type, si, ii, overIndex: null };
             setDrag({ type, si, ii, overIndex: null });
             const move = (ev) => {
@@ -22240,7 +22275,10 @@ function App() {
                 window.removeEventListener("touchmove", move);
                 window.removeEventListener("touchend", up);
                 const d = dragRef.current;
-                if (d && d.overIndex != null) {
+                // renderVorlage() wird bei jedem Render neu aufgerufen - hat der Nutzer während des Ziehens
+                // die Klasse/Art gewechselt, zeigen reorderSec/reorderItem/commit hier noch auf die alte
+                // Vorlage. Nur committen, wenn beim Loslassen noch dieselbe Klasse/Art sichtbar ist.
+                if (d && d.overIndex != null && vorlageDragKeyRef.current === myKey) {
                     if (d.type === "sec")
                         reorderSec(d.si, d.overIndex);
                     else
@@ -28023,15 +28061,22 @@ function StudentArea({ code, info, appMode }) {
             return;
         }
         setWlBusy(true);
+        // Session-Wächter (siehe claimOffer() im selben Bereich): verhindert, dass eine spät
+        // eintreffende Antwort die Anzeige eines inzwischen anderen eingeloggten Schülers auf
+        // einem geteilten Gerät mit den Wunschlisten-Werten des vorherigen Schülers überschreibt.
+        const mySession = sessionIdRef.current;
         try {
             const ok = await publicStudentSetWunschliste(code, name.trim(), pin.trim(), wlActive, wlWeekdays, wlVon, wlBis);
             if (!ok)
                 throw new Error();
-            setWlSaved(true);
-            setData(cur => cur ? { ...cur, student: { ...cur.student, wunschliste: { active: wlActive, weekdays: wlWeekdays, von: wlVon, bis: wlBis } } } : cur);
+            if (sessionIdRef.current === mySession) {
+                setWlSaved(true);
+                setData(cur => cur ? { ...cur, student: { ...cur.student, wunschliste: { active: wlActive, weekdays: wlWeekdays, von: wlVon, bis: wlBis } } } : cur);
+            }
         }
         catch (e) {
-            setWlErr("Speichern fehlgeschlagen. Bitte erneut versuchen.");
+            if (sessionIdRef.current === mySession)
+                setWlErr("Speichern fehlgeschlagen. Bitte erneut versuchen.");
         }
         setWlBusy(false);
     }
@@ -28857,7 +28902,12 @@ function BookingPage({ code, appMode, onLogout }) {
         let pin = "";
         try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
         if (!myName.trim() || !pin) { setPayStatus(null); return; }
-        publicStudentPaymentStatus(code, myName.trim(), pin).then(setPayStatus).catch(() => setPayStatus(null));
+        // "on"-Guard wie bei den Nachbar-Effects (busy-Times, nameSlots) weiter oben: verhindert,
+        // dass eine spät eintreffende Antwort für einen inzwischen verlassenen Namen/Zustand den
+        // aktuell angezeigten Zahlstatus überschreibt.
+        let on = true;
+        publicStudentPaymentStatus(code, myName.trim(), pin).then(r => { if (on) setPayStatus(r); }).catch(() => { if (on) setPayStatus(null); });
+        return () => { on = false; };
     }, [code, myName, done]);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
@@ -29907,7 +29957,9 @@ function FahrlehrerAuslastung({ schoolId }) {
         return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
             React.createElement("p", { style: { fontSize: 12.5, color: "#B3362A", margin: 0 } }, state.error));
     const heute = ymd(new Date());
-    const vor7 = ymd(new Date(Date.now() - 7 * 86400000));
+    // 6 (nicht 7) Tage zurück: zusammen mit "heute" ergibt das genau 7 Kalendertage, wie der Text
+    // unten ("letzte 7 Tage") verspricht - vorher waren es durch die 7 hier plus "heute" acht Tage.
+    const vor7 = ymd(new Date(Date.now() - 6 * 86400000));
     const byTeacher = {};
     state.rows.forEach(r => {
         (r.driven_lessons || []).forEach(l => {
