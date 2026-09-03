@@ -5493,11 +5493,18 @@ async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentW
     try {
         const { data: sess } = await sb.auth.getSession();
         const email = sess && sess.session && sess.session.user && sess.session.user.email;
-        await sb.from("profiles").upsert({ id: uid, email, day_limit: dayLim, week_limit: weekLim,
+        // error explizit prüfen statt nur die Exception abzufangen - ein von PostgREST
+        // zurückgegebener Fehler (RLS/Constraint/Validierung) wirft keine Exception, sondern
+        // kommt als { error } zurück und wurde hier bisher komplett ignoriert (fehlgeschlagenes
+        // Speichern blieb unbemerkt, siehe alle Schwesterfunktionen wie saveBookingMessage()).
+        const { error } = await sb.from("profiles").upsert({ id: uid, email, day_limit: dayLim, week_limit: weekLim,
             student_day_limit: studentDayLim, student_week_limit: studentWeekLim }, { onConflict: "id" });
+        if (error)
+            throw new Error(error.message || "Limits konnten nicht gespeichert werden");
     }
     catch (e) {
         console.error("Limits speichern fehlgeschlagen:", e);
+        showToast("Deine Buchungslimits konnten nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"));
     }
 }
 // Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender).
@@ -5507,10 +5514,13 @@ async function saveTeacherNameToProfile(uid, name) {
     try {
         const { data: sess } = await sb.auth.getSession();
         const email = sess && sess.session && sess.session.user && sess.session.user.email;
-        await sb.from("profiles").upsert({ id: uid, email, display_name: name || null }, { onConflict: "id" });
+        const { error } = await sb.from("profiles").upsert({ id: uid, email, display_name: name || null }, { onConflict: "id" });
+        if (error)
+            throw new Error(error.message || "Anzeigename konnte nicht gespeichert werden");
     }
     catch (e) {
         console.error("Anzeigename speichern fehlgeschlagen:", e);
+        showToast("Dein Anzeigename konnte nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"));
     }
 }
 // Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
@@ -6888,9 +6898,16 @@ async function fetchCalCode(schoolId) {
     // Kein Code vorhanden (z.B. neu gegründete Fahrschule): einen erzeugen und speichern,
     // damit der Fahrzeug-Kalender von Anfang an funktioniert statt eine Fehlermeldung zu zeigen.
     const fresh = secureCode(9);
-    const { error: upErr } = await sb.from("schools").update({ cal_code: fresh }).eq("id", schoolId);
-    if (upErr) {
-        console.error("Kalender-Code konnte nicht erzeugt werden:", upErr);
+    // .select() nach dem update() anfügen, um die betroffenen Zeilen zurückzubekommen - ein
+    // update() auf eine WHERE-Bedingung, die 0 Zeilen trifft (z.B. verwaiste school_id), liefert
+    // sonst KEINEN Fehler und diese Funktion hätte den frischen Code fälschlich als gespeichert
+    // gemeldet, obwohl nichts in der DB landete (anders als bei fetchBookingCode(): hier gibt es
+    // keinen Registrierungs-Trigger, der die schools-Zeile mit Verzögerung nachliefert - ein
+    // upsert() mit Notbehelfs-INSERT wäre hier riskanter, weil "name" NOT NULL ist und hier
+    // keine echten Schuldaten zur Verfügung stehen).
+    const { data: updated, error: upErr } = await sb.from("schools").update({ cal_code: fresh }).eq("id", schoolId).select("id");
+    if (upErr || !updated || updated.length === 0) {
+        console.error("Kalender-Code konnte nicht erzeugt werden:", upErr || "Schule nicht gefunden");
         return null;
     }
     return fresh;
@@ -9171,8 +9188,12 @@ function nativeBackgroundGeo() {
 }
 function rmapEsc(t) { return String(t == null ? "" : t).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 function rmapPinSvg(color) {
+    // rmapEsc() wie beim Namen im selben Aufrufkontext (LessonMap) - color wird per innerHTML
+    // eingefügt (L.divIcon), aktuell zwar immer hart auf "#E5484D" gesetzt, stammt aber aus
+    // active.pins, das in Supabase persistiert wird und über einen künftigen Farbeditor oder
+    // direkten DB-Zugriff beliebigen String-Inhalt bekommen könnte.
     return '<svg width="26" height="34" viewBox="0 0 26 34" xmlns="http://www.w3.org/2000/svg">'
-        + '<path d="M13 0C6 0 .5 5.4.5 12.2.5 21 13 34 13 34s12.5-13 12.5-21.8C25.5 5.4 20 0 13 0z" fill="' + color + '"/>'
+        + '<path d="M13 0C6 0 .5 5.4.5 12.2.5 21 13 34 13 34s12.5-13 12.5-21.8C25.5 5.4 20 0 13 0z" fill="' + rmapEsc(color) + '"/>'
         + '<circle cx="13" cy="12" r="4.6" fill="#fff"/></svg>';
 }
 /* ─────────────────────────────────────────────────────────────
@@ -9194,6 +9215,12 @@ function rmapEnsureLeaflet() {
     document.head.appendChild(link);
     var script = document.createElement("script");
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js";
+    // Ohne onerror blieb _rmapLeafletLoading nach einem fehlgeschlagenen Laden (Netzwerkfehler,
+    // Adblocker, Firmenproxy) dauerhaft true stehen - der Guard oben verhinderte dadurch jeden
+    // weiteren Ladeversuch für den Rest der Session, alle Kartenkomponenten blieben endlos bei
+    // "Karte wird geladen…" hängen. Bei Fehlschlag zurücksetzen, damit der nächste Aufruf (z.B.
+    // beim Öffnen einer anderen Fahrstunde) es erneut versuchen kann.
+    script.onerror = function () { _rmapLeafletLoading = false; };
     document.head.appendChild(script);
 }
 // Alle jemals gefahrenen Strecken eines Schuelers uebereinandergelegt – reine Anzeige
@@ -10676,15 +10703,33 @@ function App() {
         }, 500);
     }
     // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
+    // dayLimit/weekLimit/studentDayLimit/studentWeekLimit werden aus GERÄTE-weitem (nicht
+    // kontogebundenem) localStorage vorbefüllt - auf einem gemeinsam genutzten Gerät kann das
+    // noch der Wert des vorher eingeloggten Fahrlehrers sein. Der Kommentar "erst evtl. laden"
+    // beschrieb bisher nur die Absicht, ohne dass hier je geladen wurde - der erste
+    // änderungsbedingte Schreibvorgang übernahm den fremden Wert dadurch unbemerkt ins Profil
+    // des jetzt aktiven Kontos. Jetzt wird beim ersten Durchlauf nach Login immer der echte
+    // Server-Stand geladen und lokal übernommen, bevor irgendetwas zurückgeschrieben wird.
     const limitSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
             limitSyncReady.current = false;
             return;
         }
-        // Beim ersten Durchlauf nach Login nicht sofort schreiben (erst evtl. laden)
         if (!limitSyncReady.current) {
             limitSyncReady.current = true;
+            sb.from("profiles").select("day_limit,week_limit,student_day_limit,student_week_limit").eq("id", uid).maybeSingle()
+                .then(({ data }) => {
+                    if (!data)
+                        return;
+                    if (data.day_limit != null)
+                        setDayLimit(data.day_limit);
+                    if (data.week_limit != null)
+                        setWeekLimit(data.week_limit);
+                    setStudentDayLimit(data.student_day_limit != null ? data.student_day_limit : 0);
+                    setStudentWeekLimit(data.student_week_limit != null ? data.student_week_limit : 0);
+                })
+                .catch(() => { });
             return;
         }
         saveLimitsToProfile(uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit);
@@ -10697,13 +10742,13 @@ function App() {
         }
         if (!nameSyncReady.current) {
             nameSyncReady.current = true;
-            // Einmalig den gespeicherten Namen aus dem Profil holen (für neue Geräte), nur wenn lokal noch keiner da ist
-            if (!teacherName) {
-                sb.from("profiles").select("display_name").eq("id", uid).maybeSingle()
-                    .then(({ data }) => { if (data && data.display_name)
-                    setTeacherName(data.display_name); })
-                    .catch(() => { });
-            }
+            // Immer laden, nicht nur wenn lokal leer (das war der Bug) - sonst bleibt beim
+            // Kontowechsel auf einem gemeinsam genutzten Gerät der Name des vorherigen
+            // Fahrlehrers stehen, weil "lokal schon ein Name da" fälschlich als "das ist
+            // bereits der richtige" gewertet wurde.
+            sb.from("profiles").select("display_name").eq("id", uid).maybeSingle()
+                .then(({ data }) => setTeacherName((data && data.display_name) || ""))
+                .catch(() => { });
             return;
         }
         saveTeacherNameToProfile(uid, teacherName);
@@ -11653,7 +11698,10 @@ function App() {
         const stu = students.find(s => s.id === activeId) || active;
         if (!stu)
             return;
-        const entry = { date: f.date, amount, method: (f.method || "").trim() };
+        // id, damit printReceipt() später die richtige Zahlung wiederfindet, auch wenn sich
+        // die Liste zwischenzeitlich verschoben hat (siehe dortiger Kommentar) - alte, vor
+        // diesem Fix erfasste Zahlungen ohne id fallen dort weiter auf den Index zurück.
+        const entry = { id: uniqueId("pay"), date: f.date, amount, method: (f.method || "").trim() };
         if (f.invoiceId)
             entry.invoiceId = f.invoiceId; // ordnet die Zahlung einer konkreten Rechnung zu
         writeStudent({ ...stu, payments: [...(stu.payments || []), entry] });
@@ -12730,8 +12778,8 @@ function App() {
             // Schreibvorgang wuerde die serverseitige Zahlung ueberschreiben koennen und war
             // vorher die Ursache dafuer, dass ein eingeloester Gutschein ohne Gutschrift blieb.
             const zahlung = (res.zahlung && typeof res.zahlung === "object")
-                ? { date: res.zahlung.date, amount: Number(res.zahlung.amount) || betrag, method: res.zahlung.method }
-                : { date: ymd(new Date()), amount: betrag, method: "Gutschein " + res.code };
+                ? { id: res.zahlung.id || uniqueId("pay"), date: res.zahlung.date, amount: Number(res.zahlung.amount) || betrag, method: res.zahlung.method }
+                : { id: uniqueId("pay"), date: ymd(new Date()), amount: betrag, method: "Gutschein " + res.code };
             setStudents(prev => (prev || []).map(st => st.id === active.id
                 ? { ...st, payments: [...(st.payments || []), zahlung] } : st));
             setVouchers(prev => prev.map(v => v.code === res.code
@@ -14936,8 +14984,12 @@ function App() {
             const matchedPages = pages.filter(trifft);
             const matchedSettings = settingItems.filter(trifft);
             const matchedStudents = studentItems.filter(it => it.label.toLowerCase().includes(q));
+            // Nur den Sockel (max. 4) der Schüler-Treffer nehmen, nicht slice(0,n) UND
+            // slice(n) - aneinandergehängt ergab das wieder das komplette matchedStudents-Array,
+            // wodurch bei >4 Treffern nie Platz für Seiten/Einstellungen blieb (siehe Kommentar
+            // oben, der genau das verhindern sollte).
             const studentSlots = Math.min(matchedStudents.length, 4);
-            filtered = [...matchedStudents.slice(0, studentSlots), ...matchedStudents.slice(studentSlots), ...matchedPages, ...matchedSettings].slice(0, 8);
+            filtered = [...matchedStudents.slice(0, studentSlots), ...matchedPages, ...matchedSettings].slice(0, 8);
         }
         const idx = Math.min(cmdIndex, Math.max(0, filtered.length - 1));
         function choose(it) {
@@ -16672,19 +16724,30 @@ function App() {
         // Änderungen (neue Fahrstunde, neuer Posten) hier stillschweigend verworfen. scheduleSave()
         // bewusst NACH dem setStudents-Aufruf, nicht im Updater selbst (der kann von React mehrfach
         // aufgerufen werden) - gleiches Muster wie draftLessonEntry() weiter oben.
-        let patchedStudent = null;
+        // Über p.id statt idx zuordnen, falls vorhanden - idx zeigt auf die zum Klickzeitpunkt
+        // gültige Position, kann sich aber während der RPC-Laufzeit verschieben (Löschen/Anlegen
+        // einer anderen Zahlung), sodass idx danach zu einer ANDEREN Zahlung gehören kann. Alte,
+        // vor diesem Fix erfasste Zahlungen ohne id fallen weiter auf den Index zurück.
+        const pId = p.id;
+        let patchedStudent = null, savedPayment = null;
         setStudents(prev => (prev || []).map(s => {
             if (s.id !== active.id)
                 return s;
-            const payments = (s.payments || []).map((x, i) => i === idx ? { ...x, receiptNumber: number } : x);
+            const payments = (s.payments || []).map((x, i) => {
+                const match = pId ? x.id === pId : i === idx;
+                if (!match)
+                    return x;
+                const withNumber = { ...x, receiptNumber: number };
+                savedPayment = withNumber;
+                return withNumber;
+            });
             patchedStudent = { ...s, payments };
             return patchedStudent;
         }));
-        if (!patchedStudent)
+        if (!patchedStudent || !savedPayment)
             return;
         scheduleSave(patchedStudent);
-        const withNumber = patchedStudent.payments[idx];
-        setReceiptPreview(withNumber);
+        setReceiptPreview(savedPayment);
         doPrint("receipt");
     }
     // ── Ausbildungsvertrag ──
@@ -16806,10 +16869,18 @@ function App() {
             showToast("Kein offener Betrag bei " + dispName(active) + ".");
             return;
         }
+        // Wie erinnern() weiter unten: erst prüfen, ob überhaupt ein gültiger WhatsApp-Empfänger
+        // existiert, BEVOR die Mahnstufe verbucht wird - sonst zählte ein Klick ohne hinterlegte
+        // Telefonnummer trotzdem als "Erinnerung gesendet" (window.open landete auf
+        // https://wa.me/?text=... ohne Empfänger, real kam nichts an).
+        const num = active.tel ? waNumber(active.tel) : "";
+        if (!num) {
+            showToast("Für " + dispName(active) + " ist keine Telefonnummer hinterlegt.");
+            return;
+        }
         const stage = (active.reminders || []).length + 1;
         const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
         const text = reminderText(stage, active, open, lastInvoice);
-        const num = active.tel ? waNumber(active.tel) : "";
         const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
         const reminders = [...(active.reminders || []), { date: ymd(new Date()), stage, amount: open }];
         updateActive({ reminders });
@@ -18938,7 +19009,11 @@ function App() {
             own.forEach(s => {
                 if (!s.wunschliste.weekdays.includes(weekday))
                     return;
-                const already = (appts || []).some(a => a.student_id === s.id && (a.status === "confirmed" || a.status === "pending") && ymd(a.start_at) === dateKey);
+                // "offered" ergänzt (fehlte bisher) - findFreeWindow() weiter oben behandelt ein
+                // bereits offeriertes Warteliste-Angebot bewusst als belegten Kalenderslot, der
+                // already-Check hier tat das nicht und konnte dieselbe Schülerin am selben Tag ein
+                // zweites Mal in der Liste zeigen, sobald der Radar erneut lief.
+                const already = (appts || []).some(a => a.student_id === s.id && (a.status === "confirmed" || a.status === "pending" || a.status === "offered") && ymd(a.start_at) === dateKey);
                 if (already)
                     return;
                 const von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
@@ -20205,7 +20280,7 @@ function App() {
         const stu = (students || []).find(s => s.id === v.studentId);
         if (!stu || !(betrag > 0))
             return;
-        const eintrag = { date: v.datum || ymd(new Date()), amount: Math.round(betrag * 100) / 100,
+        const eintrag = { id: uniqueId("pay"), date: v.datum || ymd(new Date()), amount: Math.round(betrag * 100) / 100,
             method: "Überweisung", invoiceId: v.invoiceId };
         writeStudent({ ...stu, payments: [...(stu.payments || []), eintrag] });
         setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "gebucht", betrag: eintrag.amount } : x) } : z);
@@ -26084,6 +26159,10 @@ function BegleitFahrten({ code }) {
     const loggedIn = !!(loginName && loginPin);
     const [fahrten, setFahrten] = React.useState(loggedIn ? undefined : []); // undefined=lädt
     const [plan, setPlan] = React.useState({}); // uebungKey -> {stand, datum}
+    // Pro Übungs-Key ein hochzählender Request-Zähler - standSetzen() nutzt ihn, um einen
+    // verspätet fehlschlagenden ÄLTEREN Request nicht mehr zurückrollen zu lassen, wenn
+    // inzwischen ein NEUERER Request für denselben Punkt schon erfolgreich war.
+    const standRequestSeq = React.useRef({});
     const [form, setForm] = React.useState(null);
     const [detail, setDetail] = React.useState(null); // geöffnete Übung (Tipps)
     const [auswahl, setAuswahl] = React.useState(null); // Übungswahl vor dem Losfahren
@@ -26153,6 +26232,8 @@ function BegleitFahrten({ code }) {
         if (!loggedIn)
             return;
         const vorher = plan[k];
+        const mySeq = (standRequestSeq.current[k] || 0) + 1;
+        standRequestSeq.current[k] = mySeq;
         // Sofort umschalten, damit sich das Antippen nicht zäh anfühlt; bei Fehler zurück.
         setPlan(p => {
             const n = { ...p };
@@ -26164,15 +26245,20 @@ function BegleitFahrten({ code }) {
         });
         const ok = await publicStudentDriveSkill(code, loginName, loginPin, k, stand);
         if (!ok) {
-            setPlan(p => {
-                const n = { ...p };
-                if (vorher)
-                    n[k] = vorher;
-                else
-                    delete n[k];
-                return n;
-            });
-            setErr("Der Stand konnte nicht gespeichert werden.");
+            // Nur zurückrollen, wenn seither kein neuerer Request für DENSELBEN Punkt schon
+            // erfolgreich war - sonst würde der Fehlerpfad dieses langsameren, älteren Requests
+            // den bereits vom Server bestätigten neueren Stand wieder überschreiben.
+            if (standRequestSeq.current[k] === mySeq) {
+                setPlan(p => {
+                    const n = { ...p };
+                    if (vorher)
+                        n[k] = vorher;
+                    else
+                        delete n[k];
+                    return n;
+                });
+                setErr("Der Stand konnte nicht gespeichert werden.");
+            }
         }
     }
     function neueFahrt(route, themen) {
@@ -27100,6 +27186,11 @@ function TheoryPractice({ code }) {
     const [screen, setScreen] = React.useState("themen"); // themen|uebung|pruefung_intro|pruefung|pruefung_ergebnis
     const [queue, setQueue] = React.useState([]);
     const [qIndex, setQIndex] = React.useState(0);
+    // Immer die AKTUELLE Frage-id, per Effect nachgezogen - anders als eine in frageErklaeren()
+    // erfasste lokale Variable bleibt ein Ref auch für eine bereits laufende, ältere KI-Anfrage
+    // sichtbar aktuell (siehe dortiger Check gegen verspätet eintreffende Antworten).
+    const currentQIdRef = React.useRef(null);
+    React.useEffect(() => { currentQIdRef.current = (queue[qIndex] || {}).id || null; }, [queue, qIndex]);
     const [selected, setSelected] = React.useState([]);
     const [checked, setChecked] = React.useState(false);
     const [sessionRichtig, setSessionRichtig] = React.useState(0);
@@ -27243,13 +27334,21 @@ function TheoryPractice({ code }) {
     async function frageErklaeren() {
         const q = queue[qIndex];
         if (!q || (erklaerung && erklaerung.busy)) return;
+        const qId = q.id;
         setErklaerung({ busy: true, text: "", error: "" });
         try {
             const gewaehlt = (q.options || []).filter(o => selected.includes(o.id)).map(o => o.text);
             const txt = await erklaereFrage(code, q.question, q.answer_stem || "", q.options || [], gewaehlt);
+            // Nicht mehr übernehmen, wenn inzwischen (während die KI-Anfrage lief) zu einer
+            // anderen Frage gewechselt wurde - sonst könnte die verspätet eintreffende Antwort
+            // als (inhaltlich falsche) Erklärung zur neuen Frage angezeigt werden.
+            if (currentQIdRef.current !== qId)
+                return;
             setErklaerung({ busy: false, text: txt, error: "" });
         }
         catch (e) {
+            if (currentQIdRef.current !== qId)
+                return;
             setErklaerung({ busy: false, text: "", error: e.message || "Erklärung nicht verfügbar." });
         }
     }
@@ -28865,13 +28964,27 @@ function BookingPage({ code, appMode, onLogout }) {
     // Kombiniert lokal gespeicherte Termine (dieses Gerät) mit per Name gefundenen (geräteübergreifend).
     const mineSet = new Set([...(mineSlots || []), ...(nameSlots || [])].map(x => new Date(x).getTime()));
     const isMine = (b) => mineSet.has(new Date(b.start_at).getTime());
+    // Standard-Startzeit für ein neues Wunschtermin-Slot, an das Arbeitszeitfenster des gewählten
+    // Tages angepasst statt hart "09:00" - sonst zeigte die "Von"-Auswahl direkt nach dem Öffnen
+    // einen anderen (korrigierten) Chip als ausgewählt an als den tatsächlich in s.start
+    // gespeicherten Wert, und ein Absenden ohne die Zeit bewusst anzutippen scheiterte mit einer
+    // für den Nutzer widersprüchlichen "liegt vor der Arbeitszeit"-Meldung. updateSlot() klemmt
+    // s.start bereits genauso, aber nur bei einer nachträglichen Datums-Änderung, nicht beim
+    // ersten Anlegen eines Slots.
+    function defaultSlotStart(dateStr) {
+        const key = DOW_KEYS[new Date(dateStr + "T00:00:00").getDay()];
+        const wh = info && info.work_hours;
+        const day = wh && typeof wh === "object" ? wh[key] : null;
+        return (day && day.von) ? day.von : "09:00";
+    }
     function openForm(dateStr) {
         // Namen aus dem gespeicherten myName vorbelegen (erste Wort = Vorname, Rest = Nachname)
         const parts = (myName || "").trim().split(/\s+/);
         const vn = parts.length ? parts[0] : "";
         const nn = parts.length > 1 ? parts.slice(1).join(" ") : "";
+        const d0 = dateStr || ymd(new Date());
         setForm({ vorname: vn, nachname: nn, note: "",
-            slots: [{ date: dateStr || ymd(new Date()), start: "09:00", end: "10:00", art: "" }] });
+            slots: [{ date: d0, start: defaultSlotStart(d0), end: "10:00", art: "" }] });
         setErr("");
         setSfStatus(null);
         let pin = "";
@@ -28888,7 +29001,8 @@ function BookingPage({ code, appMode, onLogout }) {
         }
     }
     function addSlot() {
-        setForm(f => { var _a; return ({ ...f, slots: [...f.slots, { date: ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date()), start: "09:00", end: "10:00", art: "" }] }); });
+        setForm(f => { var _a; const d0 = ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date());
+            return ({ ...f, slots: [...f.slots, { date: d0, start: defaultSlotStart(d0), end: "10:00", art: "" }] }); });
     }
     function removeSlot(i) {
         setForm(f => ({ ...f, slots: f.slots.filter((_, idx) => idx !== i) }));
