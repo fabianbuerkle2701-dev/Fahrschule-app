@@ -32,7 +32,27 @@ exports.handler = async function (event) {
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
   const code = (body.code || "").toString().trim();
-  const facts = body.facts && typeof body.facts === "object" ? body.facts : null;
+  // Wie eltern-update.js (clampStr/clampNum statt body.student ungeprüft übernehmen): "facts"
+  // hat hier aber je nach "kind" eine andere Form (Zahlenfelder, Namenslisten, Schüler-Objekte
+  // mit Freitext-Notiz) statt eines festen Schemas - ein rekursiver Clamp statt 20 einzelner
+  // Feld-Clamps, deckelt aber genauso Strings/Arrays/Zahlen, damit ein Aufruf ohne Login (siehe
+  // Kommentar oben) nicht beliebig große Payloads und damit unbegrenzte Tokenkosten pro Anfrage
+  // durchschleust.
+  function clampFacts(v, depth) {
+    if (typeof v === "string") return v.slice(0, 500);
+    if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+    if (typeof v === "boolean" || v == null) return v;
+    if (depth >= 3) return null;
+    if (Array.isArray(v)) return v.slice(0, 30).map((x) => clampFacts(x, depth + 1));
+    if (typeof v === "object") {
+      const out = {};
+      for (const k of Object.keys(v).slice(0, 40)) out[k] = clampFacts(v[k], depth + 1);
+      return out;
+    }
+    return undefined;
+  }
+  const rawFacts = body.facts && typeof body.facts === "object" ? body.facts : null;
+  const facts = rawFacts ? clampFacts(rawFacts, 0) : null;
   const kind = ["morning", "evening", "statistik", "interessent", "pruefung", "abrechnung", "reform"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
@@ -56,7 +76,7 @@ exports.handler = async function (event) {
   // Eigenes, niedrigeres Limit als der Buchungs-Chat: ein Fahrlehrer öffnet sein Dashboard
   // öfter am Tag als ein Interessent chattet, aber ein Briefing braucht nicht bei jedem
   // Öffnen neu erzeugt zu werden - der Client ruft das ohnehin nur auf Knopfdruck ab.
-  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 20 });
+  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 20, p_feature: "morning-briefing" });
   if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute wurden schon mehrere Briefings erzeugt. Bitte später erneut versuchen." }) };
   }
@@ -205,6 +225,12 @@ Regeln, unbedingt einhalten:
     if (Array.isArray(facts.heuteSchueler) && facts.heuteSchueler.length) {
       zeilen.push("Schüler mit Termin heute, je mit Ausbildungsstand:");
       facts.heuteSchueler.forEach((s) => {
+        // facts kommt ungeprüft aus dem Request-Body eines unauthentifizierten Endpunkts (siehe
+        // Kommentar oben) - ein kaputtes/leeres Element (z.B. null) würde beim Property-Zugriff
+        // unten sonst eine synchrone Exception werfen. Die liegt außerhalb des try/catch (das
+        // weiter unten in dieser Funktion nur den Anthropic-Fetch umschließt), also einfach
+        // überspringen statt den ganzen Funktionsaufruf hart abstürzen zu lassen.
+        if (!s || typeof s !== "object") return;
         const teile = [];
         if (typeof s.fortschritt === "number") teile.push("ADK/Strecken " + s.fortschritt + "%");
         teile.push("Theorie " + (s.theorie ? "bestanden" : "offen"));

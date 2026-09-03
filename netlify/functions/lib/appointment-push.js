@@ -27,14 +27,17 @@ async function notifyAppointmentEvent({ evt, appointmentId, owner, serviceKey })
   if (!texts || !owner) return { skipped: true };
 
   let studentName = null;
-  const apptResp = await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + appointmentId + "&select=student_id", {
+  // appointmentId kommt ungeprueft aus dem Trigger-Payload - wie ueberall sonst im Ordner ungepruefte
+  // IDs per encodeURIComponent escapen, bevor sie in die PostgREST-Filter-Query landen (sonst koennte
+  // z.B. ein "&" darin einen zusaetzlichen Query-Parameter einschleusen).
+  const apptResp = await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + encodeURIComponent(appointmentId) + "&select=student_id", {
     headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
   });
   if (apptResp.ok) {
     const apptRows = await apptResp.json();
     const studentId = apptRows && apptRows[0] && apptRows[0].student_id;
     if (studentId) {
-      const stuResp = await fetch(SUPABASE_URL + "/rest/v1/students?id=eq." + studentId + "&select=data", {
+      const stuResp = await fetch(SUPABASE_URL + "/rest/v1/students?id=eq." + encodeURIComponent(studentId) + "&select=data", {
         headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
       });
       if (stuResp.ok) {
@@ -56,7 +59,7 @@ async function notifyAppointmentEvent({ evt, appointmentId, owner, serviceKey })
   // damit der stuendliche Nachhol-Lauf diesen Termin nicht nochmal anfasst. Bei sent===0 bleibt
   // der Zeitstempel bewusst stehen, das ist genau das Signal fuer den Nachhol-Lauf.
   if (result.sent > 0 && appointmentId) {
-    await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + appointmentId, {
+    await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + encodeURIComponent(appointmentId), {
       method: "PATCH",
       headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey, "Content-Type": "application/json", Prefer: "return=minimal" },
       body: JSON.stringify({ push_pending_since: null }),

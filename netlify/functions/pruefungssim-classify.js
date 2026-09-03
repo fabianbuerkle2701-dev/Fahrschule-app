@@ -57,10 +57,13 @@ exports.handler = async function (event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const text = (body.text || "").toString().trim();
-  const fahraufgaben = Array.isArray(body.fahraufgaben) ? body.fahraufgaben : [];
-  const kompetenzbereiche = Array.isArray(body.kompetenzbereiche) ? body.kompetenzbereiche : [];
-  const schweregrade = Array.isArray(body.schweregrade) ? body.schweregrade : [];
+  // Länge/Größe begrenzen, bevor sie in den Prompt eingebettet werden (wie in suggest-adk-items.js) -
+  // sonst könnte ein Aufruf mit riesigem Text oder Katalog die Anthropic-Tokenkosten eines
+  // einzelnen Calls unbegrenzt hochtreiben.
+  const text = (body.text || "").toString().trim().slice(0, 800);
+  const fahraufgaben = Array.isArray(body.fahraufgaben) ? body.fahraufgaben.slice(0, 50) : [];
+  const kompetenzbereiche = Array.isArray(body.kompetenzbereiche) ? body.kompetenzbereiche.slice(0, 50) : [];
+  const schweregrade = Array.isArray(body.schweregrade) ? body.schweregrade.slice(0, 50) : [];
   if (!text) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Text übergeben" }) };
   if (!fahraufgaben.length || !kompetenzbereiche.length || !schweregrade.length) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kataloge fehlen" }) };

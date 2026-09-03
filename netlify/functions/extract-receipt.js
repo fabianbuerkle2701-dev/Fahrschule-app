@@ -70,7 +70,9 @@ exports.handler = async function (event) {
   }
 
   const imageBlocks = images.map((img) => {
-    let data = img || "";
+    // img könnte auch eine Zahl/Objekt/Array sein (missgebildete Anfrage) - dann würde
+    // .match unten crashen, bevor der try/catch weiter unten greift. Als String erzwingen.
+    let data = typeof img === "string" ? img : "";
     let media = "image/jpeg";
     const m = data.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
     if (m) { media = m[1]; data = m[2]; }

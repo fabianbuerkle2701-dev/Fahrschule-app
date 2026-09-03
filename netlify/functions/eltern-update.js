@@ -57,8 +57,37 @@ exports.handler = async function (event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const student = body.student && typeof body.student === "object" ? body.student : null;
-  if (!student || !student.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  const rawStudent = body.student && typeof body.student === "object" ? body.student : null;
+  if (!rawStudent || !rawStudent.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  // Wie booking-chat.js (message.slice(0,800), history.slice(-6)) und draft-lesson-entry.js
+  // (phrase.slice(0,500), recent.slice(0,3)): jedes Feld einzeln kappen statt body.student
+  // ungeprüft in den Prompt zu übernehmen - sonst kann ein Aufruf beliebig große Strings
+  // mitschicken und die Tokenkosten pro Anfrage unbegrenzt hochtreiben.
+  const clampStr = (v, n) => (v == null ? "" : String(v)).slice(0, n);
+  const clampNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const letzteThemen = Array.isArray(rawStudent.letzteThemen) ? rawStudent.letzteThemen.slice(0, 3).map((t) => ({
+    datum: clampStr(t && t.datum, 20),
+    thema: clampStr(t && t.thema, 300),
+    gut: clampStr(t && t.gut, 300),
+    schlecht: clampStr(t && t.schlecht, 300),
+  })) : [];
+  const moeglicheUebungen = Array.isArray(rawStudent.moeglicheUebungen) ? rawStudent.moeglicheUebungen.slice(0, 30).map((u) => ({
+    key: clampStr(u && u.key, 50),
+    titel: clampStr(u && u.titel, 150),
+    stufe: clampStr(u && u.stufe, 50),
+    ziel: clampStr(u && u.ziel, 300),
+  })) : [];
+  const student = {
+    name: clampStr(rawStudent.name, 200),
+    vorname: clampStr(rawStudent.vorname, 200),
+    klasse: clampStr(rawStudent.klasse, 20),
+    gesamtProzent: clampNum(rawStudent.gesamtProzent),
+    theorieBestanden: !!rawStudent.theorieBestanden,
+    fahrstunden: clampNum(rawStudent.fahrstunden),
+    letzteThemen,
+    begleitfahrtenKm: clampNum(rawStudent.begleitfahrtenKm),
+    moeglicheUebungen,
+  };
 
   const system = `Du schreibst EINE kurze, warme WhatsApp-Nachricht des Fahrlehrers an die Eltern oder Begleitperson von ${student.vorname || student.name}, mit einem kurzen Update zum Ausbildungsstand. Schreib die Nachricht direkt in der du-Form, ADRESSIERT AN DIE ELTERN/BEGLEITPERSON - nicht als Bericht an den Fahrlehrer.
 

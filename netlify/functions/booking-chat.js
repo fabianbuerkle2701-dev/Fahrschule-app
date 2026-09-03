@@ -65,7 +65,7 @@ exports.handler = async function (event) {
 
   // Erhöht gegenüber v1.103.0 (40), weil jetzt auch eingeloggte Schüler mitzählen, nicht nur
   // Interessenten - beide teilen sich weiterhin ein gemeinsames Tageslimit pro Fahrschule.
-  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 60 });
+  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 60, p_feature: "booking-chat" });
   if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute sind schon viele Fragen gestellt worden. Bitte versuch es morgen wieder oder nutze das Anmeldeformular." }) };
   }

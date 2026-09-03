@@ -68,7 +68,9 @@ exports.handler = async function (event) {
     return { type: "image", source: { type: "base64", media_type: mediaType, data } };
   });
 
-  const roster = students.map((s) => ({ name: ((s.vorname || "") + " " + (s.name || "")).trim() }));
+  // Elemente können bei fehlerhaften Aufrufen null/kein Objekt sein - vor dem Zugriff filtern,
+  // sonst crasht die Funktion unbehandelt statt eine saubere 400-Antwort zu liefern.
+  const roster = students.filter((s) => s && typeof s === "object").map((s) => ({ name: ((s.vorname || "") + " " + (s.name || "")).trim() }));
 
   const system = `Du liest Termine aus einem Screenshot einer Kalender-App (z.B. you-drive Manager) für eine Fahrschule aus. Gib die erkannten Termine als reines JSON zurück, kein Text, keine Backticks.
 

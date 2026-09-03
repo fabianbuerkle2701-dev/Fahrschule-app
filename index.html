@@ -5712,13 +5712,25 @@ async function fetchOwnSubscription(uid) {
     }
     return data;
 }
-// Eigene Zahlung selbst als "bezahlt" markieren (z.B. nach PayPal-Zahlung)
+// Eigene Zahlung selbst als "bezahlt" markieren (z.B. nach PayPal-Zahlung). Läuft über die
+// geschützte Netlify-Funktion mark-own-payment-done (Service-Role-Key) statt über ein direktes
+// PostgREST-Update mit der eigenen Session - sonst könnte jeder angemeldete Fahrlehrer per
+// DevTools/eigenem Bearer-Token subscription_last_paid beliebig oft selbst setzen, ganz ohne
+// echte PayPal-Zahlung. Die Funktion schreibt serverseitig nur dieses eine Feld, nur für den per
+// Token identifizierten Nutzer selbst, mit serverseitig berechnetem Datum.
 async function markOwnPaymentDone(uid) {
-    const today = ymd(new Date());
-    const { error } = await sb.from("profiles").update({ subscription_last_paid: today }).eq("id", uid);
-    if (error)
-        throw new Error(error.message || "Speichern fehlgeschlagen");
-    return today;
+    const { data: sess } = await sb.auth.getSession();
+    const token = sess && sess.session && sess.session.access_token;
+    if (!token)
+        throw new Error("Nicht angemeldet");
+    const resp = await fetch("/.netlify/functions/mark-own-payment-done", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+    });
+    const data = await resp.json();
+    if (!resp.ok)
+        throw new Error(data.error || "Speichern fehlgeschlagen");
+    return data.subscription_last_paid;
 }
 // Dem Abo zustimmen: startet damit die 7-tägige kostenlose Probezeit
 async function acceptSubscription(uid) {
@@ -9922,6 +9934,11 @@ function App() {
     // studentFiles-Reset oben).
     useEffect(() => { setOpenLesson(null); setRoutesMapOpen(false); }, [activeId]);
     const [itemForm, setItemForm] = useState(null); // null | {label, amount, error} Posten hinzufügen
+    // Laufende-Anfrage-Kennung für handleReceiptImportFiles() - schützt sowohl gegen ein
+    // zwischenzeitliches Schließen des Formulars als auch gegen zwei Belegfotos kurz hintereinander,
+    // wo sonst die spät eintreffende Antwort des ERSTEN Fotos das Ergebnis des zweiten, noch
+    // laufenden Fotos überschreiben würde (gleiches Muster wie pruefungssimKiReqRef oben).
+    const receiptImportReqRef = useRef(0);
     const [paymentForm, setPaymentForm] = useState(null); // null | {amount, date, method, error} Zahlung erfassen
     // null | {step:"form"|"sign", apptId, studentId, art, vehicleId, klasse, stufe, minutes, date, von, bis, price, priceAuto, note, signature}
     const [leistungForm, setLeistungForm] = useState(null);
@@ -10166,10 +10183,16 @@ function App() {
     useEffect(() => {
         if (!uid)
             return;
+        // cancelled-Guard wie bei fetchLessonReflections: verhindert, dass eine spät
+        // eintreffende Antwort für den vorherigen Nutzer (z.B. nach Kontowechsel auf
+        // demselben Gerät) die Interessentenliste des jetzt eingeloggten Kontos überschreibt.
+        let cancelled = false;
         fetchInteressenten(uid).then(({ list, missing }) => {
+            if (cancelled) return;
             setInteressenten(list);
             setInteressentenMissing(missing);
         });
+        return () => { cancelled = true; };
     }, [uid]);
     // Prüfplatz-Kontingente, siehe renderExamSlotsSection(). Eigener useEffect statt Teil der
     // großen Promise.all-Ladekette (wie interessenten) - unabhängige, sekundäre Datenquelle.
@@ -10273,11 +10296,18 @@ function App() {
     useEffect(() => {
         if (!uid)
             return;
+        // cancelled-Guard wie bei fetchLessonReflections/useWeather: ohne ihn könnte beim schnellen
+        // Nutzerwechsel auf einem gemeinsam genutzten Gerät (Logout A, Login B) eine noch laufende
+        // Anfrage für A nach dem Login von B auflösen und dessen bereits geladene Profildaten
+        // (Name, Adresse, Telefon, Geburtsdatum) mit denen von A überschreiben.
+        let cancelled = false;
         fetchProfileData(uid).then(d => {
+            if (cancelled) return;
             setProfileData(d || {});
             const ok = !!(d && d.display_name && d.street && d.house_no && d.zip && d.city && d.phone && d.birthdate);
             setProfileComplete(ok);
-        }).catch(e => { console.error("Profildaten konnten nicht geladen werden:", e); setProfileData({}); setProfileComplete(true); });
+        }).catch(e => { if (cancelled) return; console.error("Profildaten konnten nicht geladen werden:", e); setProfileData({}); setProfileComplete(true); });
+        return () => { cancelled = true; };
     }, [uid]);
     // Stadt des eigenen Standorts. Ohne eingerichteten Standort (der Normalfall - "Standorte" sind ein selten
     // genutztes Zusatzfeature für Fahrschulen mit mehreren Filialen) auf die bei der Registrierung erfasste
@@ -10329,8 +10359,8 @@ function App() {
         else if (invoiceDraft) setInvoiceDraft(null);
         else if (apptForm) { if (!apptForm.busy) setApptForm(null); }
         else if (qrModal) setQrModal(false);
-        else if (calImport) setCalImport(null);
-        else if (adkImport) setAdkImport(null);
+        else if (calImport) { if (!calImport.busy) setCalImport(null); }
+        else if (adkImport) { if (!adkImport.busy) setAdkImport(null); }
         else if (assistant) { if (!assistant.busy) setAssistant(null); }
         else if (lessonForm) setLessonForm(null);
         else if (itemForm) setItemForm(null);
@@ -10797,6 +10827,10 @@ function App() {
             // Eltern-Update) - trägt ebenfalls Schülername und KI-Text eines konkreten Schülers
             // ({busy, text, error, name, stu}) und blieb bisher beim Kontowechsel unangetastet stehen.
             setHandoverModal(null);
+            // Ebenfalls zurücksetzen: sonst könnte auf einem gemeinsam genutzten Gerät die
+            // zwischengespeicherte Fahrlehrer-Unterschrift des vorherigen Kontos kurz sichtbar
+            // bleiben, bevor der kontogebundene Ladevorgang unten sie fürs neue Konto ersetzt.
+            setInstrSig(null);
             return;
         }
         const cached = loadCache(uid);
@@ -10812,6 +10846,27 @@ function App() {
             setSchool(cachedSchool);
             applySchoolColor(cachedSchool.color);
         }
+        // Fahrlehrer-Unterschrift kontogebunden laden (wie die Preis/Pakete-Migration weiter unten):
+        // die alte, geräteweite Ablage unter "v3_instr_sig" konnte auf einem gemeinsam genutzten
+        // Gerät sonst die Unterschrift des vorher eingeloggten Fahrlehrers unbemerkt ins jetzt aktive
+        // Konto übernehmen - auch in ein amtlich aufzubewahrendes Dokument (siehe nachweisSheet()).
+        // Einmalig aus der alten Ablage migrieren, danach nur noch kontogebunden lesen/schreiben.
+        try {
+            const ownSig = localStorage.getItem("v3_instr_sig_" + uid);
+            const legacySig = localStorage.getItem("v3_instr_sig");
+            if (ownSig) {
+                setInstrSig(ownSig);
+            }
+            else if (legacySig) {
+                localStorage.setItem("v3_instr_sig_" + uid, legacySig);
+                setInstrSig(legacySig);
+            }
+            else {
+                setInstrSig(null);
+            }
+            localStorage.removeItem("v3_instr_sig");
+        }
+        catch (e) { }
         setSyncing(true);
         setLoadErr("");
         touchLastSeen(uid); // letzten Zugriff merken
@@ -10827,11 +10882,14 @@ function App() {
             fetchCalendarFeedToken(uid).then(setCalendarFeedToken).catch(() => { });
             fetchMyRights(uid).then(r => {
                 setIsSchoolAdmin(r);
-                // Einmalige Übernahme alter, lokal gespeicherter Preise in die Fahrschule (nur Admin)
+                // Einmalige Übernahme alter, lokal gespeicherter Preise in die Fahrschule (nur Admin).
+                // Kontogebunden (wie v3_bday_shown_+uid), nicht geräteweit lesen: sonst könnte auf
+                // einem gemeinsam genutzten Gerät der Preis/die Pakete eines vorherigen Fahrschul-
+                // Admins unbemerkt in eine fremde, brandneue Fahrschule übernommen werden.
                 if (r) {
                     try {
-                        const oldPrice = localStorage.getItem("v3_price_hour");
-                        const oldPkgRaw = localStorage.getItem("v3_packages");
+                        const oldPrice = localStorage.getItem("v3_price_hour_" + uid);
+                        const oldPkgRaw = localStorage.getItem("v3_packages_" + uid);
                         const oldPkg = oldPkgRaw ? JSON.parse(oldPkgRaw) : null;
                         const needPrice = (sc.price_hour == null) && oldPrice;
                         const needPkg = (!Array.isArray(sc.packages) || sc.packages.length === 0) && oldPkg && oldPkg.length;
@@ -10845,8 +10903,8 @@ function App() {
                             saveSchoolCache(uid, merged);
                             saveSchool(merged).catch(() => { });
                         }
-                        localStorage.removeItem("v3_price_hour");
-                        localStorage.removeItem("v3_packages");
+                        localStorage.removeItem("v3_price_hour_" + uid);
+                        localStorage.removeItem("v3_packages_" + uid);
                     }
                     catch (e) { }
                 }
@@ -11311,7 +11369,11 @@ function App() {
         if (!active)
             return;
         setStudentFiles(null);
-        fetchStudentFiles(active.id).then(list => setStudentFiles(list));
+        const studentId = active.id;
+        // Staleness-Check wie bei openStaffInstructor: wechselt der Nutzer schnell zu einem anderen
+        // Schüler, während diese Anfrage noch läuft, darf ihre (evtl. später eintreffende) Antwort
+        // nicht mehr die (ggf. sensiblen) Dokumente des inzwischen aktiven Schülers überschreiben.
+        fetchStudentFiles(studentId).then(list => setActiveId(cur => { if (cur === studentId) setStudentFiles(list); return cur; }));
     }
     async function handleStudentFileUpload(file) {
         if (!file || !active)
@@ -11602,6 +11664,16 @@ function App() {
         const price = (f.priceMode === "auto")
             ? ((pricePerHour === "" || pricePerHour == null) ? null : Number(pricePerHour))
             : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((Number(f.price) / ue) * 100) / 100);
+        // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
+        // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
+        // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
+        // zeigt eine NaN-Summe dann fälschlich als "Vollständig bezahlt" an, statt die echte Forderung.
+        // Wie in saveLessonForm(): vor dem Speichern prüfen, hier zusätzlich kritisch, weil der
+        // Eintrag bereits unterschrieben und damit verbindlich ist.
+        if (price !== null && isNaN(price)) {
+            showToast("Bitte einen gültigen Preis eingeben (nur Zahl, z.B. 45 oder 45,50).");
+            return;
+        }
         const id = "LS" + Date.now() + Math.random().toString(36).slice(2, 6);
         const veh = vehicles.find(v => v.id === f.vehicleId);
         const entry = {
@@ -12600,7 +12672,15 @@ function App() {
         // als ein fehlender Schueler, und nachtragen kann man einzeln.
         const zeilen = st.daten.map(r => zeileZuImport(r, st.mapping))
             .filter(d => (d.vorname || d.name));
-        const neu = zeilen.filter(d => !vorhanden.has(normName((d.vorname + " " + d.name).trim())));
+        // vorhanden waechst hier mit, waehrend gefiltert wird: sonst wuerden zwei identische
+        // Zeilen innerhalb derselben CSV (z.B. Altsystem-Export mit einer Zeile pro
+        // Kursanmeldung) beide die Pruefung bestehen und als zwei Schueler angelegt werden.
+        const neu = zeilen.filter(d => {
+            const key = normName((d.vorname + " " + d.name).trim());
+            if (vorhanden.has(key)) return false;
+            vorhanden.add(key);
+            return true;
+        });
         const uebersprungen = zeilen.length - neu.length;
         setCsvImport({ ...st, schritt: "laeuft", busy: true, fertig: 0, gesamt: neu.length, fehler: [] });
         const fehler = [];
@@ -12664,13 +12744,19 @@ function App() {
                 "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
                 "pinChanged","pins","referralCode","wunschliste","dismissedAppts","termin",
                 "terminLabel","klasse","location_id"];
-            setStudents(prev => (prev || []).map(st => {
-                if (st.id !== d.stu.id) return st;
-                const neu = { ...st };
-                weg.forEach(k => { delete neu[k]; });
-                neu.dataDeletedAt = new Date().toISOString();
-                return neu;
-            }));
+            setStudents(prev => {
+                const arr = (prev || []).map(st => {
+                    if (st.id !== d.stu.id) return st;
+                    const neu = { ...st };
+                    weg.forEach(k => { delete neu[k]; });
+                    neu.dataDeletedAt = new Date().toISOString();
+                    return neu;
+                });
+                // Ohne saveCache bliebe der gelöschte Datensatz (Geburtsdatum, Tel., Sehhilfe, PIN, Notizen)
+                // im localStorage-Cache erhalten - die Löschung wäre nur serverseitig wirksam (§31 FahrlG).
+                if (uid) saveCache(uid, arr);
+                return arr;
+            });
             setLoeschDialog({ ...d, busy: false, fertig: { name: data.name, dateien: data.dateien } });
             ladeLoeschProtokoll();
         }
@@ -13427,7 +13513,7 @@ function App() {
             });
             const out = await resp.json().catch(() => null);
             if (!resp.ok || !out) {
-                setTheoryGenModal(m => ({ ...m, busy: false, error: (out && out.error) || "Generierung fehlgeschlagen" }));
+                setTheoryGenModal(m => m ? ({ ...m, busy: false, error: (out && out.error) || "Generierung fehlgeschlagen" }) : m);
                 return;
             }
             const drafts = (out.questions || []).map(q => ({
@@ -13436,10 +13522,12 @@ function App() {
                 options: Array.isArray(q.options) ? q.options.map(o => ({ text: o.text || "", correct: !!o.correct })) : [],
                 keep: true,
             })).filter(q => q.question && q.options.length >= 2 && q.options.some(o => o.correct));
-            setTheoryGenModal(m => ({ ...m, busy: false, drafts }));
+            // m ist null, wenn der Nutzer den Dialog inzwischen geschlossen hat - sonst würde das
+            // fertige Ergebnis den bereits geschlossenen Dialog überraschend wieder aufpoppen lassen.
+            setTheoryGenModal(m => m ? ({ ...m, busy: false, drafts }) : m);
         }
         catch (e) {
-            setTheoryGenModal(m => ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }));
+            setTheoryGenModal(m => m ? ({ ...m, busy: false, error: "Fehler: " + (e.message || "unbekannt") }) : m);
         }
     }
     async function confirmTheoryGen() {
@@ -13458,7 +13546,9 @@ function App() {
         }));
         const { data, error } = await sb.from("theory_questions").insert(rows).select("id, topic_key, points, question");
         if (error) {
-            setTheoryGenModal({ ...m, saving: false, error: "Speichern fehlgeschlagen: " + error.message });
+            // cur ist null, wenn der Nutzer den Dialog inzwischen geschlossen hat - sonst würde der
+            // Fehlerbanner mit den veralteten Entwürfen den bereits geschlossenen Dialog wieder aufpoppen lassen.
+            setTheoryGenModal(cur => cur ? ({ ...cur, saving: false, error: "Speichern fehlgeschlagen: " + error.message }) : cur);
             return;
         }
         setTheoryQuestions(prev => [...(prev || []), ...(data || [])]);
@@ -14366,14 +14456,21 @@ function App() {
         if (matchedStu)
             patch.student_id = matchedStu.id;
         await updateAppt(id, patch);
-        // WhatsApp-Bestätigung anbieten, gebündelt für alle Termine dieses Schülers.
+        // WhatsApp-Bestätigung anbieten, gebündelt für alle Termine dieses Schülers. students/appts
+        // frisch abfragen statt der vor dem await eingefangenen Closure-Werte - kurzes Peek über den
+        // funktionalen setState-Updater (kein Re-Render, da unverändert zurückgegeben wird), damit ein
+        // zwischenzeitliches Update (z.B. neuer Schüler, geänderter Terminstatus) nicht zu einer
+        // unvollständigen/veralteten WhatsApp-Nachricht führt.
         if (appt) {
-            const stu = matchedStu || (appt.student_id ? students.find(x => x.id === appt.student_id) : null);
+            let freshStudents = students, freshAppts = appts;
+            setStudents(prev => { freshStudents = prev; return prev; });
+            setAppts(prev => { freshAppts = prev; return prev; });
+            const stu = matchedStu || (appt.student_id ? freshStudents.find(x => x.id === appt.student_id) : null);
             const thisAppt = { ...appt, status: "confirmed", student_id: (stu ? stu.id : appt.student_id) };
             // Alle bestätigten Termine sammeln, die zu diesem Schüler bzw. Namen gehören (heute oder Zukunft)
             const now = Date.now();
             const keyName = (appt.title || "").toLowerCase().trim();
-            const related = (appts || []).filter(a => {
+            const related = (freshAppts || []).filter(a => {
                 if (a.id === id)
                     return false;
                 if (a.status !== "confirmed")
@@ -14627,7 +14724,11 @@ function App() {
         const amountStr = await askPrompt({ message: "Höhe der Ausfallgebühr (€):", defaultValue: suggestion });
         if (amountStr === null)
             return;
-        const parsed = parseFloat((amountStr || "").replace(",", "."));
+        // Erst Tausenderpunkte entfernen, dann Komma zu Punkt - ein einfaches replace(",", ".")
+        // würde bei "1.000,00" nur bis zum zweiten Punkt lesen und 1 statt 1000 € buchen
+        // (gleiches Muster wie in findeBetraege()).
+        const raw = amountStr || "";
+        const parsed = parseFloat(raw.indexOf(",") >= 0 ? raw.replace(/\./g, "").replace(",", ".") : raw);
         if (isNaN(parsed) || parsed <= 0)
             return;
         let patchedStudent = null;
@@ -14704,7 +14805,9 @@ function App() {
     // Zufaelliger Bearer-Code fuer den Zahler-Link – bewusst deutlich laenger als der
     // Empfehlungscode (der ist zum Eintippen gedacht, dieser hier ist ein Geheimnis).
     function genPayerCode() {
-        return Math.random().toString(36).slice(2, 10) + Math.random().toString(36).slice(2, 10);
+        // Bearer-Geheimnis fuer den Zahler-Link: secureCode() (kryptographisch sicher) statt
+        // Math.random() - dessen PRNG-State liesse sich aus wenigen Ausgaben rekonstruieren.
+        return secureCode(32);
     }
     function payerURL(s) {
         if (!s.payerCode)
@@ -15428,11 +15531,12 @@ function App() {
     // wo er sowieso gerade ist (Schülerseite), mit einem Klick plus optionaler Notiz. Zählt
     // sichtbar hoch, damit ein Muster auffällt, bevor wieder eine Stunde verschenkt wird.
     async function reportNoShow() {
+        const sid = active.id;
         const note = await askPrompt({ message: "Nicht erschienen am " + new Date().toLocaleDateString("de-DE") + " – Notiz (optional):" });
         if (note === null)
             return;
-        // Gebühr wird bewusst VOR dem einzigen updateActive()-Aufruf erfragt (nicht danach): zwei
-        // sequenzielle updateActive()-Aufrufe in einer Funktion würden beide vom selben, zu Beginn
+        // Gebühr wird bewusst VOR dem einzigen Schreibvorgang erfragt (nicht danach): zwei
+        // sequenzielle Schreibvorgänge in einer Funktion würden beide vom selben, zu Beginn
         // des Renders eingefrorenen "active" ausgehen - der zweite Aufruf hätte damit die Änderung
         // des ersten wieder überschrieben, statt sie zu ergänzen.
         const chargeFee = await askConfirm({ message: "Soll dafür eine Ausfallgebühr auf das Konto von " + dispName(active) + " gebucht werden?" });
@@ -15442,17 +15546,33 @@ function App() {
                 : pricePerHour ? (Number(pricePerHour) / 2).toFixed(2).replace(".", ",") : "";
             const amountStr = await askPrompt({ message: "Höhe der Ausfallgebühr (€):", defaultValue: suggestion });
             if (amountStr !== null) {
-                const parsed = parseFloat((amountStr || "").replace(",", "."));
+                // Gleiches Muster wie in chargeAusfallgebuehrFuerTermin() / findeBetraege(): erst
+                // Tausenderpunkte entfernen, dann Komma zu Punkt - sonst liest "1.000,00" als 1.
+                const raw = amountStr || "";
+                const parsed = parseFloat(raw.indexOf(",") >= 0 ? raw.replace(/\./g, "").replace(",", ".") : raw);
                 if (!isNaN(parsed) && parsed > 0)
                     amount = parsed;
             }
         }
         const entry = { id: uniqueId("ns"), date: ymd(new Date()), note: note.trim() };
-        const patch = { noShows: [...(active.noShows || []), entry] };
-        if (amount !== null)
-            patch.costItems = [...(active.costItems || []), neuerKostenposten({ label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE"), amount })];
-        updateActive(patch);
-        showFlash(amount !== null ? "✓ Vermerkt + Gebühr gebucht" : "✓ Vermerkt");
+        // Wie chargeAusfallgebuehrFuerTermin: zwischen den awaits oben können Minuten vergehen, in
+        // denen ein Kollege denselben (geteilten) Schüler ändert und der Fokus-Refetch dessen neuen
+        // Stand in "active" einspielt. Schreibt darum funktional gegen den GERADE AKTUELLEN
+        // Schülerstand (setStudents-Updater), nicht gegen die beim Klick eingefangene "active"-Kopie -
+        // sonst würde updateActive() Kollegen-Änderungen beim Speichern wieder überschreiben.
+        let patchedStudent = null;
+        setStudents(prev => prev.map(s => {
+            if (s.id !== sid)
+                return s;
+            patchedStudent = { ...s, noShows: [...(s.noShows || []), entry] };
+            if (amount !== null)
+                patchedStudent.costItems = [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE"), amount })];
+            return patchedStudent;
+        }));
+        if (patchedStudent) {
+            scheduleSave(patchedStudent);
+            showFlash(amount !== null ? "✓ Vermerkt + Gebühr gebucht" : "✓ Vermerkt");
+        }
     }
     function removeNoShow(id) {
         updateActive({ noShows: (active.noShows || []).filter(n => n.id !== id) });
@@ -16848,14 +16968,30 @@ function App() {
             return;
         // Funktional gegen den aktuellen Datensatz statt updateActive() - gleiches Muster wie
         // createContract(): das vor dem Confirm-Dialog eingefangene "active" kann durch die
-        // Wartezeit auf die Nutzerbestätigung veraltet sein.
-        let patchedStudent = null;
+        // Wartezeit auf die Nutzerbestätigung veraltet sein. Aus demselben Grund wird die
+        // Unterschriften-Prüfung hier direkt vor dem Löschen gegen den jetzt aktuellen
+        // Vertrags-Datensatz wiederholt: wurde der Vertrag während der Wartezeit auf die
+        // Bestätigung von einem Kollegen an einem geteilten Schüler signiert (sichtbar nach dem
+        // naechsten Fokus-Refresh, siehe Kommentar bei fetchStudents()/visibilitychange oben),
+        // darf er nicht mehr verschwinden. Schützt nur vor diesem Wettlauf mit dem echten
+        // Datensatz, nicht vor gezielter Umgehung über die Konsole - dafür bräuchte es wie bei
+        // dbCancelInvoice() eine serverseitige Sperre, die es für Verträge (noch) nicht gibt.
+        let patchedStudent = null, blockedSigned = false;
         setStudents(prev => (prev || []).map(s => {
             if (!active || s.id !== active.id)
                 return s;
+            const current = (s.contracts || []).find(x => x.id === c.id);
+            if (current && current.instrSignature && current.studentSignature) {
+                blockedSigned = true;
+                return s;
+            }
             patchedStudent = { ...s, contracts: (s.contracts || []).filter(x => x.id !== c.id) };
             return patchedStudent;
         }));
+        if (blockedSigned) {
+            showToast("Ein bereits unterschriebener Vertrag kann nicht gelöscht werden.");
+            return;
+        }
         if (patchedStudent)
             scheduleSave(patchedStudent);
     }
@@ -16939,6 +17075,7 @@ function App() {
             const files = Array.from(fileList || []);
             if (files.length === 0)
                 return;
+            const myReq = ++receiptImportReqRef.current;
             setItemForm({ label: "", amount: "", error: "", busy: true });
             try {
                 const images = [];
@@ -16951,15 +17088,19 @@ function App() {
                     body: JSON.stringify({ images }),
                 });
                 const out = await resp.json().catch(() => null);
+                // Nur übernehmen, wenn das Formular währenddessen nicht geschlossen wurde (dann ist
+                // itemForm null oder busy schon false) UND dies noch die aktuellste Anfrage ist - sonst
+                // würde ein spät eintreffendes Ergebnis das schon geschlossene Formular ungefragt wieder
+                // öffnen, oder das Ergebnis eines zweiten, bereits laufenden Belegfotos überschreiben.
                 if (!resp.ok || !out) {
-                    setItemForm({ label: "", amount: "", error: (out && out.error) || "Auslesen fehlgeschlagen", busy: false });
+                    setItemForm(prev => (prev && prev.busy && myReq === receiptImportReqRef.current) ? { label: "", amount: "", error: (out && out.error) || "Auslesen fehlgeschlagen", busy: false } : prev);
                     return;
                 }
                 const d = out.receipt || {};
-                setItemForm({ label: d.label || "", amount: (d.amount != null && d.amount !== "") ? String(d.amount).replace(".", ",") : "", error: "", busy: false });
+                setItemForm(prev => (prev && prev.busy && myReq === receiptImportReqRef.current) ? { label: d.label || "", amount: (d.amount != null && d.amount !== "") ? String(d.amount).replace(".", ",") : "", error: "", busy: false } : prev);
             }
             catch (e) {
-                setItemForm({ label: "", amount: "", error: "Fehler: " + (e.message || "unbekannt") + "\n\nLäuft die App über Netlify mit eingerichteter Funktion?", busy: false });
+                setItemForm(prev => (prev && prev.busy && myReq === receiptImportReqRef.current) ? { label: "", amount: "", error: "Fehler: " + (e.message || "unbekannt") + "\n\nLäuft die App über Netlify mit eingerichteter Funktion?", busy: false } : prev);
             }
         }
         function addLesson() {
@@ -18834,15 +18975,19 @@ function App() {
                 setMsg("Das ist deine eigene Adresse.");
                 return;
             }
+            // busy bleibt bis zum Ende des gesamten Schreibvorgangs aktiv (nicht schon nach
+            // findUserByEmail) - sonst öffnet sich der Button wieder, während dbShare/writeStudent
+            // noch laufen, und ein zweiter Klick kann mit veraltetem "shared" die erste Freigabe überschreiben.
             setBusy(true);
             setMsg("");
             const prof = await findUserByEmail(e);
-            setBusy(false);
             if (!prof) {
+                setBusy(false);
                 setMsg("Kein Konto mit dieser E-Mail gefunden. Die Person muss sich zuerst einmal in der App registrieren.");
                 return;
             }
             if (shared.indexOf(prof.id) >= 0) {
+                setBusy(false);
                 setMsg("Schon freigegeben.");
                 return;
             }
@@ -18851,10 +18996,12 @@ function App() {
                 await dbShare(active.id, next);
             }
             catch (err) {
+                setBusy(false);
                 setMsg("Freigabe fehlgeschlagen: " + err.message);
                 return;
             }
             writeStudent({ ...active, _shared: next });
+            setBusy(false);
             setEmail("");
             setMsg("Freigegeben für " + e);
         }
@@ -18923,7 +19070,10 @@ function App() {
         const d = new Date(freedAppt.start_at);
         const weekday = d.getDay();
         const hhmm = String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-        const freedEnd = new Date(freedAppt.end_at || freedAppt.start_at);
+        // Ohne end_at 45 Min (1 UE) annehmen statt auf start_at zu fallen - sonst wäre freedEnd
+        // === d und der Konfliktcheck unten hätte ein nullbreites Fenster, das nie triggert
+        // (gleiche Konvention wie apptMin()/dayTimeline() weiter unten).
+        const freedEnd = freedAppt.end_at ? new Date(freedAppt.end_at) : new Date(d.getTime() + 45 * 60000);
         // Auch die Endzeit gegen wl.bis prüfen, nicht nur den Beginn - sonst könnte ein Termin
         // angeboten werden, der weit über das Wunschfenster hinaus in eine Zeit reicht, in der der
         // Schüler laut eigener Angabe gar nicht verfügbar ist.
@@ -19103,7 +19253,10 @@ function App() {
         try {
             await dbUpdateAppt(theoryCheckinModal.appt.id, { checkin_code: code, checkin_expires_at: expires, checkin_thema: thema });
             setAppts(prev => prev.map(a => a.id === theoryCheckinModal.appt.id ? { ...a, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema } : a));
-            setTheoryCheckinModal(m => m && ({ ...m, appt: { ...m.appt, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema }, thema }));
+            // Stale-Response-Guard: während des await kann der Dialog geschlossen oder für einen anderen
+            // Termin neu geöffnet worden sein - dann NICHT mehr überschreiben (gleiche Technik wie bei
+            // setAdminTeacherStudents() weiter unten).
+            setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, appt: { ...m.appt, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema }, thema } : m);
         }
         catch (e) {
             showToast("Konnte nicht gestartet werden:\n" + e.message);
@@ -19114,14 +19267,16 @@ function App() {
             return;
         const attendance = await fetchTheoryAttendance(theoryCheckinModal.appt.id).catch(() => null);
         if (attendance)
-            setTheoryCheckinModal(m => m && ({ ...m, attendance }));
+            // Stale-Response-Guard wie oben in startTheoryCheckin().
+            setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, attendance } : m);
     }
     async function addManualAttendance(studentId) {
         if (!theoryCheckinModal || !studentId)
             return;
         try {
             const row = await dbAddTheoryAttendance(uid, theoryCheckinModal.appt.id, studentId, theoryCheckinModal.thema);
-            setTheoryCheckinModal(m => m && ({ ...m, attendance: [...m.attendance, row] }));
+            // Stale-Response-Guard wie oben in startTheoryCheckin().
+            setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, attendance: [...m.attendance, row] } : m);
         }
         catch (e) {
             showToast("Konnte nicht hinzugefügt werden:\n" + e.message);
@@ -19130,7 +19285,8 @@ function App() {
     async function removeAttendanceEntry(id) {
         try {
             await dbRemoveTheoryAttendance(id);
-            setTheoryCheckinModal(m => m && ({ ...m, attendance: m.attendance.filter(a => a.id !== id) }));
+            // Stale-Response-Guard wie oben in startTheoryCheckin().
+            setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, attendance: m.attendance.filter(a => a.id !== id) } : m);
         }
         catch (e) {
             showToast("Konnte nicht entfernt werden:\n" + e.message);
@@ -20499,10 +20655,21 @@ function App() {
         try {
             await adminSaveSchoolLogo(sc.id, "");
             setAdminSchools(prev => (prev || []).map(s => s.id === sc.id ? { ...s, logo: "" } : s));
-            if (adminEdit && adminEdit.id === sc.id)
-                setAdminEdit({ ...adminEdit, logo: "" });
+            // Gegen den zu diesem Zeitpunkt aktuellen Stand patchen statt einen vor dem await
+            // eingefangenen Snapshot zu überschreiben (gleiche Technik wie im writeSchool-
+            // Kommentar weiter oben beschrieben), sonst würden zwischenzeitliche Änderungen an
+            // adminEdit/school während des await stillschweigend verworfen. setAdminEdit ist ein
+            // reiner useState-Setter, der äußere Guard kann hier entfallen - React verwirft ein
+            // unverändert zurückgegebenes "prev" ohnehin. writeSchool dagegen löst bei JEDEM
+            // wahrheitswertigen Rückgabewert einen Cache-Write, einen debounced Server-Save
+            // (inkl. Optimistic-Lock-Konfliktprüfung) und setSaved(false) aus, selbst wenn der
+            // Updater unverändert "prev" liefert - der äußere school.id-Guard bleibt deshalb
+            // bestehen, sonst würde jede Logo-Entfernung einer FREMDEN Fahrschule einen unnötigen
+            // (und potenziell mit einem falschen Konflikt-Toast endenden) Server-Save der eigenen
+            // Fahrschule auslösen, sobald "school" gesetzt ist.
+            setAdminEdit(prev => prev && prev.id === sc.id ? { ...prev, logo: "" } : prev);
             if (school && school.id === sc.id)
-                writeSchool({ ...school, logo: "" });
+                writeSchool(prev => prev && prev.id === sc.id ? { ...prev, logo: "" } : prev);
         }
         catch (err) {
             showToast("Logo konnte nicht entfernt werden:\n" + err.message);
@@ -20754,7 +20921,11 @@ function App() {
             }
             try {
                 const dataUrl = await resizeImageToDataURL(file, 256);
-                writeSchool({ ...school, logo: dataUrl });
+                // Funktional gegen den aktuellen Schul-Datensatz statt gegen das vor dem
+                // await eingefangene "school" schreiben - sonst würden während der Resize-
+                // Wartezeit vorgenommene Änderungen (z.B. Name/Farbe) hier stillschweigend
+                // verworfen (siehe writeSchool()-Definition).
+                writeSchool(prev => prev && ({ ...prev, logo: dataUrl }));
             }
             catch (err) {
                 showToast("Logo konnte nicht verarbeitet werden:\n" + err.message);
@@ -21340,7 +21511,11 @@ function App() {
                                         return;
                                     try {
                                         const fresh = await regenerateInviteCode(school.id);
-                                        writeSchool({ ...school, invite_code: fresh });
+                                        // Funktional (prev => ...) statt {...school, ...} - Confirm-Dialog und
+                                        // regenerateInviteCode können beide beliebig lange dauern, in der Zeit an
+                                        // anderer Stelle geänderte Felder würden mit dem vor dem Dialog
+                                        // eingefangenen "school" sonst stillschweigend verworfen.
+                                        writeSchool(prev => ({ ...prev, invite_code: fresh }));
                                         showFlash("✓ Neuer Code erzeugt");
                                     }
                                     catch (e) {
@@ -25527,10 +25702,10 @@ function App() {
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Unterschriften"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 } }, "Unterschreibe zuerst selbst, dann gib dem Sch\u00FCler das Handy zum Unterschreiben."),
                 React.createElement(SignaturePad, { label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); try {
-                        localStorage.setItem("v3_instr_sig", url);
+                        localStorage.setItem("v3_instr_sig_" + uid, url); // kontogebunden, nicht geräteweit (Signatur sonst über Konten hinweg sichtbar)
                     }
                     catch (e) { } }, onClear: () => { setInstrSig(null); try {
-                        localStorage.removeItem("v3_instr_sig");
+                        localStorage.removeItem("v3_instr_sig_" + uid);
                     }
                     catch (e) { } } }),
                 React.createElement(SignaturePad, { label: "Fahrschüler · " + (active ? dispName(active) : "–"), existing: stuSig, onSave: url => setStuSig(url), onClear: () => setStuSig(null) }),
@@ -25544,7 +25719,10 @@ function App() {
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ausbildungsvertrag unterschreiben"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 } }, "Unterschreibe zuerst selbst, dann gib dem Sch\u00FCler das Handy zum Unterschreiben."),
                 React.createElement(SignaturePad, { label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); saveContractSignature("instrSignature", url); try {
-                        localStorage.setItem("v3_instr_sig", url);
+                        localStorage.setItem("v3_instr_sig_" + uid, url); // kontogebunden, nicht geräteweit (Signatur sonst über Konten hinweg sichtbar)
+                    }
+                    catch (e) { } }, onClear: () => { setInstrSig(null); try {
+                        localStorage.removeItem("v3_instr_sig_" + uid);
                     }
                     catch (e) { } } }),
                 React.createElement(SignaturePad, { label: "Fahrsch\u00FCler \u00B7 " + (active ? dispName(active) : "\u2013"), existing: contractStuSig, onSave: url => { setContractStuSig(url); saveContractSignature("studentSignature", url); }, onClear: () => setContractStuSig(null) }),
@@ -26201,6 +26379,11 @@ function BegleitFahrten({ code }) {
     // verspätet fehlschlagenden ÄLTEREN Request nicht mehr zurückrollen zu lassen, wenn
     // inzwischen ein NEUERER Request für denselben Punkt schon erfolgreich war.
     const standRequestSeq = React.useRef({});
+    // Wird true, sobald standSetzen()/speichern()/loeschen() lokal schon geschrieben haben - der
+    // noch laufende initiale GET (siehe Mount-Effekt unten) darf diese frischeren Daten dann
+    // nicht mehr mit seinem älteren Snapshot überschreiben (Race bei langsamer Verbindung).
+    const planLokalRef = React.useRef(false);
+    const fahrtenLokalRef = React.useRef(false);
     const [form, setForm] = React.useState(null);
     const [detail, setDetail] = React.useState(null); // geöffnete Übung (Tipps)
     const [auswahl, setAuswahl] = React.useState(null); // Übungswahl vor dem Losfahren
@@ -26230,8 +26413,25 @@ function BegleitFahrten({ code }) {
             if (weg)
                 return;
             const s = (r && r.student) || {};
-            setFahrten(asArray(s.begleitfahrten) || []);
-            setPlan((s.begleitplan && typeof s.begleitplan === "object") ? s.begleitplan : {});
+            const fetchedFahrten = asArray(s.begleitfahrten) || [];
+            const fetchedPlan = (s.begleitplan && typeof s.begleitplan === "object") ? s.begleitplan : {};
+            // Nicht mehr blind überschreiben, falls währenddessen schon lokal gespeichert wurde - sonst
+            // flippt eine gerade bestätigte Änderung wieder auf den alten Stand zurück. Den frisch
+            // geladenen Stand aber trotzdem einmischen (nicht komplett verwerfen wie zuvor) - sonst
+            // würden ab dem ersten Tipp/Speichern während des noch laufenden GET alle ANDEREN, schon
+            // früher gespeicherten Übungen bzw. Fahrten für den Rest dieser Sitzung ausgeblendet
+            // (gleiches Merge-Muster wie beim Hintergrund-Abgleich der Schülerliste weiter oben).
+            if (!fahrtenLokalRef.current)
+                setFahrten(fetchedFahrten);
+            else
+                setFahrten(prev => {
+                    const ids = new Set((prev || []).map(f => f.id));
+                    return [...fetchedFahrten.filter(f => !ids.has(f.id)), ...(prev || [])];
+                });
+            if (!planLokalRef.current)
+                setPlan(fetchedPlan);
+            else
+                setPlan(p => ({ ...fetchedPlan, ...p }));
         })
             .catch(() => { if (!weg)
             setFahrten([]); });
@@ -26272,6 +26472,9 @@ function BegleitFahrten({ code }) {
         const vorher = plan[k];
         const mySeq = (standRequestSeq.current[k] || 0) + 1;
         standRequestSeq.current[k] = mySeq;
+        // Ab hier hat diese Funktion die Hoheit über plan - der noch laufende initiale GET darf
+        // ihn nicht mehr zurücksetzen, egal wann er noch eintrifft.
+        planLokalRef.current = true;
         // Sofort umschalten, damit sich das Antippen nicht zäh anfühlt; bei Fehler zurück.
         setPlan(p => {
             const n = { ...p };
@@ -26378,6 +26581,9 @@ function BegleitFahrten({ code }) {
             localStorage.setItem(LS_BEGL, eintrag.begleiter);
         }
         catch (e) { }
+        // Ab hier hat diese Komponente selbst den aktuellen Stand - der noch laufende initiale
+        // GET darf ihn nicht mehr überschreiben, egal wann er noch eintrifft.
+        fahrtenLokalRef.current = true;
         setFahrten(prev => [...(prev || []).filter(f => f.id !== eintrag.id), eintrag]);
         setForm(null);
     }
@@ -26394,6 +26600,7 @@ function BegleitFahrten({ code }) {
             setErr("Die Fahrt konnte nicht gelöscht werden.");
             return;
         }
+        fahrtenLokalRef.current = true;
         setFahrten(prev => (prev || []).filter(f => f.id !== form.id));
         setForm(null);
     }
@@ -27852,22 +28059,28 @@ function StudentArea({ code, info, appMode }) {
                 setLoading(false);
                 return;
             }
-            setData(d);
-            setName(n);
-            const w = (d.student && d.student.wunschliste) || {};
-            setWlActive(!!w.active);
-            setWlWeekdays(Array.isArray(w.weekdays) ? w.weekdays : []);
-            setWlVon(w.von || "");
-            setWlBis(w.bis || "");
-            // Hintergrund-Nachladen der Fahrstunden - nur übernehmen, wenn zwischenzeitlich nicht
-            // aus- und als jemand anderes wieder eingeloggt wurde (siehe sessionIdRef-Kommentar oben).
-            publicStudentLessons(code, n, p).then(ls => { if (sessionIdRef.current === mySession)
-                setData(cur => cur ? { ...cur, lessons: ls } : cur); });
-            try {
-                localStorage.setItem(LS_NAME, n);
-                localStorage.setItem(LS_PIN, p);
+            // Nur übernehmen, wenn zwischenzeitlich nicht aus- und als jemand anderes wieder
+            // eingeloggt wurde (siehe sessionIdRef-Kommentar oben) - sonst könnte die Antwort
+            // dieses (ggf. langsamen) Logins noch die Daten von inzwischen eingeloggtem Schüler B
+            // überschreiben, obwohl B sich nie als A angemeldet hat.
+            if (sessionIdRef.current === mySession) {
+                setData(d);
+                setName(n);
+                const w = (d.student && d.student.wunschliste) || {};
+                setWlActive(!!w.active);
+                setWlWeekdays(Array.isArray(w.weekdays) ? w.weekdays : []);
+                setWlVon(w.von || "");
+                setWlBis(w.bis || "");
+                // Hintergrund-Nachladen der Fahrstunden - nur übernehmen, wenn zwischenzeitlich nicht
+                // aus- und als jemand anderes wieder eingeloggt wurde (siehe sessionIdRef-Kommentar oben).
+                publicStudentLessons(code, n, p).then(ls => { if (sessionIdRef.current === mySession)
+                    setData(cur => cur ? { ...cur, lessons: ls } : cur); });
+                try {
+                    localStorage.setItem(LS_NAME, n);
+                    localStorage.setItem(LS_PIN, p);
+                }
+                catch (e) { }
             }
-            catch (e) { }
             // Früher wurde beim Erst-Login sofort der PIN-Dialog erzwungen. Das verstellte den
             // Blick auf genau das, weshalb man sich anmeldet - Fortschritt und Erfolge. Der
             // Hinweis steht jetzt als Banner in der Übersicht und lässt sich später erledigen.
@@ -28008,12 +28221,17 @@ function StudentArea({ code, info, appMode }) {
         }
         setAvatarBusy(true);
         setAvatarErr("");
+        // Session-Wächter (siehe doCancel()/claimOffer() im selben Bereich): ein spät auflösender
+        // Upload darf das Profilbild eines inzwischen anderen eingeloggten Schülers auf einem
+        // geteilten Gerät nicht überschreiben, siehe sessionIdRef-Kommentar oben.
+        const mySession = sessionIdRef.current;
         try {
             const dataUrl = await resizeImageToDataURL(file, 256);
             const res = await publicStudentSetAvatar(code, name.trim(), pin.trim(), dataUrl);
             if (res !== "ok")
                 throw new Error("Speichern fehlgeschlagen");
-            setData(cur => cur ? { ...cur, student: { ...cur.student, avatarUrl: dataUrl } } : cur);
+            if (sessionIdRef.current === mySession)
+                setData(cur => cur ? { ...cur, student: { ...cur.student, avatarUrl: dataUrl } } : cur);
         }
         catch (err) {
             setAvatarErr(err.message || "Profilbild konnte nicht gespeichert werden.");
@@ -28023,11 +28241,14 @@ function StudentArea({ code, info, appMode }) {
     async function removeAvatar() {
         setAvatarBusy(true);
         setAvatarErr("");
+        // Session-Wächter, siehe onAvatarFile()/sessionIdRef-Kommentar oben.
+        const mySession = sessionIdRef.current;
         try {
             const res = await publicStudentSetAvatar(code, name.trim(), pin.trim(), "");
             if (res !== "ok")
                 throw new Error("Entfernen fehlgeschlagen");
-            setData(cur => cur ? { ...cur, student: { ...cur.student, avatarUrl: null } } : cur);
+            if (sessionIdRef.current === mySession)
+                setData(cur => cur ? { ...cur, student: { ...cur.student, avatarUrl: null } } : cur);
         }
         catch (err) {
             setAvatarErr(err.message || "Profilbild konnte nicht entfernt werden.");
@@ -28489,7 +28710,7 @@ function StudentArea({ code, info, appMode }) {
                                 background: on ? sm.bg : "var(--card)",
                                 filter: on ? "none" : "grayscale(0.6) opacity(0.55)", transition: "all .12s" } }, sm.emoji);
                     })))),
-                React.createElement("textarea", { rows: 2, value: reflectForm.note, onChange: e => setReflectForm(rf => rf && ({ ...rf, note: e.target.value })), placeholder: t("reflect_note_placeholder"), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, marginTop: 12, resize: "vertical" } }),
+                React.createElement("textarea", { rows: 2, maxLength: 500, value: reflectForm.note, onChange: e => setReflectForm(rf => rf && ({ ...rf, note: e.target.value.slice(0, 500) })), placeholder: t("reflect_note_placeholder"), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, marginTop: 12, resize: "vertical" } }),
                 reflectForm.error && React.createElement("div", { style: { fontSize: 12.5, color: "#B3362A", marginTop: 8 } }, reflectForm.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: reflectForm.busy, onClick: submitReflection }, reflectForm.busy ? "…" : t("reflect_submit")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: reflectForm.busy, onClick: () => setReflectForm(null) }, t("zurueck")))),
@@ -28899,16 +29120,22 @@ function BookingPage({ code, appMode, onLogout }) {
     // damit der Hinweis nach einer Buchung bzw. nach einer verbuchten Zahlung aktuell ist.
     const [payStatus, setPayStatus] = React.useState(null); // null | {modus, offen, iban, empfaenger}
     React.useEffect(() => {
-        let pin = "";
+        let pin = "", loginName = "";
         try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
-        if (!myName.trim() || !pin) { setPayStatus(null); return; }
+        // Für den Zahlstatus zählt der eingeloggte Name (v3_sa_name_), nicht das separat
+        // editierbare myName-Feld auf dem Termine-Tab - genau wie bei BegleitFahrten/openForm
+        // (siehe deren loginName). Sonst würde ein dort geänderter Name den Server unter
+        // falscher Identität abfragen und eine echte offene Rechnung stillschweigend aus der
+        // Anzeige verschwinden lassen.
+        try { loginName = localStorage.getItem("v3_sa_name_" + code) || ""; } catch (e) { }
+        if (!loginName.trim() || !pin) { setPayStatus(null); return; }
         // "on"-Guard wie bei den Nachbar-Effects (busy-Times, nameSlots) weiter oben: verhindert,
         // dass eine spät eintreffende Antwort für einen inzwischen verlassenen Namen/Zustand den
         // aktuell angezeigten Zahlstatus überschreibt.
         let on = true;
-        publicStudentPaymentStatus(code, myName.trim(), pin).then(r => { if (on) setPayStatus(r); }).catch(() => { if (on) setPayStatus(null); });
+        publicStudentPaymentStatus(code, loginName.trim(), pin).then(r => { if (on) setPayStatus(r); }).catch(() => { if (on) setPayStatus(null); });
         return () => { on = false; };
-    }, [code, myName, done]);
+    }, [code, done]);
     const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
     // In der App beginnt man auf der Startseite (wie in der Fahrlehrer-App), auf der
@@ -30172,7 +30399,10 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
             reload();
         }
         catch (e) {
-            setForm({ ...f, busy: false, error: e.message || "Buchung fehlgeschlagen" });
+            // Funktional (prev => ...) statt {...f, ...} - die Formularfelder bleiben während busy
+            // editierbar, der Nutzer kann also während des awaits oben schon eine Korrektur eintippen;
+            // das vor dem Request eingefangene "f" würde diese sonst stillschweigend überschreiben.
+            setForm(prev => prev ? { ...prev, busy: false, error: e.message || "Buchung fehlgeschlagen" } : prev);
             reload();
         }
     }
@@ -30419,6 +30649,11 @@ function schuelerLogout(code) {
     try {
         localStorage.removeItem("v3_sa_name_" + code);
         localStorage.removeItem("v3_sa_pin_" + code);
+        // v3_mine_/v3_myname_ sind geräteweit unter dem Fahrschul-Code gespeichert, nicht pro
+        // Fahrschüler - ohne Löschen beim Abmelden zeigt BookingPage auf einem gemeinsam
+        // genutzten Gerät dem nächsten Schüler noch die Termine des vorherigen als "Dein Termin" an.
+        localStorage.removeItem("v3_mine_" + code);
+        localStorage.removeItem("v3_myname_" + code);
     }
     catch (e) { }
     setSchuelerGuest(code, false);
