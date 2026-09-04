@@ -7,6 +7,16 @@
 
 const { notifyAppointmentEvent } = require("./lib/appointment-push");
 
+// Der Postgres-Trigger schickt ausschliesslich echte uuid-Spalten (appointments.id und
+// appointments.owner sind beide "uuid NOT NULL"), alles andere kann nur aus einem manipulierten
+// Aufruf stammen. Vorher wanderte owner voellig ungeprueft weiter und landete in lib/apns.js roh
+// (ohne encodeURIComponent) in den PostgREST-URLs: ein enthaltenes "#" beendet dort den
+// Query-String, der einschraenkende Filter "&token=in.(...)" fiel damit aus der Aufraeum-Anfrage
+// fuer tote Tokens heraus und es wurden ALLE Geraetetoken dieses Fahrlehrers geloescht - er war
+// danach still von jeder Push abgemeldet. Deshalb hier hart abweisen statt durchreichen.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const isUuid = (v) => typeof v === "string" && UUID_RE.test(v);
+
 exports.handler = async function (event) {
   const headers = { "Content-Type": "application/json" };
 
@@ -31,6 +41,10 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültiges JSON" }) };
   }
 
+  if (!isUuid(payload.appointment_id) || !isUuid(payload.owner)) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Termin- oder Besitzer-ID" }) };
+  }
+
   try {
     const result = await notifyAppointmentEvent({
       evt: payload.event,
@@ -40,6 +54,7 @@ exports.handler = async function (event) {
     });
     return { statusCode: 200, headers, body: JSON.stringify(result) };
   } catch (e) {
+    console.error("appointment-push-trigger:", e);
     return { statusCode: 500, headers, body: JSON.stringify({ error: e.message || "Serverfehler" }) };
   }
 };
