@@ -2799,7 +2799,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.198.0";
+const APP_VERSION = "1.199.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2926,6 +2926,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.199.0", date: "September 2026", changes: [
+            "Neu: Unterlagen-Radar in der Auswertung. Die Checkliste „Führerschein-Antrag\" (Sehtest, Erste-Hilfe-Kurs, Passfoto, Antrag bei der Führerscheinstelle) gab es bisher nur je Schüler - wer wissen wollte, von wem noch ein Sehtest fehlt, musste jeden Schüler einzeln aufmachen. Jetzt steht dieselbe Information einmal über alle deine Schüler: wie viele noch etwas schulden, was genau bei wem fehlt, und seit wann derjenige schon dabei ist",
+            "Dringend markiert sind Schüler, bei denen eine Prüfung schon angemeldet oder die Theorie bestanden ist, obwohl noch Unterlagen fehlen - da hängt die Anmeldung an einem Zettel",
+            "Ein Tipp auf „Erinnern\" öffnet WhatsApp mit einer fertigen Nachricht, die genau die bei diesem Schüler fehlenden Unterlagen aufzählt. Abgeschickt wird wie immer von Hand. Das Datum wird beim Schüler gemerkt, damit du beim nächsten Durchgang siehst, wen du schon angeschrieben hast",
+            "Über die Reihe oben lässt sich auf eine einzelne Unterlage filtern - zum Beispiel „wer hat noch keinen Sehtest\", bevor du zur Führerscheinstelle fährst",
+        ] },
     { v: "1.198.0", date: "August 2026", changes: [
             "Wichtig: Eine sicherheitsrelevante Prüfung hat mehrere Zugriffslücken in der Datenbank aufgedeckt und geschlossen - unter anderem einen Weg, über den sich ein Konto Zugriff auf eine fremde Fahrschule hätte verschaffen können, sowie kleinere Lücken bei der Fahrschüler-App (Terminverwaltung, Namensabfragen). Alle Funde wurden noch am selben Tag behoben und live geprüft. Details bewusst nicht öffentlich - wer betroffen sein könnte, wird direkt informiert",
             "Nebenbei repariert: Die Knöpfe zum Setzen von Fahrschul-Admin- und Moderator-Rechten für Kollegen funktionierten bisher nur für den zentralen App-Admin, nicht für echte Fahrschul-Admins - liefen technisch ins Leere, ohne Fehlermeldung. Laufen jetzt über einen eigenen, geprüften Weg",
@@ -8963,6 +8969,23 @@ function licenseStepDone(stu, key) {
     const steps = stu.licenseSteps || {};
     return !!(steps[key] && steps[key].done);
 }
+// Die vier Schritte aus LICENSE_STEPS, die der Schüler selbst beibringen muss - Grundlage des
+// Unterlagen-Radars in der Auswertung. Die übrigen vier drehen sich um Anmeldung und Ergebnis
+// der Prüfungen und stehen deshalb dort, wo Prüfungen geplant werden.
+// "bitte" ist die Formulierung für die Erinnerungsnachricht an den Schüler - das Checklisten-
+// Label ("Antrag bei der Führerscheinstelle gestellt") liest sich in einer Bitte falsch.
+const UNTERLAGEN_STEPS = [
+    { key: "sehtest", kurz: "Sehtest", bitte: "Sehtest" },
+    { key: "erstehilfe", kurz: "Erste Hilfe", bitte: "Erste-Hilfe-Kurs (Bescheinigung)" },
+    { key: "passfoto", kurz: "Passfoto", bitte: "biometrisches Passfoto" },
+    { key: "antrag", kurz: "Antrag", bitte: "Antrag bei der Führerscheinstelle" },
+];
+// Datum der zuletzt verschickten Unterlagen-Erinnerung. Liegt bewusst IN licenseSteps statt als
+// eigenes Feld am Schüler: die Löschung der Ausbildungsdaten nach § 31 FahrlG entfernt
+// licenseSteps als Ganzes und nimmt den Zeitpunkt damit mit - ein eigenes Feld kennt sie nicht.
+// Der Unterstrich hält den Eintrag von den echten Schritt-keys getrennt; gelesen wird er nur im
+// Unterlagen-Radar, die Checkliste selbst läuft ausschließlich über LICENSE_STEPS.
+const UNTERLAGEN_ERINNERT_KEY = "_erinnertAm";
 const VEHICLE_COST_CATEGORIES = ["Kraftstoff", "Werkstatt/Reparatur", "TÜV/HU", "Versicherung", "Leasing/Finanzierung", "Sonstiges"];
 // FAQ-Fragen unter Mehr/Einstellungen/Konto - der Fragetext geht 1:1 an den KI-Helfer, dessen
 // Systemprompt (netlify/functions/assistant.js) dieselben Themen als Wissensquelle kennt, damit
@@ -9570,6 +9593,8 @@ function App() {
     const [codeHervorheben, setCodeHervorheben] = useState(false); // kurzer Rahmen um den Fahrschul-Code nach dem Sprung aus der Suche
     const [offenePosten, setOffenePosten] = useState(null); // null | {busy,error,list} schulweites Offene-Posten-Dashboard
     const [quotenpilot, setQuotenpilot] = useState(null); // null | {busy,error,rows,zeitraum,klasse} Erfolgsquoten-Cockpit
+    // Unterlagen-Radar in der Auswertung: "alle" oder der key eines UNTERLAGEN_STEPS-Eintrags.
+    const [unterlagenFilter, setUnterlagenFilter] = useState("alle");
     // Abrechnungs-Wächter. stichtag liegt hier (nicht im Modal-State), weil die Kachel in der
     // Abrechnung ihn schon zum Rechnen braucht, bevor das Modal überhaupt geöffnet wurde.
     const [luecken, setLuecken] = useState({ offen: false, busy: false, error: "", raw: null, soloMode: false, stichtag: "", expandedId: null });
@@ -14845,7 +14870,7 @@ function App() {
             { id: "theoriepilot", label: "Theoriepilot", group: "Seite", action: () => setView("theoriepilot") },
             { id: "daten", label: "Schülerdaten", group: "Seite", action: () => setView("daten") },
             { id: "fuhrpark", label: "Fuhrpark - Fahrzeuge, Kosten, Kalender", group: "Seite", action: () => setView("fuhrpark") },
-            { id: "auswertung", label: "Auswertung - Statistik, Prüfungsplanung, Abrechnung", group: "Seite", action: () => setView("auswertung") },
+            { id: "auswertung", label: "Auswertung - Statistik, Prüfungsplanung, Unterlagen, Abrechnung", group: "Seite", action: () => setView("auswertung") },
             { id: "tagesgeschaeft", label: "Tagesgeschäft - Tagesabschluss, Lücken, krank melden", group: "Seite", action: () => setView("tagesgeschaeft") },
             { id: "interessenten", label: "Interessenten", group: "Seite", action: () => setView("interessenten") },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
@@ -17109,11 +17134,13 @@ function App() {
         const canEditSchool = isAdmin(session) || isSchoolAdmin;
         return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Auswertung"),
-            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Statistik, Prüfungsplanung und Abrechnung deiner Fahrschule an einem Ort."),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } }, "Statistik, Prüfungsplanung, Unterlagen und Abrechnung deiner Fahrschule an einem Ort."),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Statistik"),
             renderStatistikBody(),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Prüfungsplanung"),
             renderPruefungsplanungBody(),
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Unterlagen-Radar"),
+            renderUnterlagenBody(),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "24px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Abrechnung"),
             renderAbrechnungBody(),
             canEditSchool && school && school.id && React.createElement(React.Fragment, null,
@@ -17561,6 +17588,152 @@ function App() {
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, dispName(f.stu)),
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, f.from + " – " + f.to + " Uhr")),
                             React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5 }, onClick: () => offerLueckenSlot(f) }, "Anbieten")))))));
+    }
+    /* ── Unterlagen-Radar: wer muss noch etwas für den Führerschein-Antrag beibringen. Die
+       Checkliste dazu gibt es je Schüler schon lange (Führerschein-Reiter) - nur eben je
+       Schüler: um zu wissen, von wem noch ein Sehtest fehlt, musste man alle Schüler einzeln
+       aufmachen. Hier steht dieselbe Information einmal über alle eigenen Schüler.
+       Reine Client-Aggregation über bereits geladene Felder (licenseSteps, ausbildungsbeginn),
+       ohne neue Abfrage und ohne neues Datenfeld - wie Statistik und Prüfungsplanung. NICHT
+       schulweit: filtert auf _isMine, siehe dortigen Kommentar und Changelog 1.164.46. ── */
+    function unterlagenRadar() {
+        const heute = new Date();
+        // pending = Selbstanmeldung, die noch nicht übernommen wurde (noch kein Schüler);
+        // dataDeletedAt = Ausbildungsdaten nach § 31 FahrlG gelöscht, licenseSteps ist dort weg
+        // und der Schüler sähe sonst aus, als fehlte bei ihm alles.
+        const aktive = (students || []).filter(s => s._isMine && !s.archived && !s.pending && !s.dataDeletedAt);
+        const rows = aktive.map(s => {
+            const fehlt = UNTERLAGEN_STEPS.filter(st => !licenseStepDone(s, st.key));
+            if (fehlt.length === 0)
+                return null;
+            // Dringend, sobald eine Prüfung angemeldet oder die Theorie bestanden ist: dann
+            // hätten die Unterlagen längst vorliegen müssen, sonst steht die Anmeldung.
+            const dringend = licenseStepDone(s, "theorie_angemeldet") || licenseStepDone(s, "theorie_bestanden")
+                || licenseStepDone(s, "praxis_angemeldet");
+            // Anmeldedatum ist ein optionales Feld; ohne es ist das Anlegedatum des Schülers die
+            // ehrlichste Näherung für "seit wann dabei".
+            const seitDatum = s.ausbildungsbeginn || (s._createdAt || "").slice(0, 10) || "";
+            const seit = seitDatum ? new Date(seitDatum + "T12:00:00") : null;
+            const tage = (seit && !isNaN(seit.getTime())) ? Math.max(0, Math.round((heute - seit) / 86400000)) : null;
+            const erinnertAm = String((s.licenseSteps || {})[UNTERLAGEN_ERINNERT_KEY] || "").slice(0, 10);
+            return { s, fehlt, dringend, tage, erinnertAm };
+        }).filter(Boolean);
+        // Dringend zuerst, dann wer am längsten dabei ist (unbekanntes Datum zuletzt), dann wer
+        // am meisten schuldig ist, dann alphabetisch - damit die Reihenfolge stabil bleibt.
+        // Die Dauer schlägt bewusst die Anzahl: bei einem gestern angelegten Schüler fehlt
+        // naturgemäß alles, das ist kein Grund, ihn über jemanden zu stellen, der seit vier
+        // Monaten dabei ist.
+        rows.sort((a, b) => (Number(b.dringend) - Number(a.dringend))
+            || ((b.tage == null ? -1 : b.tage) - (a.tage == null ? -1 : a.tage))
+            || (b.fehlt.length - a.fehlt.length)
+            || dispName(a.s).localeCompare(dispName(b.s), "de"));
+        return { rows, aktiveAnzahl: aktive.length };
+    }
+    // Text der Unterlagen-Erinnerung: nennt genau die Unterlagen, die bei diesem Schüler noch
+    // fehlen - gleiche Tonalität wie die Willkommensnachricht, nur eben später und gezielt.
+    function unterlagenText(r) {
+        const vorname = (r.s.vorname || "").trim() || dispName(r.s);
+        const schule = (school && school.name) || "";
+        const liste = r.fehlt.map(st => st.bitte);
+        const aufzaehlung = liste.length === 1 ? liste[0]
+            : liste.slice(0, -1).join(", ") + " und " + liste[liste.length - 1];
+        const gruss = " Viele Grüße" + (schule ? ", " + schule : "");
+        // Fehlt nur noch der Antrag selbst, passt der übliche Satz nicht: den stellt der Schüler
+        // bei der Führerscheinstelle, abzugeben ist bei uns nichts.
+        if (r.fehlt.length === 1 && r.fehlt[0].key === "antrag")
+            return "Hallo " + vorname + ", für deinen Führerschein fehlt jetzt nur noch der Antrag bei der Führerscheinstelle. "
+                + "Stell ihn am besten in den nächsten Tagen und sag uns danach kurz Bescheid." + gruss;
+        return "Hallo " + vorname + ", für deinen Führerschein-Antrag fehlt bei uns noch: " + aufzaehlung + ". "
+            + "Bring die Unterlagen gerne zur nächsten Fahrstunde mit - oder sag kurz Bescheid, wenn davon schon etwas erledigt ist."
+            + gruss;
+    }
+    // Erinnerung verschicken: WhatsApp mit fertigem Text öffnen und das Datum am Schüler merken,
+    // damit man beim nächsten Durchgang sieht, wen man schon angeschrieben hat. Abgeschickt wird
+    // wie überall in der App von Hand - die App verschickt nichts von allein.
+    function sendeUnterlagenErinnerung(r) {
+        const num = r.s.tel ? waNumber(r.s.tel) : "";
+        if (!num) {
+            showToast("Für " + dispName(r.s) + " ist keine Handynummer hinterlegt.");
+            return;
+        }
+        window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(unterlagenText(r)), "_blank", "noopener");
+        writeStudent({ ...r.s, licenseSteps: { ...(r.s.licenseSteps || {}), [UNTERLAGEN_ERINNERT_KEY]: ymd(new Date()) } });
+    }
+    // Innerer Inhalt des Unterlagen-Radars OHNE eigenen Seitentitel - siehe renderAuswertung().
+    function renderUnterlagenBody() {
+        const { rows: alle, aktiveAnzahl } = unterlagenRadar();
+        const gefiltert = unterlagenFilter === "alle" ? alle : alle.filter(r => r.fehlt.some(st => st.key === unterlagenFilter));
+        const dringendCount = alle.filter(r => r.dringend).length;
+        function goTo(id) { setActiveId(id); setView("daten"); pendingStudentTabRef.current = "antrag"; }
+        // Erinnert-Datum steht als YYYY-MM-DD am Schüler; ein kaputter Wert soll die Zeile nicht
+        // mit "Invalid Date" verunstalten, sondern einfach wegbleiben.
+        function erinnertText(iso) {
+            const d = iso ? new Date(iso + "T12:00:00") : null;
+            return (d && !isNaN(d.getTime())) ? "zuletzt erinnert am " + d.toLocaleDateString("de-DE") : "";
+        }
+        function seitText(tage) {
+            if (tage == null)
+                return "";
+            if (tage === 0)
+                return "heute angemeldet";
+            if (tage === 1)
+                return "seit 1 Tag dabei";
+            if (tage < 14)
+                return "seit " + tage + " Tagen dabei";
+            if (tage < 84)
+                return "seit " + Math.floor(tage / 7) + " Wochen dabei";
+            return "seit " + Math.floor(tage / 30) + " Monaten dabei";
+        }
+        // Zweite Zeile unter den Unterlagen. Kann leer bleiben (kein Datum bekannt, noch nie
+        // erinnert) - dann entfällt die Zeile ganz, statt eine leere Lücke zu lassen.
+        function metaText(r) { return [seitText(r.tage), erinnertText(r.erinnertAm)].filter(Boolean).join(" · "); }
+        function leerKarte(text) {
+            return React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, text);
+        }
+        return React.createElement(React.Fragment, null,
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 2px 16px" } },
+                "Von wem fehlt noch Sehtest, Erste-Hilfe-Nachweis, Passfoto oder der Antrag bei der Führerscheinstelle - über alle deine Schüler auf einmal statt Karteikarte für Karteikarte."),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 10, marginBottom: 16 } },
+                statTile(alle.length, "Schüler mit offenen Unterlagen", alle.length ? "var(--amber)" : "var(--green)"),
+                statTile(dringendCount, "davon dringend", dringendCount ? "var(--danger)" : "var(--green)")),
+            alle.length > 0 && React.createElement("div", { className: "strip", role: "group", "aria-label": "Nach fehlender Unterlage filtern" },
+                [{ key: "alle", kurz: "Alle", anzahl: alle.length }].concat(UNTERLAGEN_STEPS.map(st => ({
+                    key: st.key, kurz: st.kurz, anzahl: alle.filter(r => r.fehlt.some(f => f.key === st.key)).length,
+                }))).map(c => {
+                    const an = unterlagenFilter === c.key;
+                    return React.createElement("button", { key: c.key, className: "chip", "aria-pressed": an,
+                        onClick: () => setUnterlagenFilter(c.key),
+                        style: { background: an ? "var(--orange-soft)" : "var(--field-bg)", borderBottom: "3px solid " + (an ? "var(--orange-deep)" : "var(--line)") } },
+                        React.createElement("b", { style: { color: an ? "var(--orange-deep)" : "var(--ink)" } }, c.anzahl),
+                        React.createElement("span", null, c.kurz));
+                })),
+            aktiveAnzahl === 0
+                ? leerKarte("Noch keine Schüler angelegt - hier steht später, von wem welche Unterlagen fehlen.")
+                : alle.length === 0
+                    ? leerKarte("Bei allen aktiven Schülern sind Sehtest, Erste-Hilfe-Nachweis, Passfoto und Antrag abgehakt. ✓")
+                    : gefiltert.length === 0
+                        ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center" } },
+                            React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 10 } }, "Diese Unterlage fehlt gerade bei niemandem."),
+                            React.createElement("button", { className: "btn btn-ghost", style: { color: "var(--orange-deep)" }, onClick: () => setUnterlagenFilter("alle") }, "Filter zurücksetzen"))
+                        : React.createElement("div", { className: "card", style: { padding: "4px 14px" } },
+                            gefiltert.map((r, i) => React.createElement("div", { key: r.s.id,
+                                style: { padding: "12px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                                    React.createElement("button", { onClick: () => goTo(r.s.id),
+                                        style: { flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, fontSize: 14, fontWeight: 600, color: "var(--ink)" } },
+                                        dispName(r.s)),
+                                    r.dringend && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--danger)", textTransform: "uppercase", letterSpacing: ".04em" } }, "dringend"),
+                                    React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: "var(--orange-deep)" },
+                                        onClick: () => sendeUnterlagenErinnerung(r),
+                                        "aria-label": "Unterlagen-Erinnerung an " + dispName(r.s) + " per WhatsApp" }, "Erinnern")),
+                                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } },
+                                    r.fehlt.map(st => React.createElement("span", { key: st.key,
+                                        style: { fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: "var(--r-xs)",
+                                            background: r.dringend ? "var(--danger-bg)" : "var(--amber-bg)",
+                                            color: r.dringend ? "var(--danger)" : "var(--amber)" } }, st.kurz))),
+                                !!metaText(r) && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, metaText(r))))),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
+                "Abgehakt wird weiterhin beim Schüler selbst - ein Tipp auf den Namen öffnet seinen Führerschein-Reiter. „Erinnern\" öffnet nur WhatsApp mit fertigem Text, abgeschickt wird von Hand. Um die Prüfungsanmeldungen aus derselben Checkliste kümmert sich die Prüfungsplanung darüber."));
     }
     /* ── Abrechnung: Dashboard über Umsatz, offene Forderungen & Rechnungen. NICHT schulweit:
        filtert auf _isMine wie Statistik, siehe dortigen Kommentar und Changelog 1.164.46. ── */
