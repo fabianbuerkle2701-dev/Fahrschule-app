@@ -81,8 +81,10 @@ exports.handler = async function (event) {
   // Katalog kompakt für den Prompt aufbereiten: nur id/label je Punkt, keine Zähler - die Anzahl
   // der Wiederholungen kann aus einem Stichwort ohnehin nicht seriös geschätzt werden, das
   // übernimmt der Client (immer genau ein Schritt mehr als der aktuelle Stand).
-  const katalogText = sections.map(sec =>
-    sec.title + " (" + sec.id + "):\n" + (sec.items || []).map(it => "  - " + it.id + ": " + it.label).join("\n")
+  // Kaputte Einträge (z.B. null) rausfiltern statt mit einer TypeError zu crashen, bevor der
+  // try/catch weiter unten greift - dieselbe Absicherung wie beim Schüler-Import in extract-calendar.js.
+  const katalogText = sections.filter(sec => sec && typeof sec === "object").map(sec =>
+    sec.title + " (" + sec.id + "):\n" + (sec.items || []).filter(it => it && typeof it === "object").map(it => "  - " + it.id + ": " + it.label).join("\n")
   ).join("\n\n");
 
   const instruction = `Ein Fahrlehrer hat nach einer Fahrstunde folgenden kurzen Text notiert:

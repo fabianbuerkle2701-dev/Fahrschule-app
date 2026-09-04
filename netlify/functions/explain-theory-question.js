@@ -37,8 +37,13 @@ exports.handler = async function (event) {
   // Antwortstamm: der angefangene Satz, den jede Antwort fortsetzt ("Weil der ...").
   // Fehlt er, liest die KI nur Fragmente und erklaert am Kern vorbei.
   const stamm = (body.stamm || "").toString().slice(0, 200);
-  const optionen = Array.isArray(body.optionen) ? body.optionen.slice(0, 6) : [];
-  const gewaehlt = Array.isArray(body.gewaehlt) ? body.gewaehlt.slice(0, 6) : [];
+  // Wie avoidTexts in generate-theory-questions.js: Array-Länge UND jedes einzelne Textfeld
+  // kappen. Ohne die zweite Kappung könnte man in 6 "Optionen" beliebig viel Freitext
+  // unterbringen und die Function trotz Tageslimit als Text-Orakel missbrauchen.
+  const optionen = Array.isArray(body.optionen)
+    ? body.optionen.slice(0, 6).map((o) => ({ text: String((o && o.text) || "").slice(0, 200), correct: !!(o && o.correct) }))
+    : [];
+  const gewaehlt = Array.isArray(body.gewaehlt) ? body.gewaehlt.slice(0, 6).map((t) => String(t || "").slice(0, 200)) : [];
   if (!frage || optionen.length === 0) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Frage übergeben" }) };
   }
@@ -55,7 +60,7 @@ exports.handler = async function (event) {
 
   // Tageslimit wie beim Buchungs-Chat: die Function ist bewusst ohne Login erreichbar
   // (Schüler haben keinen Supabase-Account), darf aber keine offene Kostenfalle sein.
-  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 120 });
+  const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 120, p_feature: "explain-theory-question" });
   if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute ist die Zahl der Erklärungen erschöpft. Morgen geht es weiter." }) };
   }

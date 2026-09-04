@@ -56,8 +56,10 @@ exports.handler = async function (event) {
 
   const images = Array.isArray(body.images) ? body.images : [];
   // Katalog der Abschnitte, die es in der Vorlage des Fahrlehrers gibt (ADK und Strecken),
-  // damit die KI die erkannten Bereiche eindeutig zuordnen kann.
-  const sections = Array.isArray(body.sections) ? body.sections : [];
+  // damit die KI die erkannten Bereiche eindeutig zuordnen kann. Einträge ohne gültige
+  // Objektstruktur rausfiltern - sonst crasht das JSON.stringify unten (außerhalb des
+  // Try/Catch) bei kaputtem sections-Payload statt sauber 400 zurückzugeben.
+  const sections = (Array.isArray(body.sections) ? body.sections : []).filter((s) => s && typeof s === "object");
   if (!images.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Bilder übergeben" }) };
 
   const imageBlocks = images.map((dataUrl) => {
@@ -70,7 +72,7 @@ exports.handler = async function (event) {
   const system = `Du liest ein Foto oder einen Screenshot einer ausgefüllten ADK-Karte (Ausbildungsdiagrammkarte) einer Fahrschule aus. Das kann eine handschriftlich abgehakte Papierkarte sein (Kreuze, Kästchen, Datum bei einzelnen Punkten) oder ein Screenshot einer anderen App mit Fortschrittsanzeige je Punkt.
 
 Bekannte Abschnitte mit ihren einzelnen Punkten, denen du die erkannten Markierungen zuordnen sollst (falls ein Punkt auf dem Bild keinem dieser bekannten Punkte eindeutig entspricht, lass ihn weg, erfinde keinen neuen). "count" gibt an, wie oft dieser Punkt insgesamt abgehakt werden kann:
-${JSON.stringify(sections.map((s) => ({ id: s.id, title: s.title, kind: s.kind, items: (s.items || []).map((it) => ({ id: it.id, label: it.label, count: it.count })) })))}
+${JSON.stringify(sections.map((s) => ({ id: s.id, title: s.title, kind: s.kind, items: (Array.isArray(s.items) ? s.items : []).filter((it) => it && typeof it === "object").map((it) => ({ id: it.id, label: it.label, count: it.count })) })))}
 
 Schätze für jeden erkennbaren Punkt, wie oft er laut dem Bild bereits erledigt/abgehakt wurde (eine ganze Zahl von 0 bis maximal dem "count" dieses Punkts). Zähle bei einer handschriftlichen Karte die abgehakten Kästchen oder Datumseinträge dieses Punkts. Bei einem Screenshot mit Fortschrittsanzeige leitest du die Anzahl aus der Anzeige ab.
 

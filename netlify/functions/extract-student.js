@@ -64,14 +64,28 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) };
   }
 
-  const images = Array.isArray(body.images) ? body.images : (body.image ? [body.image] : []);
+  // Wie bei den anderen KI-Funktionen (generate-theory-questions.js: count/avoidTexts,
+  // map-import-columns.js: header/samples, match-kontoauszug.js: lines/students) wird das
+  // client-kontrollierte Array vor dem Weiterreichen an Anthropic gedeckelt - sonst könnte ein
+  // Aufruf mit dutzenden Bildern die Kosten weit über eine normale "Foto vom Anmeldeformular"-
+  // Nutzung treiben (jedes Bild zählt als eigener Bildblock in den Input-Tokens). 6 Bilder
+  // reichen für ein mehrseitiges Formular inkl. Rückseite.
+  const images = (Array.isArray(body.images) ? body.images : (body.image ? [body.image] : [])).slice(0, 6);
   if (images.length === 0) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Bild übergeben" }) };
+  }
+  // Serverseitiger Größen-Deckel pro Bild, zusätzlich zum Client-Check ("Bild ist zu groß (max.
+  // 8 MB)", siehe index.html) - diese Funktion ist auch direkt ohne Frontend aufrufbar, das
+  // Client-Limit allein reicht also nicht.
+  if (images.some((img) => typeof img === "string" && img.length > 11 * 1024 * 1024)) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Bild ist zu groß (max. 8 MB)." }) };
   }
 
   // Bild-Bausteine für Claude aufbereiten (Base64 ohne data:-Präfix)
   const imageBlocks = images.map((img) => {
-    let data = img || "";
+    // img könnte auch eine Zahl/Objekt/Array sein (missgebildete Anfrage) - dann würde
+    // .match unten crashen, bevor der try/catch weiter unten greift. Als String erzwingen.
+    let data = typeof img === "string" ? img : "";
     let media = "image/jpeg";
     const m = data.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/);
     if (m) { media = m[1]; data = m[2]; }

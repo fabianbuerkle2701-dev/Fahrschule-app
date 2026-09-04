@@ -83,7 +83,9 @@ exports.handler = async function (event) {
   const gut = (body.gut || "").toString().trim().slice(0, 500);
   const klasse = (body.klasse || "").toString().trim().slice(0, 10);
   const ratings = (body.ratings && typeof body.ratings === "object") ? body.ratings : {};
-  const recent = Array.isArray(body.recent) ? body.recent.slice(0, 3) : [];
+  // Elemente können durch Bugs im Client (z.B. soft-deleter Tagebucheintrag) null/kein Objekt
+  // sein - ungefiltert würde l.date etc. unten mit einer unbehandelten TypeError abstürzen.
+  const recent = Array.isArray(body.recent) ? body.recent.filter(l => l && typeof l === "object").slice(0, 3) : [];
 
   const schwacheBereiche = LESSON_FIELDS.filter(f => ratings[f.id] === 1).map(f => f.label).join(", ");
 
