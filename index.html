@@ -735,12 +735,49 @@
 <body>
 <div id="root"></div>
 <script>
+  // Mehrere Zugangswege dieser App stecken als Klartext-Geheimnis in der URL: ?zahler= gibt
+  // einem Elternteil ohne jeden Login Einblick in Rechnungen und Zahlstand, ?checkin= erlaubt
+  // das Eintragen einer Theorie-Anwesenheit, ?buchen=/?code= identifizieren die Fahrschule.
+  // Sentry haengt an jedes Ereignis die vollstaendige Seiten-URL sowie Navigations- und
+  // Fetch-Breadcrumbs - diese Codes waeren damit bei jedem Fehler an sentry.io uebertragen und
+  // dort fuer jeden mit Projektzugriff lesbar. Deshalb werden sie vor dem Senden ersetzt.
+  var SENTRY_GEHEIME_PARAMETER = ["zahler", "checkin", "buchen", "code", "pin", "kalender"];
+  function sentryUrlSaeubern(text) {
+    if (typeof text !== "string" || text.indexOf("=") < 0) return text;
+    var out = text;
+    for (var i = 0; i < SENTRY_GEHEIME_PARAMETER.length; i++) {
+      out = out.replace(new RegExp("([?&#]" + SENTRY_GEHEIME_PARAMETER[i] + "=)[^&#\\s\"']*", "gi"), "$1[entfernt]");
+    }
+    return out;
+  }
+  // Rekursiv ueber das ganze Ereignis, weil die URL nicht nur in request.url steht, sondern
+  // auch in Breadcrumbs (from/to/url), im Transaktionsnamen und in Stacktrace-Rahmen.
+  // gesehen[] bricht Zyklen ab, damit ein selbstbezuegliches Objekt nicht endlos laeuft.
+  function sentryTiefSaeubern(wert, tiefe, gesehen) {
+    if (tiefe > 8 || wert == null) return wert;
+    if (typeof wert === "string") return sentryUrlSaeubern(wert);
+    if (typeof wert !== "object") return wert;
+    if (gesehen.indexOf(wert) >= 0) return wert;
+    gesehen.push(wert);
+    try {
+      var keys = Object.keys(wert);
+      for (var i = 0; i < keys.length; i++) {
+        wert[keys[i]] = sentryTiefSaeubern(wert[keys[i]], tiefe + 1, gesehen);
+      }
+    } catch (e) { }
+    return wert;
+  }
   function initSentry() {
     Sentry.init({
       dsn: "https://d24aa7c57ccceb0520e72236fdab1714@o4511860409958400.ingest.de.sentry.io/4511860418019408",
       environment: location.hostname === "allindrive.netlify.app" ? "production" : "development",
       integrations: [Sentry.browserTracingIntegration()],
       tracesSampleRate: location.hostname === "allindrive.netlify.app" ? 0.2 : 1.0,
+      // Keine IP-Adressen/Cookies mitschicken - die App braucht sie zur Fehlersuche nicht.
+      sendDefaultPii: false,
+      beforeSend: function (event) { return sentryTiefSaeubern(event, 0, []); },
+      beforeSendTransaction: function (event) { return sentryTiefSaeubern(event, 0, []); },
+      beforeBreadcrumb: function (crumb) { return sentryTiefSaeubern(crumb, 0, []); },
       ignoreErrors: ["ResizeObserver loop limit exceeded", "ResizeObserver loop completed with undelivered notifications"]
     });
   }
@@ -752,11 +789,21 @@
   crossorigin="anonymous"
   onload="initSentry()"
 ></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
-<script defer src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<!-- Subresource Integrity fuer alle Fremd-Skripte. Bisher hatte nur das Sentry-Bundle einen
+     integrity-Wert; React, ReactDOM, supabase-js und Leaflet liefen ungeprueft. Ein
+     kompromittiertes CDN haette darueber beliebigen Code in JEDER Fahrschule gleichzeitig
+     ausfuehren koennen - supabase-js besonders heikel, weil dort die Anmeldesitzung durchlaeuft.
+     Die Hashes wurden gegen die von cdnjs selbst veroeffentlichten SRI-Werte bzw. (bei
+     supabase-js) gegen das offizielle npm-Paket abgeglichen, nicht nur aus dem Download gebildet.
+     supabase-js zeigt bewusst auf dist/umd/supabase.js statt auf .min.js: die minifizierte
+     Fassung liegt gar nicht im npm-Paket, sondern wird von jsDelivr erst beim Abruf erzeugt -
+     ein darauf festgenagelter Hash wuerde brechen, sobald jsDelivr seinen Minifier aendert. Die
+     Paketdatei ist ohnehin bereits gebuendelt und sogar 291 Byte kleiner. -->
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" integrity="sha384-tMH8h3BGESGckSAVGZ82T9n90ztNXxvdwvdM6UoR56cYcf+0iGXBliJ29D+wZ/x8" crossorigin="anonymous"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" integrity="sha384-bm7MnzvK++ykSwVJ2tynSE5TRdN+xL418osEVF2DE/L/gfWHj91J2Sphe582B1Bh" crossorigin="anonymous"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js" integrity="sha384-0w2KAL2YHP6wKOkUDzkCDGgVvfmHnj02DHeQ6XcHOgTfFsGyonKOpShMH1x6nk9o" crossorigin="anonymous"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" integrity="sha384-c6Rcwz4e4CITMbu/NBmnNS8yN2sC3cUElMEMfP3vqqKFp7GOYaaBBCqmaWBjmkjb" crossorigin="anonymous"/>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js" integrity="sha384-NElt3Op+9NBMCYaef5HxeJmU4Xeard/Lku8ek6hoPTvYkQPh3zLIrJP7KiRocsxO" crossorigin="anonymous"></script>
 <style>
   /* Karte / Live-Streckentracking */
   /* isolation:isolate faengt Leaflets eigene z-index-Werte (Zoom-Controls, Popups,
@@ -1162,6 +1209,27 @@
 </style>
 <script type="module">
 "use strict";
+// Faellt eines der Fremd-Skripte aus (CDN nicht erreichbar, Netzsperre im Firmen-/Schul-WLAN,
+// oder ab sofort auch eine fehlgeschlagene SRI-Pruefung), wirft die naechste Zeile sofort einen
+// ReferenceError - das Modul bricht ab, #root bleibt leer und der Nutzer sieht dauerhaft eine
+// weisse Seite ohne jeden Hinweis, was los ist. Statt dessen eine verstaendliche Meldung mit
+// dem einzigen Schritt, der hier hilft.
+(function () {
+    const fehlend = [];
+    if (typeof React === "undefined" || typeof ReactDOM === "undefined") fehlend.push("Anzeige-Bibliothek");
+    if (typeof supabase === "undefined") fehlend.push("Datenverbindung");
+    if (!fehlend.length) return;
+    const el = document.getElementById("root");
+    if (el) {
+        el.innerHTML = '<div style="max-width:420px;margin:16vh auto;padding:0 24px;font-family:system-ui,sans-serif;text-align:center;color:#2B2117">'
+            + '<div style="font-size:40px;line-height:1;margin-bottom:14px">\u26A0\uFE0F</div>'
+            + '<h1 style="font-size:19px;margin:0 0 10px">Die App konnte nicht vollst\u00E4ndig geladen werden</h1>'
+            + '<p style="font-size:14px;line-height:1.55;color:#6E5F4E;margin:0 0 18px">Ein Teil der App wurde vom Netzwerk blockiert oder war nicht erreichbar. Das liegt meist an einer eingeschr\u00E4nkten Internetverbindung, einem Firmen- oder Schul-WLAN mit Filter, oder einem Werbeblocker.</p>'
+            + '<button onclick="location.reload()" style="font:inherit;font-size:14px;font-weight:700;background:#FF9300;color:#181512;border:none;border-radius:12px;padding:12px 20px;cursor:pointer">Erneut versuchen</button>'
+            + '</div>';
+    }
+    throw new Error("Abbruch: Fremd-Skripte fehlen (" + fehlend.join(", ") + ")");
+})();
 const { useState, useEffect, useCallback, useRef } = React;
 const V3_LOGO = "assets/logo-v3.png";
 const DEFAULT_LOGO = "assets/logo-default.png";
@@ -4825,6 +4893,31 @@ function saveTplCache(uid, tpl) { try {
 }
 catch (e) { } }
 function schoolKey(uid) { return "v3_school_" + uid; }
+// Alle kontobezogenen Zwischenspeicher dieses Geraets loeschen. Wird beim Abmelden gerufen:
+// v3_cache_<uid> enthaelt die vollstaendige Schuelerkartei im Klartext (Namen, Anschriften,
+// Telefonnummern, Ausbildungsstand) und blieb bisher nach dem Abmelden unbegrenzt auf dem
+// Geraet liegen. Auf einem geteilten Rechner - Fahrschulbuero, Familientablett - war die
+// Kartei des vorherigen Fahrlehrers damit weiterhin auslesbar. Nur die Schluessel DIESES
+// Kontos anfassen, damit ein zweiter Fahrlehrer auf demselben Geraet nichts verliert.
+function clearAccountCaches(uid) {
+    if (!uid)
+        return;
+    try {
+        // v3_instr_sig_<uid> (die gezeichnete Unterschrift des Fahrlehrers) bewusst NICHT dabei:
+        // die existiert nur lokal, ohne jede Serverkopie (siehe die drei Stellen weiter unten, die
+        // sie schreiben/lesen) - anders als die Schülerkartei ist sie aber die eigene Signatur des
+        // angemeldeten Kontos, nicht Drittdaten, die auf dem Gerät zurückbleiben dürften. Ein
+        // erster Entwurf hat sie hier versehentlich mitgelöscht: unwiederbringlicher Verlust bei
+        // jeder Abmeldung, im schlimmsten Fall mitten beim Ausdrucken eines amtlich
+        // aufzubewahrenden Ausbildungsnachweises. Der eigene Schlüssel je Konto (uid-gebunden)
+        // verhindert ohnehin schon, dass sie einem zweiten Fahrlehrer auf demselben Gerät angezeigt
+        // wird - dafür muss sie nicht gelöscht werden.
+        [cacheKey(uid), tplKey(uid), schoolKey(uid), recBufferKey(uid),
+            "v3_bday_shown_" + uid,
+            "v3_packages_" + uid, "v3_price_hour_" + uid].forEach(k => localStorage.removeItem(k));
+    }
+    catch (e) { }
+}
 function loadSchoolCache(uid) { try {
     const r = localStorage.getItem(schoolKey(uid));
     if (r)
@@ -20397,7 +20490,11 @@ function App() {
             .catch(e => setAdminAccounts({ busy: false, error: e.message || "Fehler beim Laden", list: [] }));
     }
     async function doDeleteAccount(acc) {
-        if (!await askConfirm({ message: 'Konto "' + acc.email + '" wirklich vollständig löschen?\n\nDas entfernt das Profil UND das Anmelde-Konto bei Supabase. Die Person kann sich danach nicht mehr einloggen. Schülerdaten, die diesem Konto gehören, bleiben ohne Besitzer erhalten. Das kann nicht rückgängig gemacht werden.' }))
+        // Vorher stand hier faelschlich, Schuelerdaten blieben "ohne Besitzer erhalten" - tatsaechlich
+        // werden sie mitgeloescht (students_owner_fkey ... ON DELETE CASCADE). Die Netlify-Function
+        // prueft das inzwischen vorab und lehnt ab, solange z.B. an Kollegen mitfreigegebene Schueler
+        // im Weg stehen - der Text hier darf das nicht kleinreden.
+        if (!await askConfirm({ message: 'Konto "' + acc.email + '" wirklich vollständig löschen?\n\nDas entfernt das Profil UND das Anmelde-Konto bei Supabase. Die Person kann sich danach nicht mehr einloggen. Alle Schüler, Termine und Vorlagen dieses Kontos werden UNWIDERRUFLICH mitgelöscht. Das kann nicht rückgängig gemacht werden.' }))
             return;
         setAdminAccounts(prev => prev ? { ...prev, busy: true } : prev);
         try {
@@ -21079,7 +21176,10 @@ function App() {
                             adminAccounts.list.length,
                             " Konten"),
                         React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px", fontSize: 12.5 }, disabled: adminAccounts.busy, onClick: loadAllAccounts }, "Aktualisieren")),
-                    adminAccounts.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 10 } }, adminAccounts.error),
+                    // whiteSpace pre-wrap: die Konto-Löschung meldet ihre Blocker inzwischen als
+                    // mehrzeilige Liste ("- Grund 1\n- Grund 2\n...") - ohne das würden die
+                    // Zeilenumbrüche im HTML verschluckt und alles zu einem Fließtext verschmelzen.
+                    adminAccounts.error && React.createElement("div", { style: { fontSize: 13, color: "#B3362A", marginBottom: 10, whiteSpace: "pre-wrap" } }, adminAccounts.error),
                     adminAccounts.list.map(acc => React.createElement("div", { key: acc.id, className: "card", style: { padding: "11px 13px", marginBottom: 8 } },
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
@@ -21180,6 +21280,9 @@ function App() {
             if (await askConfirm({ message: "Wirklich abmelden? Du musst dich danach neu anmelden." })) {
                 if (deviceToken)
                     await removeDeviceToken(uid, deviceToken);
+                // Vor dem signOut, solange uid noch feststeht: sonst bliebe die komplette
+                // Schuelerkartei im Klartext auf dem Geraet zurueck (siehe clearAccountCaches).
+                clearAccountCaches(uid);
                 await sb.auth.signOut();
             }
         }

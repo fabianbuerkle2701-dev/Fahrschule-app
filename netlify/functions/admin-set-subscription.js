@@ -64,11 +64,27 @@ exports.handler = async function (event) {
     });
     if (!updResp.ok) {
       const errData = await updResp.json().catch(() => ({}));
+      console.error("admin-set-subscription: PATCH fehlgeschlagen", updResp.status, errData);
       return { statusCode: 502, headers, body: JSON.stringify({ error: "Speichern fehlgeschlagen: " + (errData.message || updResp.status) }) };
     }
     const updated = await updResp.json();
-    return { statusCode: 200, headers, body: JSON.stringify({ ok: true, profile: (updated && updated[0]) || null }) };
+    // PostgREST antwortet auch dann mit 200, wenn die id keine Zeile trifft - die Antwort ist dann
+    // nur ein leeres Array. Ohne diese Pruefung meldete die Funktion Erfolg fuer Konten ohne
+    // profiles-Zeile: Die Oberflaeche zeigte "Abo aktiv" bzw. "Zuletzt bezahlt: heute", in der
+    // Datenbank stand davon nichts.
+    if (!Array.isArray(updated) || updated.length === 0) {
+      console.error("admin-set-subscription: PATCH ohne Treffer, kein Profil zu id " + targetUid);
+      return { statusCode: 404, headers, body: JSON.stringify({ error: "Zu diesem Konto gibt es kein Profil. Es wurde nichts geändert." }) };
+    }
+    // Die gespeicherte Zeile vollstaendig zurueckgeben (inkl. subscription_lifetime): Die Oberflaeche
+    // soll den neuen Stand aus der Antwort uebernehmen und nicht aus ihrer eigenen Annahme - sonst
+    // laeuft sie auseinander, sobald ein Feld anders in der Datenbank landet als gesendet.
+    return { statusCode: 200, headers, body: JSON.stringify({ ok: true, profile: updated[0] }) };
   } catch (e) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
+    // Nach aussen nur eine allgemeine Meldung: Dieser Block greift auch, bevor der Aufrufer als
+    // Admin bestaetigt ist (z. B. wenn schon der Auth-Aufruf scheitert) - Details gehoeren dann
+    // ins Server-Log, nicht in die Antwort.
+    console.error("admin-set-subscription: Serverfehler", e);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler. Bitte später noch einmal versuchen." }) };
   }
 };

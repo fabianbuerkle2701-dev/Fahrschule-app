@@ -16,8 +16,18 @@
 // Verifikation fehl (falscher PIN, kein Login), läuft der Chat einfach als anonymer
 // Schulfakten-Chat weiter, ohne einen Fehler zurückzugeben - so lässt sich von außen nicht
 // durch Fehlermeldungen erraten, ob ein Name/PIN existiert.
+const crypto = require("crypto");
+
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
+
+// Nach außen gehen nur diese festen Sätze - der Rohtext der Anthropic-API bzw. einer Exception
+// wäre für den anonymen Aufrufer englischer Jargon und würde nebenbei den Betriebszustand des
+// KI-Kontos verraten (Schlüssel ungültig, Kontingent erschöpft). Der Originaltext landet
+// stattdessen per console.error in den Netlify-Logs.
+const FEHLER_ALLGEMEIN = "Der Assistent ist gerade nicht erreichbar. Bitte versuch es in ein paar Minuten noch einmal.";
+const FEHLER_AUSLASTUNG = "Gerade sind sehr viele Anfragen unterwegs. Bitte versuch es in einer Minute noch einmal.";
+const FEHLER_TAGESLIMIT = "Für heute sind schon viele Fragen gestellt worden. Bitte versuch es morgen wieder oder nutze das Anmeldeformular.";
 
 exports.handler = async function (event) {
   const headers = {
@@ -31,7 +41,11 @@ exports.handler = async function (event) {
   if (event.httpMethod !== "POST") return { statusCode: 405, headers, body: JSON.stringify({ error: "Nur POST erlaubt" }) };
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return { statusCode: 500, headers, body: JSON.stringify({ error: "Kein API-Schlüssel hinterlegt (ANTHROPIC_API_KEY)." }) };
+  if (!apiKey) {
+    // Welche Umgebungsvariable fehlt, geht den anonymen Aufrufer nichts an - nur ins Log.
+    console.error("booking-chat: ANTHROPIC_API_KEY fehlt");
+    return { statusCode: 500, headers, body: JSON.stringify({ error: FEHLER_ALLGEMEIN }) };
+  }
 
   let body;
   try { body = JSON.parse(event.body || "{}"); }
@@ -43,7 +57,18 @@ exports.handler = async function (event) {
   const pin = (body.pin || "").toString().trim().slice(0, 50);
   // Nur die letzten paar Runden mitschicken - reicht für Rückfragen im Kontext, hält die
   // Anfrage aber klein (jede Runde kostet, und die Fragen sind kurze Standardthemen).
-  const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
+  //
+  // Der Verlauf des Clients wird dabei normalisiert statt ihm zu vertrauen: Die Messages-API
+  // verlangt, dass die ERSTE Nachricht die Rolle "user" hat, und lehnt leere Textblöcke ab.
+  // Der Client hängt bei einem fehlgeschlagenen Senden nur die Frage an, nie eine Antwort -
+  // dadurch kippte die Parität der Liste dauerhaft, und sobald sie länger als 6 wurde, begann
+  // der Ausschnitt auf einem assistant-Eintrag. Ab da lief jede weitere Frage in einen 400 der
+  // API, der Chat war bis zum Neuladen der Seite tot, und jeder Versuch zählte trotzdem gegen
+  // das Tageslimit.
+  const history = (Array.isArray(body.history) ? body.history : [])
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.text === "string" && m.text.trim())
+    .slice(-6);
+  while (history.length && history[0].role !== "user") history.shift();
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!message) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Nachricht übergeben" }) };
 
@@ -63,11 +88,34 @@ exports.handler = async function (event) {
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Unbekannter Buchungslink" }) };
   }
 
+  // Zweite, an den Aufrufer gebundene Zähldimension. Vorher hing das Tageslimit allein am
+  // Buchungscode, und der ist kein Geheimnis (er steht in jedem verschickten Buchungslink):
+  // eine curl-Schleife von einem einzigen Rechner konnte damit in Sekunden das gesamte
+  // Tageskontingent einer Fahrschule aufbrauchen und den Chat für Interessenten UND für
+  // eingeloggte Schüler bis Mitternacht abschalten.
+  //
+  // Gezählt wird nicht die IP selbst, sondern nur eines von 64 Fächern, in das ihr Hash fällt.
+  // Das bindet den Zähler an den Aufrufer, ohne eine personenbeziehbare Kennung zu speichern,
+  // und deckelt die Zeilen in public_chat_usage auf 64 pro Schule und Tag (die Tabelle wird
+  // nirgends aufgeräumt). Bewusst VOR dem Schul-Limit geprüft: sonst würden die hier
+  // abgewiesenen Anfragen das gemeinsame Kontingent trotzdem verbrauchen.
+  const reqHeaders = event.headers || {};
+  const ipRoh = reqHeaders["x-nf-client-connection-ip"] || reqHeaders["client-ip"] || reqHeaders["x-forwarded-for"] || "";
+  // x-forwarded-for kann eine Kette sein - der erste Eintrag ist der ursprüngliche Aufrufer.
+  const clientIp = ipRoh.toString().split(",")[0].trim();
+  if (clientIp) {
+    const fach = parseInt(crypto.createHash("sha256").update(clientIp).digest("hex").slice(0, 8), 16) % 64;
+    const ipAllowed = await rpc("public_chat_rate_limit", { code, max_per_day: 25, p_feature: "booking-chat-ip" + fach });
+    if (ipAllowed !== true) {
+      return { statusCode: 429, headers, body: JSON.stringify({ error: FEHLER_TAGESLIMIT }) };
+    }
+  }
+
   // Erhöht gegenüber v1.103.0 (40), weil jetzt auch eingeloggte Schüler mitzählen, nicht nur
   // Interessenten - beide teilen sich weiterhin ein gemeinsames Tageslimit pro Fahrschule.
   const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 60, p_feature: "booking-chat" });
   if (allowed !== true) {
-    return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute sind schon viele Fragen gestellt worden. Bitte versuch es morgen wieder oder nutze das Anmeldeformular." }) };
+    return { statusCode: 429, headers, body: JSON.stringify({ error: FEHLER_TAGESLIMIT }) };
   }
 
   const packages = Array.isArray(facts.packages) ? facts.packages : [];
@@ -127,9 +175,10 @@ Regeln, unbedingt einhalten:
 5. Du bist kein Mensch - wenn danach gefragt wird, sag klar, dass du ein automatischer Assistent bist.`;
 
   const messages = [
-    ...history
-      .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.text === "string")
-      .map((m) => ({ role: m.role, content: m.text.slice(0, 800) })),
+    // history ist oben schon gefiltert und auf einen user-Anfang gebracht; hier bleibt nur noch
+    // das Kürzen. Getrimmt wird vor dem Kürzen, damit aus einem führenden Leerzeichen-Block kein
+    // leerer Textblock wird - den lehnt die API ebenfalls mit 400 ab.
+    ...history.map((m) => ({ role: m.role, content: m.text.trim().slice(0, 800) })),
     { role: "user", content: message },
   ];
 
@@ -147,16 +196,25 @@ Regeln, unbedingt einhalten:
       // Antworten nicht nötig.
       body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 400, thinking: { type: "disabled" }, system, messages }),
     });
-    const data = await resp.json();
+    // Ein Fehler der Gegenseite muss nicht zwingend JSON sein (Infrastruktur-Seite, leerer Body),
+    // deshalb hier auffangen statt in den catch unten laufen zu lassen - so bleibt wenigstens der
+    // HTTP-Status für das Log erhalten.
+    const data = await resp.json().catch(() => null);
     if (!resp.ok) {
-      const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
+      console.error("booking-chat: Anthropic-Fehler", resp.status, (data && data.error && data.error.message) || "(kein JSON-Fehlertext)");
+      const msg = (resp.status === 429 || resp.status === 529) ? FEHLER_AUSLASTUNG : FEHLER_ALLGEMEIN;
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };
     }
     let text = "";
-    if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
-    if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten" }) };
+    if (data && Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
+    if (!text) {
+      console.error("booking-chat: leere oder unlesbare Antwort der KI");
+      return { statusCode: 502, headers, body: JSON.stringify({ error: FEHLER_ALLGEMEIN }) };
+    }
     return { statusCode: 200, headers, body: JSON.stringify({ reply: text }) };
   } catch (e) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
+    // Auch e.message bleibt intern: bei Netzwerkfehlern stehen darin Host- und DNS-Angaben.
+    console.error("booking-chat: unerwarteter Fehler", e);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: FEHLER_ALLGEMEIN }) };
   }
 };

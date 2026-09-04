@@ -51,19 +51,94 @@ exports.handler = async function (event) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { statusCode: 500, headers, body: JSON.stringify({ error: "Kein API-Schlüssel hinterlegt (ANTHROPIC_API_KEY)." }) };
 
+  // Netlify liefert den Body bis in den Megabyte-Bereich aus. Vorher wurde davon alles
+  // ungeprüft in den Prompt geschrieben - ein einziger aufgeblähter Request konnte damit
+  // Anthropic-Guthaben im Dollarbereich verbrennen (und lief obendrein in den Timeout, die
+  // Kosten waren also nicht einmal an einer Antwort erkennbar). Grobe Obergrenze deshalb schon
+  // vor dem Parsen; ein echter Roster dieser App liegt um Größenordnungen darunter.
+  if ((event.body || "").length > 2000000) {
+    return { statusCode: 413, headers, body: JSON.stringify({ error: "Die Anfrage ist zu groß." }) };
+  }
+
   let body;
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const message = (body.message || "").toString();
-  const students = Array.isArray(body.students) ? body.students : [];
-  const today = (body.today || "").toString();
-  const adk = Array.isArray(body.adk) ? body.adk : [];
-  const strecken = Array.isArray(body.strecken) ? body.strecken : [];
-  if (!message.trim()) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Anweisung übergeben" }) };
+  // Feldweise Kappung wie in den Schwesterfunctions (booking-chat.js: message.slice(0,800),
+  // draft-lesson-entry.js: phrase.slice(0,500), eltern-update.js: clampStr) - assistant.js war
+  // die einzige KI-Function ganz ohne Begrenzung und hat message/students/adk/strecken
+  // unverändert in den Prompt übernommen, Länge und Tokenkosten pro Aufruf waren unbegrenzt.
+  // Steuerzeichen fliegen dabei raus, damit ein Datenfeld den Datenblock unten nicht optisch
+  // verlassen kann.
+  const clampStr = (v, n) => (v == null ? "" : String(v)).replace(/[\x00-\x1f\x7f]/g, " ").slice(0, n);
+  // Für Felder, die über die öffentliche Selbstanmeldung (public_enroll_student) von außen
+  // beschreibbar sind, zusätzlich spitze Klammern entfernen: sonst könnte ein selbst
+  // angemeldeter "Schüler" mit einem gefälschten End-Tag im Namen aus <schuelerdaten>
+  // ausbrechen und dem Modell Text als Anweisung unterschieben.
+  const clampName = (v, n) => clampStr(v, n).replace(/[<>]/g, " ").trim();
+  const clampNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  // Kappt eine Liste doppelt: auf maxAnzahl Einträge UND auf ein Zeichenbudget des fertigen
+  // JSON. Ohne das Budget käme ein böswillig gefüllter Request trotz Feldkappung immer noch
+  // auf mehrere hundert Kilobyte Prompt; echte Rosters und Kataloge dieser App bleiben weit
+  // unter den Budgets und werden nie angeschnitten.
+  const kappeListe = (arr, maxAnzahl, budget, mapFn) => {
+    const quelle = (Array.isArray(arr) ? arr : []).slice(0, maxAnzahl);
+    const out = [];
+    let laenge = 0;
+    for (let i = 0; i < quelle.length; i++) {
+      const eintrag = mapFn(quelle[i]);
+      laenge += JSON.stringify(eintrag).length + 1;
+      if (laenge > budget) break;
+      out.push(eintrag);
+    }
+    return out;
+  };
 
+  const message = (body.message || "").toString().slice(0, 2000);
+  const today = clampStr(body.today, 20).trim();
+  const studentsRaw = Array.isArray(body.students) ? body.students : [];
   // Schülerliste wird bereits reichhaltig übergeben (inkl. offen, bezahlt, Prozente, Theorie)
-  const roster = students;
+  const roster = kappeListe(studentsRaw, 300, 200000, (s) => ({
+    id: clampName(s && s.id, 80),
+    vorname: clampName(s && s.vorname, 80),
+    name: clampName(s && s.name, 80),
+    telefon: clampName(s && s.telefon, 40),
+    theorie: !!(s && s.theorie),
+    adkProzent: clampNum(s && s.adkProzent),
+    streckenProzent: clampNum(s && s.streckenProzent),
+    gesamtProzent: clampNum(s && s.gesamtProzent),
+    abschnitte: kappeListe(s && s.abschnitte, 80, 20000, (a) => ({
+      art: clampStr(a && a.art, 20),
+      titel: clampStr(a && a.titel, 120),
+      prozent: clampNum(a && a.prozent),
+    })),
+    wiederkehrendeSchwaechen: kappeListe(s && s.wiederkehrendeSchwaechen, 12, 4000, (w) => ({
+      feld: clampStr(w && w.feld, 80),
+      schnitt: clampNum(w && w.schnitt),
+      schlechtCount: clampNum(w && w.schlechtCount),
+      bewertungen: clampNum(w && w.bewertungen),
+    })),
+    letzteNotizen: kappeListe(s && s.letzteNotizen, 4, 4000, (n) => ({
+      datum: clampStr(n && n.datum, 20),
+      thema: clampStr(n && n.thema, 300),
+      gut: clampStr(n && n.gut, 300),
+      schlecht: clampStr(n && n.schlecht, 300),
+    })),
+    fahrstunden: clampNum(s && s.fahrstunden),
+    gefahreneMinuten: clampNum(s && s.gefahreneMinuten),
+    berechnet: clampNum(s && s.berechnet),
+    bezahlt: clampNum(s && s.bezahlt),
+    offen: clampNum(s && s.offen),
+  }));
+  const rosterGekuerzt = roster.length < studentsRaw.length;
+  const katalogEintrag = (it) => ({
+    id: clampName(it && it.id, 80),
+    label: clampStr(it && it.label, 200),
+    count: clampNum(it && it.count),
+  });
+  const adk = kappeListe(body.adk, 4000, 250000, katalogEintrag);
+  const strecken = kappeListe(body.strecken, 4000, 250000, katalogEintrag);
+  if (!message.trim()) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Anweisung übergeben" }) };
 
   const system = `Du bist der Assistent einer Fahrschul-App für den Fahrlehrer. Du kannst zwei Dinge: (A) Fragen frei beantworten und Übersichten geben, und (B) Eintragungen vorbereiten, die der Fahrlehrer dann bestätigt. Antworte immer mit reinem JSON, kein Text drumherum, keine Backticks.
 
@@ -71,6 +146,7 @@ Heutiges Datum: ${today || "unbekannt"}
 
 Verfügbare Schüler mit ihren aktuellen Daten (alle Beträge in Euro):
 ${JSON.stringify(roster)}
+${rosterGekuerzt ? "\nACHTUNG: Diese Schülerliste ist wegen ihrer Größe gekürzt und UNVOLLSTÄNDIG. Wenn nach einem bestimmten Schüler gefragt wird, der hier nicht auftaucht, oder nach einer Zahl über ALLE Schüler (z.B. Gesamtsumme), sag das ausdrücklich dazu - erfinde keine Angabe für fehlende Schüler." : ""}
 
 Bedeutung der Felder: vorname, name, telefon; theorie (Theorieprüfung bestanden true/false); adkProzent (Fortschritt Ausbildungsnachweis); streckenProzent; gesamtProzent; fahrstunden (Anzahl gefahrener Fahrstunden); gefahreneMinuten; berechnet (Summe der Kosten); bezahlt (Summe der Zahlungen); offen (offener Betrag, negativ bedeutet Guthaben); abschnitte (Fortschritt JE Abschnitt, z.B. [{"art":"ADK","titel":"Grundstufe","prozent":94},{"art":"Strecken","titel":"Autobahn","prozent":0}] – nutze das für konkrete Trainingsvorschläge statt nur die Gesamtprozent zu nennen); wiederkehrendeSchwaechen (bereits serverseitig über die letzten bis zu 8 Fahrstunden-Tagebucheinträge berechnete, ECHTE Muster – jedes Element z.B. {"feld":"Verkehrsbeobachtung","schnitt":1.3,"schlechtCount":3,"bewertungen":4} bedeutet: von den letzten Bewertungen dieses Feldes waren schlechtCount davon "schlecht" bewertet, schnitt ist der Notenschnitt auf einer Skala 1=schlecht/2=mittel/3=gut; ist das Array leer, gibt es KEIN belastbares Muster); letzteNotizen (die letzten Tagebucheinträge mit Freitext, je [{"datum":"...","thema":"...","gut":"...","schlecht":"..."}], für konkrete Beispiele in der Antwort).
 
@@ -200,6 +276,46 @@ App-Wissen (Stand aktuelle Version):
           ? "Die Antwort wurde mitten im Satz abgeschnitten (zu lang). Bitte nochmal versuchen oder die Frage präziser stellen."
           : "Antwort konnte nicht gelesen werden";
         return { statusCode: 502, headers, body: JSON.stringify({ error: msg, raw: text }) };
+      }
+    }
+    // Die Modell-Antwort wurde bisher ungeprüft durchgereicht. Der Client ordnet eine Aktion
+    // ausschließlich über studentId zu (index.html z.B. students.find(s => s.id === p.studentId)),
+    // zeigt im Bestätigungsdialog aber studentName an - fallen die beiden auseinander (Verwechslung
+    // durch das Modell, oder gezielt über einen selbst angemeldeten Schülernamen als Prompt-
+    // Injection provoziert), bestätigt der Fahrlehrer eine Aktion für die falsche Person, ohne es zu
+    // merken. Deshalb hier serverseitig nachvalidieren, bevor die Antwort den Client erreicht.
+    const AKTIONEN = ["antwort", "fahrstunde", "termin", "zahlung", "adk", "strecken", "schueler", "unknown"];
+    const FELDER = ["tel", "anschrift", "bemerkungen"];
+    const MODI = ["ersetzen", "anhaengen"];
+    if (parsed && typeof parsed === "object") {
+      if (!AKTIONEN.includes(parsed.action)) parsed.action = "unknown";
+      if (parsed.action !== "antwort" && parsed.action !== "unknown") {
+        const hit = roster.find((s) => s.id === parsed.studentId);
+        if (!hit) {
+          // Keine oder eine unbekannte studentId - lieber eine Rückfrage als eine Aktion auf einen
+          // nicht existierenden bzw. nicht wirklich gemeinten Schüler anzubieten.
+          parsed.needsClarification = true;
+          parsed.clarification = parsed.clarification || "Ich bin mir nicht sicher, welchen Schüler du meinst - kannst du den Namen genauer nennen?";
+        } else {
+          // Anzeigename immer aus dem echten Datensatz nehmen, nie aus dem Modell-Text übernehmen -
+          // so kann eine Verwechslung nicht mehr unbemerkt durch die Bestätigung rutschen.
+          parsed.studentName = (hit.vorname + " " + hit.name).trim();
+        }
+      }
+      if (parsed.action === "schueler") {
+        if (!FELDER.includes(parsed.field)) { parsed.needsClarification = true; parsed.clarification = parsed.clarification || "Welches Feld soll ich ändern - Telefonnummer, Anschrift oder Bemerkungen?"; }
+        if (parsed.mode != null && !MODI.includes(parsed.mode)) parsed.mode = "ersetzen";
+      }
+      if (parsed.action === "zahlung") {
+        const n = Number(parsed.amount);
+        parsed.amount = Number.isFinite(n) ? n : null;
+        if (parsed.amount == null) { parsed.needsClarification = true; parsed.clarification = parsed.clarification || "Welcher Betrag wurde bezahlt?"; }
+      }
+      if (parsed.action === "fahrstunde" || parsed.action === "termin") {
+        if (parsed.minutes != null) {
+          const n = Number(parsed.minutes);
+          parsed.minutes = Number.isFinite(n) ? n : null;
+        }
       }
     }
     return { statusCode: 200, headers, body: JSON.stringify({ result: parsed }) };
