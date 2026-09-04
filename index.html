@@ -2813,7 +2813,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.198.0";
+const APP_VERSION = "1.199.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2952,6 +2952,14 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.199.0", date: "September 2026", changes: [
+            "Neu: Unterrichtsnachweis je Schüler. Der Theorie-Bereich eines Schülers zeigt jetzt alle Pflichtthemen des theoretischen Unterrichts (12 Grundstoff-Themen plus der Zusatzstoff seiner Klasse, Anlage 1 FahrschAusbO) mit Häkchen und Besuchsdatum - und vor allem, welche noch offen sind. Grundlage sind die Anwesenheiten, die du im Kalender über den Check-in erfasst. Wurde bei einem Schüler mindestens eine Anwesenheit erfasst, erscheint die Liste zusätzlich als eigener Abschnitt auf dem gedruckten Ausbildungsnachweis. Bewusst als Ergänzung zu deiner eigenen Anwesenheitsliste ausgewiesen, kein amtlicher Nachweis - es steht nur drin, wofür in der App tatsächlich ein Check-in gelaufen ist",
+            "Behoben: Auf jedem Bildschirm und in beiden Designs blitzte beim Überscrollen (Trackpad, elastisches Scrollen in den Apps) kurz die falsche Farbe auf - die Seite war hinter dem Inhalt in der Text- statt der Hintergrundfarbe eingefärbt",
+            "Behoben: Im Fahrschüler-Bereich stand für Gäste „Abmelden“ in der Kopfzeile, während der Bildschirm darunter „Noch nicht angemeldet“ sagte. Der Knopf meldet für einen Gast auch niemanden ab, sondern vergisst nur die gemerkte Fahrschule - er heißt jetzt „Fahrschule wechseln“, solange kein PIN-Login vorliegt",
+            "Behoben: Der deaktivierte orangefarbene Hauptknopf (z.B. „Prüfen“ in der Theorie-Übung, solange keine Antwort gewählt ist) war im Dunkelmodus praktisch unlesbar. Jetzt wird nur die Fläche gedämpft, die Schrift bleibt lesbar",
+            "Behoben: Die Wochenbeschriftung im Kalender lief bis Sonntag, obwohl die Wochenansicht bewusst nur Montag bis Samstag zeigt - Beschriftung und Inhalt widersprachen sich",
+            "„Umsatz pro Monat“ in der Auswertung zeigte ohne einen einzigen Zahlungseingang sechs Monatsbeschriftungen unter einer leeren Fläche und sah damit nach einem kaputten Diagramm aus. Jetzt steht dort ein erklärender Hinweis wie bei Fuhrpark und Videos",
+        ] },
     { v: "1.198.0", date: "August 2026", changes: [
             "Wichtig: Eine sicherheitsrelevante Prüfung hat mehrere Zugriffslücken in der Datenbank aufgedeckt und geschlossen - unter anderem einen Weg, über den sich ein Konto Zugriff auf eine fremde Fahrschule hätte verschaffen können, sowie kleinere Lücken bei der Fahrschüler-App (Terminverwaltung, Namensabfragen). Alle Funde wurden noch am selben Tag behoben und live geprüft. Details bewusst nicht öffentlich - wer betroffen sein könnte, wird direkt informiert",
             "Nebenbei repariert: Die Knöpfe zum Setzen von Fahrschul-Admin- und Moderator-Rechten für Kollegen funktionierten bisher nur für den zentralen App-Admin, nicht für echte Fahrschul-Admins - liefen technisch ins Leere, ohne Fehlermeldung. Laufen jetzt über einen eigenen, geprüften Weg",
@@ -6402,6 +6410,20 @@ async function fetchTheoryAttendance(apptId) {
     if (error) {
         console.error(error);
         return [];
+    }
+    return data || [];
+}
+// Alle bestaetigten Theorie-Anwesenheiten EINES Schuelers - Grundlage fuer den
+// Unterrichtsnachweis in der Schueler-Detailansicht. Die bestehende fetchTheoryAttendance()
+// fragt bewusst je Termin ab (fuer den Check-in-Dialog); hier wird ueber alle Termine hinweg
+// nach Schueler gefragt, was der Check-in-Dialog nie braucht.
+async function fetchTheoryAttendanceForStudent(studentId) {
+    if (!studentId || (typeof studentId === "string" && studentId.startsWith("demo_")))
+        return [];
+    const { data, error } = await sb.from("theory_attendance").select("*").eq("student_id", studentId);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
     }
     return data || [];
 }
@@ -10248,6 +10270,38 @@ function App() {
 
     const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
+    // Unterrichtsnachweis des gerade geoeffneten Schuelers: null = noch nicht geladen,
+    // "error" = Laden fehlgeschlagen, sonst die Anwesenheitszeilen. Wird beim Oeffnen der
+    // Theorie-Station geladen, nicht schon beim Oeffnen des Schuelers - die meisten Aufrufe
+    // der Detailansicht brauchen sie gar nicht.
+    const [stuTheoryAttendance, setStuTheoryAttendance] = useState(null);
+    const stuTheoryAttReqRef = useRef(0);
+    // Unterrichtsnachweis (Theorie-Anwesenheit) des geoeffneten Schuelers laden. Bewusst am
+    // Schuelerwechsel und nicht erst beim Oeffnen der Theorie-Station: der Ausdruck
+    // (nachweisSheet) braucht die Daten ebenfalls, und der laesst sich direkt aus dem Kopfmenue
+    // starten, ohne dass die Station je offen war.
+    // Der Effect steht bewusst HIER oben bei den uebrigen Hooks und nicht unten neben der
+    // active-Ableitung: dort stehen mehrere fruehe returns davor (Splash, Auth, Abo-Sperre),
+    // ein Hook danach wuerde je nach Render mal aufgerufen und mal nicht - genau der Fall, den
+    // React mit "Rendered more hooks than during the previous render" quittiert. Die Schueler-Id
+    // wird deshalb hier aus students/activeId abgeleitet statt aus active.
+    function loadStuTheoryAttendance(fuer) {
+        if (!fuer)
+            return;
+        // Stale-Response-Guard wie ueberall sonst: waehrend des await kann laengst ein anderer
+        // Schueler geoeffnet sein - dessen Nachweis darf die spaete Antwort nicht ueberschreiben.
+        const seq = ++stuTheoryAttReqRef.current;
+        setStuTheoryAttendance(null);
+        fetchTheoryAttendanceForStudent(fuer)
+            .then(rows => { if (seq === stuTheoryAttReqRef.current) setStuTheoryAttendance(rows); })
+            .catch(() => { if (seq === stuTheoryAttReqRef.current) setStuTheoryAttendance("error"); });
+    }
+    const theorieNachweisFuer = (() => {
+        const list = students || [];
+        const s2 = list.find(x => x.id === activeId) || list[0] || null;
+        return s2 ? s2.id : null;
+    })();
+    useEffect(() => { loadStuTheoryAttendance(theorieNachweisFuer); }, [theorieNachweisFuer]);
     // Theorie-Anwesenheit (QR-Check-in), siehe renderTheoryCheckinModal().
     const [theoryCheckinModal, setTheoryCheckinModal] = useState(null); // null | {appt, thema, attendance, manualId}
     // Schüler-Selbsteinschätzungen (lesson_reflections) des GERADE ANGESEHENEN Schülers, für den
@@ -18329,12 +18383,87 @@ function App() {
     // Theorie-Übungsfortschritt des Schülers, gruppiert nach Thema - Rohdaten kommen aus
     // students.data.theoryProgress (vom Fahrschülerbereich gefüllt, siehe TheoryPractice/
     // public_theory_answer_submit), die Fragenliste selbst aus der global lesbaren theory_questions.
+    // Pflichtthemen des theoretischen Unterrichts nach Anlage 1 FahrschAusbO: 12 Grundstoff-
+    // Themen fuer alle Klassen plus der klassenspezifische Zusatzstoff. Die im Check-in
+    // gespeicherten Themen stammen aus genau derselben Liste (siehe Auswahlfeld in
+    // renderTheoryCheckinModal), ein Textvergleich ist hier also verlaesslich und nicht geraten.
+    function theoriePflichtthemen(klasse) {
+        return [
+            ...GRUNDSTOFF_THEMEN.map((t, i) => ({ titel: t, nr: (i + 1) + ".", block: "Grundstoff" })),
+            ...zusatzstoffFor(klasse).map((t, i) => ({ titel: t, nr: (i + 1) + ".", block: "Zusatzstoff" })),
+        ];
+    }
+    // Ordnet jedem Pflichtthema die (frueheste) besuchte Sitzung zu. rows kommt aus
+    // fetchTheoryAttendanceForStudent(). Unbekannte Themen (z.B. Zusatzstoff einer anderen
+    // Klasse, oder ein spaeter umbenanntes Thema) gehen nicht verloren, sondern werden als
+    // "sonstige" zurueckgegeben - lieber sichtbar als stillschweigend verschluckt.
+    function theorieNachweisStand(klasse, rows) {
+        const liste = theoriePflichtthemen(klasse);
+        const bekannt = new Set(liste.map(t => t.titel));
+        const ersteBesuche = {};
+        (rows || []).forEach(r => {
+            const t = (r.thema || "").trim();
+            if (!t)
+                return;
+            const d = r.checked_at || "";
+            if (!ersteBesuche[t] || (d && d < ersteBesuche[t]))
+                ersteBesuche[t] = d;
+        });
+        const themen = liste.map(t => ({ ...t, besuchtAm: ersteBesuche[t.titel] || null }));
+        const sonstige = Object.keys(ersteBesuche).filter(t => !bekannt.has(t)).sort();
+        const offen = themen.filter(t => !t.besuchtAm);
+        return { themen, sonstige, offen, erledigt: themen.length - offen.length, gesamt: themen.length };
+    }
+    // Unterrichtsnachweis: welche Pflichtthemen hat dieser Schueler nachweislich besucht?
+    // Bewusst als Ergaenzung zur eigenen Anwesenheitsliste ausgewiesen, nicht als amtlicher
+    // Nachweis - die Aussagekraft haengt vollstaendig daran, ob im Unterricht tatsaechlich
+    // jedes Mal ein Check-in gelaufen ist.
+    function renderUnterrichtsnachweis() {
+        const vk = active.klasse || DEFAULT_KLASSE;
+        const kopf = React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 3 } }, "Unterrichtsnachweis");
+        if (stuTheoryAttendance === null)
+            return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } }, kopf,
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "L\u00E4dt\u2026"));
+        if (stuTheoryAttendance === "error")
+            return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } }, kopf,
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 9 } }, "Die besuchten Theoriestunden konnten nicht geladen werden."),
+                React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 13, padding: "8px 12px" }, onClick: () => loadStuTheoryAttendance(active.id) }, "Erneut versuchen"));
+        const stand = theorieNachweisStand(vk, stuTheoryAttendance);
+        const pct = stand.gesamt ? Math.round((stand.erledigt / stand.gesamt) * 100) : 0;
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    kopf,
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.45 } },
+                        stand.erledigt + " von " + stand.gesamt + " Pflichtthemen besucht \u00B7 Klasse " + vk)),
+                React.createElement(Ring, { pct: pct, size: 40 })),
+            stand.erledigt === 0
+                ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, padding: "4px 0 2px" } },
+                    "F\u00FCr " + dispName(active) + " ist noch kein Theoriethema als besucht erfasst. Anwesenheit erfasst du im Kalender bei einem Theorieunterricht-Termin \u00FCber \u201EAnwesenheit\u201C.")
+                : React.createElement("div", null,
+                    stand.themen.map((t, i) => React.createElement("div", { key: t.block + t.nr + t.titel, style: { display: "flex", alignItems: "flex-start", gap: 9, padding: "7px 0", borderTop: i === 0 ? "1px solid var(--line)" : "none", borderBottom: i < stand.themen.length - 1 ? "1px solid var(--line)" : "none" } },
+                        React.createElement("span", { "aria-hidden": "true", style: { width: 18, flexShrink: 0, textAlign: "center", fontWeight: 800, color: t.besuchtAm ? "var(--sage-deep)" : "var(--muted)" } }, t.besuchtAm ? "\u2713" : "\u2013"),
+                        React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, lineHeight: 1.4, color: t.besuchtAm ? "var(--ink)" : "var(--muted)" } },
+                            t.block === "Zusatzstoff" ? ("Zusatzstoff " + t.nr + " " + t.titel) : (t.nr + " " + t.titel)),
+                        React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0, fontVariantNumeric: "tabular-nums" } },
+                            t.besuchtAm ? new Date(t.besuchtAm).toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit" }) : "offen")))),
+            stand.sonstige.length > 0 && React.createElement("div", { style: { marginTop: 10, paddingTop: 9, borderTop: "1px solid var(--line)" } },
+                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
+                    "Zus\u00E4tzlich besucht, aber nicht in der Pflichtliste der Klasse " + vk + ": " + stand.sonstige.join(", "))),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "10px 0 0" } },
+                "Erg\u00E4nzung zu deiner eigenen Anwesenheitsliste, kein amtlicher Nachweis: hier steht nur, wof\u00FCr in der App tats\u00E4chlich eine Anwesenheit erfasst wurde."));
+    }
     function renderTheorieFortschritt() {
+        // Der Unterrichtsnachweis hängt nicht an den Übungsfragen: er muss auch dann stehen,
+        // wenn die Fahrschule gar keine Übungsfragen hinterlegt hat oder diese noch laden.
+        const nachweis = renderUnterrichtsnachweis();
         if (theoryQuestions === null)
-            return React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…");
+            return React.createElement(React.Fragment, null, nachweis,
+                React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…"));
         const tq = theoryQuestionsFor(active);
         if (tq.length === 0)
-            return React.createElement("div", { className: "card", style: { padding: "20px 16px", textAlign: "center", fontSize: 13, color: "var(--muted)" } }, "Noch keine Übungsfragen hinterlegt.");
+            return React.createElement(React.Fragment, null, nachweis,
+                React.createElement("div", { className: "card", style: { padding: "20px 16px", textAlign: "center", fontSize: 13, color: "var(--muted)" } }, "Noch keine Übungsfragen hinterlegt."));
         const progress = active.theoryProgress || {};
         const byTopic = {};
         tq.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
@@ -18343,6 +18472,7 @@ function App() {
         const gesamtPct = Math.round((gesamtGemeistert / tq.length) * 100);
         const beantwortet = theoryAnsweredCount(progress, tq);
         return React.createElement(React.Fragment, null,
+            nachweis,
             React.createElement("div", { className: "card home-tile", style: { marginBottom: 14, cursor: "default" } },
                 React.createElement("div", { className: "home-num" }, gesamtPct + "%"),
                 React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, "Theorie gemeistert · " + gesamtGemeistert + " / " + tq.length + " Fragen")),
@@ -22851,6 +22981,28 @@ function App() {
             React.createElement("div", { style: { display: "flex", gap: 0, marginBottom: 14, border: "1px solid #ccc", borderRadius: 6, overflow: "hidden" } }, [["Fahrstunden", std + " Std."], ["ADK-Fortschritt", adkPct + "%"], ["Strecken", strPct + "%"], ["Gesamt", gesamt + "%"]].map(([l, v]) => React.createElement("div", { key: l, style: { flex: 1, padding: "8px 10px", textAlign: "center", borderRight: "1px solid #ccc" } },
                 React.createElement("div", { style: { fontSize: "8pt", color: "#777", textTransform: "uppercase", letterSpacing: ".05em" } }, l),
                 React.createElement("div", { style: { fontSize: "13pt", fontWeight: "bold", marginTop: 2 } }, v)))),
+            // Teilnahme am theoretischen Unterricht (Anlage 1 FahrschAusbO). Nur drucken, wenn
+            // ueberhaupt eine Anwesenheit erfasst ist - sonst stuende auf jedem Ausdruck eine
+            // vollstaendig leere Pflichtliste, die faelschlich wie ein Versaeumnis aussieht,
+            // obwohl die Fahrschule den Check-in vielleicht gar nicht nutzt.
+            Array.isArray(stuTheoryAttendance) && stuTheoryAttendance.length > 0 && (() => {
+                const stand = theorieNachweisStand(active.klasse || DEFAULT_KLASSE, stuTheoryAttendance);
+                return React.createElement("div", { style: { marginBottom: 14 } },
+                    React.createElement("div", { style: { fontWeight: "bold", fontSize: "10pt", borderBottom: "1px solid #ccc", paddingBottom: 4, marginBottom: 8 } },
+                        "Teilnahme am theoretischen Unterricht (" + stand.erledigt + " von " + stand.gesamt + ")"),
+                    React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "9pt" } },
+                        React.createElement("thead", null,
+                            React.createElement("tr", { style: { background: "#f5f5f5" } },
+                                React.createElement("th", { style: { textAlign: "left", padding: "4px 6px", borderBottom: "1px solid #ccc" } }, "Thema"),
+                                React.createElement("th", { style: { textAlign: "center", width: 90, padding: "4px 6px", borderBottom: "1px solid #ccc" } }, "Besucht am"))),
+                        React.createElement("tbody", null, stand.themen.map(t => React.createElement("tr", { key: t.block + t.nr + t.titel, style: { borderBottom: "1px solid #eee" } },
+                            React.createElement("td", { style: { padding: "4px 6px" } },
+                                (t.block === "Zusatzstoff" ? "Zusatzstoff " : "") + t.nr + " " + t.titel),
+                            React.createElement("td", { style: { padding: "4px 6px", textAlign: "center" } },
+                                t.besuchtAm ? new Date(t.besuchtAm).toLocaleDateString("de-DE") : "offen"))))),
+                    React.createElement("div", { style: { fontSize: "8pt", color: "#777", marginTop: 5, lineHeight: 1.4 } },
+                        "Erfasst \u00FCber den Anwesenheits-Check-in dieser App. Erg\u00E4nzung zur eigenen Anwesenheitsliste der Fahrschule, kein amtlicher Nachweis."));
+            })(),
             adkSections.length > 0 && React.createElement("div", { style: { marginBottom: 14 } },
                 React.createElement("div", { style: { fontWeight: "bold", fontSize: "10pt", borderBottom: "1px solid #ccc", paddingBottom: 4, marginBottom: 8 } }, "Ausbildungsdiagrammkarte (ADK)"),
                 React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "9pt" } },
