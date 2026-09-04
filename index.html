@@ -2805,7 +2805,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.198.0";
+const APP_VERSION = "1.199.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -2944,6 +2944,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.199.0", date: "September 2026", changes: [
+            "Neu: „Theorieunterricht“ im Führerschein-Reiter eines Schülers. Zeigt auf einen Blick, welche Unterrichtsthemen er schon besucht hat und welche noch fehlen - die 12 Grundstoff-Themen und die beiden klassenspezifischen Zusatzstoff-Themen, jedes mit dem Datum des ersten Besuchs. Die Anwesenheit wird schon seit Längerem beim Theorieunterricht-Termin per QR-Check-in erfasst, war aber nur je Sitzung einsehbar: wer wissen wollte, ob ein Schüler zur Theorieprüfung angemeldet werden kann, musste jeden einzelnen Theorietermin einzeln aufmachen und die Namen zusammensuchen",
+            "Erfasste Sitzungen, die zu keinem Thema der Klasse passen (z.B. unter einem Platzhalter-Titel eingecheckt) oder ganz ohne Thema laufen, werden getrennt darunter genannt statt stillschweigend weggelassen - so bleibt sichtbar, dass sie erfasst sind, auch wenn sie in der Zählung nicht mitkönnen",
+            "Eingetragen und korrigiert wird die Anwesenheit weiterhin dort, wo sie entsteht: im Check-in der jeweiligen Theoriesitzung. Die neue Karte ist bewusst nur eine Übersicht",
+        ] },
     { v: "1.198.0", date: "August 2026", changes: [
             "Wichtig: Eine sicherheitsrelevante Prüfung hat mehrere Zugriffslücken in der Datenbank aufgedeckt und geschlossen - unter anderem einen Weg, über den sich ein Konto Zugriff auf eine fremde Fahrschule hätte verschaffen können, sowie kleinere Lücken bei der Fahrschüler-App (Terminverwaltung, Namensabfragen). Alle Funde wurden noch am selben Tag behoben und live geprüft. Details bewusst nicht öffentlich - wer betroffen sein könnte, wird direkt informiert",
             "Nebenbei repariert: Die Knöpfe zum Setzen von Fahrschul-Admin- und Moderator-Rechten für Kollegen funktionierten bisher nur für den zentralen App-Admin, nicht für echte Fahrschul-Admins - liefen technisch ins Leere, ohne Fehlermeldung. Laufen jetzt über einen eigenen, geprüften Weg",
@@ -6397,6 +6402,22 @@ async function fetchTheoryAttendance(apptId) {
     }
     return data || [];
 }
+// Alle Anwesenheits-Zeilen EINES Schülers, über alle Theorieunterricht-Termine hinweg - die
+// Gegenrichtung zu fetchTheoryAttendance(), das je Sitzung lädt. Grundlage der Themenübersicht
+// im Führerschein-Reiter (renderTheorieAnwesenheit). Wirft im Fehlerfall, damit die Anzeige den
+// echten Grund nennen kann statt "noch nichts erfasst" vorzutäuschen.
+async function fetchTheoryAttendanceForStudent(studentId) {
+    // Wie in fetchTheoryAttendance: eine lokale "demo_..."-Kennung ist keine UUID und würde nur
+    // einen 22P02-Datenbankfehler erzeugen, obwohl das Ergebnis ohnehin leer wäre.
+    if (!studentId || (typeof studentId === "string" && studentId.startsWith("demo_")))
+        return [];
+    const { data, error } = await sb.from("theory_attendance").select("*").eq("student_id", studentId);
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data || [];
+}
 async function dbAddTheoryAttendance(uid, apptId, studentId, thema) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, appt_id: apptId, student_id: studentId, thema, checked_at: new Date().toISOString() }; }
     const { data, error } = await sb.from("theory_attendance").insert({ owner: uid, appt_id: apptId, student_id: studentId, thema }).select().single();
@@ -9728,6 +9749,16 @@ function App() {
     const [studentFileCategory, setStudentFileCategory] = useState("sehtest");
     const [studentFileUploading, setStudentFileUploading] = useState(false);
     useEffect(() => { setStudentFiles(null); }, [activeId]);
+    // Theorie-Anwesenheit des aktiven Schülers (QR-Check-in beim Theorieunterricht) - ebenfalls
+    // lazy im Führerschein-Reiter geladen, siehe renderTheorieAnwesenheit().
+    // null = noch nicht geladen | {busy:true} | {rows:[...]} | {error:"..."}
+    const [theorieAnwesenheit, setTheorieAnwesenheit] = useState(null);
+    // Laufende-Anfrage-Kennung (gleiches Muster wie receiptImportReqRef oben): schützt gegen zwei
+    // Anfragen nacheinander UND - weil der Reset unten mitzählt - gegen eine Antwort, die erst
+    // nach einem Schülerwechsel eintrifft und sonst die Themen des vorherigen Schülers unter dem
+    // neuen Namen anzeigen würde.
+    const theorieAnwesenheitReqRef = useRef(0);
+    useEffect(() => { theorieAnwesenheitReqRef.current++; setTheorieAnwesenheit(null); }, [activeId]);
     const [view, setView] = useState("home");
     const [tourStep, setTourStep] = useState(0);
     const [tourOn, setTourOn] = useState(true);
@@ -11421,6 +11452,26 @@ function App() {
         // Schüler, während diese Anfrage noch läuft, darf ihre (evtl. später eintreffende) Antwort
         // nicht mehr die (ggf. sensiblen) Dokumente des inzwischen aktiven Schülers überschreiben.
         fetchStudentFiles(studentId).then(list => setActiveId(cur => { if (cur === studentId) setStudentFiles(list); return cur; }));
+    }
+    async function loadTheorieAnwesenheit() {
+        if (!active)
+            return;
+        const studentId = active.id;
+        const req = ++theorieAnwesenheitReqRef.current;
+        setTheorieAnwesenheit({ busy: true });
+        try {
+            const rows = await fetchTheoryAttendanceForStudent(studentId);
+            if (theorieAnwesenheitReqRef.current !== req)
+                return;
+            setTheorieAnwesenheit({ rows });
+        }
+        catch (e) {
+            if (theorieAnwesenheitReqRef.current !== req)
+                return;
+            // Fallback-Text, weil ein leerer Fehlertext die Karte sonst in die Themenliste laufen
+            // ließe und "0 von 14 besucht" anzeigen würde, obwohl gar nichts geladen wurde.
+            setTheorieAnwesenheit({ error: e.message || String(e) || "Unbekannter Fehler" });
+        }
     }
     async function handleStudentFileUpload(file) {
         if (!file || !active)
@@ -18181,11 +18232,109 @@ function App() {
                             React.createElement("span", { style: done ? { color: "var(--green)", fontWeight: 600 } : null }, st.label)),
                         done && React.createElement("input", { type: "date", value: date, onChange: e => setStepDate(st.key, e.target.value), style: { border: "1.5px solid var(--line)", borderRadius: 9, padding: "6px 8px", fontSize: 16, width: 142, flexShrink: 0 } }));
                 })),
+            renderTheorieAnwesenheit(),
             renderPruefungsversuche(),
             renderRueckwaertsFahrplan(),
             renderStudentFiles(),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
                 "Rein informell für deinen Überblick – ersetzt keine offiziellen Unterlagen der Führerscheinstelle."));
+    }
+    /* ── Theorie-Anwesenheit eines Schülers: welche der Unterrichtsthemen nach Anlage 1
+       FahrschAusbO er beim Theorieunterricht schon besucht hat und welche noch fehlen. Die Daten
+       dafür entstehen längst beim QR-Check-in (theory_attendance, siehe renderTheoryCheckinModal),
+       ausgewertet wurden sie aber nur je Sitzung - wer wissen wollte, ob ein Schüler zur
+       Theorieprüfung angemeldet werden kann, musste jeden einzelnen TH-Termin einzeln öffnen.
+       Deshalb hier im Führerschein-Reiter, direkt bei den Schritten "Theorieprüfung angemeldet /
+       bestanden". Bewusst nur eine Anzeige: eingetragen und entfernt wird die Anwesenheit weiter
+       dort, wo sie entsteht, nämlich im Check-in der jeweiligen Sitzung. ── */
+    function renderTheorieAnwesenheit() {
+        const vkTh = (active && active.klasse) || DEFAULT_KLASSE;
+        // Alle für diese Klasse geltenden Themen in einer Liste, nur für Zähler und Soll-Abgleich -
+        // angezeigt werden Grundstoff und Zusatzstoff unten bewusst getrennt.
+        const themen = [...GRUNDSTOFF_THEMEN, ...zusatzstoffFor(vkTh)];
+        const st = theorieAnwesenheit;
+        const rows = (st && Array.isArray(st.rows)) ? st.rows : null;
+        // Frühester erfasster Besuch je Thema - wird ein Thema mehrfach besucht, zählt der erste
+        // Termin, denn der erfüllt die Pflicht. Ein Thema kann auch ohne lesbare Zeit vorkommen
+        // (dann leerer String): besucht ist es trotzdem, nur ohne Datum in der Anzeige.
+        // Map statt einfachem Objekt, weil die Schlüssel aus der Datenbank kommen und ein Thema
+        // wie "constructor" in einem Objekt-Literal schon von Haus aus "vorhanden" wäre.
+        const besuchtAm = new Map();
+        (rows || []).forEach(r => {
+            const key = ((r && r.thema) || "").trim();
+            if (!key)
+                return;
+            const ts = (r && r.checked_at) ? String(r.checked_at) : "";
+            if (!besuchtAm.has(key)) {
+                besuchtAm.set(key, ts);
+                return;
+            }
+            const bisher = besuchtAm.get(key);
+            if (ts && (!bisher || ts < bisher))
+                besuchtAm.set(key, ts);
+        });
+        const besucht = themen.filter(t => besuchtAm.has(t)).length;
+        const pct = themen.length ? Math.round((besucht / themen.length) * 100) : 0;
+        // Erfasste Sitzungen, deren Thema in keiner der beiden Listen dieser Klasse steht (z.B.
+        // unter dem Platzhalter-Titel einer anderen Klasse eingecheckt) - nicht verschweigen,
+        // sondern gesammelt darunter zeigen, sonst wirkt ein echter Besuch wie nie erfasst.
+        const bekannt = new Set(themen);
+        const weitere = [...besuchtAm.keys()].filter(k => !bekannt.has(k)).sort((a, b) => a.localeCompare(b, "de"));
+        const ohneThema = (rows || []).filter(r => r && !((r.thema) || "").trim()).length;
+        function datTh(iso) {
+            if (!iso)
+                return "";
+            const d = new Date(iso);
+            return isNaN(d.getTime()) ? "" : d.toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "2-digit" });
+        }
+        function zeileTh(label, key, ts, letzte) {
+            return React.createElement("div", { key: key, style: { display: "flex", alignItems: "baseline", gap: 10, padding: "10px 0", borderBottom: letzte ? "none" : "1px solid var(--line)" } },
+                React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, lineHeight: 1.4 } }, label),
+                ts === null
+                    ? React.createElement("span", { style: { flexShrink: 0, fontSize: 12, color: "var(--muted)" } }, "Offen")
+                    : React.createElement("span", { style: { flexShrink: 0, fontSize: 12, fontWeight: 700, color: "var(--green)" } }, datTh(ts) ? "Besucht · " + datTh(ts) : "Besucht"));
+        }
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Theorieunterricht"),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } },
+                "Welche Unterrichtsthemen dieser Schüler schon besucht hat - aus dem QR-Check-in der Theoriesitzungen."),
+            st === null
+                ? React.createElement("button", { className: "btn btn-ghost", onClick: loadTheorieAnwesenheit }, "Anwesenheit laden")
+                : st.busy
+                    ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Wird geladen…")
+                    : st.error
+                        ? React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { fontSize: 13, color: "var(--danger)", lineHeight: 1.5, marginBottom: 10 } },
+                                "Anwesenheit konnte nicht geladen werden: " + st.error),
+                            React.createElement("button", { className: "btn btn-ghost", onClick: loadTheorieAnwesenheit }, "Erneut versuchen"))
+                        : (rows && rows.length === 0)
+                            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55 } },
+                                "Für diesen Schüler ist noch keine Anwesenheit erfasst. Sie entsteht beim Theorieunterricht-Termin über „Anwesenheit (QR-Check-in)“ - dort scannen die Schüler den Code, oder du trägst sie von Hand ein.")
+                            : React.createElement(React.Fragment, null,
+                                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 6 } },
+                                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } },
+                                        besucht + " von " + themen.length + (themen.length === 1 ? " Thema" : " Themen") + " besucht"),
+                                    React.createElement("span", { style: { fontSize: 12, color: "var(--muted)" } }, "Klasse " + vkTh)),
+                                React.createElement(Bar, { pct: pct, color: pct === 100 ? "var(--green)" : "var(--orange)", h: 6 }),
+                                React.createElement("div", { className: "home-eyebrow", style: { margin: "14px 0 2px" } }, "Grundstoff"),
+                                GRUNDSTOFF_THEMEN.map((titel, i) => zeileTh((i + 1) + ". " + titel, "g" + i,
+                                    (titel in besuchtAm) ? besuchtAm[titel] : null, i === GRUNDSTOFF_THEMEN.length - 1)),
+                                React.createElement("div", { className: "home-eyebrow", style: { margin: "14px 0 2px" } }, "Zusatzstoff Klasse " + vkTh),
+                                zusatzstoffFor(vkTh).map((titel, i, arr) => zeileTh(titel, "z" + i,
+                                    (titel in besuchtAm) ? besuchtAm[titel] : null, i === arr.length - 1)),
+                                // Gleicher Hinweis wie im Theoriepilot: für Klassen ohne hinterlegte
+                                // Zusatzstoff-Titel stehen dort Platzhalter, keine erfundenen Themen.
+                                !ZUSATZSTOFF_THEMEN[vkTh] && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } },
+                                    "Für Klasse " + vkTh + " sind die genauen Zusatzstoff-Titel noch nicht hinterlegt - die beiden Zeilen darüber sind Platzhalter."),
+                                weitere.length > 0 && React.createElement(React.Fragment, null,
+                                    React.createElement("div", { className: "home-eyebrow", style: { margin: "14px 0 2px" } }, "Weitere erfasste Themen"),
+                                    weitere.map((titel, i) => zeileTh(titel, "w" + i, besuchtAm[titel], i === weitere.length - 1)),
+                                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } },
+                                        "Diese Themen gehören nicht zur Liste der Klasse " + vkTh + " und zählen deshalb oben nicht mit.")),
+                                ohneThema > 0 && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } },
+                                    "Dazu " + ohneThema + (ohneThema === 1 ? " Sitzung" : " Sitzungen") + " ohne hinterlegtes Thema - sie lassen sich keinem Punkt zuordnen."),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "12px 0 0", lineHeight: 1.5 } },
+                                    "Grundlage sind ausschließlich die in der App erfassten Sitzungen. Anwesenheit, die du außerhalb dokumentiert hast, steht hier nicht.")));
     }
     // Dokumente eines Schülers (Sehtest, Erste-Hilfe-Nachweis, Passfoto, ...) - lazy geladen,
     // eigener privater Speicher (student-files), nur der eigene Fahrlehrer sieht sie.
