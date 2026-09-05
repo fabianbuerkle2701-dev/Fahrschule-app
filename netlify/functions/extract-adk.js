@@ -54,13 +54,19 @@ exports.handler = async function (event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const images = Array.isArray(body.images) ? body.images : [];
+  // Wie bei extract-student.js: das client-kontrollierte Array vor dem Weiterreichen an
+  // Anthropic deckeln - diese Funktion ist auch direkt ohne Frontend aufrufbar, sonst könnte
+  // ein Aufruf mit dutzenden/riesigen Bildern die Kosten unbegrenzt hochtreiben.
+  const images = (Array.isArray(body.images) ? body.images : []).slice(0, 6);
   // Katalog der Abschnitte, die es in der Vorlage des Fahrlehrers gibt (ADK und Strecken),
   // damit die KI die erkannten Bereiche eindeutig zuordnen kann. Einträge ohne gültige
   // Objektstruktur rausfiltern - sonst crasht das JSON.stringify unten (außerhalb des
   // Try/Catch) bei kaputtem sections-Payload statt sauber 400 zurückzugeben.
   const sections = (Array.isArray(body.sections) ? body.sections : []).filter((s) => s && typeof s === "object");
   if (!images.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Bilder übergeben" }) };
+  if (images.some((img) => typeof img === "string" && img.length > 11 * 1024 * 1024)) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Bild ist zu groß (max. 8 MB)." }) };
+  }
 
   const imageBlocks = images.map((dataUrl) => {
     const m = /^data:(.*?);base64,(.*)$/.exec(dataUrl || "");

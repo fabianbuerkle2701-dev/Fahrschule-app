@@ -94,12 +94,29 @@ exports.handler = async function (event) {
     const [apptResp, stuResp, profResp] = await Promise.all([
       sbFetch("appointments?owner=eq." + owner + "&status=eq.confirmed&start_at=gte." + from + "&start_at=lte." + to + "&select=id,student_id,title,start_at,end_at,art,note&order=start_at.asc"),
       sbFetch("students?owner=eq." + owner + "&select=id,data"),
-      sbFetch("profiles?id=eq." + owner + "&select=display_name"),
+      sbFetch("profiles?id=eq." + owner + "&select=display_name,school_id"),
     ]);
     if (!apptResp.ok) throw new Error("Termine konnten nicht geladen werden (" + apptResp.status + ")");
     const appts = await apptResp.json();
     const students = stuResp.ok ? await stuResp.json() : [];
     const profRows = profResp.ok ? await profResp.json() : [];
+    const schoolId = profRows && profRows[0] && profRows[0].school_id;
+
+    // Die Fahrschule kann Terminarten-Bezeichnungen in den Einstellungen umbenennen oder eigene
+    // Terminarten mit eigenem Kürzel anlegen (school.arten, siehe index.html) - dieselbe Liste
+    // wird hier gelesen statt nur der statischen ART_LABELS-Kopie, sonst zeigt der Kalender-Abo
+    // für umbenannte/eigene Terminarten weiterhin das alte bzw. nur das kryptische Kürzel.
+    let artenBySchool = {};
+    if (schoolId) {
+      const schoolResp = await sbFetch("schools?id=eq." + schoolId + "&select=arten");
+      const schoolRows = schoolResp.ok ? await schoolResp.json() : [];
+      const arten = (schoolRows && schoolRows[0] && Array.isArray(schoolRows[0].arten)) ? schoolRows[0].arten : [];
+      arten.forEach(a => {
+        if (!a || !a.code) return;
+        const prefix = a.code + " · ";
+        artenBySchool[a.code] = (a.label && a.label.indexOf(prefix) === 0) ? a.label.slice(prefix.length) : (a.label || a.code);
+      });
+    }
 
     const nameById = {};
     (students || []).forEach(s => {
@@ -122,7 +139,7 @@ exports.handler = async function (event) {
       const isUrlaub = note.indexOf(URLAUB_MARK) === 0;
       const isSonstige = note.indexOf(SONST_MARK) === 0;
       const desc = cleanNote(note);
-      const artLabel = ART_LABELS[a.art] || a.art || "Fahrstunde";
+      const artLabel = artenBySchool[a.art] || ART_LABELS[a.art] || a.art || "Fahrstunde";
       const stuName = a.student_id ? nameById[a.student_id] : null;
       let summary;
       if (isUrlaub) summary = "Urlaub";

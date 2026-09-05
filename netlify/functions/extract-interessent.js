@@ -66,9 +66,15 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) };
   }
 
-  const images = Array.isArray(body.images) ? body.images : (body.image ? [body.image] : []);
+  // Wie bei extract-student.js: das client-kontrollierte Array vor dem Weiterreichen an
+  // Anthropic deckeln - diese Funktion ist auch direkt ohne Frontend aufrufbar, sonst könnte
+  // ein Aufruf mit dutzenden/riesigen Bildern die Kosten unbegrenzt hochtreiben.
+  const images = (Array.isArray(body.images) ? body.images : (body.image ? [body.image] : [])).slice(0, 6);
   if (images.length === 0) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Bild übergeben" }) };
+  }
+  if (images.some((img) => typeof img === "string" && img.length > 11 * 1024 * 1024)) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Bild ist zu groß (max. 8 MB)." }) };
   }
 
   const imageBlocks = images.map((img) => {

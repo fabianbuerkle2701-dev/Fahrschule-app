@@ -57,8 +57,87 @@ exports.handler = async function (event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const student = body.student && typeof body.student === "object" ? body.student : null;
-  if (!student || !student.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  const rawStudent = body.student && typeof body.student === "object" ? body.student : null;
+  if (!rawStudent || !rawStudent.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  // Wie student-handover-summary.js/eltern-update.js: jedes Feld einzeln kappen statt
+  // body.student ungeprüft in den Prompt zu übernehmen - sonst kann ein Aufruf beliebig große
+  // Strings/Arrays mitschicken und die Tokenkosten pro Anfrage unbegrenzt hochtreiben.
+  const clampStr = (v, n) => (v == null ? "" : String(v)).slice(0, n);
+  const clampNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const bes = rawStudent.besonderheiten && typeof rawStudent.besonderheiten === "object" ? rawStudent.besonderheiten : {};
+  const abschnitte = Array.isArray(rawStudent.abschnitte) ? rawStudent.abschnitte.slice(0, 60).map((a) => ({
+    art: clampStr(a && a.art, 20),
+    titel: clampStr(a && a.titel, 150),
+    prozent: clampNum(a && a.prozent),
+  })) : [];
+  const wiederkehrendeSchwaechen = Array.isArray(rawStudent.wiederkehrendeSchwaechen) ? rawStudent.wiederkehrendeSchwaechen.slice(0, 20).map((w) => ({
+    feld: clampStr(w && w.feld, 100),
+    schnitt: clampNum(w && w.schnitt),
+    schlechtCount: clampNum(w && w.schlechtCount),
+    bewertungen: clampNum(w && w.bewertungen),
+  })) : [];
+  const letzteFahrstundenNotizen = Array.isArray(rawStudent.letzteFahrstundenNotizen) ? rawStudent.letzteFahrstundenNotizen.slice(0, 10).map((l) => ({
+    datum: clampStr(l && l.datum, 20),
+    thema: clampStr(l && l.thema, 300),
+    gut: clampStr(l && l.gut, 300),
+    schlecht: clampStr(l && l.schlecht, 300),
+  })) : [];
+  const psRaw = rawStudent.pruefungssimulation && typeof rawStudent.pruefungssimulation === "object" ? rawStudent.pruefungssimulation : null;
+  const gesamtRaw = psRaw && psRaw.gesamt && typeof psRaw.gesamt === "object" ? psRaw.gesamt : null;
+  const pruefungssimulation = psRaw ? {
+    anzahl: clampNum(psRaw.anzahl),
+    letzteAm: clampStr(psRaw.letzteAm, 20),
+    gesamt: gesamtRaw ? { leicht: clampNum(gesamtRaw.leicht), erheblich: clampNum(gesamtRaw.erheblich), gefaehrdung: clampNum(gesamtRaw.gefaehrdung) } : null,
+  } : null;
+  const skRaw = rawStudent.schaltkompetenz && typeof rawStudent.schaltkompetenz === "object" ? rawStudent.schaltkompetenz : null;
+  const schaltkompetenz = skRaw ? {
+    letzteAm: clampStr(skRaw.letzteAm, 20), gut: clampNum(skRaw.gut), schlecht: clampNum(skRaw.schlecht),
+    offen: clampNum(skRaw.offen), notiz: clampStr(skRaw.notiz, 300),
+  } : null;
+  const clampRecurringList = (list) => Array.isArray(list) ? list.slice(0, 30).map((x) => ({
+    id: clampStr(x && x.id, 60), label: clampStr(x && x.label, 150),
+    erheblich: clampNum(x && x.erheblich), gefaehrdung: clampNum(x && x.gefaehrdung), total: clampNum(x && x.total),
+  })) : [];
+  const wsRaw = rawStudent.wiederkehrendeSchwerePruefungssimFehler && typeof rawStudent.wiederkehrendeSchwerePruefungssimFehler === "object" ? rawStudent.wiederkehrendeSchwerePruefungssimFehler : null;
+  const wiederkehrendeSchwerePruefungssimFehler = wsRaw ? {
+    fahraufgaben: clampRecurringList(wsRaw.fahraufgaben),
+    kompetenzbereiche: clampRecurringList(wsRaw.kompetenzbereiche),
+  } : null;
+  const sonderfahrten = Array.isArray(rawStudent.sonderfahrten) ? rawStudent.sonderfahrten.slice(0, 20).map((x) => ({
+    art: clampStr(x && x.art, 60), ue: clampNum(x && x.ue), sollUe: clampNum(x && x.sollUe), erfuellt: !!(x && x.erfuellt),
+  })) : null;
+  const tuRaw = rawStudent.theorieUebungsstand && typeof rawStudent.theorieUebungsstand === "object" ? rawStudent.theorieUebungsstand : null;
+  const theorieUebungsstand = tuRaw ? {
+    gemeistertProzent: clampNum(tuRaw.gemeistertProzent), beantwortet: clampNum(tuRaw.beantwortet), gesamtFragen: clampNum(tuRaw.gesamtFragen),
+  } : null;
+  const student = {
+    name: clampStr(rawStudent.name, 200),
+    klasse: clampStr(rawStudent.klasse, 20),
+    theorie: !!rawStudent.theorie,
+    adkProzent: clampNum(rawStudent.adkProzent),
+    streckenProzent: clampNum(rawStudent.streckenProzent),
+    gesamtProzent: clampNum(rawStudent.gesamtProzent),
+    abschnitte,
+    fahrstunden: clampNum(rawStudent.fahrstunden),
+    gefahreneMinuten: clampNum(rawStudent.gefahreneMinuten),
+    besonderheiten: {
+      sehhilfe: !!bes.sehhilfe,
+      bemerkungen: clampStr(bes.bemerkungen, 1000),
+      letzteNotizZumStand: clampStr(bes.letzteNotizZumStand, 1000),
+      streckenNotizen: Array.isArray(bes.streckenNotizen) ? bes.streckenNotizen.slice(0, 20).map((n) => clampStr(n, 300)) : [],
+    },
+    wiederkehrendeSchwaechen,
+    letzteFahrstundenNotizen,
+    pruefungssimulation,
+    schaltkompetenz,
+    ampelStufe: clampStr(rawStudent.ampelStufe, 30),
+    ampelText: clampStr(rawStudent.ampelText, 200),
+    offenePunkteAnzahl: clampNum(rawStudent.offenePunkteAnzahl),
+    theorieOffen: clampNum(rawStudent.theorieOffen),
+    wiederkehrendeSchwerePruefungssimFehler,
+    sonderfahrten,
+    theorieUebungsstand,
+  };
 
   const system = `Du bist ein erfahrener Fahrlehrer-Kollege und gibst eine begründete Einschätzung ab, ob ${student.name} bereit für die Anmeldung zur Praxisprüfung ist. Du bekommst dieselben Rohdaten, die die App auch als Prozentwerte/Ampel zeigt - dein Mehrwert ist, die WEICHEN Signale (Freitext-Notizen, wiederkehrende Fehler, Sonderfahrten, Theorie-Übung) einzubeziehen, die eine reine Prozentzahl nicht erfasst, und daraus eine echte, konkrete Empfehlung zu machen statt nur die Zahlen nachzuerzählen.
 

@@ -54,8 +54,64 @@ exports.handler = async function (event) {
   try { body = JSON.parse(event.body || "{}"); }
   catch (e) { return { statusCode: 400, headers, body: JSON.stringify({ error: "Ungültige Anfrage" }) }; }
 
-  const student = body.student && typeof body.student === "object" ? body.student : null;
-  if (!student || !student.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  const rawStudent = body.student && typeof body.student === "object" ? body.student : null;
+  if (!rawStudent || !rawStudent.name) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Schülerdaten übergeben" }) };
+  // Wie eltern-update.js/draft-lesson-entry.js/booking-chat.js: jedes Feld einzeln kappen statt
+  // body.student ungeprüft in den Prompt zu übernehmen - sonst kann ein Aufruf beliebig große
+  // Strings/Arrays mitschicken und die Tokenkosten pro Anfrage unbegrenzt hochtreiben.
+  const clampStr = (v, n) => (v == null ? "" : String(v)).slice(0, n);
+  const clampNum = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const bes = rawStudent.besonderheiten && typeof rawStudent.besonderheiten === "object" ? rawStudent.besonderheiten : {};
+  const abschnitte = Array.isArray(rawStudent.abschnitte) ? rawStudent.abschnitte.slice(0, 60).map((a) => ({
+    art: clampStr(a && a.art, 20),
+    titel: clampStr(a && a.titel, 150),
+    prozent: clampNum(a && a.prozent),
+  })) : [];
+  const wiederkehrendeSchwaechen = Array.isArray(rawStudent.wiederkehrendeSchwaechen) ? rawStudent.wiederkehrendeSchwaechen.slice(0, 20).map((w) => ({
+    feld: clampStr(w && w.feld, 100),
+    schnitt: clampNum(w && w.schnitt),
+    schlechtCount: clampNum(w && w.schlechtCount),
+    bewertungen: clampNum(w && w.bewertungen),
+  })) : [];
+  const letzteFahrstundenNotizen = Array.isArray(rawStudent.letzteFahrstundenNotizen) ? rawStudent.letzteFahrstundenNotizen.slice(0, 10).map((l) => ({
+    datum: clampStr(l && l.datum, 20),
+    thema: clampStr(l && l.thema, 300),
+    gut: clampStr(l && l.gut, 300),
+    schlecht: clampStr(l && l.schlecht, 300),
+  })) : [];
+  const psRaw = rawStudent.pruefungssimulation && typeof rawStudent.pruefungssimulation === "object" ? rawStudent.pruefungssimulation : null;
+  const gesamtRaw = psRaw && psRaw.gesamt && typeof psRaw.gesamt === "object" ? psRaw.gesamt : null;
+  const pruefungssimulation = psRaw ? {
+    anzahl: clampNum(psRaw.anzahl),
+    letzteAm: clampStr(psRaw.letzteAm, 20),
+    gesamt: gesamtRaw ? { leicht: clampNum(gesamtRaw.leicht), erheblich: clampNum(gesamtRaw.erheblich), gefaehrdung: clampNum(gesamtRaw.gefaehrdung) } : null,
+  } : null;
+  const skRaw = rawStudent.schaltkompetenz && typeof rawStudent.schaltkompetenz === "object" ? rawStudent.schaltkompetenz : null;
+  const schaltkompetenz = skRaw ? {
+    letzteAm: clampStr(skRaw.letzteAm, 20), gut: clampNum(skRaw.gut), schlecht: clampNum(skRaw.schlecht),
+    offen: clampNum(skRaw.offen), notiz: clampStr(skRaw.notiz, 300),
+  } : null;
+  const student = {
+    name: clampStr(rawStudent.name, 200),
+    klasse: clampStr(rawStudent.klasse, 20),
+    theorie: !!rawStudent.theorie,
+    adkProzent: clampNum(rawStudent.adkProzent),
+    streckenProzent: clampNum(rawStudent.streckenProzent),
+    gesamtProzent: clampNum(rawStudent.gesamtProzent),
+    abschnitte,
+    fahrstunden: clampNum(rawStudent.fahrstunden),
+    gefahreneMinuten: clampNum(rawStudent.gefahreneMinuten),
+    besonderheiten: {
+      sehhilfe: !!bes.sehhilfe,
+      bemerkungen: clampStr(bes.bemerkungen, 1000),
+      letzteNotizZumStand: clampStr(bes.letzteNotizZumStand, 1000),
+      streckenNotizen: Array.isArray(bes.streckenNotizen) ? bes.streckenNotizen.slice(0, 20).map((n) => clampStr(n, 300)) : [],
+    },
+    wiederkehrendeSchwaechen,
+    letzteFahrstundenNotizen,
+    pruefungssimulation,
+    schaltkompetenz,
+  };
 
   const system = `Du schreibst eine vollständige Übergabe-Einschätzung eines Fahrschülers für eine neue Fahrlehrkraft oder eine neue Fahrschule (Fahrschulwechsel). Fasse ALLE unten stehenden Daten in einem gut strukturierten, sachlichen Text auf Deutsch zusammen, damit die neue Lehrkraft sofort weiß, wo der Schüler steht, ohne die kompletten Rohdaten selbst durchsuchen zu müssen.
 

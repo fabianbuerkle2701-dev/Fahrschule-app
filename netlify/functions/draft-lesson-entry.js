@@ -81,14 +81,18 @@ exports.handler = async function (event) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Stichwort übergeben" }) };
   }
   const recent = Array.isArray(body.recent) ? body.recent.slice(0, 3) : [];
+  // Nur die Array-Laenge war gekappt, die Freitextfelder darin nicht - ein Aufruf mit nur 3
+  // Eintraegen, aber beliebig langen thema/gut/schlecht-Strings konnte die Prompt-Groesse
+  // trotzdem unbegrenzt hochtreiben (gleiche Fehlerklasse wie bei student-handover-summary.js).
+  const clampStr = (v, n) => (v == null ? "" : String(v)).slice(0, n);
 
   const recentText = recent.length === 0 ? "Keine vorherigen Einträge." : recent.map((l, i) => {
     const bewertungen = LESSON_FIELDS.map(f => (l.ratings && l.ratings[f.id]) ? (f.label + ": " + l.ratings[f.id] + "/3") : null).filter(Boolean).join(", ");
-    return "Stunde " + (i + 1) + (l.date ? " (" + l.date + ")" : "") + ": "
-      + (l.thema ? "Thema \"" + l.thema + "\". " : "")
+    return "Stunde " + (i + 1) + (l.date ? " (" + clampStr(l.date, 20) + ")" : "") + ": "
+      + (l.thema ? "Thema \"" + clampStr(l.thema, 200) + "\". " : "")
       + (bewertungen ? "Bewertungen: " + bewertungen + ". " : "")
-      + (l.gut ? "Gut lief: " + l.gut + ". " : "")
-      + (l.schlecht ? "Schlecht lief: " + l.schlecht + ". " : "");
+      + (l.gut ? "Gut lief: " + clampStr(l.gut, 300) + ". " : "")
+      + (l.schlecht ? "Schlecht lief: " + clampStr(l.schlecht, 300) + ". " : "");
   }).join("\n");
 
   const instruction = `Du hilfst einem Fahrlehrer, einen Tagebucheintrag für eine gerade gegebene Fahrstunde auszufüllen. Er hat dir nur ein kurzes Stichwort zur Stunde gegeben. Nutze es zusammen mit den letzten Einträgen desselben Schülers (Kontext, Wiederholungsmuster, Ton), um einen vollständigen Entwurf zu erstellen.
