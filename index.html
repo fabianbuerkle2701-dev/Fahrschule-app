@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.201.0";
+const APP_VERSION = "1.203.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,11 +3025,18 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "1.201.0", date: "September 2026", changes: [
+    { v: "1.203.0", date: "September 2026", changes: [
             "Neu: Unterlagen-Radar in der Auswertung. Die Checkliste „Führerschein-Antrag\" (Sehtest, Erste-Hilfe-Kurs, Passfoto, Antrag bei der Führerscheinstelle) gab es bisher nur je Schüler - wer wissen wollte, von wem noch ein Sehtest fehlt, musste jeden Schüler einzeln aufmachen. Jetzt steht dieselbe Information einmal über alle deine Schüler: wie viele noch etwas schulden, was genau bei wem fehlt, und seit wann derjenige schon dabei ist",
             "Dringend markiert sind Schüler, bei denen eine Prüfung schon angemeldet oder die Theorie bestanden ist, obwohl noch Unterlagen fehlen - da hängt die Anmeldung an einem Zettel",
             "Ein Tipp auf „Erinnern\" öffnet WhatsApp mit einer fertigen Nachricht, die genau die bei diesem Schüler fehlenden Unterlagen aufzählt. Abgeschickt wird wie immer von Hand. Das Datum wird beim Schüler gemerkt, damit du beim nächsten Durchgang siehst, wen du schon angeschrieben hast",
             "Über die Reihe oben lässt sich auf eine einzelne Unterlage filtern - zum Beispiel „wer hat noch keinen Sehtest\", bevor du zur Führerscheinstelle fährst",
+        ] },
+    { v: "1.202.0", date: "September 2026", changes: [
+            "8 weitere Fehler behoben (zweite Bug-Hunt-Runde): Mahnungen-Cockpit zeigte immer „14 Tage“ statt des eingestellten Zahlungsziels; die Admin-Fremdansicht „Fahrlehrer → Schüler ansehen“ zeigte 0% für jede Klasse außer B ohne eigene Vorlage; die CSV-Import-Vorschau zählte Dubletten innerhalb derselben Datei nicht mit; die Kontoauszug-Betragserkennung verwechselte Rücklastschriften/Stornos mit echten Zahlungseingängen (Minuszeichen wurde ignoriert); die §31-FahrlG-Löschung entfernte drei Felder nicht (Prüfungssimulationen, Begleitperson-Telefonnummer, Einweisungs-Nachweis) - jetzt ergänzt, per Datenbank-Migration auch serverseitig",
+            "Sicherheitshärtung: die Datenbank-Regel „Demo-Konto darf nichts schreiben“ war auf vier Tabellen (Gutscheine, Prüfplätze, Fahrtenbuch-Reflexionen, Theorie-Anwesenheit) versehentlich als ODER- statt UND-Bedingung angelegt und hob dadurch die eigentliche Besitzer-Prüfung für ALLE echten Nutzer auf, nicht nur fürs Demo-Konto - jede Fahrschule konnte dadurch fremde Gutscheine/Prüfplätze anlegen oder löschen. Außerdem konnte ein normaler Fahrschul-Admin sich selbst unerlaubt zum schulübergreifenden App-Moderator machen. Beides jetzt per Migration geschlossen und live gegengeprüft",
+        ] },
+    { v: "1.201.0", date: "September 2026", changes: [
+            "11 Fehler im Fahrlehrer-Bereich behoben, gefunden und gegengeprüft in einem breiten Bug-Hunt: §31-Löschung entfernte hochgeladene Dateien nur aus der Datenbank, nicht aus dem Speicher (jetzt wirklich gelöscht, mit Warnung bei Fehlschlag); ein fehlgeschlagenes „Zurücksetzen“ bei Erinnerungen stellte den alten Stand nie wieder her; verschwundene/entzogene geteilte Schüler blieben nach einem Hintergrund-Neuladen weiter sichtbar; Rückgängig nach Schüler-Löschen stellte eine Kollegen-Freigabe nicht wieder her; Dokumente-Upload/-Löschen konnte bei schnellem Schülerwechsel die Dateien des falschen Schülers zeigen; Theorie-Check-in bot immer nur Klasse-B-Zusatzstoffthemen an (jetzt mit Klassenauswahl); XRechnung wies bei Altrechnungen ohne gespeichertes Kleinunternehmer-Feld fälschlich 19% USt aus; ein Klick auf den schon aktiven Schüler in der Prüfungsplanung sprang nicht zum Führerschein-Reiter; der KI-Helfer schickte zum Fahrschul-Code an eine seit längerem falsche Stelle und nannte beim Fahrtenbuch-Export einen nicht existierenden Einstellungsnamen; normale Fahrlehrer sahen im Fuhrpark gar keine Fahrzeugliste mehr, obwohl der Code dafür längst vorbereitet war",
         ] },
     { v: "1.200.0", date: "September 2026", changes: [
             "Neu: Impressum (Einstellungen, Mehr, Impressum - auch ohne Login unter allindrive.app/?impressum=1 erreichbar). Gab es bisher gar nicht",
@@ -4977,10 +4984,14 @@ function cleanData(s) {
     return rest;
 }
 async function dbInsert(uid, s) {
-    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: [] }), _isMine: true }; }
+    // s._shared wird hier bewusst übernommen (nicht immer [] angelegt): removeStudent()'s Undo
+    // ruft dbInsert() mit dem kompletten Backup inkl. _shared auf und erwartet, dass eine vorher
+    // mit Kollegen geteilte Freigabe beim Wiederherstellen erhalten bleibt.
+    const sharedWith = s._shared || [];
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }), _isMine: true }; }
     return await withNetworkRetry(async () => {
         const { data, error } = await sb.from("students")
-            .insert({ owner: uid, data: cleanData(s), shared_with: [] }).select().single();
+            .insert({ owner: uid, data: cleanData(s), shared_with: sharedWith }).select().single();
         if (error) {
             console.error(error);
             return null;
@@ -6168,8 +6179,11 @@ const xrR2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const xrF2 = (n) => xrR2(n).toFixed(2);
 
 function buildXRechnung(o) {
-  const { inv, seller, buyer, zahlungszielTage } = o;
-  const kUnt = !!inv.kleinunternehmer;
+  const { inv, seller, buyer, zahlungszielTage, kUntFallback } = o;
+  // Altrechnungen von vor Einführung des kleinunternehmer-Felds besitzen es nicht (undefined) -
+  // dann auf die aktuelle Fahrschul-Einstellung zurückfallen, wie bei exportDatev()/exportRechnungen()/
+  // invoiceSheet(), statt sie fälschlich als regelbesteuert (19% USt) zu behandeln.
+  const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!kUntFallback;
   const satz = kUnt ? 0 : 19;
   const brutto = xrR2(inv.total);
   // Netto aus der Bruttosumme ableiten, damit die Summe exakt zur gedruckten Rechnung passt.
@@ -7748,13 +7762,19 @@ function findeRechnungsnummer(zeile) {
 function findeBetraege(zeile) {
     const ohneDatum = String(zeile).replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, " ");
     const out = [];
-    const re = /(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})/g;
+    // Erfasst ein optionales Minuszeichen vor ODER nach dem Betrag (beide Notationen kommen in
+    // echten Kontoauszügen vor) - damit markierte Beträge sind Rücklastschriften/Stornos (Geld
+    // verlässt das Konto wieder) und werden bewusst NICHT zurückgegeben: sie dürfen nie als
+    // eingehende Zahlung vorgeschlagen werden, sonst gilt eine Rechnung als beglichen, obwohl
+    // das Geld nie angekommen ist.
+    const re = /(-)?\s?(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})(-)?/g;
     let m;
     while ((m = re.exec(ohneDatum))) {
-        const roh = m[1];
+        const istNegativ = m[1] === "-" || m[3] === "-";
+        const roh = m[2];
         const norm = roh.indexOf(",") >= 0 ? roh.replace(/\./g, "").replace(",", ".") : roh;
         const v = parseFloat(norm);
-        if (!isNaN(v) && v > 0)
+        if (!isNaN(v) && v > 0 && !istNegativ)
             out.push(Math.round(v * 100) / 100);
     }
     return out;
@@ -10975,11 +10995,13 @@ function App() {
         markiereErinnert(k.appt.id, new Date().toISOString());
     }
     function markiereErinnert(id, wert) {
+        const vorher = (appts || []).find(a => a.id === id);
+        const vorherWert = vorher ? vorher.reminded_at : null;
         setAppts(prev => prev.map(a => a.id === id ? { ...a, reminded_at: wert } : a));
         dbUpdateAppt(id, { reminded_at: wert }).catch(e => {
             console.error("Erinnerungs-Merker speichern fehlgeschlagen:", e);
             showToast("Konnte nicht gemerkt werden: " + (e.message || "unbekannter Fehler"));
-            setAppts(prev => prev.map(a => a.id === id ? { ...a, reminded_at: wert ? null : a.reminded_at } : a));
+            setAppts(prev => prev.map(a => a.id === id ? { ...a, reminded_at: vorherWert } : a));
         });
     }
     // Bewertungslink + eigener Text für die Bitte um eine Bewertung nach bestandener Prüfung.
@@ -11261,8 +11283,12 @@ function App() {
                 setStudents(prev => {
                     const byId = new Map((list || []).map(s => [s.id, s]));
                     // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
-                    // alle anderen auf den frisch geladenen Serverstand bringen.
-                    const merged = (prev || []).map(s => (busy.has(s.id) || !byId.has(s.id)) ? s : byId.get(s.id));
+                    // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
+                    // nicht gerade speichernder Schüler serverseitig nicht mehr auf (gelöscht
+                    // oder die Freigabe wurde entzogen), gehört er entfernt statt stehen zu bleiben.
+                    const merged = (prev || [])
+                        .filter(s => busy.has(s.id) || byId.has(s.id))
+                        .map(s => busy.has(s.id) ? s : byId.get(s.id));
                     const knownIds = new Set(merged.map(s => s.id));
                     const added = (list || []).filter(s => !knownIds.has(s.id));
                     const arr = [...merged, ...added];
@@ -11636,11 +11662,14 @@ function App() {
     async function handleStudentFileUpload(file) {
         if (!file || !active)
             return;
+        const studentId = active.id;
         setStudentFileUploading(true);
         try {
-            await uploadStudentFile(active.id, uid, file, studentFileCategory);
-            const list = await fetchStudentFiles(active.id);
-            setStudentFiles(list);
+            await uploadStudentFile(studentId, uid, file, studentFileCategory);
+            const list = await fetchStudentFiles(studentId);
+            // Staleness-Check wie bei loadStudentFiles(): wechselt der Nutzer während des Uploads
+            // zu einem anderen Schüler, darf diese Antwort nicht mehr dessen Dokumentenliste treffen.
+            setActiveId(cur => { if (cur === studentId) setStudentFiles(list); return cur; });
             showFlash("✓ Hochgeladen");
         }
         catch (e) {
@@ -11653,9 +11682,12 @@ function App() {
     async function handleStudentFileDelete(f) {
         if (!await askConfirm({ message: "Datei \"" + f.filename + "\" endgültig löschen?" }))
             return;
+        const studentId = active ? active.id : null;
         try {
             await deleteStudentFile(f);
-            setStudentFiles(list => (list || []).filter(x => x.id !== f.id));
+            // Gleicher Staleness-Check: die Antwort darf nach einem zwischenzeitlichen Schülerwechsel
+            // nicht mehr die Dokumentenliste des jetzt aktiven, anderen Schülers verändern.
+            setActiveId(cur => { if (cur === studentId) setStudentFiles(list => (list || []).filter(x => x.id !== f.id)); return cur; });
         }
         catch (e) {
             showToast("Löschen fehlgeschlagen:\n" + (e.message || e));
@@ -12991,14 +13023,37 @@ function App() {
         }
         setLoeschDialog({ ...d, busy: true, error: "" });
         try {
+            // Storage-Pfade VOR der Löschung sichern - die RPC entfernt gleich die
+            // student_files-Zeilen, aus denen sie stammen, danach wären sie nicht mehr ermittelbar.
+            let dateipfade = [];
+            try {
+                const { data: files } = await sb.from("student_files").select("storage_path").eq("student_id", d.stu.id);
+                dateipfade = (files || []).map(f => f.storage_path).filter(Boolean);
+            } catch (e) { console.error("Storage-Pfade vor Löschung nicht ermittelbar:", e); }
             const { data, error } = await sb.rpc("student_data_delete", { p_student_id: d.stu.id });
             if (error) throw new Error(error.message);
             if (!data || !data.ok) throw new Error("Löschung wurde abgelehnt.");
+            // Die RPC hat nur die student_files-Metadatenzeilen entfernt, nicht die tatsächlich
+            // hochgeladenen Dateien im Storage-Bucket - das holen wir hier nach (wie beim manuellen
+            // Einzel-Löschen in deleteStudentFile()). Best-effort: schlägt das fehl, bleibt die
+            // eigentliche §31-Löschung trotzdem wirksam, es erscheint nur eine Warnung.
+            let dateiWarnung = "";
+            if (dateipfade.length) {
+                try {
+                    const { error: rmErr } = await sb.storage.from("student-files").remove(dateipfade);
+                    if (rmErr) throw rmErr;
+                }
+                catch (e) {
+                    console.error("Storage-Dateien konnten nicht gelöscht werden:", e);
+                    dateiWarnung = "Die Metadaten der hochgeladenen Dateien wurden gelöscht, die Dateien selbst konnten aber nicht entfernt werden (" + (e.message || "unbekannter Fehler") + "). Bitte später erneut versuchen oder den Support kontaktieren.";
+                }
+            }
             // Lokalen Stand nachziehen: dieselben Felder entfernen, die der Server entfernt hat.
             const weg = ["adkDates","adkLog","adkNotes","items","customCounts","strecken","streckenLog",
                 "streckenNotes","routes","drivenLessons","lessons","manualHours","noShows","exams",
-                "schaltkompetenzTests","licenseSteps","begleitfahrten","begleitplan","theorie",
-                "theoryProgress","theoryMockExams","bemerkungen","lastNote","messages","avatarUrl",
+                "schaltkompetenzTests","examSims","licenseSteps","begleitfahrten","begleitplan",
+                "begleitEinweisung","elternTel","theorie","theoryProgress","theoryMockExams",
+                "bemerkungen","lastNote","messages","avatarUrl",
                 "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
                 "pinChanged","pins","referralCode","wunschliste","dismissedAppts","termin",
                 "terminLabel","klasse","location_id"];
@@ -13015,7 +13070,7 @@ function App() {
                 if (uid) saveCache(uid, arr);
                 return arr;
             });
-            setLoeschDialog({ ...d, busy: false, fertig: { name: data.name, dateien: data.dateien } });
+            setLoeschDialog({ ...d, busy: false, fertig: { name: data.name, dateien: data.dateien, warnung: dateiWarnung } });
             ladeLoeschProtokoll();
         }
         catch (e) {
@@ -13047,6 +13102,7 @@ function App() {
                 buyer: { name: stu.firmaName, strasse: stu.firmaStrasse || "", plz: kd.plz, ort: kd.ort,
                     ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "" },
                 zahlungszielTage: zahlungszielTage,
+                kUntFallback: !!iv.kleinunternehmer,
             });
             const blob = new Blob([out.xml], { type: "application/xml;charset=utf-8" });
             const url = URL.createObjectURL(blob);
@@ -17982,7 +18038,18 @@ function App() {
     // Innerer Inhalt von Prüfungsplanung OHNE eigenen Seitentitel - siehe renderAuswertung().
     function renderPruefungsplanungBody() {
         const { upcoming, readyNotRegistered } = examPlanning();
-        function goTo(id) { setActiveId(id); setView("daten"); pendingStudentTabRef.current = "antrag"; }
+        function goTo(id) {
+            // Ist der Schüler schon activeId, ändert setActiveId(id) den State nicht (React-Bailout),
+            // der Tab-Wechsel-Effekt an [activeId] feuert dann nicht - der Ref-Wert bliebe stehen und
+            // würde erst beim nächsten, unabhängigen Schülerwechsel woanders fälschlich verbraucht.
+            // Direkt umschalten statt den Ref zu setzen, wenn sich activeId gar nicht ändert.
+            if (id === activeId)
+                setStudentTab("antrag");
+            else
+                pendingStudentTabRef.current = "antrag";
+            setActiveId(id);
+            setView("daten");
+        }
         return React.createElement(React.Fragment, null,
             (upcoming.length > 0 || readyNotRegistered.length > 0) && React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 16 } },
                 renderBriefingBlock(pruefungBriefing, setPruefungBriefing, {
@@ -18227,7 +18294,18 @@ function App() {
         const { rows: alle, aktiveAnzahl } = unterlagenRadar();
         const gefiltert = unterlagenFilter === "alle" ? alle : alle.filter(r => r.fehlt.some(st => st.key === unterlagenFilter));
         const dringendCount = alle.filter(r => r.dringend).length;
-        function goTo(id) { setActiveId(id); setView("daten"); pendingStudentTabRef.current = "antrag"; }
+        // Gleiche Fassung wie in der Prüfungsplanung: ist der Schüler schon activeId, ändert
+        // setActiveId(id) den State nicht (React-Bailout), der Tab-Wechsel-Effekt an [activeId]
+        // feuert dann nicht - der Ref-Wert bliebe stehen und würde erst beim nächsten,
+        // unabhängigen Schülerwechsel woanders fälschlich verbraucht.
+        function goTo(id) {
+            if (id === activeId)
+                setStudentTab("antrag");
+            else
+                pendingStudentTabRef.current = "antrag";
+            setActiveId(id);
+            setView("daten");
+        }
         // Erinnert-Datum steht als YYYY-MM-DD am Schüler; ein kaputter Wert soll die Zeile nicht
         // mit "Invalid Date" verunstalten, sondern einfach wegbleiben.
         function erinnertText(iso) {
@@ -18841,18 +18919,17 @@ function App() {
                     React.createElement("span", { style: { display: "block", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14.5 } }, "Fahrzeug-Kalender"),
                     React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } }, "Belegungsplan ansehen und Fahrzeuge buchen")),
                 React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, "›")),
-            canEditSchool
-                ? React.createElement(React.Fragment, null,
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "0 2px 10px" } }, "Verwaltung"),
-                    renderFahrzeugVerwaltungBody(),
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Kosten & Service"),
-                    renderFahrzeugeBody(),
-                    vehicles.filter(v => !v.inactive).length > 0 && React.createElement(React.Fragment, null,
-                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Auslastung"),
-                        React.createElement(FahrzeugAuslastung, { code: school && school.cal_code, vehicles: vehicles })))
-                : React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
-                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16 } }, "Nur für den Fahrschul-Admin"),
-                    React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginTop: 8 } }, "Fahrzeuge, Kosten und Wartungstermine pflegt der Admin deiner Fahrschule.")));
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "0 2px 10px" } }, "Verwaltung"),
+            // renderFahrzeugVerwaltungBody() zeigt Nicht-Admins selbst schon eine schreibgeschützte
+            // Fahrzeugliste ("pflegt ein Fahrschul-Admin") - die separate Sperr-Karte hier hat diesen
+            // Zweig vorher unerreichbar gemacht und normalen Fahrlehrern gar keine Liste gezeigt.
+            renderFahrzeugVerwaltungBody(),
+            canEditSchool && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Kosten & Service"),
+                renderFahrzeugeBody(),
+                vehicles.filter(v => !v.inactive).length > 0 && React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", margin: "24px 2px 10px" } }, "Auslastung"),
+                    React.createElement(FahrzeugAuslastung, { code: school && school.cal_code, vehicles: vehicles }))));
     }
     // Fahrzeug-Verwaltung: aus Einstellungen, Organisation, Fahrzeuge hierher verschoben, damit
     // Anlegen/Bearbeiten direkt neben Kosten und Kalender steht statt auf einem eigenen Menüpfad.
@@ -19750,7 +19827,7 @@ function App() {
     }
     async function openTheoryCheckin(appt) {
         const attendance = await fetchTheoryAttendance(appt.id).catch(() => []);
-        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || "", attendance });
+        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || "", attendance, klasse: theoryKlasse });
     }
     // 15 Minuten gültig - reicht für den Sitzungsbeginn, ohne dass ein alter Code tagelang gültig bliebe.
     async function startTheoryCheckin(thema) {
@@ -24416,8 +24493,9 @@ function App() {
                         React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.55, marginBottom: 6 } },
                             "Die Ausbildungsdaten von " + loeschDialog.fertig.name + " wurden entfernt"
                             + (loeschDialog.fertig.dateien > 0 ? (", dazu " + loeschDialog.fertig.dateien + " hochgeladene Datei(en)") : "") + "."),
-                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
+                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: loeschDialog.fertig.warnung ? 8 : 14 } },
                             "Rechnungen und Zahlungen sind erhalten geblieben. Der Vorgang steht im Löschprotokoll unter Einstellungen."),
+                        loeschDialog.fertig.warnung && React.createElement("p", { style: { fontSize: 12.5, color: "var(--danger)", lineHeight: 1.5, marginBottom: 14 } }, loeschDialog.fertig.warnung),
                         React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setLoeschDialog(null) }, "Schließen"))
                     : React.createElement(React.Fragment, null,
                         React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ausbildungsdaten löschen"),
@@ -24494,13 +24572,22 @@ function App() {
                     const map = csvImport.mapping;
                     const vorhanden = new Set((students || []).map(x => normName(dispName(x))));
                     const zeilen = csvImport.daten.map(r => zeileZuImport(r, map)).filter(d => (d.vorname || d.name));
-                    const dubletten = zeilen.filter(d => vorhanden.has(normName((d.vorname + " " + d.name).trim())));
-                    const neu = zeilen.length - dubletten.length;
+                    // vorhanden waechst hier mit, wie in csvImportStarten() - sonst zaehlen zwei
+                    // identische Zeilen innerhalb derselben CSV in der Vorschau beide als "neu",
+                    // obwohl beim echten Import nur eine davon angelegt und die andere uebersprungen wird.
+                    const neuZeilen = zeilen.filter(d => {
+                        const key = normName((d.vorname + " " + d.name).trim());
+                        if (vorhanden.has(key)) return false;
+                        vorhanden.add(key);
+                        return true;
+                    });
+                    const neu = neuZeilen.length;
+                    const dublettenCount = zeilen.length - neu;
                     const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Adresse"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
                     return React.createElement(React.Fragment, null,
                         React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } },
                             csvImport.daten.length + " Zeilen gelesen \u00B7 " + neu + " werden angelegt"
-                            + (dubletten.length ? " \u00B7 " + dubletten.length + " bereits vorhanden" : "")),
+                            + (dublettenCount ? " \u00B7 " + dublettenCount + " bereits vorhanden" : "")),
                         csvImport.hinweis && React.createElement("div", { style: { fontSize: 12.5, background: "var(--amber-bg)", border: "1px solid var(--amber)", borderRadius: 10, padding: "9px 11px", marginBottom: 12, lineHeight: 1.45 } }, csvImport.hinweis),
                         React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Spaltenzuordnung"),
                         React.createElement("div", { className: "card", style: { padding: "6px 12px", marginBottom: 14 } },
@@ -24726,7 +24813,8 @@ function App() {
         theoryCheckinModal && (() => {
             const appt = theoryCheckinModal.appt;
             const live = appt.checkin_code && appt.checkin_expires_at && new Date(appt.checkin_expires_at) > new Date();
-            const themen = [...GRUNDSTOFF_THEMEN, ...zusatzstoffFor(DEFAULT_KLASSE)];
+            const checkinKlasse = theoryCheckinModal.klasse || DEFAULT_KLASSE;
+            const themen = [...GRUNDSTOFF_THEMEN, ...zusatzstoffFor(checkinKlasse)];
             const checkedInIds = new Set(theoryCheckinModal.attendance.map(a => a.student_id));
             const manualCandidates = (students || []).filter(s => s._isMine && !s.archived && !checkedInIds.has(s.id));
             const checkinUrl = live ? location.origin + location.pathname + "?code=" + encodeURIComponent(bookingCode || "") + "&checkin=" + appt.checkin_code : "";
@@ -24738,6 +24826,10 @@ function App() {
                     !live
                         ? React.createElement(React.Fragment, null,
                             React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14 } }, "Welches Thema behandelt ihr in dieser Sitzung?"),
+                            klassen.length > 1 && React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                                React.createElement("label", null, "Führerscheinklasse dieser Sitzung",
+                                React.createElement("select", { value: checkinKlasse, onChange: e => setTheoryCheckinModal(m => ({ ...m, klasse: e.target.value, thema: "" })) },
+                                    klassen.map(k => React.createElement("option", { key: k, value: k }, k))))),
                             React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                                 React.createElement("select", { value: theoryCheckinModal.thema, onChange: e => setTheoryCheckinModal(m => ({ ...m, thema: e.target.value })), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                                     React.createElement("option", { value: "" }, "– Thema wählen –"),
@@ -25656,7 +25748,7 @@ function App() {
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, "\u00DCberf\u00E4llige Rechnungen"),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)))),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + 14 + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + zahlungszielTage + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
                 ueberfaelligeRechnungen.length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell ist nichts \u00FCberf\u00E4llig.")
                     : ueberfaelligeRechnungen.map(x => React.createElement("div", { key: x.inv.id, className: "card", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 8 } },
@@ -25795,12 +25887,21 @@ function App() {
                                 // Eigene Vorlage bevorzugen, aber je Kategorie (ADK/Strecken) einzeln auf die
                                 // Vorlage des Fahrschul-Admins zurückfallen, wenn der Fahrlehrer dort selbst
                                 // nichts hinterlegt hat - sonst zeigt "kein eigener Eintrag" fälschlich 0%.
-                                const ownSlice = (adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse[s.klasse]) || {};
-                                const fallbackSlice = (adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse[s.klasse]) || {};
-                                const teacherTplS = {
-                                    adk: (ownSlice.adk && ownSlice.adk.length) ? ownSlice.adk : (fallbackSlice.adk || []),
-                                    strecken: (ownSlice.strecken && ownSlice.strecken.length) ? ownSlice.strecken : (fallbackSlice.strecken || []),
+                                // Hat auch der Admin für die Klasse des Schülers nichts hinterlegt, zusätzlich
+                                // auf Klasse B zurückfallen (gleiche Punkt-IDs), wie tplForRaw() das für die
+                                // normale Ansicht schon macht - sonst zeigt jede Nicht-B-Klasse hier 0%.
+                                const kSlice = s.klasse || DEFAULT_KLASSE;
+                                const tryArr = (byKlasseObj, klasse, cat) => {
+                                    const slice = byKlasseObj && byKlasseObj[klasse];
+                                    return (slice && Array.isArray(slice[cat]) && slice[cat].length) ? slice[cat] : null;
                                 };
+                                const resolveArr = (cat) =>
+                                    tryArr(adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse, kSlice, cat)
+                                    || tryArr(adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse, kSlice, cat)
+                                    || (kSlice !== DEFAULT_KLASSE && tryArr(adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse, DEFAULT_KLASSE, cat))
+                                    || (kSlice !== DEFAULT_KLASSE && tryArr(adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse, DEFAULT_KLASSE, cat))
+                                    || [];
+                                const teacherTplS = { adk: resolveArr("adk"), strecken: resolveArr("strecken") };
                                 const lp = calcLern(s.items, teacherTplS.adk, s), bp = calcBack(s, teacherTplS.strecken);
                                 const ges = Math.max(lp, bp);
                                 return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid var(--line)" } },

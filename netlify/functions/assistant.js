@@ -217,9 +217,9 @@ App-Wissen (Stand aktuelle Version):
 - Termin anlegen: Reiter "Kalender" → freie Zeit antippen, Schüler und Art wählen. Für mehrere Termine auf einmal: im Formular "Terminserie anlegen" aktivieren.
 - Termin krankheitsbedingt absagen: Mehr → "Fahrlehrer krank" → Tag wählen → "Alle Fahrstunden absagen" → für jeden Schüler öffnet sich ein WhatsApp-Text zum Verschicken.
 - Rechnung erstellen: Schüler öffnen → Reiter "Fahrten & Kosten" → offene Posten prüfen → "Rechnung erstellen".
-- Buchungslink für Schüler: Mehr → Einstellungen → Mein Bereich → Arbeit & Ausbildung → "Fahrschul-Code" bzw. den teilbaren Buchungslink an den Schüler senden; er kann dort offene Termine selbst anfragen.
+- Buchungslink für Schüler: der Fahrschul-Code und der teilbare Buchungslink stehen NICHT in den Einstellungen, sondern beim einzelnen Schüler unter „Schülerdaten“ (Kasten „Fahrschülerbereich“); von dort an den Schüler senden, er kann damit offene Termine selbst anfragen.
 - Ausbildungslimit / Limit je Schüler einstellen: Mehr → Einstellungen → Mein Bereich → Arbeit & Ausbildung → Karten "Mein Ausbildungslimit" (dein eigenes Tages-/Wochenlimit) bzw. "Limit je Fahrschüler" (Obergrenze pro einzelnem Schüler).
-- Fahrtenbuch exportieren: Mehr → Einstellungen → Mein Bereich → Konto & Daten → "Fahrtenbuch als CSV exportieren".
+- Fahrtenbuch exportieren: Mehr → Einstellungen → Mein Bereich → Daten & Sicherung → "Fahrtenbuch als CSV exportieren".
 - Prüfreife-Ampel: rot = noch viel offen, gelb = fast fertig, grün = prüfungsreif (ADK/Strecken komplett und Theorie bestanden). Sichtbar beim Schüler und gesammelt unter Mehr → Prüfungsplanung.
 - Interessenten/Warteliste vor der Einschreibung erfassen: Mehr → "Interessenten" → "+ Interessent".
 - Statistik (Umsatz, Erfolgsquote, Prüfreife): Mehr → "Statistik".`;
