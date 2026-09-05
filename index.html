@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.201.0";
+const APP_VERSION = "1.202.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,6 +3025,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.202.0", date: "September 2026", changes: [
+            "8 weitere Fehler behoben (zweite Bug-Hunt-Runde): Mahnungen-Cockpit zeigte immer „14 Tage“ statt des eingestellten Zahlungsziels; die Admin-Fremdansicht „Fahrlehrer → Schüler ansehen“ zeigte 0% für jede Klasse außer B ohne eigene Vorlage; die CSV-Import-Vorschau zählte Dubletten innerhalb derselben Datei nicht mit; die Kontoauszug-Betragserkennung verwechselte Rücklastschriften/Stornos mit echten Zahlungseingängen (Minuszeichen wurde ignoriert); die §31-FahrlG-Löschung entfernte drei Felder nicht (Prüfungssimulationen, Begleitperson-Telefonnummer, Einweisungs-Nachweis) - jetzt ergänzt, per Datenbank-Migration auch serverseitig",
+            "Sicherheitshärtung: die Datenbank-Regel „Demo-Konto darf nichts schreiben“ war auf vier Tabellen (Gutscheine, Prüfplätze, Fahrtenbuch-Reflexionen, Theorie-Anwesenheit) versehentlich als ODER- statt UND-Bedingung angelegt und hob dadurch die eigentliche Besitzer-Prüfung für ALLE echten Nutzer auf, nicht nur fürs Demo-Konto - jede Fahrschule konnte dadurch fremde Gutscheine/Prüfplätze anlegen oder löschen. Außerdem konnte ein normaler Fahrschul-Admin sich selbst unerlaubt zum schulübergreifenden App-Moderator machen. Beides jetzt per Migration geschlossen und live gegengeprüft",
+        ] },
     { v: "1.201.0", date: "September 2026", changes: [
             "11 Fehler im Fahrlehrer-Bereich behoben, gefunden und gegengeprüft in einem breiten Bug-Hunt: §31-Löschung entfernte hochgeladene Dateien nur aus der Datenbank, nicht aus dem Speicher (jetzt wirklich gelöscht, mit Warnung bei Fehlschlag); ein fehlgeschlagenes „Zurücksetzen“ bei Erinnerungen stellte den alten Stand nie wieder her; verschwundene/entzogene geteilte Schüler blieben nach einem Hintergrund-Neuladen weiter sichtbar; Rückgängig nach Schüler-Löschen stellte eine Kollegen-Freigabe nicht wieder her; Dokumente-Upload/-Löschen konnte bei schnellem Schülerwechsel die Dateien des falschen Schülers zeigen; Theorie-Check-in bot immer nur Klasse-B-Zusatzstoffthemen an (jetzt mit Klassenauswahl); XRechnung wies bei Altrechnungen ohne gespeichertes Kleinunternehmer-Feld fälschlich 19% USt aus; ein Klick auf den schon aktiven Schüler in der Prüfungsplanung sprang nicht zum Führerschein-Reiter; der KI-Helfer schickte zum Fahrschul-Code an eine seit längerem falsche Stelle und nannte beim Fahrtenbuch-Export einen nicht existierenden Einstellungsnamen; normale Fahrlehrer sahen im Fuhrpark gar keine Fahrzeugliste mehr, obwohl der Code dafür längst vorbereitet war",
         ] },
@@ -7752,13 +7756,19 @@ function findeRechnungsnummer(zeile) {
 function findeBetraege(zeile) {
     const ohneDatum = String(zeile).replace(/\b\d{1,2}\.\d{1,2}\.\d{2,4}\b/g, " ");
     const out = [];
-    const re = /(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})/g;
+    // Erfasst ein optionales Minuszeichen vor ODER nach dem Betrag (beide Notationen kommen in
+    // echten Kontoauszügen vor) - damit markierte Beträge sind Rücklastschriften/Stornos (Geld
+    // verlässt das Konto wieder) und werden bewusst NICHT zurückgegeben: sie dürfen nie als
+    // eingehende Zahlung vorgeschlagen werden, sonst gilt eine Rechnung als beglichen, obwohl
+    // das Geld nie angekommen ist.
+    const re = /(-)?\s?(\d{1,3}(?:\.\d{3})+,\d{2}|\d+,\d{2}|\d+\.\d{2})(-)?/g;
     let m;
     while ((m = re.exec(ohneDatum))) {
-        const roh = m[1];
+        const istNegativ = m[1] === "-" || m[3] === "-";
+        const roh = m[2];
         const norm = roh.indexOf(",") >= 0 ? roh.replace(/\./g, "").replace(",", ".") : roh;
         const v = parseFloat(norm);
-        if (!isNaN(v) && v > 0)
+        if (!isNaN(v) && v > 0 && !istNegativ)
             out.push(Math.round(v * 100) / 100);
     }
     return out;
@@ -13016,8 +13026,9 @@ function App() {
             // Lokalen Stand nachziehen: dieselben Felder entfernen, die der Server entfernt hat.
             const weg = ["adkDates","adkLog","adkNotes","items","customCounts","strecken","streckenLog",
                 "streckenNotes","routes","drivenLessons","lessons","manualHours","noShows","exams",
-                "schaltkompetenzTests","licenseSteps","begleitfahrten","begleitplan","theorie",
-                "theoryProgress","theoryMockExams","bemerkungen","lastNote","messages","avatarUrl",
+                "schaltkompetenzTests","examSims","licenseSteps","begleitfahrten","begleitplan",
+                "begleitEinweisung","elternTel","theorie","theoryProgress","theoryMockExams",
+                "bemerkungen","lastNote","messages","avatarUrl",
                 "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
                 "pinChanged","pins","referralCode","wunschliste","dismissedAppts","termin",
                 "terminLabel","klasse","location_id"];
@@ -24376,13 +24387,22 @@ function App() {
                     const map = csvImport.mapping;
                     const vorhanden = new Set((students || []).map(x => normName(dispName(x))));
                     const zeilen = csvImport.daten.map(r => zeileZuImport(r, map)).filter(d => (d.vorname || d.name));
-                    const dubletten = zeilen.filter(d => vorhanden.has(normName((d.vorname + " " + d.name).trim())));
-                    const neu = zeilen.length - dubletten.length;
+                    // vorhanden waechst hier mit, wie in csvImportStarten() - sonst zaehlen zwei
+                    // identische Zeilen innerhalb derselben CSV in der Vorschau beide als "neu",
+                    // obwohl beim echten Import nur eine davon angelegt und die andere uebersprungen wird.
+                    const neuZeilen = zeilen.filter(d => {
+                        const key = normName((d.vorname + " " + d.name).trim());
+                        if (vorhanden.has(key)) return false;
+                        vorhanden.add(key);
+                        return true;
+                    });
+                    const neu = neuZeilen.length;
+                    const dublettenCount = zeilen.length - neu;
                     const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Adresse"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
                     return React.createElement(React.Fragment, null,
                         React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } },
                             csvImport.daten.length + " Zeilen gelesen \u00B7 " + neu + " werden angelegt"
-                            + (dubletten.length ? " \u00B7 " + dubletten.length + " bereits vorhanden" : "")),
+                            + (dublettenCount ? " \u00B7 " + dublettenCount + " bereits vorhanden" : "")),
                         csvImport.hinweis && React.createElement("div", { style: { fontSize: 12.5, background: "var(--amber-bg)", border: "1px solid var(--amber)", borderRadius: 10, padding: "9px 11px", marginBottom: 12, lineHeight: 1.45 } }, csvImport.hinweis),
                         React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Spaltenzuordnung"),
                         React.createElement("div", { className: "card", style: { padding: "6px 12px", marginBottom: 14 } },
@@ -25543,7 +25563,7 @@ function App() {
                 React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 4 } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, "\u00DCberf\u00E4llige Rechnungen"),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)))),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + 14 + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + zahlungszielTage + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
                 ueberfaelligeRechnungen.length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell ist nichts \u00FCberf\u00E4llig.")
                     : ueberfaelligeRechnungen.map(x => React.createElement("div", { key: x.inv.id, className: "card", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", marginBottom: 8 } },
@@ -25682,12 +25702,21 @@ function App() {
                                 // Eigene Vorlage bevorzugen, aber je Kategorie (ADK/Strecken) einzeln auf die
                                 // Vorlage des Fahrschul-Admins zurückfallen, wenn der Fahrlehrer dort selbst
                                 // nichts hinterlegt hat - sonst zeigt "kein eigener Eintrag" fälschlich 0%.
-                                const ownSlice = (adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse[s.klasse]) || {};
-                                const fallbackSlice = (adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse[s.klasse]) || {};
-                                const teacherTplS = {
-                                    adk: (ownSlice.adk && ownSlice.adk.length) ? ownSlice.adk : (fallbackSlice.adk || []),
-                                    strecken: (ownSlice.strecken && ownSlice.strecken.length) ? ownSlice.strecken : (fallbackSlice.strecken || []),
+                                // Hat auch der Admin für die Klasse des Schülers nichts hinterlegt, zusätzlich
+                                // auf Klasse B zurückfallen (gleiche Punkt-IDs), wie tplForRaw() das für die
+                                // normale Ansicht schon macht - sonst zeigt jede Nicht-B-Klasse hier 0%.
+                                const kSlice = s.klasse || DEFAULT_KLASSE;
+                                const tryArr = (byKlasseObj, klasse, cat) => {
+                                    const slice = byKlasseObj && byKlasseObj[klasse];
+                                    return (slice && Array.isArray(slice[cat]) && slice[cat].length) ? slice[cat] : null;
                                 };
+                                const resolveArr = (cat) =>
+                                    tryArr(adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse, kSlice, cat)
+                                    || tryArr(adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse, kSlice, cat)
+                                    || (kSlice !== DEFAULT_KLASSE && tryArr(adminTeacherStudents.tpl && adminTeacherStudents.tpl.byKlasse, DEFAULT_KLASSE, cat))
+                                    || (kSlice !== DEFAULT_KLASSE && tryArr(adminTeacherStudents.tplFallback && adminTeacherStudents.tplFallback.byKlasse, DEFAULT_KLASSE, cat))
+                                    || [];
+                                const teacherTplS = { adk: resolveArr("adk"), strecken: resolveArr("strecken") };
                                 const lp = calcLern(s.items, teacherTplS.adk, s), bp = calcBack(s, teacherTplS.strecken);
                                 const ges = Math.max(lp, bp);
                                 return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid var(--line)" } },
