@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.204.0";
+const APP_VERSION = "1.205.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,9 +3025,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "1.204.0", date: "September 2026", changes: [
+    { v: "1.205.0", date: "September 2026", changes: [
             "Neu: „Wiederholen“ im Theorie-Übungsbereich der Fahrschüler-App. Die App merkt sich beim Üben längst, wie gut jede Frage sitzt, und schlägt sie nach ein paar Tagen von selbst wieder vor - bisher stand diese Zahl nur im Lernstand, ohne dass man etwas damit anfangen konnte. Jetzt gibt es eine eigene Karte direkt darunter: sie zeigt, wie viele Fragen heute wieder dran sind und aus welchen Sachgebieten sie vor allem kommen, und startet auf einen Tipp genau diese Runde (die dringendsten zuerst, höchstens 20 auf einmal). Ist gerade nichts fällig, steht dort, an welchem Tag die nächste Wiederholung ansteht - und ein zweiter Knopf für die wackeligen Fragen, die erst einmal richtig beantwortet wurden und deshalb noch nicht sitzen",
             "Behoben: Eine nur mit einem Lesezeichen gemerkte, aber nie beantwortete Frage wurde im Lernstand als „zur Wiederholung fällig“ mitgezählt. Zählt jetzt wie überall sonst nur, was wirklich beantwortet wurde",
+        ] },
+    { v: "1.204.0", date: "September 2026", changes: [
+            "9 weitere Fehler behoben (fünfte Bug-Hunt-Runde): Sonderfahrten-Bilanz zählte bei Klassenwechsel alte Fahrten der vorherigen Klasse mit; eine korrigierte Terminart wurde bei fehlgeschlagenem Speichern im Fahrtenbuch nicht zurückgerollt; die Prüfplatz-Kandidatenliste schloss bereits anderweitig zugeteilte Schüler nicht aus (Doppelvergabe möglich); ein gelöschter Paket-Kostenposten hinterließ verwaistes Paket-Guthaben (Paket-Knapp-Cockpit zu ungenau); die Rechnungs-PDF zeigte bei Firmenkunden weiterhin die Privatadresse statt der Firma; der Warnhinweis beim Entfernen einer Führerscheinklasse zählte nur eigene statt alle Schüler der Fahrschule; drei Einstellungen (DATEV-Export, Geschenkgutscheine, Löschprotokoll) fehlten in der Befehlssuche; ein Doppelklick auf „Beleg drucken“/„Vertrag erstellen“ konnte eine Beleg-/Vertragsnummer verbrauchen und verwerfen (Nummernlücke); CSV-Exporte (Fahrtenbuch, Rechnungen) waren nicht gegen Formel-Injection in Namensfeldern abgesichert",
         ] },
     { v: "1.203.0", date: "September 2026", changes: [
             "14 weitere Fehler behoben (vierte Bug-Hunt-Runde): §31-Löschung entfernte drei Empfehlungsprogramm-Felder nicht (u.a. Klarnamen geworbener Freunde) - per Migration ergänzt; Gutschein-Einlösung prüfte nicht, ob der Ziel-Schüler wirklich zur Schule des Gutscheins gehört (konnte Geld zwischen Fahrschulen verschieben) - per Migration geschlossen; ein einmal fehlerhafter Empfehlungscode blockierte jede spätere Korrektur dauerhaft; Push-Benachrichtigungen konnten bei kurzzeitig offlinem Gerät als „zugestellt“ gelten, obwohl Apple sie verworfen hat (fehlender apns-expiration-Header, jetzt ergänzt, dazu ein Sende-Timeout); ein zweiter Abmelden-Knopf im Fahrschul-Beitritts-Bildschirm entfernte den Push-Gerätetoken nicht; das Homescreen-Widget hatte keine Widerrufs-Möglichkeit und blieb nach dem Abmelden aktiv - jetzt behoben; der Quotenpilot zählte archivierte Schüler anders als Statistik/Abrechnung für dieselbe Erfolgsquote; der Onboarding-Assistent zeigte neu eingeladenen Fahrlehrern eine Fahrschul-Bearbeitungsmaske, die für sie durch die Datenbank ohnehin gesperrt war; drei Fehlermeldungen im mehrsprachigen Fahrschüler-Bereich (Profilbild, Warteliste, Stornofrist-Hinweis) blieben unabhängig von der gewählten Sprache Deutsch; KI-Nachrichtenvorschläge an Interessenten hatten keine Prompt-Injection-Abwehr",
@@ -7346,7 +7349,10 @@ function sonderfahrtenBilanz(stu, klasse, sollMap) {
         const sollUe = Number(soll[a.key]) || 0;
         if (sollUe <= 0)
             return null;
-        const treffer = lessons.filter(l => l.art === a.code);
+        // Nur Fahrten derselben Klasse zählen (bzw. ohne gespeicherte Klasse - ältere Einträge
+        // von vor dieser Erfassung) - sonst zählen bei einem Klassenwechsel frühere Sonderfahrten
+        // einer anderen, bereits abgeschlossenen Ausbildungsklasse fälschlich zur neuen Bilanz.
+        const treffer = lessons.filter(l => l.art === a.code && (!l.klasse || l.klasse === klasse));
         const minuten = treffer.reduce((sum, l) => sum + (Number(l.minutes) || 0), 0);
         const ue = Math.round((minuten / 45) * 100) / 100;
         return { ...a, ue, sollUe, anzahl: treffer.length, erfuellt: ue >= sollUe,
@@ -9948,6 +9954,12 @@ function App() {
     // den Bonus doppelt gutschreiben. Ein Ref (statt State) wirkt sofort, ohne auf ein Re-Render
     // zu warten.
     const referralBusyRef = useRef(false);
+    // Re-Entrancy-Schutz für printReceipt()/createContract(): beide Knöpfe haben keinen
+    // disabled/busy-State, ein Doppelklick (auf Touch-Geräten häufig) würde sonst zweimal
+    // nextDocumentNumber() aufrufen und eine Beleg-/Vertragsnummer verbrauchen, die im Datensatz
+    // nie auftaucht (Nummernlücke) bzw. einen zweiten, ungewollten Vertrag anlegen.
+    const receiptBusyRef = useRef(new Set());
+    const contractBusyRef = useRef(new Set());
     // Doppeltap-Schutz für convertInteressentToStudent() - ein Ref wirkt sofort, ohne auf das
     // Re-Render von interessentForm.busy zu warten (siehe apptSavingRef für dasselbe Muster).
     const interessentConvertBusyRef = useRef(false);
@@ -14695,21 +14707,24 @@ function App() {
         const current = (appts || []).find(a => a.id === id);
         if (patch.start_at && current && patch.start_at !== current.start_at && current.reminded_at)
             patch = { ...patch, reminded_at: null };
-        // Wird die Terminart nachträglich korrigiert (z.B. ÜST -> Überland) und für diesen
-        // Termin existiert bereits ein Fahrtenbuch-Eintrag (confirmPastLesson kopiert appt.art
-        // nur EINMALIG beim Anlegen), muss die Art dort nachgezogen werden - sonst rechnet
-        // sonderfahrtenBilanz() weiter mit der veralteten, längst korrigierten Art.
-        if (patch.art !== undefined && current && (patch.art || "ÜST") !== (current.art || "ÜST")) {
-            (students || []).forEach(stu => {
-                if (!(stu.drivenLessons || []).some(l => l.apptId === id))
-                    return;
-                writeStudent({ ...stu, drivenLessons: stu.drivenLessons.map(l => l.apptId === id ? { ...l, art: patch.art || "ÜST" } : l) });
-            });
-        }
         setAppts(prev => prev.map(a => a.id === id ? { ...a, ...patch } : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
         try {
             await dbUpdateAppt(id, patch);
             setSaved(true);
+            // Wird die Terminart nachträglich korrigiert (z.B. ÜST -> Überland) und für diesen
+            // Termin existiert bereits ein Fahrtenbuch-Eintrag (confirmPastLesson kopiert appt.art
+            // nur EINMALIG beim Anlegen), muss die Art dort nachgezogen werden - sonst rechnet
+            // sonderfahrtenBilanz() weiter mit der veralteten, längst korrigierten Art. Erst NACH
+            // dem erfolgreichen Speichern des Termins, sonst bliebe bei einem fehlgeschlagenen
+            // dbUpdateAppt() die schon nachgezogene (und bereits persistierte) Fahrtenbuch-Art
+            // stehen, während der Termin selbst auf die alte Art zurückgerollt wird.
+            if (patch.art !== undefined && current && (patch.art || "ÜST") !== (current.art || "ÜST")) {
+                (students || []).forEach(stu => {
+                    if (!(stu.drivenLessons || []).some(l => l.apptId === id))
+                        return;
+                    writeStudent({ ...stu, drivenLessons: stu.drivenLessons.map(l => l.apptId === id ? { ...l, art: patch.art || "ÜST" } : l) });
+                });
+            }
         }
         catch (e) {
             // Speichern fehlgeschlagen: optimistische Änderung zurücknehmen, damit die Liste zur
@@ -15433,6 +15448,9 @@ function App() {
             (isAdmin(session) || isSchoolAdmin) && { id: "set-fuhrpark", label: "Fuhrpark & Auswertung", group: "Einstellungen", action: () => goSetting("fuhrpark") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-kosten", label: "Kosten", group: "Einstellungen", action: () => goSetting("kosten") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-rechnung", label: "Rechnungsdaten", group: "Einstellungen", action: () => goSetting("rechnungsdaten") },
+            (isAdmin(session) || isSchoolAdmin) && { id: "set-datev", label: "DATEV-Export", group: "Einstellungen", action: () => goSetting("datev") },
+            (isAdmin(session) || isSchoolAdmin) && { id: "set-gutscheine", label: "Geschenkgutscheine", group: "Einstellungen", action: () => goSetting("gutscheine") },
+            (isAdmin(session) || isSchoolAdmin) && { id: "set-loeschprotokoll", label: "Löschprotokoll", group: "Einstellungen", action: () => goSetting("loeschprotokoll") },
             (isAdmin(session) || isSchoolAdmin) && { id: "set-personal", label: "Personalunterlagen", group: "Einstellungen", action: () => goSetting("personalunterlagen") },
             { id: "set-konto", label: "Konto", group: "Einstellungen", action: () => goSetting("konto") },
             { id: "set-hilfe", label: "Hilfe & FAQ", group: "Einstellungen", action: () => goSetting("hilfe") },
@@ -17200,45 +17218,54 @@ function App() {
             doPrint("receipt");
             return;
         }
-        let number;
+        const busyKey = p.id || ("idx" + idx);
+        if (receiptBusyRef.current.has(busyKey))
+            return;
+        receiptBusyRef.current.add(busyKey);
         try {
-            number = await nextDocumentNumber(school.id, "receipt");
+            let number;
+            try {
+                number = await nextDocumentNumber(school.id, "receipt");
+            }
+            catch (e) {
+                showToast("Beleg konnte nicht erstellt werden:\n" + e.message);
+                return;
+            }
+            // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
+            // ...patch}), baut also auf dem vor dem RPC-await eingefangenen, jetzt veralteten "active"
+            // auf) - sonst würden alle während der Belegnummer-Vergabe an diesem Schüler vorgenommenen
+            // Änderungen (neue Fahrstunde, neuer Posten) hier stillschweigend verworfen. scheduleSave()
+            // bewusst NACH dem setStudents-Aufruf, nicht im Updater selbst (der kann von React mehrfach
+            // aufgerufen werden) - gleiches Muster wie draftLessonEntry() weiter oben.
+            // Über p.id statt idx zuordnen, falls vorhanden - idx zeigt auf die zum Klickzeitpunkt
+            // gültige Position, kann sich aber während der RPC-Laufzeit verschieben (Löschen/Anlegen
+            // einer anderen Zahlung), sodass idx danach zu einer ANDEREN Zahlung gehören kann. Alte,
+            // vor diesem Fix erfasste Zahlungen ohne id fallen weiter auf den Index zurück.
+            const pId = p.id;
+            let patchedStudent = null, savedPayment = null;
+            setStudents(prev => (prev || []).map(s => {
+                if (s.id !== active.id)
+                    return s;
+                const payments = (s.payments || []).map((x, i) => {
+                    const match = pId ? x.id === pId : i === idx;
+                    if (!match)
+                        return x;
+                    const withNumber = { ...x, receiptNumber: number };
+                    savedPayment = withNumber;
+                    return withNumber;
+                });
+                patchedStudent = { ...s, payments };
+                return patchedStudent;
+            }));
+            if (!patchedStudent || !savedPayment)
+                return;
+            scheduleSave(patchedStudent);
+            setReceiptPreview(savedPayment);
+            doPrint("receipt");
         }
-        catch (e) {
-            showToast("Beleg konnte nicht erstellt werden:\n" + e.message);
-            return;
+        finally {
+            receiptBusyRef.current.delete(busyKey);
         }
-        // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
-        // ...patch}), baut also auf dem vor dem RPC-await eingefangenen, jetzt veralteten "active"
-        // auf) - sonst würden alle während der Belegnummer-Vergabe an diesem Schüler vorgenommenen
-        // Änderungen (neue Fahrstunde, neuer Posten) hier stillschweigend verworfen. scheduleSave()
-        // bewusst NACH dem setStudents-Aufruf, nicht im Updater selbst (der kann von React mehrfach
-        // aufgerufen werden) - gleiches Muster wie draftLessonEntry() weiter oben.
-        // Über p.id statt idx zuordnen, falls vorhanden - idx zeigt auf die zum Klickzeitpunkt
-        // gültige Position, kann sich aber während der RPC-Laufzeit verschieben (Löschen/Anlegen
-        // einer anderen Zahlung), sodass idx danach zu einer ANDEREN Zahlung gehören kann. Alte,
-        // vor diesem Fix erfasste Zahlungen ohne id fallen weiter auf den Index zurück.
-        const pId = p.id;
-        let patchedStudent = null, savedPayment = null;
-        setStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
-            const payments = (s.payments || []).map((x, i) => {
-                const match = pId ? x.id === pId : i === idx;
-                if (!match)
-                    return x;
-                const withNumber = { ...x, receiptNumber: number };
-                savedPayment = withNumber;
-                return withNumber;
-            });
-            patchedStudent = { ...s, payments };
-            return patchedStudent;
-        }));
-        if (!patchedStudent || !savedPayment)
-            return;
-        scheduleSave(patchedStudent);
-        setReceiptPreview(savedPayment);
-        doPrint("receipt");
     }
     // ── Ausbildungsvertrag ──
     // Erstellt einen neuen Ausbildungsvertrag für den aktuellen Schüler, als Schnappschuss der
@@ -17256,35 +17283,45 @@ function App() {
             return;
         if (!await askConfirm({ message: "Ausbildungsvertrag f\u00FCr " + dispName(active) + " erstellen?" }))
             return;
-        let number;
+        // Re-Entrancy-Schutz: der Knopf hat keinen disabled/busy-State, ein Doppelklick würde sonst
+        // zweimal nextDocumentNumber() aufrufen und zwei Verträge mit je eigener Nummer anlegen.
+        if (contractBusyRef.current.has(active.id))
+            return;
+        contractBusyRef.current.add(active.id);
         try {
-            number = await nextDocumentNumber(school.id, "contract");
+            let number;
+            try {
+                number = await nextDocumentNumber(school.id, "contract");
+            }
+            catch (e) {
+                showToast("Vertrag konnte nicht erstellt werden:\n" + e.message);
+                return;
+            }
+            // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
+            // ...patch}), baut auf dem vor den Confirm-Dialogen/RPC-await eingefangenen, jetzt
+            // veralteten "active" auf) - sonst würden während der Wartezeit an diesem Schüler
+            // vorgenommene Änderungen (neue Fahrstunde, Zahlung, paralleler Kollege) hier
+            // stillschweigend verworfen. Gleiches Muster wie printReceipt()/confirmInvoice() oben.
+            let patchedStudent = null, c = null;
+            setStudents(prev => (prev || []).map(s => {
+                if (s.id !== active.id)
+                    return s;
+                const lastPkg = (s.packages && s.packages.length) ? s.packages[s.packages.length - 1] : null;
+                c = { id: uniqueId("vtr"), number, date: ymd(new Date()),
+                    klasse: s.klasse || DEFAULT_KLASSE, priceUE: price,
+                    packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
+                patchedStudent = { ...s, contracts: [...(s.contracts || []), c] };
+                return patchedStudent;
+            }));
+            if (!patchedStudent)
+                return;
+            scheduleSave(patchedStudent);
+            setContractPreview(c);
+            doPrint("contract");
         }
-        catch (e) {
-            showToast("Vertrag konnte nicht erstellt werden:\n" + e.message);
-            return;
+        finally {
+            contractBusyRef.current.delete(active.id);
         }
-        // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
-        // ...patch}), baut auf dem vor den Confirm-Dialogen/RPC-await eingefangenen, jetzt
-        // veralteten "active" auf) - sonst würden während der Wartezeit an diesem Schüler
-        // vorgenommene Änderungen (neue Fahrstunde, Zahlung, paralleler Kollege) hier
-        // stillschweigend verworfen. Gleiches Muster wie printReceipt()/confirmInvoice() oben.
-        let patchedStudent = null, c = null;
-        setStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
-            const lastPkg = (s.packages && s.packages.length) ? s.packages[s.packages.length - 1] : null;
-            c = { id: uniqueId("vtr"), number, date: ymd(new Date()),
-                klasse: s.klasse || DEFAULT_KLASSE, priceUE: price,
-                packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
-            patchedStudent = { ...s, contracts: [...(s.contracts || []), c] };
-            return patchedStudent;
-        }));
-        if (!patchedStudent)
-            return;
-        scheduleSave(patchedStudent);
-        setContractPreview(c);
-        doPrint("contract");
     }
     function viewContract(c) {
         setContractPreview(c);
@@ -17419,7 +17456,15 @@ function App() {
             }
             // Ueber die id treffen, falls vorhanden - die Position koennte inzwischen eine andere sein.
             const ziel = items[idx];
-            updateActive({ costItems: ziel && ziel.id ? items.filter(it => it.id !== ziel.id) : items.filter((_, i) => i !== idx) });
+            // Ein aus einem Paket übernommener Posten hat eine zugehörige packages-Zeile (siehe
+            // "Oder ein Paket übernehmen" unten) - ohne sie mit zu entfernen, bliebe das
+            // Paket-Guthaben (includedUE) verwaist stehen, obwohl der Rechnungsposten gelöscht
+            // wurde, und packageRemainingUE()/das Paket-Knapp-Cockpit rechnen dauerhaft mit einem
+            // zu hohen Rest.
+            updateActive({
+                costItems: ziel && ziel.id ? items.filter(it => it.id !== ziel.id) : items.filter((_, i) => i !== idx),
+                packages: ziel && ziel.id ? (active.packages || []).filter(p => p.costItemId !== ziel.id) : active.packages,
+            });
         }
         // Beleg-Foto → Kostenposition: liest ein Foto einer Quittung/eines Kassenbons aus und
         // öffnet damit vorbefüllt genau dasselbe "Posten hinzufügen"-Formular wie addItem() -
@@ -17606,11 +17651,15 @@ function App() {
                         // Dialog kann durch Zögern/Tippen offen bleiben, in der Zeit gemachte Änderungen
                         // an costItems/drivenLessons/payments/packages würden sonst hier verworfen.
                         let patchedStudent = null;
+                        // costItem.id wird auch am packages-Eintrag hinterlegt (costItemId) - so kann
+                        // removeItem() beim Löschen des Postens die zugehörige Paket-Guthaben-Zeile
+                        // wiederfinden und mit entfernen (siehe dortiger Kommentar).
+                        const costItem = neuerKostenposten({ label: p.name, amount: p.amount });
                         setStudents(prev => (prev || []).map(s => {
                             if (s.id !== active.id)
                                 return s;
-                            patchedStudent = { ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: p.name, amount: p.amount })],
-                                packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()) }] };
+                            patchedStudent = { ...s, costItems: [...(s.costItems || []), costItem],
+                                packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()), costItemId: costItem.id }] };
                             return patchedStudent;
                         }));
                         if (patchedStudent)
@@ -18134,9 +18183,17 @@ function App() {
     // nicht existiert. Sortierung nach _createdAt (Anlegedatum) als ehrliche Näherung für
     // "wartet am längsten" - der Zeitpunkt "wurde prüfreif" wird nirgends erfasst.
     function examSlotCandidates(art) {
+        const todayStr = ymd(new Date());
+        // Wer bereits einem offenen/vergebenen Prüfplatz derselben Art zugeteilt ist, gehört nicht
+        // nochmal in die Kandidatenliste - assignExamSlot() aktualisiert weder exams noch
+        // licenseSteps, die Prüfreife-Ampel merkt eine bestehende Zuteilung also nie von selbst,
+        // sonst könnte derselbe Schüler versehentlich zwei knappen TÜV/DEKRA-Plätzen zugewiesen werden.
+        const bereitsZugeteilt = new Set((examSlots || [])
+            .filter(s => s.art === art && s.status === "vergeben" && s.student_id && s.datum >= todayStr)
+            .map(s => s.student_id));
         const pool = art === "praxis" ? examPlanning().readyNotRegistered
             : (students || []).filter(s => s._isMine && !s.archived && !s.theorie);
-        return pool.slice().sort((a, b) => (a._createdAt || "").localeCompare(b._createdAt || ""));
+        return pool.filter(s => !bereitsZugeteilt.has(s.id)).sort((a, b) => (a._createdAt || "").localeCompare(b._createdAt || ""));
     }
     async function addExamSlotSubmit() {
         const f = examSlotForm;
@@ -22093,8 +22150,17 @@ function App() {
                                 React.createElement("span", { style: { fontSize: 13.5, fontWeight: 700, fontFamily: "var(--font-d)" } }, k),
                                 React.createElement("button", { onClick: async () => {
                                         // Ohne Rückfrage ließ sich eine Klasse versehentlich mit einem Tipp entfernen -
-                                        // betroffene Schüler zeigen die Klasse danach nirgends mehr an.
-                                        const affected = (students || []).filter(s => s.klasse === k).length;
+                                        // betroffene Schüler zeigen die Klasse danach nirgends mehr an. Schulweit zählen
+                                        // (nicht nur students - das lädt laut fetchStudents() ausdrücklich nur eigene +
+                                        // geteilte Schüler, ein Admin ohne eigene Schüler dieser Klasse sähe sonst
+                                        // fälschlich 0, obwohl Kollegen zahlreiche Schüler mit genau dieser Klasse haben).
+                                        let affected = (students || []).filter(s => s.klasse === k).length;
+                                        if (school && school.id) {
+                                            try {
+                                                const { data, error } = await sb.rpc("school_students_klasse_count", { p_school_id: school.id, p_klasse: k });
+                                                if (!error && typeof data === "number") affected = data;
+                                            } catch (e) { /* Fallback bleibt die lokale, evtl. zu niedrige Zahl */ }
+                                        }
                                         if (!await askConfirm({ message: (affected > 0 ? "Achtung: " + affected + (affected === 1 ? " Schüler ist" : " Schüler sind") + " aktuell Klasse " + k + " zugeordnet. " : "") + "Klasse " + k + " wirklich entfernen?" }))
                                             return;
                                         saveKlassen(klassen.filter((_, i) => i !== idx));
@@ -22547,7 +22613,16 @@ function App() {
                 return;
             }
             const csvNum = n => String(Math.round((Number(n) || 0) * 100) / 100).replace(".", ",");
-            const csvCell = s => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+            const csvCell = s => {
+                let v = String(s == null ? "" : s);
+                // CSV-/Formel-Injection (CWE-1236): Excel/LibreOffice werten eine Zelle, die mit
+                // =, +, -, @, Tab oder Carriage-Return beginnt, beim Öffnen als Formel statt als
+                // Text aus. Namen sind frei editierbar (Tippfehler, CSV-Import, KI-Fotoerfassung) -
+                // ein führendes Apostroph erzwingt die Text-Interpretation, ohne den sichtbaren
+                // Inhalt zu verändern.
+                if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+                return '"' + v.replace(/"/g, '""') + '"';
+            };
             const header = ["Datum", "Uhrzeit", "Schüler", "Klasse", "Minuten", "UE", "Preis pro UE (€)", "Betrag (€)"];
             const lines = [header.join(";")].concat(rows.map(r => [
                 r.datum, r.uhrzeit, csvCell(r.schueler), r.klasse, r.minuten, csvNum(r.ue), csvNum(r.preis), csvNum(r.betrag),
@@ -22714,7 +22789,16 @@ function App() {
                 return;
             }
             const csvNum = n => String(Math.round((Number(n) || 0) * 100) / 100).replace(".", ",");
-            const csvCell = s => '"' + String(s == null ? "" : s).replace(/"/g, '""') + '"';
+            const csvCell = s => {
+                let v = String(s == null ? "" : s);
+                // CSV-/Formel-Injection (CWE-1236): Excel/LibreOffice werten eine Zelle, die mit
+                // =, +, -, @, Tab oder Carriage-Return beginnt, beim Öffnen als Formel statt als
+                // Text aus. Namen sind frei editierbar (Tippfehler, CSV-Import, KI-Fotoerfassung) -
+                // ein führendes Apostroph erzwingt die Text-Interpretation, ohne den sichtbaren
+                // Inhalt zu verändern.
+                if (/^[=+\-@\t\r]/.test(v)) v = "'" + v;
+                return '"' + v.replace(/"/g, '""') + '"';
+            };
             const header = ["Rechnungsnummer", "Datum", "Schüler", "Netto (€)", "USt (€)", "Brutto (€)"];
             const lines = [header.join(";")].concat(rows.map(r => [
                 csvCell(r.nummer), r.datum, csvCell(r.schueler), csvNum(r.netto), csvNum(r.ust), csvNum(r.brutto),
@@ -23659,8 +23743,20 @@ function App() {
                     inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert durch " + inv.cancelledBy))),
             React.createElement("div", { style: { marginBottom: 18 } },
                 React.createElement("div", { style: { fontSize: "9pt", color: "#777", marginBottom: 2 } }, "Rechnungsempf\u00E4nger"),
-                React.createElement("div", { style: { fontWeight: "bold" } }, dispName(active)),
-                active.anschrift && React.createElement("div", null, active.anschrift)),
+                // Bei Firmenkunden (siehe istFirmenkunde/firma*-Felder) muss die Firma als
+                // Rechnungsempfänger stehen - sonst weicht dieser gedruckte/als PDF verschickte
+                // Beleg vom XRechnung-Buyer derselben Rechnung ab (xrechnungHerunterladen()), was
+                // z.B. den Vorsteuerabzug der Firma erschwert.
+                active.istFirmenkunde && active.firmaName
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("div", { style: { fontWeight: "bold" } }, active.firmaName),
+                        active.firmaStrasse && React.createElement("div", null, active.firmaStrasse),
+                        active.firmaPlzOrt && React.createElement("div", null, active.firmaPlzOrt),
+                        React.createElement("div", { style: { fontSize: "9pt", color: "#444", marginTop: 2 } }, "z.Hd. " + dispName(active)),
+                        active.firmaUstId && React.createElement("div", { style: { fontSize: "9pt", color: "#444" } }, "USt-IdNr.: " + active.firmaUstId))
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("div", { style: { fontWeight: "bold" } }, dispName(active)),
+                        active.anschrift && React.createElement("div", null, active.anschrift))),
             React.createElement("table", { className: "ps-inv-table" },
                 React.createElement("thead", null,
                     React.createElement("tr", null,
