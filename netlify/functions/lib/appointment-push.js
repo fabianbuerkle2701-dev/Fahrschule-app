@@ -59,11 +59,19 @@ async function notifyAppointmentEvent({ evt, appointmentId, owner, serviceKey })
   // damit der stuendliche Nachhol-Lauf diesen Termin nicht nochmal anfasst. Bei sent===0 bleibt
   // der Zeitstempel bewusst stehen, das ist genau das Signal fuer den Nachhol-Lauf.
   if (result.sent > 0 && appointmentId) {
-    await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + encodeURIComponent(appointmentId), {
+    // .catch fängt nur Netzwerk-/Promise-Fehler ab, fetch() lehnt bei einem HTTP-Fehlerstatus
+    // (z.B. 404/409/500) nicht ab - ohne die resp.ok-Prüfung bliebe ein fehlgeschlagenes Räumen
+    // von push_pending_since unbemerkt. Auf einen erneuten Versand beim nächsten Nachhol-Lauf
+    // wird bewusst verzichtet (der Termin ist ja bereits zugestellt) - hier zählt nur Sichtbarkeit
+    // im Log, damit ein wiederholt fehlschlagendes Räumen auffällt statt sich zu häufen.
+    const patchResp = await fetch(SUPABASE_URL + "/rest/v1/appointments?id=eq." + encodeURIComponent(appointmentId), {
       method: "PATCH",
       headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey, "Content-Type": "application/json", Prefer: "return=minimal" },
       body: JSON.stringify({ push_pending_since: null }),
-    }).catch(() => {});
+    }).catch((e) => { console.error("push_pending_since raeumen fehlgeschlagen (Netzwerk):", e); return null; });
+    if (patchResp && !patchResp.ok) {
+      console.error("push_pending_since raeumen fehlgeschlagen:", patchResp.status, await patchResp.text().catch(() => ""));
+    }
   }
 
   return result;

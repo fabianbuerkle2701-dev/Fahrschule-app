@@ -41,6 +41,11 @@ function sendOne(deviceToken, payload, bundleId, providerToken) {
 
     const client = http2.connect(APNS_HOST);
     client.on("error", () => finish({ ok: false, status: 0 }));
+    // Ohne Timeout kann eine haengende Verbindung (Netzwerk-Blackhole, keine Antwort und kein
+    // Fehler) den gesamten Sendevorgang blockieren - bei daily-appointment-reminders.js wuerde
+    // das die restlichen Fahrlehrer derselben Sammelrunde nie erreichen. 10s reichen fuer einen
+    // einzelnen Push-Request deutlich.
+    client.setTimeout(10000, () => { client.destroy(); finish({ ok: false, status: 0 }); });
 
     const req = client.request({
       ":method": "POST",
@@ -49,6 +54,13 @@ function sendOne(deviceToken, payload, bundleId, providerToken) {
       "apns-topic": bundleId,
       "apns-push-type": "alert",
       "apns-priority": "10",
+      // Ohne apns-expiration behandelt Apple die Push wie den Wert 0: ist das Geraet gerade
+      // nicht erreichbar (kein Netz/Flugmodus), wird sie sofort verworfen statt fuer eine
+      // spaetere Zustellung vorgehalten - trotzdem antwortet Apple mit HTTP 200, was sendOne()
+      // faelschlich als erfolgreich zugestellt werten wuerde. 1h Vorhaltezeit reicht, danach
+      // greift ohnehin der eigene Nachhol-Mechanismus (catchUpMissedPushes) mit einer neuen,
+      // aktuelleren Benachrichtigung.
+      "apns-expiration": String(Math.floor(Date.now() / 1000) + 3600),
       "content-type": "application/json",
     });
     req.setEncoding("utf8");
