@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.205.0";
+const APP_VERSION = "1.206.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,6 +3025,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.206.0", date: "September 2026", changes: [
+            "Neu: „Wiederholen“ im Theorie-Übungsbereich der Fahrschüler-App. Die App merkt sich beim Üben längst, wie gut jede Frage sitzt, und schlägt sie nach ein paar Tagen von selbst wieder vor - bisher stand diese Zahl nur im Lernstand, ohne dass man etwas damit anfangen konnte. Jetzt gibt es eine eigene Karte direkt darunter: sie zeigt, wie viele Fragen heute wieder dran sind und aus welchen Sachgebieten sie vor allem kommen, und startet auf einen Tipp genau diese Runde (die dringendsten zuerst, höchstens 20 auf einmal). Ist gerade nichts fällig, steht dort, an welchem Tag die nächste Wiederholung ansteht - und ein zweiter Knopf für die wackeligen Fragen, die erst einmal richtig beantwortet wurden und deshalb noch nicht sitzen",
+            "Behoben: Eine nur mit einem Lesezeichen gemerkte, aber nie beantwortete Frage wurde im Lernstand als „zur Wiederholung fällig“ mitgezählt. Zählt jetzt wie überall sonst nur, was wirklich beantwortet wurde",
+        ] },
     { v: "1.205.0", date: "September 2026", changes: [
             "Wichtiger Fehler behoben: Uhrzeiten im Kalender waren falsch, sobald sich das Gerät des Fahrlehrers in einer anderen Zeitzone als Deutschland befand (z.B. im Urlaub - Teneriffa liegt ganzjährig eine Stunde hinter Deutschland). Termine, Erinnerungen und die Positionierung im Tages-Kalender rechneten bisher mit der Geräte-Zeitzone statt fest mit Europe/Berlin - betraf sowohl die Anzeige bestehender Termine als auch das Anlegen neuer (die dadurch mit der falschen Uhrzeit gespeichert werden konnten). Rechnet jetzt überall unabhängig von der Geräte-Zeitzone korrekt in deutscher Ortszeit",
         ] },
@@ -5291,6 +5295,43 @@ function lernReihenfolge(fragen, progress) {
             if (a.st.box !== b.st.box) return a.st.box - b.st.box;
             return (Number(b.q.points) || 0) - (Number(a.q.points) || 0);
         }).map(x => x.q);
+}
+/* Was heute zur Wiederholung ansteht. Zwei getrennte Toepfe aus demselben Fach-System:
+     faellig  - das Fach hat seine Frist erreicht (Fach 1 heute, Fach 2 morgen usw.), genau
+                dafuer ist der Leitner-Rhythmus da.
+     wackelig - noch nicht faellig, steht aber in Fach 1 oder 2: einmal richtig heisst noch
+                nicht, dass es sitzt. Fuer den Fall, dass gerade nichts faellig ist und trotzdem
+                jemand ueben will.
+   Bewusst nur BEANTWORTETE Fragen (box > 0): ein blosses Lesezeichen legt zwar einen
+   Fortschritts-Eintrag an, ist aber keine Antwort - eine nie beantwortete Frage gehoert ins
+   normale Ueben, nicht ins Wiederholen. */
+function wiederholungsFragen(fragen, progress) {
+    const faellig = [], wackelig = [];
+    (fragen || []).forEach(q => {
+        const st = lernStand(q, progress);
+        if (st.box === 0)
+            return;
+        if (st.faellig)
+            faellig.push(q);
+        else if (st.box <= 2)
+            wackelig.push(q);
+    });
+    return { faellig, wackelig };
+}
+/* Frühestes Faelligkeitsdatum in der Zukunft (als "JJJJ-MM-TT") - damit die Karte, wenn gerade
+   nichts ansteht, sagen kann, wann es weitergeht, statt nur leer zu bleiben. Ohne beantwortete
+   Frage mit kuenftiger Frist: null. */
+function naechsteWiederholung(fragen, progress) {
+    const heute = ymd(new Date());
+    let frueheste = null;
+    (fragen || []).forEach(q => {
+        const e = (progress && progress[q.id]) || null;
+        if (!e || !e.box || !e.due || e.due <= heute)
+            return;
+        if (frueheste === null || e.due < frueheste)
+            frueheste = e.due;
+    });
+    return frueheste;
 }
 /* Erwartete Fehlerpunkte in einer Pruefung mit 30 Fragen. Die echte Klasse-B-Pruefung gilt ab
    mehr als 10 Fehlerpunkten als nicht bestanden - deshalb wird genau diese Zahl geschaetzt
@@ -28499,6 +28540,32 @@ function TheoryPractice({ code }) {
         return Math.round((gemeistert / qs.length) * 100);
     }
     const gesamtPct = topicPct(questions);
+    // Wiederholen: die beiden Toepfe aus dem Fach-System (siehe wiederholungsFragen) und, falls
+    // gerade nichts ansteht, der naechste Termin. Eine Runde bleibt auf dieselbe Laenge begrenzt
+    // wie "Zufaellig ueben" - sonst wachsen die faelligen Fragen zu einer Sitzung an, in der man
+    // nie fertig wird.
+    const wdh = wiederholungsFragen(questions, progress);
+    const wdhNaechste = naechsteWiederholung(questions, progress);
+    // Verteilung der faelligen Fragen auf die Sachgebiete, die drei groessten zuerst. Map statt
+    // Objekt-Literal: ein Sachgebiet koennte theoretisch "constructor" heissen, in einem Objekt
+    // waere dieser Schluessel schon von Haus aus belegt.
+    const wdhThemen = (() => {
+        const zaehler = new Map();
+        wdh.faellig.forEach(q => { const k = q.topic_key || "Ohne Sachgebiet"; zaehler.set(k, (zaehler.get(k) || 0) + 1); });
+        return [...zaehler.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(e => e[0] + " (" + e[1] + ")");
+    })();
+    const wdhAnzahl = Math.min(MIX_LEN, wdh.faellig.length);
+    // Datum der naechsten Wiederholung im Klartext ("Mittwoch, 9. September"), wie die Kopfzeile
+    // des Fahrschueler-Bereichs es schreibt. Leerer String, falls der Server je ein unlesbares
+    // Datum liefert - dann bleibt der Satz einfach ohne Termin stehen statt "Invalid Date".
+    const wdhNaechsteText = (() => {
+        if (!wdhNaechste)
+            return "";
+        const d = new Date(wdhNaechste + "T00:00:00");
+        if (isNaN(d.getTime()))
+            return "";
+        return d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "numeric", month: "long" });
+    })();
     return React.createElement("div", null,
         !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Mein Fortschritt“ an, damit dein Übungsfortschritt gespeichert wird. Üben geht auch so schon."),
         // Eine card.home-list statt vier einzelner card-Kacheln - dasselbe Kachel-Mosaik-Muster,
@@ -28550,7 +28617,11 @@ function TheoryPractice({ code }) {
                         React.createElement("div", { style: { height: "100%", width: Math.round(100 * sch.gesehen / MINDESTENS_GEUEBT) + "%", background: "var(--orange)" } })),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
                         "Für Klasse " + (myKlasse || DEFAULT_KLASSE) + " stehen " + sch.gesamt + " Fragen bereit: " + sch.grundstoff + " Grundstoff für alle Klassen und " + sch.zusatzstoff + " klassenspezifische."));
-            const faellig = questions.filter(q => { const st = lernStand(q, progress); return st.gesehen && st.faellig; }).length;
+            // box > 0 statt gesehen: ein blosses Lesezeichen legt zwar einen Fortschritts-Eintrag
+            // an, ist aber keine Antwort - sonst zaehlt diese Zeile eine nur gemerkte Frage als
+            // faellig, waehrend die Wiederholen-Karte darunter (wiederholungsFragen) sie zu Recht
+            // auslaesst. Zwei Zahlen auf demselben Bildschirm, die sich widersprechen.
+            const faellig = questions.filter(q => { const st = lernStand(q, progress); return st.box > 0 && st.faellig; }).length;
             const gut = sch.bestehtVoraussichtlich;
             return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14,
                     border: "1.5px solid " + (gut ? "var(--green)" : "var(--amber)"),
@@ -28567,6 +28638,35 @@ function TheoryPractice({ code }) {
                 React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8, lineHeight: 1.45 } },
                     "Schätzung aus deinem Übungsstand, keine Vorhersage. Beim " + sch.regeln.label + " stellt die echte Prüfung " + sch.regeln.grundstoff + " Grundstoff- und " + sch.regeln.zusatzstoff + " klassenspezifische Fragen, bestanden bis " + sch.regeln.maxFehler + " Fehlerpunkte."));
         })(),
+        /* ── Wiederholen ──────────────────────────────────────────────────────────────────────
+           Der Lernstand darüber nennt die Zahl der fälligen Fragen schon länger, es führte aber
+           kein Weg dorthin: geübt werden konnte nur zufällig, nach Sachgebiet oder nach
+           Lesezeichen. Diese Karte macht aus der Zahl eine Runde - genau die Fragen, die das
+           Fach-System heute wieder vorschlägt. Ohne eine einzige beantwortete Frage bleibt sie
+           weg: dann gibt es nichts zu wiederholen, dafür steht "Zufällig üben" oben. */
+        (wdh.faellig.length > 0 || wdh.wackelig.length > 0 || wdhNaechsteText) && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
+            React.createElement("div", { style: { fontSize: 11, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", marginBottom: 6 } }, "Wiederholen"),
+            wdh.faellig.length > 0
+                ? React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 8, marginBottom: 4 } },
+                        React.createElement("span", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 26, color: "var(--orange-deep)" } }, wdh.faellig.length),
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--ink-2)" } }, wdh.faellig.length === 1 ? "Frage ist heute wieder dran" : "Fragen sind heute wieder dran")),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5 } },
+                        "Was du zuletzt konntest, kommt nach ein paar Tagen erneut - so bleibt es hängen. Diese Fragen bringen dir gerade am meisten."),
+                    wdhThemen.length > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.45 } },
+                        "Vor allem: " + wdhThemen.join(" · ")),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 }, onClick: () => startRound(lernReihenfolge(wdh.faellig, progress).slice(0, MIX_LEN)) },
+                        wdh.faellig.length > MIX_LEN
+                            ? ("Die " + wdhAnzahl + " dringendsten wiederholen")
+                            : (wdhAnzahl === 1 ? "1 Frage wiederholen" : wdhAnzahl + " Fragen wiederholen")))
+                : React.createElement("div", { style: { fontSize: 13, color: "var(--ink-2)", lineHeight: 1.55 } },
+                    "Heute ist keine Wiederholung fällig.",
+                    wdhNaechsteText ? (" Die nächste schlägt dir die App am " + wdhNaechsteText + " vor.") : ""),
+            wdh.wackelig.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: wdh.faellig.length > 0 ? 8 : 12, justifyContent: "space-between" }, onClick: () => startRound(lernReihenfolge(wdh.wackelig, progress).slice(0, MIX_LEN)) },
+                React.createElement("span", null, "Wackelige Fragen üben"),
+                React.createElement("span", { style: { color: "var(--muted)", fontWeight: 400 } }, wdh.wackelig.length + (wdh.wackelig.length === 1 ? " Frage" : " Fragen"))),
+            wdh.wackelig.length > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.45 } },
+                "Einmal richtig heißt noch nicht, dass es sitzt - diese stehen erst in Fach 1 oder 2.")),
         React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Nach Thema üben"),
         React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
             topics.map((topic, ti) => {
