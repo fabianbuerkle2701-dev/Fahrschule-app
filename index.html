@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.205.0";
+const APP_VERSION = "1.206.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,6 +3025,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.206.0", date: "September 2026", changes: [
+            "Neu: Feiertage im Kalender. Die Wochen- und Tagesansicht zeigt jetzt automatisch, wenn ein Tag ein gesetzlicher Feiertag ist - die neun bundesweiten Feiertage immer, dazu die deines Bundeslands, sobald es unter Einstellungen › Meine Fahrschule hinterlegt ist (z.B. Fronleichnam, Allerheiligen). Rein clientseitig berechnet, keine externe Quelle nötig",
+        ] },
     { v: "1.205.0", date: "September 2026", changes: [
             "Wichtiger Fehler behoben: Uhrzeiten im Kalender waren falsch, sobald sich das Gerät des Fahrlehrers in einer anderen Zeitzone als Deutschland befand (z.B. im Urlaub - Teneriffa liegt ganzjährig eine Stunde hinter Deutschland). Termine, Erinnerungen und die Positionierung im Tages-Kalender rechneten bisher mit der Geräte-Zeitzone statt fest mit Europe/Berlin - betraf sowohl die Anzeige bestehender Termine als auch das Anlegen neuer (die dadurch mit der falschen Uhrzeit gespeichert werden konnten). Rechnet jetzt überall unabhängig von der Geräte-Zeitzone korrekt in deutscher Ortszeit",
         ] },
@@ -5967,7 +5970,8 @@ async function saveSchool(school) {
         // Wie oben: jedes neue Fahrschul-Feld MUSS hier explizit auftauchen, sonst wirkt es nur
         // lokal und ist nach dem naechsten Laden wieder weg.
         datev_settings: school.datev_settings || {},
-        zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen) };
+        zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen),
+        bundesland: school.bundesland || null };
     // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
     // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
     // Sitzungen sich sonst stillschweigend gegenseitig überschreiben. Kennt der Client noch kein
@@ -8047,6 +8051,69 @@ function ToastConfirmHost() {
 function weekdayShort(d) { return new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short" }); }
 function dayMonth(d) { return new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }); }
 function isToday(d) { return ymd(d) === ymd(new Date()); }
+/* ════════ Feiertage ════════ */
+// Rein clientseitig berechnet, keine externe Quelle/Abhängigkeit. Die neun bundesweiten Feiertage
+// gelten überall in Deutschland; die übrigen hängen vom Bundesland der Fahrschule ab
+// (school.bundesland, Einstellungen › Meine Fahrschule) - ohne Auswahl werden nur die bundesweiten
+// angezeigt. Bewusst NICHT dabei: Feiertage, die auf Gemeinde-Ebene schwanken, wie Mariä
+// Himmelfahrt in Bayern (nur in überwiegend katholischen Gemeinden) - das ließe sich ohne
+// Gemeindedaten nicht zuverlässig bestimmen und wäre für einen Teil der bayerischen Fahrschulen
+// schlicht falsch.
+const BUNDESLAENDER = {
+    BW: "Baden-Württemberg", BY: "Bayern", BE: "Berlin", BB: "Brandenburg", HB: "Bremen",
+    HH: "Hamburg", HE: "Hessen", MV: "Mecklenburg-Vorpommern", NI: "Niedersachsen",
+    NW: "Nordrhein-Westfalen", RP: "Rheinland-Pfalz", SL: "Saarland", SN: "Sachsen",
+    ST: "Sachsen-Anhalt", SH: "Schleswig-Holstein", TH: "Thüringen",
+};
+function osterSonntag(jahr) {
+    // Gaußsche Osterformel (gültig im gregorianischen Kalender)
+    const k = Math.floor(jahr / 100);
+    const m = 15 + Math.floor((3 * k + 3) / 4) - Math.floor((8 * k + 13) / 25);
+    const s = 2 - Math.floor((3 * k + 3) / 4);
+    const a = jahr % 19;
+    const d = (19 * a + m) % 30;
+    const r = Math.floor((d + Math.floor(a / 11)) / 29);
+    const og = 21 + d - r;
+    const sz = 7 - (jahr + Math.floor(jahr / 4) + s) % 7;
+    const oe = 7 - (og - sz) % 7;
+    const os = og + oe;
+    return os <= 31 ? new Date(jahr, 2, os) : new Date(jahr, 3, os - 31);
+}
+// Nach Jahr+Bundesland gecacht, statt bei jeder einzelnen Tageskarte im Kalender neu die
+// Osterformel und alle Feiertage des Jahres zu berechnen.
+const _feiertageCache = {};
+function feiertageDesJahres(jahr, bundesland) {
+    const cacheKey = jahr + "|" + (bundesland || "");
+    if (_feiertageCache[cacheKey])
+        return _feiertageCache[cacheKey];
+    const os = osterSonntag(jahr);
+    const plus = n => { const d = new Date(os); d.setDate(d.getDate() + n); return d; };
+    const list = [
+        { d: new Date(jahr, 0, 1), name: "Neujahr" },
+        { d: plus(-2), name: "Karfreitag" },
+        { d: plus(1), name: "Ostermontag" },
+        { d: new Date(jahr, 4, 1), name: "Tag der Arbeit" },
+        { d: plus(39), name: "Christi Himmelfahrt" },
+        { d: plus(50), name: "Pfingstmontag" },
+        { d: new Date(jahr, 9, 3), name: "Tag der Deutschen Einheit" },
+        { d: new Date(jahr, 11, 25), name: "1. Weihnachtsfeiertag" },
+        { d: new Date(jahr, 11, 26), name: "2. Weihnachtsfeiertag" },
+    ];
+    if (["BW", "BY", "ST"].includes(bundesland)) list.push({ d: new Date(jahr, 0, 6), name: "Heilige Drei Könige" });
+    if (["BW", "BY", "HE", "NW", "RP", "SL"].includes(bundesland)) list.push({ d: plus(60), name: "Fronleichnam" });
+    if (bundesland === "SL") list.push({ d: new Date(jahr, 7, 15), name: "Mariä Himmelfahrt" });
+    if (["BB", "HB", "HH", "MV", "NI", "SN", "ST", "SH", "TH"].includes(bundesland)) list.push({ d: new Date(jahr, 9, 31), name: "Reformationstag" });
+    if (["BW", "BY", "NW", "RP", "SL"].includes(bundesland)) list.push({ d: new Date(jahr, 10, 1), name: "Allerheiligen" });
+    const byYmd = {};
+    list.forEach(x => { byYmd[ymd(x.d)] = x.name; });
+    _feiertageCache[cacheKey] = byYmd;
+    return byYmd;
+}
+// Name des Feiertags an diesem Tag, oder null. bundesland ist optional (dann nur bundesweite).
+function feiertagFuer(d, bundesland) {
+    const jahr = new Date(d).getFullYear();
+    return feiertageDesJahres(jahr, bundesland || "")[ymd(d)] || null;
+}
 // Kurzes, gut lesbares "wann ist das" für einen Termin: "in 40 Min", "heute 14:00 Uhr", "morgen", "in 4 Tagen" …
 function relTimeLabel(dateISO) {
     const now = new Date(), d = new Date(dateISO);
@@ -20256,6 +20323,7 @@ function App() {
             const k = ymd(d);
             const list = (byDay[k] || []).sort((a, b) => a.start_at.localeCompare(b.start_at));
             const today = isToday(d);
+            const feiertag = feiertagFuer(d, school && school.bundesland);
             const showHead = !opts || !opts.noHead;
             const used = list.length > 0 ? confirmedMinutesOnDay(k) : 0;
             const showRing = dayLimit > 0 && list.length > 0;
@@ -20274,6 +20342,7 @@ function App() {
                         showRing && React.createElement(Ring, { pct: Math.min(100, Math.round(used / dayLimit * 100)), size: 30, color: over ? "#B3362A" : (near ? "var(--amber)" : "var(--orange)") }),
                         React.createElement("button", { onClick: () => openNewAppt(k), "aria-label": "Termin an diesem Tag", style: { width: 36, height: 36, borderRadius: 9, border: "none", background: "var(--field-bg)",
                                 fontSize: 18, lineHeight: 1, color: "var(--orange-deep)", display: "inline-flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, "+"))),
+                showHead && feiertag && React.createElement("div", { style: { padding: "0 15px 10px", fontSize: 12, fontWeight: 700, color: "var(--sage-deep)" } }, "Feiertag: " + feiertag),
                 list.length === 0
                     ? React.createElement("div", { style: { padding: "2px 15px 14px", fontSize: 13, color: "var(--muted)" } }, "Keine Termine")
                     : React.createElement("div", { style: { padding: "0 8px 8px" } }, list.map(a => {
@@ -21994,6 +22063,13 @@ function App() {
                                     React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, ["#FF9300", "#E5484D", "#2B7FFF", "#12A150", "#7C3AED", "#0F172A"].map(c => React.createElement("button", { key: c, onClick: () => { if (school)
                                             writeSchool({ ...school, color: c }); }, "aria-label": "Farbe " + c, style: { width: 30, height: 30, borderRadius: "50%", background: c,
                                             border: (school && school.color && school.color.toLowerCase() === c.toLowerCase()) ? "3px solid var(--ink)" : "2px solid var(--line)" } }))))),
+                            React.createElement("div", { className: "field", style: { marginTop: 14 } },
+                                React.createElement("label", { htmlFor: "field-bundesland" }, "Bundesland",
+                                React.createElement("select", { id: "field-bundesland", value: (school && school.bundesland) || "", onChange: e => { if (school)
+                                        writeSchool({ ...school, bundesland: e.target.value || null }); } },
+                                    React.createElement("option", { value: "" }, "– keine Angabe –"),
+                                    Object.entries(BUNDESLAENDER).map(([code, name]) => React.createElement("option", { key: code, value: code }, name))))),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Nur für die Feiertage im Kalender - ohne Angabe zeigt die App ausschließlich die neun bundesweiten Feiertage, mit Angabe zusätzlich die deines Bundeslands."),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "12px 0 0", lineHeight: 1.5 } }, "Name, Untertitel, Logo und Farbe gelten für alle Fahrlehrer deiner Fahrschule. Das Logo erscheint in der App und auf den PDF-Dokumenten."))
                             : React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14, marginBottom: 12 } },
