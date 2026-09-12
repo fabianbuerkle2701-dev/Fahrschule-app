@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.207.0";
+const APP_VERSION = "1.208.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,6 +3025,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.208.0", date: "September 2026", changes: [
+            "Neu: „Schüler nach Klasse“ in der Statistik. Zeigt auf einen Blick, wie viele aktive Schüler auf welche Führerscheinklasse entfallen (inkl. selbst angelegter Zusatzklassen) - hilfreich für Fuhrpark- und Terminplanung",
+            "Neu: Vermerk auf der Rechnung. Beim Rechnungsentwurf lässt sich jetzt ein Freitext eintragen (z.B. „Skonto 2% bereits abgezogen“), der auf der gedruckten Rechnung erscheint - das Feld dafür gab es serverseitig schon länger, aber keine Eingabemöglichkeit",
+            "Neu: „Neu“-Kennzeichnung in der Schüler-Videobibliothek für Videos, die in den letzten 14 Tagen hochgeladen wurden",
+        ] },
     { v: "1.207.0", date: "September 2026", changes: [
             "Neu: Sonderfahrten-Radar in der Prüfungsplanung. Zeigt gezielt Schüler, bei denen ADK, Strecken und Theorie bereits fertig sind und nur noch bestimmte Überland-/Autobahn-/Dämmerungsfahrten fehlen (inkl. genauer UE-Zahl je Art) - dieser konkrete, gut planbare Grund ging bisher in der pauschalen gelben Ampel unter",
             "Neu: „Wiederkehrend auffällig“ im Fahrtenbuch. Zeigt direkt beim Schüler, welche Bewertungsfelder (z.B. Verkehrsbeobachtung, Kommunikation) über die letzten Fahrstunden wiederholt schlecht abschnitten - dieselbe Mustererkennung, die bisher nur intern an KI-Helfer und KI-Übergabe ging, jetzt auch ohne Nachfragen sichtbar",
@@ -17887,8 +17892,16 @@ function App() {
         const thisMonthKey = now.getFullYear() + "-" + String(now.getMonth() + 1).padStart(2, "0");
         const newThisMonth = allOwn.filter(s => s._createdAt && monthKeyOf(s._createdAt) === thisMonthKey).length;
 
+        // Nach tatsächlich vorkommenden s.klasse-Werten gruppieren statt über die feste
+        // LFK_KLASSEN-Liste zu iterieren - Schulen können eigene Klassen über die 17
+        // Standardklassen hinaus anlegen (Einstellungen › Führerscheinklassen), die sonst aus
+        // dieser Auswertung verschwinden würden.
+        const klasseCounts = {};
+        own.forEach(s => { const k = s.klasse || DEFAULT_KLASSE; klasseCounts[k] = (klasseCounts[k] || 0) + 1; });
+        const klasseVerteilung = Object.entries(klasseCounts).map(([klasse, anzahl]) => ({ klasse, anzahl })).sort((a, b) => b.anzahl - a.anzahl);
+
         return { monthlyRevenue, examQuote, ready, notReady, avgUE, passedPraxisCount: passedPraxis.length,
-            activeCount: own.length, newThisMonth };
+            activeCount: own.length, newThisMonth, klasseVerteilung };
     }
     function statTile(value, label, color) {
         return React.createElement("div", { className: "card", style: { padding: "14px 10px", textAlign: "center" } },
@@ -17960,6 +17973,16 @@ function App() {
                 statTile(st.activeCount, "Aktive Schüler", "var(--ink)"),
                 statTile(st.ready, "Prüfreif", "var(--green)"),
                 statTile(st.newThisMonth, "Neu diesen Monat", "var(--orange-deep)")),
+            st.klasseVerteilung.length > 0 && React.createElement("div", { className: "card", style: { padding: "16px 15px", marginBottom: 16 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 12 } }, "Schüler nach Klasse"),
+                (() => {
+                    const maxAnzahl = Math.max(...st.klasseVerteilung.map(k => k.anzahl));
+                    return st.klasseVerteilung.map(k => React.createElement("div", { key: k.klasse, style: { marginBottom: 10 } },
+                        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 4 } },
+                            React.createElement("span", { style: { fontWeight: 600 } }, k.klasse),
+                            React.createElement("span", { style: { color: "var(--muted)" } }, k.anzahl)),
+                        React.createElement(Bar, { pct: Math.round((k.anzahl / maxAnzahl) * 100), color: "var(--sky-deep)", h: 6 })));
+                })()),
             React.createElement("div", { className: "card", style: { padding: "16px 15px", marginBottom: 16 } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Umsatz pro Monat"),
                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginBottom: 14 } }, "Nach Zahlungseingang, letzte 6 Monate"),
@@ -23902,6 +23925,9 @@ function App() {
                 eurFmt(ust),
                 " \u00B7 netto: ",
                 eurFmt(netto)),
+            // Nur ein getrimmter, nicht-leerer Vermerk wird gedruckt - sonst zeigt jede Rechnung
+            // ohne Vermerk (invoiceDraft.note ist standardm\u00E4\u00DFig "") eine st\u00F6rende Leerzeile.
+            inv.note && inv.note.trim() && React.createElement("div", { style: { marginTop: 14, fontSize: "9.5pt", color: "#444", whiteSpace: "pre-wrap" } }, inv.note),
             // Girocode (EPC069-12) zum Scannen mit jeder Banking-App - f\u00FCllt Empf\u00E4nger, IBAN,
             // Betrag und Verwendungszweck automatisch aus. Nur wenn eine IBAN hinterlegt ist,
             // noch ein offener Betrag aussteht (bei bereits bezahlten/stornierten Rechnungen
@@ -26563,6 +26589,12 @@ function App() {
                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "12px 0", fontWeight: 800, fontFamily: "var(--font-d)", fontSize: 16, borderBottom: "2px solid var(--line)", marginBottom: 14 } },
                     React.createElement("span", null, "Summe"),
                     React.createElement("span", null, eurFmt(invoiceDraft.rows.filter(r => invoiceDraft.selected.indexOf(r.key) >= 0).reduce((s, r) => s + r.amount, 0)))),
+                React.createElement("div", { style: { fontSize: 12.5, fontWeight: 600, color: "var(--muted)", marginBottom: 6 } }, "Vermerk auf der Rechnung (optional)"),
+                // Nur hier vor confirmInvoice() editierbar - die Rechnung selbst ist wie ihre
+                // fortlaufende Nummer danach unveränderlich, kein nachträgliches Bearbeitungsfeld.
+                React.createElement("textarea", { rows: 2, maxLength: 500, value: invoiceDraft.note, placeholder: "z.B. „Skonto 2% bereits abgezogen“",
+                        onChange: e => setInvoiceDraft(d => d && ({ ...d, note: e.target.value.slice(0, 500) })),
+                        style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 14, marginBottom: 14, resize: "vertical" } }),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: !!invoiceDraft.busy, onClick: confirmInvoice }, invoiceDraft.busy ? "Wird erstellt…" : "Rechnung erstellen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!invoiceDraft.busy, onClick: () => setInvoiceDraft(null) }, "Abbrechen"))),
         printChoice && React.createElement("div", { onClick: () => setPrintChoice(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.5)", zIndex: 100, display: "flex",
@@ -26662,6 +26694,8 @@ function getPayerCodeFromURL() {
     return null;
 }
 // ════════ Video-Bibliothek (öffentlich, kein Login nötig) ════════
+// Videos, die weniger als so viele Tage alt sind, gelten als "Neu" (siehe VideoLibrary).
+const VIDEO_NEU_TAGE = 14;
 function VideoLibrary({ code }) {
     const [list, setList] = React.useState(undefined); // undefined=lädt, null=fehler, []=leer
     const [openId, setOpenId] = React.useState(null);
@@ -26704,7 +26738,10 @@ function VideoLibrary({ code }) {
                     React.createElement("span", { className: "home-iconchip", style: { background: vBg, color: vFg, width: 30, height: 30, flexShrink: 0 } },
                         React.createElement("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "currentColor", stroke: "none" },
                             React.createElement("path", { d: "M8 5v14l11-7z" }))),
-                    React.createElement("span", { style: { flex: 1, fontSize: 13.5, fontWeight: 600 } }, v.title),
+                    React.createElement("span", { style: { flex: 1, display: "flex", alignItems: "center", gap: 7, minWidth: 0 } },
+                        React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, v.title),
+                        v.created_at && (Date.now() - new Date(v.created_at).getTime()) / 86400000 < VIDEO_NEU_TAGE &&
+                            React.createElement("span", { style: { fontSize: 10.5, fontWeight: 800, color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase", flexShrink: 0 } }, "Neu")),
                     React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "var(--muted)", strokeWidth: "2.4", strokeLinecap: "round", strokeLinejoin: "round", style: { flexShrink: 0, transform: open ? "rotate(180deg)" : "none", transition: "transform .2s" } },
                         React.createElement("polyline", { points: "6 9 12 15 18 9" }))),
                 open && React.createElement("div", { style: { marginTop: 10 } },
