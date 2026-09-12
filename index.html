@@ -2886,7 +2886,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.206.0";
+const APP_VERSION = "1.207.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3025,6 +3025,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.207.0", date: "September 2026", changes: [
+            "Neu: Sonderfahrten-Radar in der Prüfungsplanung. Zeigt gezielt Schüler, bei denen ADK, Strecken und Theorie bereits fertig sind und nur noch bestimmte Überland-/Autobahn-/Dämmerungsfahrten fehlen (inkl. genauer UE-Zahl je Art) - dieser konkrete, gut planbare Grund ging bisher in der pauschalen gelben Ampel unter",
+            "Neu: „Wiederkehrend auffällig“ im Fahrtenbuch. Zeigt direkt beim Schüler, welche Bewertungsfelder (z.B. Verkehrsbeobachtung, Kommunikation) über die letzten Fahrstunden wiederholt schlecht abschnitten - dieselbe Mustererkennung, die bisher nur intern an KI-Helfer und KI-Übergabe ging, jetzt auch ohne Nachfragen sichtbar",
+            "Neu: Suche im Fahrtenbuch. Ab 4 Einträgen lässt sich nach Thema oder Notiz durchsuchen, ohne jeden Eintrag einzeln aufzuklappen",
+        ] },
     { v: "1.206.0", date: "September 2026", changes: [
             "Neu: Feiertage im Kalender. Die Wochen- und Tagesansicht zeigt jetzt automatisch, wenn ein Tag ein gesetzlicher Feiertag ist - die neun bundesweiten Feiertage immer, dazu die deines Bundeslands, sobald es unter Einstellungen › Meine Fahrschule hinterlegt ist (z.B. Fronleichnam, Allerheiligen). Rein clientseitig berechnet, keine externe Quelle nötig",
         ] },
@@ -9315,6 +9320,26 @@ const SMILEYS = [
     { v: 2, emoji: "😐", label: "mittel", color: "var(--amber)", bg: "var(--amber-bg)" },
     { v: 1, emoji: "🙁", label: "schlecht", color: "#B3362A", bg: "#FDECEA" },
 ];
+// Mustererkennung über die letzten Fahrtenbuch-Einträge eines Schülers: pro Bewertungsfeld
+// (LESSON_FIELDS) Durchschnitt und Anzahl "schlecht" (Smiley 1) über die letzten 8 Einträge
+// bilden. Nur echte, wiederkehrende Schwächen zurückgeben (>=2 Bewertungen desselben Feldes,
+// dabei mind. 2x "schlecht" oder Schnitt <=1,6), damit ein einzelner Ausrutscher nicht als
+// Muster erscheint. War bisher in askAssistant() und buildHandoverPayload() fast identisch
+// dupliziert - jetzt eine gemeinsame Funktion, auch direkt im Fahrtenbuch für den Fahrlehrer
+// selbst sichtbar (renderTagebuch), nicht nur intern für KI-Funktionen.
+function wiederkehrendeSchwaechenAus(lessons) {
+    const diaryRecent = (lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
+    return LESSON_FIELDS.map(f => {
+        const vals = diaryRecent.map(l => l.ratings && l.ratings[f.id]).filter(v => v);
+        if (vals.length < 2)
+            return null;
+        const schlechtCount = vals.filter(v => v === 1).length;
+        const schnitt = Math.round((vals.reduce((a, v) => a + v, 0) / vals.length) * 10) / 10;
+        if (schlechtCount < 2 && schnitt > 1.6)
+            return null;
+        return { feld: f.label, schnitt, schlechtCount, bewertungen: vals.length };
+    }).filter(Boolean).sort((a, b) => a.schnitt - b.schnitt);
+}
 // Standard-Schritte vom Ausbildungsbeginn bis zum fertigen Führerschein. "theorie_bestanden" ist
 // bewusst kein eigenes Feld, sondern spiegelt direkt active.theorie (das schon an vielen anderen
 // Stellen der App verwendet wird), damit es nicht zwei widersprüchliche Quellen für dieselbe
@@ -10248,6 +10273,7 @@ function App() {
     const [tabMenu, setTabMenu] = useState(null); // null | "ausbildung" | "mehr"
     const [mehrGroup, setMehrGroup] = useState(null); // null | "fahrschule" | "fahrschueler" | "lernen" - aufgeklappte Untergruppe im mobilen Mehr-Popup
     const [openLesson, setOpenLesson] = useState(null);
+    const [tagebuchSuche, setTagebuchSuche] = useState(""); // Suchtext im Fahrtenbuch (renderTagebuch)
     const [calWeek, setCalWeek] = useState(() => startOfWeek(new Date())); // Montag der gezeigten Woche
     const [calMode, setCalMode] = useState("woche"); // "woche" | "tag"
     const [calWeekStyle, setCalWeekStyle] = useState("karten"); // "karten" | "zeitstrahl" - nur relevant bei calMode "woche"
@@ -10266,7 +10292,7 @@ function App() {
     // Ohne diesen Reset blieb eine beim vorherigen Schüler aufgeklappte Fahrstunde für den neuen
     // Schüler sofort sichtbar, obwohl der Fahrlehrer das für ihn nie angefordert hat (analog zum
     // studentFiles-Reset oben).
-    useEffect(() => { setOpenLesson(null); setRoutesMapOpen(false); }, [activeId]);
+    useEffect(() => { setOpenLesson(null); setRoutesMapOpen(false); setTagebuchSuche(""); }, [activeId]);
     const [itemForm, setItemForm] = useState(null); // null | {label, amount, error} Posten hinzufügen
     // Laufende-Anfrage-Kennung für handleReceiptImportFiles() - schützt sowohl gegen ein
     // zwischenzeitliches Schließen des Formulars als auch gegen zwei Belegfotos kurz hintereinander,
@@ -13379,23 +13405,10 @@ function App() {
                     ...(tplS.adk || []).map(sec => ({ art: "ADK", titel: sec.title, prozent: secLern(s, sec) })),
                     ...(tplS.strecken || []).map(sec => ({ art: "Strecken", titel: sec.title, prozent: secBack(s, sec) })),
                 ];
-                // Mustererkennung über die letzten Fahrstunden-Tagebucheinträge: pro Bewertungsfeld
-                // (Verkehrsbeobachtung, Position, Tempo, Kommunikation, Bedienung) Durchschnitt und
-                // Anzahl "schlecht" (Smiley 1) über die letzten 8 Einträge bilden. Nur echte,
-                // wiederkehrende Schwächen mitgeben (>=2 Bewertungen desselben Feldes, dabei
-                // mind. 2x "schlecht" oder Schnitt <=1,6), damit die KI keine Einzelausrutscher
-                // als Muster verkauft.
+                // Mustererkennung über die letzten Fahrstunden-Tagebucheinträge (wiederkehrendeSchwaechenAus,
+                // siehe dort für die genaue Regel), damit die KI keine Einzelausrutscher als Muster verkauft.
                 const diaryRecent = (s.lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
-                const wiederkehrendeSchwaechen = LESSON_FIELDS.map(f => {
-                    const vals = diaryRecent.map(l => l.ratings && l.ratings[f.id]).filter(v => v);
-                    if (vals.length < 2)
-                        return null;
-                    const schlechtCount = vals.filter(v => v === 1).length;
-                    const schnitt = Math.round((vals.reduce((a, v) => a + v, 0) / vals.length) * 10) / 10;
-                    if (schlechtCount < 2 && schnitt > 1.6)
-                        return null;
-                    return { feld: f.label, schnitt, schlechtCount, bewertungen: vals.length };
-                }).filter(Boolean).sort((a, b) => a.schnitt - b.schnitt);
+                const wiederkehrendeSchwaechen = wiederkehrendeSchwaechenAus(s.lessons);
                 const letzteNotizen = diaryRecent.slice(0, 4)
                     .filter(l => l.thema || l.gut || l.schlecht)
                     .map(l => ({ datum: l.date, thema: l.thema || "", gut: l.gut || "", schlecht: l.schlecht || "" }));
@@ -13461,20 +13474,9 @@ function App() {
             ...(tplS.adk || []).map(sec => ({ art: "ADK", titel: sec.title, prozent: secLern(stu, sec) })),
             ...(tplS.strecken || []).map(sec => ({ art: "Strecken", titel: sec.title, prozent: secBack(stu, sec) })),
         ];
-        // Gleiche Mustererkennung wie im KI-Helfer (askAssistant oben) - hier bewusst dupliziert
-        // statt geteilt, da dort zusätzlich Kosten/Zahlungen mit in den Datensatz einfließen,
-        // die in diese Übergabe-Einschätzung nicht hineinsollen.
+        // Gleiche Mustererkennung wie im KI-Helfer (wiederkehrendeSchwaechenAus, siehe dort).
         const diaryRecent = (stu.lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 8);
-        const wiederkehrendeSchwaechen = LESSON_FIELDS.map(f => {
-            const vals = diaryRecent.map(l => l.ratings && l.ratings[f.id]).filter(v => v);
-            if (vals.length < 2)
-                return null;
-            const schlechtCount = vals.filter(v => v === 1).length;
-            const schnitt = Math.round((vals.reduce((a, v) => a + v, 0) / vals.length) * 10) / 10;
-            if (schlechtCount < 2 && schnitt > 1.6)
-                return null;
-            return { feld: f.label, schnitt, schlechtCount, bewertungen: vals.length };
-        }).filter(Boolean).sort((a, b) => a.schnitt - b.schnitt);
+        const wiederkehrendeSchwaechen = wiederkehrendeSchwaechenAus(stu.lessons);
         const letzteNotizen = diaryRecent.slice(0, 6)
             .filter(l => l.thema || l.gut || l.schlecht)
             .map(l => ({ datum: l.date, thema: l.thema || "", gut: l.gut || "", schlecht: l.schlecht || "" }));
@@ -16969,8 +16971,28 @@ function App() {
     function renderTagebuch() {
         const lessons = active.lessons || [];
         const alleStrecken = lessons.filter(l => l.route && l.route.pts && l.route.pts.length >= 2).map(l => l.route.pts);
+        // Dieselbe Mustererkennung, die bisher nur intern an den KI-Assistenten und die
+        // KI-Übergabe-Einschätzung ging (wiederkehrendeSchwaechenAus) - jetzt auch direkt hier
+        // sichtbar, ohne dass der Fahrlehrer erst danach fragen muss.
+        const schwaechen = wiederkehrendeSchwaechenAus(lessons);
+        // Suche über die bereits geladene Liste (kein Server-Roundtrip): "Hatten wir Kreisverkehr
+        // schon? Was hatte ich da notiert?" ließ sich bisher nur durch Aufklappen jedes einzelnen
+        // Eintrags beantworten. idx bleibt dabei der Index in der UNGEFILTERTEN Liste, damit die
+        // "X. Fahrstunde"-Nummerierung unten (die auf lessons.length - idx beruht) auch gefiltert
+        // stabil bleibt.
+        const suchTreffer = l => {
+            const q = tagebuchSuche.trim().toLowerCase();
+            if (!q)
+                return true;
+            return [l.thema, l.gut, l.schlecht, l.note, l.hinweis].some(v => (v || "").toLowerCase().includes(q));
+        };
+        const gefiltert = lessons.map((l, idx) => ({ l, idx })).filter(({ l }) => suchTreffer(l));
         return React.createElement("div", { className: "pad" },
             studentHeader(),
+            schwaechen.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, borderLeft: "3px solid var(--amber)" } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13.5, marginBottom: 6 } }, "Wiederkehrend auffällig"),
+                schwaechen.map((w, i) => React.createElement("div", { key: w.feld, style: { fontSize: 13, color: "var(--muted)", marginTop: i > 0 ? 3 : 0 } },
+                    w.feld + " · Ø " + String(w.schnitt).replace(".", ",") + (w.schlechtCount >= 2 ? " · " + w.schlechtCount + "× schlecht" : "") + " (letzte " + w.bewertungen + " Bewertungen)"))),
             alleStrecken.length > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden" } },
                 React.createElement("button", { onClick: () => setRoutesMapOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "13px 14px", textAlign: "left",
                         fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14.5, color: "var(--ink)" } },
@@ -16987,11 +17009,15 @@ function App() {
                         " ",
                         lessons.length === 1 ? "Eintrag" : "Einträge")),
                 React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Stunde")),
+            lessons.length > 3 && React.createElement("div", { className: "field", style: { margin: "0 0 12px" } },
+                React.createElement("input", { type: "search", value: tagebuchSuche, placeholder: "Fahrtenbuch durchsuchen (Thema, Notizen)…", "aria-label": "Fahrtenbuch durchsuchen",
+                    onChange: e => setTagebuchSuche(e.target.value) })),
             lessons.length === 0 && React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 6 } }, "Noch keine Fahrstunden"),
                 React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lege für jede Fahrstunde einen Eintrag mit Datum und Bewertung an."),
                 React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Erste Stunde eintragen")),
-            lessons.map((l, idx) => {
+            lessons.length > 0 && gefiltert.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 16px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Fahrstunde passt zu \"" + tagebuchSuche + "\"."),
+            gefiltert.map(({ l, idx }) => {
                 const avg = lessonAvg(l);
                 const avgSmiley = avg == null ? null : (avg >= 2.5 ? SMILEYS[0] : avg >= 1.75 ? SMILEYS[1] : SMILEYS[2]);
                 const isOpen = openLesson === l.id;
@@ -18184,11 +18210,25 @@ function App() {
             const a = ampel(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
             return a.stufe === "gruen" && !licenseStepDone(s, "praxis_angemeldet") && !hasFuturePraxis(s);
         });
-        return { upcoming, readyNotRegistered };
+        // Sonderfahrten-Radar: Schüler, die ADK/Strecken komplett und die Theorie bestanden
+        // haben, aber wegen fehlender Überland-/Autobahn-/Dämmerungsfahrten trotzdem nicht
+        // prüfungsreif sind (siehe ampel()/pruefungsreife()) - ohne diese Auswertung geht dieser
+        // konkrete, gezielt planbare Grund ("noch 2x Autobahn nötig") in der pauschalen
+        // gelben Ampel unter.
+        const nurSonderfahrtenOffen = own.filter(s => {
+            const vk = s.klasse || DEFAULT_KLASSE;
+            const p = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+            return p.offeneADK.length === 0 && p.offeneStrecken.length === 0 && !p.theorieOffen && p.offeneSonderfahrten.length > 0;
+        }).map(s => {
+            const vk = s.klasse || DEFAULT_KLASSE;
+            const p = pruefungsreife(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+            return { stu: s, offen: p.offeneSonderfahrten };
+        });
+        return { upcoming, readyNotRegistered, nurSonderfahrtenOffen };
     }
     // Innerer Inhalt von Prüfungsplanung OHNE eigenen Seitentitel - siehe renderAuswertung().
     function renderPruefungsplanungBody() {
-        const { upcoming, readyNotRegistered } = examPlanning();
+        const { upcoming, readyNotRegistered, nurSonderfahrtenOffen } = examPlanning();
         function goTo(id) {
             // Ist der Schüler schon activeId, ändert setActiveId(id) den State nicht (React-Bailout),
             // der Tab-Wechsel-Effekt an [activeId] feuert dann nicht - der Ref-Wert bliebe stehen und
@@ -18233,6 +18273,17 @@ function App() {
                         React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "var(--green)", textTransform: "uppercase", letterSpacing: ".03em" } }, "Prüfungsreif")))),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0 0", paddingBottom: 4 } },
                 "Prüfungsreif = grüne Ampel (Theorie bestanden, ADK/Strecken ab 90%, alle Sonderfahrten erfüllt sofern ein Soll hinterlegt ist). Ein Klick öffnet den Führerschein-Reiter, um „Praxisprüfung angemeldet\" zu setzen oder einen Termin unter Prüfungsversuche einzutragen."),
+            nurSonderfahrtenOffen.length > 0 && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "20px 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Sonderfahrten-Radar"),
+                React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 20 } },
+                    nurSonderfahrtenOffen.map((x, i) => React.createElement("button", { key: x.stu.id, onClick: () => goTo(x.stu.id),
+                            style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderTop: i > 0 ? "1px solid var(--line)" : "none", background: "none", border: "none" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, dispName(x.stu)),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                "Fehlt noch: " + x.offen.map(o => o.label + " (" + o.ue + "/" + o.sollUe + " UE)").join(", ")))))),
+                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "10px 2px 4px" } },
+                        "ADK, Strecken und Theorie sind schon fertig - es fehlen nur noch diese Sonderfahrten. Gezielt einplanen, statt in der pauschalen gelben Ampel unterzugehen.")),
             renderExamSlotsSection());
     }
     /* ── Prüfplätze: Verwaltung der von TÜV/DEKRA zugeteilten Prüftermin-Kontingente (knappe
