@@ -2892,7 +2892,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "1.209.0";
+const APP_VERSION = "1.210.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3031,6 +3031,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "1.210.0", date: "September 2026", changes: [
+            "App-Redesign (Kalender): Tagesansicht hat jetzt einen Wochentag-Streifen zum schnellen Tageswechsel innerhalb derselben Woche, dazu farbige Terminart-Icons je Termin",
+            "App-Redesign (Fortschritt): neue Zusammenfassung oben bei jedem Schüler - Ausbildungsstand als Ring, nächste Fahrstunde mit Illustration, offener Betrag und Sonderfahrten-Hinweis auf einen Blick",
+            "App-Redesign (Fahrstunde): Fahrzeit und gefahrene Strecke werden jetzt auch direkt in der Fahrstunde selbst angezeigt, während die GPS-Aufzeichnung läuft - vorher nur in der separaten Leiste am Bildschirmrand",
+        ] },
     { v: "1.209.0", date: "September 2026", changes: [
             "App-Redesign (Start): neue Illustrationen, neuer Claim „Gemeinsam ans Ziel“, und die mobile Tab-Leiste hat jetzt einen eigenen „Start“-Reiter (vorher nur über das Logo erreichbar) - „Ausbildung“ zog dafür als Sprungliste ins „Mehr“-Menü um, nichts ist verloren gegangen",
             "Neu: Der nächste Termin des Tages bekommt auf der Startseite eine eigene große Karte mit Illustration, Uhrzeit, Klasse und Direktlink - vorher nur eine hervorgehobene Zeile in der Terminliste",
@@ -9654,7 +9659,7 @@ function AllRoutesMap({ routes, color }) {
         React.createElement("div", { ref: elRef, style: { width: "100%", height: "100%" } }),
         !ready && React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "var(--muted)" } }, "Karte lädt…"));
 }
-function LessonMap({ route, pins, recActive, recTick, recPts, otherRecording, onStart, onStop, onDeleteRoute, onSavePin, onDeletePin, color }) {
+function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, otherRecording, onStart, onStop, onDeleteRoute, onSavePin, onDeletePin, color }) {
     const lineColor = color || "#FF9300";
     const elRef = useRef(null), mapRef = useRef(null), lineRef = useRef(null), liveRef = useRef(null);
     const pinLayerRef = useRef(null);
@@ -9787,6 +9792,16 @@ function LessonMap({ route, pins, recActive, recTick, recPts, otherRecording, on
             " \u00B7 ",
             rmapFmtDur(route.dur || 0),
             route.recordedAt ? " · " + new Date(route.recordedAt).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : ""),
+        // App-Redesign (siehe Mockup): während der laufenden Aufzeichnung Fahrzeit/Strecke direkt
+        // hier bei der Karte zeigen - vorher gab es das nur in der globalen "rec-pill"-Leiste und
+        // der Home-Kachel "Aufzeichnung läuft", nicht in der Stunde selbst, in der man gerade ist.
+        recActive && React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 10 } },
+            React.createElement("div", { className: "card", style: { padding: "10px 12px" } },
+                React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 } }, "Fahrzeit"),
+                React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 18, fontVariantNumeric: "tabular-nums" } }, rmapFmtDur(recDur || 0))),
+            React.createElement("div", { className: "card", style: { padding: "10px 12px" } },
+                React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 } }, "Strecke"),
+                React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 18, fontVariantNumeric: "tabular-nums" } }, rmapFmtDist(recDist || 0)))),
         React.createElement("div", { className: "rmap-wrap" },
             React.createElement("div", { ref: elRef, className: "rmap", style: { height: "38vh", minHeight: 240 } })),
         (pins || []).length > 0 && React.createElement("div", { style: { marginTop: 8 } }, pins.map(p => React.createElement("div", { className: "rmap-list-item", key: p.id, style: { padding: "8px 11px" } },
@@ -16850,8 +16865,38 @@ function App() {
         const showStr = ueberTab === "strecken" || ueberTab === "beide";
         const showReife = ueberTab === "reife";
         const suggestion = adminTplSuggestion && adminTplSuggestion.byKlasse && adminTplSuggestion.byKlasse[vk];
+        // App-Redesign (siehe Mockup): Gesamtfortschritt als Ring + nächste Fahrstunde + kurze
+        // Kennzahlen vorneweg - dieselben Werte, die die Schülerliste/renderReife() für denselben
+        // Schüler ohnehin schon berechnen (gesamtPct/ampel/nextApptByStudent/pruefungsreife), hier
+        // nur einmal zusätzlich zusammengefasst für den schnellen Blick auf diesen einen Schüler.
+        const gesamt = gesamtPct(active);
+        const amp = ampel(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+        const naechsteFahrstunde = nextApptByStudent[active.id];
+        const stdPreis = Number(pricePerHour) || 0;
+        const offenerBetrag = sumCharges(active, stdPreis) - sumPayments(active);
+        const reifeInfo = pruefungsreife(active, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
         return React.createElement("div", { className: "pad" },
             studentHeader({ showReliability: true }),
+            React.createElement("div", { className: "card", style: { display: "flex", alignItems: "center", gap: 16, padding: "15px 17px", marginBottom: 12 } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 } }, "Ausbildungsstand"),
+                    React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16, color: amp.farbe } }, amp.text)),
+                React.createElement(Ring, { pct: gesamt, size: 62, color: amp.farbe })),
+            naechsteFahrstunde && React.createElement("button", { onClick: () => { setCalDay(new Date(naechsteFahrstunde.start_at)); setView("kalender"); }, className: "card", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
+                React.createElement("img", { src: ILLUSTRATION_FORTSCHRITT, alt: "", "aria-hidden": "true", style: { position: "absolute", right: -22, bottom: -16, width: "44%", maxWidth: 180, pointerEvents: "none" } }),
+                React.createElement("div", { style: { position: "relative", padding: "15px 17px", maxWidth: "62%" } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--orange-deep)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 } }, "Nächste Fahrstunde"),
+                    React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 15.5, marginBottom: 4 } },
+                        weekdayShort(naechsteFahrstunde.start_at) + ", " + fmtD(naechsteFahrstunde.start_at)),
+                    React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } },
+                        hm(naechsteFahrstunde.start_at) + (naechsteFahrstunde.end_at ? " – " + hm(naechsteFahrstunde.end_at) : "") + " Uhr · " + artLabelPlain(apptArt(naechsteFahrstunde))))),
+            (offenerBetrag > 0.005 || reifeInfo.offeneSonderfahrten.length > 0) && React.createElement("div", { style: { display: "grid", gridTemplateColumns: (offenerBetrag > 0.005 && reifeInfo.offeneSonderfahrten.length > 0) ? "repeat(2, 1fr)" : "1fr", gap: 10, marginBottom: 12 } },
+                offenerBetrag > 0.005 && React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 4 } }, "Offener Betrag"),
+                    React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 19, color: "#B3362A" } }, eurFmt(offenerBetrag))),
+                reifeInfo.offeneSonderfahrten.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 4 } }, "Hinweis"),
+                    React.createElement("div", { style: { fontSize: 13, fontWeight: 700, lineHeight: 1.3 } }, "Noch " + reifeInfo.offeneSonderfahrten.length + (reifeInfo.offeneSonderfahrten.length === 1 ? " Sonderfahrt offen" : " Sonderfahrten offen")))),
             suggestion && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, border: "1.5px solid var(--orange)" } },
                 React.createElement("div", { style: { fontWeight: 700, fontSize: 14, marginBottom: 5 } }, "Vorlage deiner Fahrschule verf\u00FCgbar"),
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 11px" } }, "Dein Fahrschul-Admin hat f\u00FCr Klasse " + vk + " eine ADK/Strecken-Vorlage hinterlegt. Du kannst sie als Ausgangspunkt \u00FCbernehmen und danach weiterhin f\u00FCr dich selbst anpassen."),
@@ -17107,7 +17152,7 @@ function App() {
                                     updateLesson(l.id, { thema: e.target.value }); }, placeholder: "z. B. Kreisverkehr, Autobahn auffahren, Einparken…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, fontWeight: 600 } })),
                         React.createElement("div", { style: { marginBottom: 12 } },
                             React.createElement("label", { className: "ls-lbl" }, "Gefahrene Strecke"),
-                            React.createElement(LessonMap, { route: l.route || null, pins: l.pins || [], color: (school && school.color) || "#FF9300", recActive: recActiveHere, recTick: recUi.tick, recPts: recPtsRef.current, otherRecording: !!recSession && !(recSession.studentId === active.id && recSession.lessonId === l.id), onStart: () => startRecording(active.id, l.id, dispName(active)), onStop: save => stopRecording(save), onDeleteRoute: () => updateLesson(l.id, { route: null }), onSavePin: p => updateLesson(l.id, { pins: [...(l.pins || []), p] }), onDeletePin: id => updateLesson(l.id, { pins: (l.pins || []).filter(x => x.id !== id) }) })),
+                            React.createElement(LessonMap, { route: l.route || null, pins: l.pins || [], color: (school && school.color) || "#FF9300", recActive: recActiveHere, recTick: recUi.tick, recPts: recPtsRef.current, recDist: recUi.dist, recDur: recUi.dur, otherRecording: !!recSession && !(recSession.studentId === active.id && recSession.lessonId === l.id), onStart: () => startRecording(active.id, l.id, dispName(active)), onStop: save => stopRecording(save), onDeleteRoute: () => updateLesson(l.id, { route: null }), onSavePin: p => updateLesson(l.id, { pins: [...(l.pins || []), p] }), onDeletePin: id => updateLesson(l.id, { pins: (l.pins || []).filter(x => x.id !== id) }) })),
                         LESSON_FIELDS.map(f => {
                             const cur = l.ratings && l.ratings[f.id];
                             return React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "7px 0", borderTop: "1px solid var(--line)" } },
@@ -20466,8 +20511,10 @@ function App() {
                         const aColor = artColor(apptArt(a));
                         const accent = offered ? "var(--sage)" : (pend ? "var(--amber)" : (hasLeist ? "#1B8F4D" : aColor));
                         const tint = offered ? "var(--sage-bg)" : (pend ? "var(--amber-bg)" : (hasLeist ? "#E3F4E9" : softBg(aColor)));
-                        return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "9px 11px", textAlign: "left",
+                        return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { width: "100%", display: "flex", alignItems: "center", gap: 9, padding: "9px 11px", textAlign: "left",
                                 borderRadius: 12, marginTop: 4, background: tint, border: offered ? "1.5px dashed var(--sage)" : "none" } },
+                            React.createElement("span", { className: "home-iconchip", style: { width: 30, height: 30, background: "var(--card)", color: accent } },
+                                React.createElement(IcCarIcon, null)),
                             React.createElement("div", { style: { minWidth: 50, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13, fontVariantNumeric: "tabular-nums", color: accent,
                                     background: "var(--card)", borderRadius: 9, padding: "6px 0", flexShrink: 0, boxShadow: "0 1px 4px rgba(0,0,0,.05)" } },
                                 hm(a.start_at),
@@ -20793,6 +20840,22 @@ function App() {
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, -1)) }, "‹"),
                     React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "8px" }, onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalDay(d); } }, "Heute"),
                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalDay(addDays(calDay, 1)) }, "›")),
+                // Wochentag-Streifen (App-Redesign, siehe Mockup): schneller Sprung auf einen
+                // anderen Tag DERSELBEN Woche, ohne erst über ‹/› einzeln durchzublättern. Der
+                // kleine Punkt zeigt, ob an dem Tag überhaupt Termine liegen (byDay, s.o.) -
+                // reserviert IMMER denselben Platz (opacity statt bedingtem Rendern), damit die
+                // sieben Tages-Buttons nicht durch fehlende Punkte in der Höhe hüpfen.
+                React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 14 } },
+                    Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(calDay), i)).map(d => {
+                        const dKey = ymd(d);
+                        const dActive = dKey === ymd(calDay);
+                        const hatTermine = (byDay[dKey] || []).length > 0;
+                        return React.createElement("button", { key: dKey, onClick: () => setCalDay(d), style: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "7px 2px",
+                                borderRadius: "var(--r-md)", background: dActive ? "var(--orange)" : "transparent", color: dActive ? "#181512" : "var(--ink)" } },
+                            React.createElement("span", { style: { fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".02em", opacity: dActive ? .85 : .55 } }, weekdayShort(d).slice(0, 2)),
+                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, d.getDate()),
+                            React.createElement("span", { style: { width: 4, height: 4, borderRadius: "50%", background: dActive ? "#181512" : "var(--orange)", opacity: hatTermine ? 1 : 0 } }));
+                    })),
                 React.createElement("div", { style: { display: "flex", justifyContent: "center", gap: 6, marginBottom: 14 } },
                     [["karten", "Karten"], ["zeitstrahl", "Zeitstrahl"]].map(([v, lbl]) => React.createElement("button", { key: v, onClick: () => setCalDayStyle(v), style: { padding: "5px 13px", borderRadius: 99, fontSize: 12.5, fontWeight: 700,
                             border: "1.5px solid " + (calDayStyle === v ? "var(--orange)" : "var(--line)"),
