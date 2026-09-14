@@ -264,8 +264,12 @@
      Header nur Logo + Avatar vor, kein Platz mehr neben Suche+Avatar für Wetter/Speicherstatus -
      beide passten schon vorher nur knapp, mit dem neuen Avatar quoll die Kopfzeile über). Auf
      Desktop (≥900px, siehe @media weiter unten) bleiben beide sichtbar, dort ist reichlich Platz. */
-  .save-pill{display:none;font-size:11px;font-weight:700;background:transparent;color:var(--muted);
-    border-radius:99px;padding:4px 0;white-space:nowrap;text-align:right}
+  /* Designprüfung 2026-09-14: Die Pille war per display:none ausgeblendet und wurde erst ab
+     900px eingeblendet - der Fahrlehrer am Handy, also der Hauptnutzer, sah die einzige
+     Rückmeldung über Speichervorgänge nie. Jetzt immer sichtbar, am Desktop nur größer. */
+  .save-pill{display:block;font-size:10.5px;font-weight:700;background:transparent;color:var(--muted);
+    border-radius:99px;padding:4px 0;white-space:nowrap;text-align:right;border:none}
+  .save-pill.err{color:var(--red-ink);text-decoration:underline}
   /* Kompaktes Wetter-Pill oben rechts in der Kopfzeile (Redesign 2026) - nur Icon + aktuelle
      Temperatur, wie im Entwurf. */
   .weather-chip{display:none;align-items:center;gap:5px;flex-shrink:0;background:var(--field-bg);
@@ -582,7 +586,7 @@
     .app .brand{display:none}
     /* Kopfzeile deutlich präsenter als auf dem Handy statt einer schmalen Leiste. */
     .topbar{padding:22px 28px}
-    .save-pill{display:block;font-size:13px;padding:6px 2px}
+    .save-pill{font-size:13px;padding:6px 2px}
     .weather-chip{display:inline-flex;font-size:13.5px;padding:7px 13px}
     /* Bottom-Sheets (mobiles Muster) werden auf dem Desktop zu zentrierten Dialogen */
     .modal-overlay{align-items:center!important}
@@ -5904,7 +5908,7 @@ async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentW
     }
     catch (e) {
         console.error("Limits speichern fehlgeschlagen:", e);
-        showToast("Deine Buchungslimits konnten nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"));
+        showToast("Deine Buchungslimits konnten nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
     }
 }
 // Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender).
@@ -5920,7 +5924,7 @@ async function saveTeacherNameToProfile(uid, name) {
     }
     catch (e) {
         console.error("Anzeigename speichern fehlgeschlagen:", e);
-        showToast("Dein Anzeigename konnte nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"));
+        showToast("Dein Anzeigename konnte nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
     }
 }
 // Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
@@ -8280,6 +8284,28 @@ function downloadApptIcs(a, summary) {
 let _toastSetter = null, _confirmSetter = null, _promptSetter = null;
 function showToast(msg, tone) { if (_toastSetter)
     _toastSetter({ msg, tone: tone || "info", key: uniqueId("toast") }); }
+// Übersetzt die rohe Meldung eines fehlgeschlagenen Aufrufs in einen Satz, mit dem der Fahrlehrer
+// etwas anfangen kann. Vorher wurde an über 50 Stellen "\n" + e.message angehängt, und e.message
+// ist meist wörtlich das, was PostgREST/Supabase liefert: "Failed to fetch", "JWT expired",
+// "new row violates row-level security policy for table students". Genau die drei Fälle, in denen
+// eine gute Meldung eine konkrete Handlung auslöst (kein Netz / neu anmelden / keine Berechtigung),
+// kamen als Text an, der nur beunruhigt. (Designprüfung 2026-09-14)
+function fehlerText(e) {
+    const m = String((e && e.message) || e || "");
+    if (/Failed to fetch|NetworkError|Load failed|ERR_INTERNET|offline/i.test(m))
+        return "Keine Verbindung. Sobald du wieder Netz hast, einfach erneut versuchen.";
+    if (/JWT|token is expired|not authenticated|invalid_token|session/i.test(m))
+        return "Deine Sitzung ist abgelaufen. Bitte einmal neu anmelden.";
+    if (/row-level security|permission denied|not authorized|insufficient/i.test(m))
+        return "Dafür fehlt dir die Berechtigung in dieser Fahrschule.";
+    if (/duplicate key|already exists|unique constraint/i.test(m))
+        return "Das gibt es schon.";
+    if (/demo_ro_no_insert|demo/i.test(m))
+        return "Demo-Ansicht: Änderungen werden nicht gespeichert.";
+    if (/timeout|timed out/i.test(m))
+        return "Der Server hat zu lange gebraucht. Bitte erneut versuchen.";
+    return m ? "Unerwarteter Fehler. Bitte erneut versuchen.\n(" + m.slice(0, 120) + ")" : "Unerwarteter Fehler. Bitte erneut versuchen.";
+}
 // Verben, an denen ein Bestätigungsdialog als zerstörerisch erkannt wird, mit der Beschriftung,
 // die der Knopf dann trägt. Reihenfolge = Priorität (erster Treffer gewinnt).
 const CONFIRM_VERBEN = [
@@ -8342,8 +8368,11 @@ function ToastConfirmHost() {
     const [promptVal, setPromptVal] = useState("");
     const timerRef = useRef(null);
     useEffect(() => {
+        // Fehler stehen länger als Bestätigungen: 3,4 Sekunden reichen für "Link kopiert", aber
+        // nicht für "Termin konnte nicht gespeichert werden" - besonders nicht, wenn der Fahrlehrer
+        // gerade auf die Straße schaut. Wegtippen geht jederzeit (Designprüfung 2026-09-14).
         _toastSetter = (t) => { setToast(t); if (timerRef.current)
-            clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setToast(null), 3400); };
+            clearTimeout(timerRef.current); timerRef.current = setTimeout(() => setToast(null), t && t.tone === "error" ? 9000 : 3400); };
         _confirmSetter = setConfirmState;
         _promptSetter = (p) => { setPromptVal(p.defaultValue != null ? String(p.defaultValue) : ""); setPromptState(p); };
         return () => { _toastSetter = null; _confirmSetter = null; _promptSetter = null; if (timerRef.current)
@@ -8365,7 +8394,7 @@ function ToastConfirmHost() {
         return () => document.removeEventListener("keydown", onEsc, true);
     }, [confirmState, promptState]);
     return React.createElement(React.Fragment, null,
-        toast && React.createElement("div", { key: toast.key, role: toast.tone === "error" ? "alert" : "status", "aria-live": toast.tone === "error" ? "assertive" : "polite", "aria-atomic": "true", style: { position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
+        toast && React.createElement("div", { key: toast.key, role: toast.tone === "error" ? "alert" : "status", "aria-live": toast.tone === "error" ? "assertive" : "polite", "aria-atomic": "true", onClick: () => setToast(null), title: "Zum Ausblenden tippen", style: { cursor: "pointer", position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
                 background: toast.tone === "error" ? "var(--red)" : "var(--ink)", color: "var(--canvas)", padding: "12px 18px", borderRadius: "var(--r-pill)", fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
                 boxShadow: "0 10px 30px rgba(0,0,0,.35)", textAlign: "center", lineHeight: 1.4, whiteSpace: "pre-line" } }, toast.msg),
         confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
@@ -9233,7 +9262,7 @@ function Auth() {
                         // enden lassen, sondern direkt beim Einloggen einen eigenen Wiederherstellungs-
                         // Screen zeigen (school ohne id, siehe schoolRecovery-State in App()).
                         console.error(se);
-                        showToast("Einladungscode ungültig oder Beitritt fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.");
+                        showToast("Einladungscode ungültig oder Beitritt fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.", "error");
                     }
                 }
                 else {
@@ -9246,7 +9275,7 @@ function Auth() {
                     }
                     catch (se) {
                         console.error(se);
-                        showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.");
+                        showToast("Fahrschule anlegen fehlgeschlagen:\n" + (se.message || se) + "\n\nDu kannst es direkt nach der Anmeldung erneut versuchen.", "error");
                     }
                 }
                 setInfo("Konto erstellt. Du wirst angemeldet…");
@@ -10704,6 +10733,7 @@ function App() {
     // Geschenkgutscheine. Hooks gehoeren hier oben zu den uebrigen, nicht unten zur Logik -
     // siehe Kommentar bei csvImport (React-Fehler #310).
     const [vouchers, setVouchers] = useState([]);
+    const [vouchersErr, setVouchersErr] = useState(null);
     const [loeschDialog, setLoeschDialog] = useState(null); // null | {stu, eingabe, busy, error, fertig}
     const [loeschProtokoll, setLoeschProtokoll] = useState([]);
     const [voucherForm, setVoucherForm] = useState(null);   // null | {betrag, empfaenger, von, busy}
@@ -10892,6 +10922,9 @@ function App() {
     }, [theme, school]);
     const [search, setSearch] = useState("");
     const [saved, setSaved] = useState(true);
+    // null = alles geschrieben. Sonst der Schüler, dessen letzter Schreibversuch fehlschlug -
+    // die Speicheranzeige wird damit gleichzeitig zum Wiederholen-Knopf (Designprüfung 2026-09-14).
+    const [saveError, setSaveError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     const saveTimers = useRef({});
     // IDs von Schülern mit gerade laufendem (angestoßenem, aber noch nicht abgeschlossenem)
@@ -10950,15 +10983,21 @@ function App() {
     // Prüfplatz-Kontingente, siehe renderExamSlotsSection(). Eigener useEffect statt Teil der
     // großen Promise.all-Ladekette (wie interessenten) - unabhängige, sekundäre Datenquelle.
     const [examSlots, setExamSlots] = useState([]);
+    // Designprüfung 2026-09-14: Beide Listen verschluckten Ladefehler mit .catch(() => {}). Ein
+    // fehlgeschlagener Abruf sah danach exakt aus wie "noch nichts angelegt" - der Fahrlehrer
+    // hätte angefangen, bereits vorhandene Prüfplätze ein zweites Mal einzutragen.
+    const [examSlotsErr, setExamSlotsErr] = useState(null);
     useEffect(() => {
         if (!uid)
             return;
-        fetchExamSlots(uid).then(setExamSlots).catch(() => { });
+        setExamSlotsErr(null);
+        fetchExamSlots(uid).then(d => { setExamSlots(d); setExamSlotsErr(null); }).catch(e => setExamSlotsErr(fehlerText(e)));
     }, [uid]);
     // Gutscheine der eigenen Fahrschule laden.
     useEffect(() => {
         if (!school || !school.id) { setVouchers([]); return; }
-        fetchVouchers(school.id).then(setVouchers).catch(() => { });
+        setVouchersErr(null);
+        fetchVouchers(school.id).then(d => { setVouchers(d); setVouchersErr(null); }).catch(e => setVouchersErr(fehlerText(e)));
     }, [school && school.id]);
     // Löschprotokoll laden (Nachweis nach § 31 FahrlG, siehe Einstellungen).
     useEffect(() => {
@@ -11531,7 +11570,7 @@ function App() {
         setAppts(prev => prev.map(a => a.id === id ? { ...a, reminded_at: wert } : a));
         dbUpdateAppt(id, { reminded_at: wert }).catch(e => {
             console.error("Erinnerungs-Merker speichern fehlgeschlagen:", e);
-            showToast("Konnte nicht gemerkt werden: " + (e.message || "unbekannter Fehler"));
+            showToast("Konnte nicht gemerkt werden: " + (e.message || "unbekannter Fehler"), "error");
             setAppts(prev => prev.map(a => a.id === id ? { ...a, reminded_at: vorherWert } : a));
         });
     }
@@ -11967,7 +12006,7 @@ function App() {
                         setSchool(fresh); });
                 }
                 else {
-                    showToast("Einstellungen konnten nicht gespeichert werden:\n" + e.message);
+                    showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
                 }
             }
         }, 500);
@@ -12040,7 +12079,7 @@ function App() {
                         setTpl(fresh); });
                 }
                 else {
-                    showToast("Vorlage konnte nicht gespeichert werden:\n" + e.message);
+                    showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
                 }
             }
         }, 500);
@@ -12159,7 +12198,7 @@ function App() {
             showFlash("✓ Hochgeladen");
         }
         catch (e) {
-            showToast("Hochladen fehlgeschlagen:\n" + (e.message || e));
+            showToast("Hochladen fehlgeschlagen:\n" + (e.message || e), "error");
         }
         finally {
             setStaffUploading(false);
@@ -12173,7 +12212,7 @@ function App() {
             setStaffFiles(list => (list || []).filter(x => x.id !== f.id));
         }
         catch (e) {
-            showToast("Löschen fehlgeschlagen:\n" + (e.message || e));
+            showToast("Löschen fehlgeschlagen:\n" + (e.message || e), "error");
         }
     }
     function loadMyStaffFiles() {
@@ -12204,7 +12243,7 @@ function App() {
             showFlash("✓ Hochgeladen");
         }
         catch (e) {
-            showToast("Hochladen fehlgeschlagen:\n" + (e.message || e));
+            showToast("Hochladen fehlgeschlagen:\n" + (e.message || e), "error");
         }
         finally {
             setStudentFileUploading(false);
@@ -12221,7 +12260,7 @@ function App() {
             setActiveId(cur => { if (cur === studentId) setStudentFiles(list => (list || []).filter(x => x.id !== f.id)); return cur; });
         }
         catch (e) {
-            showToast("Löschen fehlgeschlagen:\n" + (e.message || e));
+            showToast("Löschen fehlgeschlagen:\n" + (e.message || e), "error");
         }
     }
     async function openCityTplModal() {
@@ -12306,15 +12345,36 @@ function App() {
             try {
                 await dbUpdate(stu, dirty ? Array.from(dirty) : null);
                 setSaved(true);
+                setSaveError(null);
             }
             catch (e) {
-                showToast("Änderungen konnten nicht gespeichert werden:\n" + e.message);
+                // Die geänderten Felder wurden zwei Zeilen vorher aus der Dirty-Liste gelöscht -
+                // ohne sie zurückzulegen gäbe es keinen zweiten Versuch, und die Änderung lebte nur
+                // noch im lokalen Zwischenspeicher (Designprüfung 2026-09-14).
+                if (dirty) {
+                    const jetzt = dirtyKeysRef.current[stu.id] || new Set();
+                    dirty.forEach(k => jetzt.add(k));
+                    dirtyKeysRef.current[stu.id] = jetzt;
+                }
+                setSaveError(stu.id);
+                showToast("Änderungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
             }
             finally {
                 studentWritesRef.current.delete(stu.id);
             }
         }, 500);
     }, []);
+    // Wiederholen nach einem fehlgeschlagenen Speichern. Bewusst über die ID statt über das
+    // damals übergebene Objekt: der Schüler kann sich inzwischen geändert haben, geschrieben
+    // werden soll der aktuelle Stand.
+    const retrySave = useCallback(() => {
+        if (!saveError)
+            return;
+        const stu = (students || []).find(x => x.id === saveError);
+        setSaveError(null);
+        if (stu)
+            scheduleSave(stu);
+    }, [saveError, students, scheduleSave]);
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
         setStudents(prev => {
@@ -12842,7 +12902,7 @@ function App() {
                     setMySubscription(s => ({ ...s, subscription_accepted_at: now }));
                 }
                 catch (e) {
-                    showToast("Fehler:\n" + e.message);
+                    showToast("Fehler:\n" + fehlerText(e), "error");
                 }
             } });
     if (gate === "locked")
@@ -12852,7 +12912,7 @@ function App() {
                     setMySubscription(s => ({ ...s, subscription_last_paid: d }));
                 }
                 catch (e) {
-                    showToast("Fehler:\n" + e.message);
+                    showToast("Fehler:\n" + fehlerText(e), "error");
                 }
             } });
     if (students === null || tpl === null)
@@ -12872,7 +12932,7 @@ function App() {
         const draft = { ...newStudent(), klasse: guessedKlasse, location_id: validMyLocationId || "" };
         const created = await dbInsert(uid, draft);
         if (!created) {
-            showToast("Konnte nicht speichern. Internetverbindung prüfen.");
+            showToast("Konnte nicht speichern. Internetverbindung prüfen.", "error");
             return;
         }
         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
@@ -12909,7 +12969,7 @@ function App() {
         }
         catch (e) {
             setInteressentForm({ ...f, busy: false });
-            showToast("Konnte nicht gespeichert werden:\n" + (e.message || e));
+            showToast("Konnte nicht gespeichert werden:\n" + (e.message || e), "error");
         }
     }
     async function removeInteressent(it) {
@@ -12921,7 +12981,7 @@ function App() {
             setInteressentForm(null);
         }
         catch (e) {
-            showToast("Löschen fehlgeschlagen:\n" + (e.message || e));
+            showToast("Löschen fehlgeschlagen:\n" + (e.message || e), "error");
         }
     }
     // Übernimmt einen Interessenten als vollwertigen Schüler - gleicher Anlege-Pfad wie
@@ -12946,7 +13006,7 @@ function App() {
                 klasse: guessedKlasse, bemerkungen: it.notiz || "", location_id: validMyLocationId || "" };
             const created = await dbInsert(uid, draft);
             if (!created) {
-                showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.");
+                showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.", "error");
                 return;
             }
             setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
@@ -13018,7 +13078,7 @@ function App() {
             setStudents(prev => (prev || []).filter(x => x.id !== s.id));
         }
         catch (e) {
-            showToast("Konnte nicht gelöscht werden:\n" + e.message);
+            showToast("Konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
         }
     }
     // Empfehlungscode eines Freundes manuell nachtragen (z.B. wenn er bei der Anmeldung vergessen
@@ -13650,7 +13710,7 @@ function App() {
             showToast("XRechnung erzeugt (Beta) – bitte einmal von deinem Steuerberater oder einem Validator prüfen lassen.");
         }
         catch (e) {
-            showToast("XRechnung konnte nicht erzeugt werden: " + (e.message || "unbekannt"));
+            showToast("XRechnung konnte nicht erzeugt werden: " + (e.message || "unbekannt"), "error");
         }
     }
     /* ── Geschenkgutscheine ─────────────────────────────────────────────────────────────────
@@ -13698,7 +13758,7 @@ function App() {
             await dbDeleteVoucher(v.id);
             setVouchers(prev => prev.filter(x => x.id !== v.id));
         }
-        catch (e) { showToast("Konnte nicht gelöscht werden: " + (e.message || "")); }
+        catch (e) { showToast("Konnte nicht gelöscht werden: " + (e.message || ""), "error"); }
     }
     // Einloesen: die RPC setzt den Status, danach wird der Betrag beim aktiven Schueler als
     // Zahlung erfasst - mit dem Code als Zahlungsart, damit die Herkunft nachvollziehbar bleibt.
@@ -13770,7 +13830,7 @@ function App() {
         const draft = draftFromImportData(d);
         const created = await dbInsert(uid, draft);
         if (!created) {
-            showToast("Konnte nicht speichern. Internetverbindung prüfen.");
+            showToast("Konnte nicht speichern. Internetverbindung prüfen.", "error");
             return;
         }
         setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
@@ -14247,7 +14307,7 @@ function App() {
         catch (e) {
             // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
             writeStudent({ ...s, archived: true, archivedAt: s.archivedAt || ymd(new Date()) });
-            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message);
+            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message, "error");
             return;
         }
         setStudents(prev => {
@@ -14264,7 +14324,7 @@ function App() {
                 setActiveId(created.id);
             }
             else
-                showToast("Wiederherstellen fehlgeschlagen.");
+                showToast("Wiederherstellen fehlgeschlagen.", "error");
         });
     }
     const updateActive = (patch) => { if (active)
@@ -14535,7 +14595,7 @@ function App() {
             // Schüler oder die Fahrstunde während der laufenden Aufzeichnung gelöscht wurde
             // (z.B. versehentlich) - der Nutzer tippte "Speichern" und dachte, es habe geklappt.
             if (!stu || !(stu.lessons || []).some(l => l.id === sess.lessonId)) {
-                showToast("Strecke konnte nicht gespeichert werden - Fahrstunde oder Schüler existiert nicht mehr.");
+                showToast("Strecke konnte nicht gespeichert werden - Fahrstunde oder Schüler existiert nicht mehr.", "error");
             }
             else {
                 const lessons = stu.lessons.map(l => l.id === sess.lessonId ? { ...l, route } : l);
@@ -14543,7 +14603,7 @@ function App() {
             }
         }
         else if (save && sess) {
-            showToast("Zu wenige Punkte aufgezeichnet – Strecke nicht gespeichert.");
+            showToast("Zu wenige Punkte aufgezeichnet – Strecke nicht gespeichert.", "error");
         }
         try {
             localStorage.removeItem(recBufferKey(uid));
@@ -14640,7 +14700,7 @@ function App() {
             // Schüler nicht mehr auffindbar (z.B. Kontowechsel während laufender Simulation) -
             // NICHT den Erfolgs-Bildschirm zeigen, sonst denkt der Fahrlehrer, das Ergebnis sei
             // gespeichert, obwohl nichts geschrieben wurde.
-            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.");
+            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.", "error");
             setPruefungssim(null);
             setView("uebersicht");
             return;
@@ -14687,7 +14747,7 @@ function App() {
         if (!stu) {
             // Schüler nicht mehr auffindbar (z.B. Kontowechsel während laufendem Test) - vorher
             // tat der Button hier einfach gar nichts, ohne jede Rückmeldung.
-            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.");
+            showToast("Schüler nicht gefunden - Ergebnis konnte nicht gespeichert werden.", "error");
             setSchaltkompetenz(null);
             setView("schaltkompetenzliste");
             return;
@@ -15012,7 +15072,7 @@ function App() {
             return created;
         }
         catch (e) {
-            showToast("Termin konnte nicht gespeichert werden:\n" + e.message);
+            showToast("Termin konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15194,7 +15254,7 @@ function App() {
             // Datenbank passt (gleiches Rollback-Muster wie in removeAppt()).
             if (current)
                 setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
-            showToast("Änderung fehlgeschlagen:\n" + e.message);
+            showToast("Änderung fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15219,7 +15279,7 @@ function App() {
             apptDeletedRef.current.delete(id);
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
-            showToast("Löschen fehlgeschlagen:\n" + e.message);
+            showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15247,7 +15307,7 @@ function App() {
                     // dbInsertAppt wirft bei Fehlern statt null zurückzugeben - ohne dieses
                     // catch würde ein Fehlschlag als unbehandelte Promise-Ablehnung verschwinden
                     // und der Nutzer würde nie erfahren, dass die Wiederherstellung fehlschlug.
-                    showToast("Wiederherstellen fehlgeschlagen:\n" + e.message);
+                    showToast("Wiederherstellen fehlgeschlagen:\n" + fehlerText(e), "error");
                 }
                 finally {
                     apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15594,12 +15654,12 @@ function App() {
                     setBookingCode(fresh);
                 }
                 else {
-                    showToast("Der Buchungslink konnte nicht erzeugt werden. Das ist meist eine Berechtigungsfrage in der Datenbank (fehlende oder zu enge Regel für profiles). Bitte kurz erneut versuchen oder Bescheid geben, damit die Ursache geprüft werden kann.");
+                    showToast("Der Buchungslink konnte nicht erzeugt werden. Das ist meist eine Berechtigungsfrage in der Datenbank (fehlende oder zu enge Regel für profiles). Bitte kurz erneut versuchen oder Bescheid geben, damit die Ursache geprüft werden kann.", "error");
                     return;
                 }
             }
             catch (e) {
-                showToast("Der Buchungslink konnte nicht erzeugt werden:\n" + (e.message || "unbekannter Fehler"));
+                showToast("Der Buchungslink konnte nicht erzeugt werden:\n" + (e.message || "unbekannter Fehler"), "error");
                 return;
             }
         }
@@ -15668,12 +15728,12 @@ function App() {
                 if (fresh)
                     setBookingCode(fresh);
                 else {
-                    showToast("Der Link konnte nicht erzeugt werden.");
+                    showToast("Der Link konnte nicht erzeugt werden.", "error");
                     return;
                 }
             }
             catch (e) {
-                showToast("Der Link konnte nicht erzeugt werden:\n" + (e.message || "unbekannter Fehler"));
+                showToast("Der Link konnte nicht erzeugt werden:\n" + (e.message || "unbekannter Fehler"), "error");
                 return;
             }
         }
@@ -17759,7 +17819,7 @@ function App() {
         }
         catch (e) {
             setInvoiceDraft(prev => prev && ({ ...prev, busy: false }));
-            showToast("Rechnung konnte nicht erstellt werden:\n" + e.message);
+            showToast("Rechnung konnte nicht erstellt werden:\n" + fehlerText(e), "error");
             return;
         }
         // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
@@ -17810,7 +17870,7 @@ function App() {
             storno = await dbCancelInvoice(active.id, school.id, inv.id, reason);
         }
         catch (e) {
-            showToast("Stornierung fehlgeschlagen:\n" + e.message);
+            showToast("Stornierung fehlgeschlagen:\n" + fehlerText(e), "error");
             return;
         }
         // Funktional gegen den aktuellen Datensatz statt gegen das vor dem askPrompt/RPC-await
@@ -17854,7 +17914,7 @@ function App() {
                 number = await nextDocumentNumber(school.id, "receipt");
             }
             catch (e) {
-                showToast("Beleg konnte nicht erstellt werden:\n" + e.message);
+                showToast("Beleg konnte nicht erstellt werden:\n" + fehlerText(e), "error");
                 return;
             }
             // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
@@ -17920,7 +17980,7 @@ function App() {
                 number = await nextDocumentNumber(school.id, "contract");
             }
             catch (e) {
-                showToast("Vertrag konnte nicht erstellt werden:\n" + e.message);
+                showToast("Vertrag konnte nicht erstellt werden:\n" + fehlerText(e), "error");
                 return;
             }
             // Funktional gegen den aktuellen Datensatz statt updateActive() (= writeStudent({...active,
@@ -18897,7 +18957,7 @@ function App() {
             showToast("Prüfplatz erfasst.");
         }
         catch (e) {
-            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+            showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
         }
     }
     async function assignExamSlot(slot, student) {
@@ -18907,7 +18967,7 @@ function App() {
             setExamSlotAssign({ slot: { ...slot, student_id: student.id, status: "vergeben" }, assignedTo: student });
         }
         catch (e) {
-            showToast("Konnte nicht zugewiesen werden:\n" + e.message);
+            showToast("Konnte nicht zugewiesen werden:\n" + fehlerText(e), "error");
         }
     }
     // Platz freigeben (Schüler kann kurzfristig nicht, oder Zuteilung war ein Irrtum) - öffnet
@@ -18920,7 +18980,7 @@ function App() {
             setExamSlotAssign({ slot: freed, assignedTo: null });
         }
         catch (e) {
-            showToast("Konnte nicht freigegeben werden:\n" + e.message);
+            showToast("Konnte nicht freigegeben werden:\n" + fehlerText(e), "error");
         }
     }
     async function markExamSlotAbgesagt(slot) {
@@ -18931,7 +18991,7 @@ function App() {
             setExamSlots(prev => prev.map(s => s.id === slot.id ? { ...s, student_id: null, status: "abgesagt" } : s));
         }
         catch (e) {
-            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+            showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
         }
     }
     async function deleteExamSlot(slot) {
@@ -18942,7 +19002,7 @@ function App() {
             setExamSlots(prev => prev.filter(s => s.id !== slot.id));
         }
         catch (e) {
-            showToast("Konnte nicht gelöscht werden:\n" + e.message);
+            showToast("Konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
         }
     }
     function examSlotWaText(slot, student) {
@@ -18959,7 +19019,10 @@ function App() {
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", margin: "20px 2px 8px" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, "Prüfplätze"),
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 10px", fontSize: 12.5 }, onClick: () => setExamSlotForm({ art: "praxis", datum: "", zeit: "", ort: "" }) }, "+ Prüfplatz")),
-            active.length === 0
+            examSlotsErr
+                ? React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 13.5, color: "var(--red-ink)", background: "var(--red-soft)", border: "1px solid var(--red)", whiteSpace: "pre-line" } },
+                    "Prüfplätze konnten nicht geladen werden.\n" + examSlotsErr)
+                : active.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } },
                     "Noch keine Prüfplätze erfasst. Trage hier ein, wie viele Termine ihr von TÜV/DEKRA zugeteilt bekommen habt, und weise sie prüfungsreifen Schülern zu.")
                 : React.createElement("div", { className: "card", style: { padding: "6px 14px" } },
@@ -20121,7 +20184,7 @@ function App() {
                                         showToast("Fahrschul-Code kopiert");
                                     }
                                     catch (err) {
-                                        showToast("Konnte nicht kopiert werden. Du kannst den Code auch antippen und von Hand kopieren.");
+                                        showToast("Konnte nicht kopiert werden. Du kannst den Code auch antippen und von Hand kopieren.", "error");
                                     }
                                 } }, "Kopieren"))),
                     React.createElement("div", { style: { display: "flex", gap: 8 } },
@@ -20358,7 +20421,7 @@ function App() {
             showToast("Auf der Warteliste angeboten – passende Schüler sehen die Stunde jetzt in ihrer App.");
         }
         catch (e) {
-            showToast("Anbieten fehlgeschlagen:\n" + e.message);
+            showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         offerNextInQueue(queue);
     }
@@ -20469,7 +20532,7 @@ function App() {
             showToast("Als Warteliste-Angebot angelegt – passende Schüler sehen es jetzt in ihrer App.");
         }
         catch (e) {
-            showToast("Anbieten fehlgeschlagen:\n" + e.message);
+            showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
         }
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
@@ -20514,7 +20577,7 @@ function App() {
             setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, appt: { ...m.appt, checkin_code: code, checkin_expires_at: expires, checkin_thema: thema }, thema } : m);
         }
         catch (e) {
-            showToast("Konnte nicht gestartet werden:\n" + e.message);
+            showToast("Konnte nicht gestartet werden:\n" + fehlerText(e), "error");
         }
     }
     async function refreshTheoryAttendance() {
@@ -20534,7 +20597,7 @@ function App() {
             setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, attendance: [...m.attendance, row] } : m);
         }
         catch (e) {
-            showToast("Konnte nicht hinzugefügt werden:\n" + e.message);
+            showToast("Konnte nicht hinzugefügt werden:\n" + fehlerText(e), "error");
         }
     }
     async function removeAttendanceEntry(id) {
@@ -20544,7 +20607,7 @@ function App() {
             setTheoryCheckinModal(m => (m && m.appt.id === theoryCheckinModal.appt.id) ? { ...m, attendance: m.attendance.filter(a => a.id !== id) } : m);
         }
         catch (e) {
-            showToast("Konnte nicht entfernt werden:\n" + e.message);
+            showToast("Konnte nicht entfernt werden:\n" + fehlerText(e), "error");
         }
     }
     // Fahrstunden des morgigen Tages, für die eine Erinnerung sinnvoll ist.
@@ -20892,7 +20955,7 @@ function App() {
         catch (e) {
             // Fenster offen lassen, damit die Eingaben nicht verloren gehen
             setApptForm({ ...f, busy: false });
-            showToast("Termin konnte nicht gespeichert werden:\n" + ((e && e.message) || e));
+            showToast("Termin konnte nicht gespeichert werden:\n" + ((e && e.message) || e), "error");
         }
         finally {
             apptSavingRef.current = false;
@@ -21586,7 +21649,7 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_active: !a.subscription_active } : a) } : prev);
         }
         catch (e) {
-            showToast("Konnte nicht geändert werden:\n" + e.message);
+            showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
         }
     }
     // Lifetime-Zugang an/aus. Ein Lifetime-Konto ist dauerhaft freigeschaltet: kein
@@ -21608,7 +21671,7 @@ function App() {
             showFlash(an ? "✓ Lifetime aktiv" : "✓ Lifetime entfernt");
         }
         catch (e) {
-            showToast("Konnte nicht geändert werden:\n" + e.message);
+            showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
         }
     }
     // Theorie-üben-Zusatzpaket an/aus umschalten (separat vom Basis-Abo, siehe THEORY_UEBEN_RELEASED)
@@ -21618,7 +21681,7 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, theory_addon_active: !a.theory_addon_active } : a) } : prev);
         }
         catch (e) {
-            showToast("Konnte nicht geändert werden:\n" + e.message);
+            showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
         }
     }
     // Monatsbeitrag eines Fahrlehrers ändern
@@ -21636,7 +21699,7 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_amount: val } : a) } : prev);
         }
         catch (e) {
-            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+            showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
         }
     }
     // Zahlung als heute erledigt markieren
@@ -21651,7 +21714,7 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_last_paid: paidDate } : a) } : prev);
         }
         catch (e) {
-            showToast("Konnte nicht gespeichert werden:\n" + e.message);
+            showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
         }
     }
     // Neue Fahrschule direkt im Admin-Bereich anlegen
@@ -21670,7 +21733,7 @@ function App() {
             setAdminSchools(prev => [{ ...created, teachers: 0, students: 0 }, ...(prev || [])]);
         }
         catch (e) {
-            showToast("Fahrschule anlegen fehlgeschlagen:\n" + e.message);
+            showToast("Fahrschule anlegen fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         setAdminBusy(false);
     }
@@ -21686,7 +21749,7 @@ function App() {
             setAdminEdit(null);
         }
         catch (e) {
-            showToast("Speichern fehlgeschlagen:\n" + e.message);
+            showToast("Speichern fehlgeschlagen:\n" + fehlerText(e), "error");
         }
     }
     async function adminDoDelete(sc) {
@@ -21697,7 +21760,7 @@ function App() {
             setAdminSchools(prev => (prev || []).filter(s => s.id !== sc.id));
         }
         catch (e) {
-            showToast("Löschen fehlgeschlagen:\n" + e.message);
+            showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
         }
     }
     function openTeachers(sc) {
@@ -21706,7 +21769,7 @@ function App() {
         // eine separat mitgeführte Variable - verhindert, dass eine spät eintreffende Antwort für
         // eine inzwischen verlassene/geschlossene Fahrschule die Anzeige überschreibt.
         adminFetchTeachers(sc.id).then(list => setAdminTeachers(prev => (prev && prev.school.id === sc.id) ? { school: sc, list } : prev))
-            .catch(e => { showToast("Fahrlehrer konnten nicht geladen werden:\n" + e.message); setAdminTeachers(prev => (prev && prev.school.id === sc.id) ? null : prev); });
+            .catch(e => { showToast("Fahrlehrer konnten nicht geladen werden:\n" + fehlerText(e), "error"); setAdminTeachers(prev => (prev && prev.school.id === sc.id) ? null : prev); });
     }
     // Schulweite Liste aller unterschriebenen Leistungen öffnen (für den Fahrschul-Admin)
     function openSchoolLeistungen() {
@@ -21965,7 +22028,7 @@ function App() {
             setAdminSchools(prev => (prev || []).map(s => s.id === (adminTeachers && adminTeachers.school.id) ? { ...s, teachers: Math.max(0, s.teachers - 1) } : s));
         }
         catch (e) {
-            showToast("Stilllegen fehlgeschlagen:\n" + e.message);
+            showToast("Stilllegen fehlgeschlagen:\n" + fehlerText(e), "error");
         }
     }
     async function toggleTeacherAdmin(uid, current) {
@@ -21977,7 +22040,7 @@ function App() {
                 setIsSchoolAdmin(!current);
         }
         catch (e) {
-            showToast("Konnte das Recht nicht ändern:\n" + e.message);
+            showToast("Konnte das Recht nicht ändern:\n" + fehlerText(e), "error");
         }
     }
     // App-Moderator zuweisen/entziehen – nur der echte App-Admin darf das (siehe UI-Gate unten)
@@ -21989,7 +22052,7 @@ function App() {
                 setIsModerator(!current);
         }
         catch (e) {
-            showToast("Konnte die Moderator-Rolle nicht ändern:\n" + e.message);
+            showToast("Konnte die Moderator-Rolle nicht ändern:\n" + fehlerText(e), "error");
         }
     }
     // Schülerliste eines Fahrlehrers öffnen (nur ansehen)
@@ -22035,7 +22098,7 @@ function App() {
                 writeSchool({ ...school, logo: dataUrl });
         }
         catch (err) {
-            showToast("Logo konnte nicht gesetzt werden:\n" + err.message);
+            showToast("Logo konnte nicht gesetzt werden:\n" + fehlerText(err), "error");
         }
     }
     async function adminRemoveLogo(sc) {
@@ -22061,7 +22124,7 @@ function App() {
                 writeSchool(prev => prev && prev.id === sc.id ? { ...prev, logo: "" } : prev);
         }
         catch (err) {
-            showToast("Logo konnte nicht entfernt werden:\n" + err.message);
+            showToast("Logo konnte nicht entfernt werden:\n" + fehlerText(err), "error");
         }
     }
     // Alle Daten eines Schülers als JSON – für DSGVO-Auskunft und Datenmitnahme.
@@ -22240,7 +22303,7 @@ function App() {
                     ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => setPaypalLinkEdit((s && s.paypal_link) || "")) }, "Laden")
                     : React.createElement("div", { style: { display: "flex", gap: 8 } },
                         React.createElement("input", { type: "text", value: paypalLinkEdit, onChange: e => setPaypalLinkEdit(e.target.value), placeholder: "z.B. paypal.me/deinname oder name@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + e.message)) }, "Speichern"))),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + fehlerText(e), "error")) }, "Speichern"))),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
             adminAccounts === null
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
@@ -22317,7 +22380,7 @@ function App() {
                 writeSchool(prev => prev && ({ ...prev, logo: dataUrl }));
             }
             catch (err) {
-                showToast("Logo konnte nicht verarbeitet werden:\n" + err.message);
+                showToast("Logo konnte nicht verarbeitet werden:\n" + fehlerText(err), "error");
             }
         }
         async function onAvatarFile(e) {
@@ -22335,7 +22398,7 @@ function App() {
                 setProfileData(pd => ({ ...(pd || {}), avatar_url: dataUrl }));
             }
             catch (err) {
-                showToast("Profilbild konnte nicht verarbeitet werden:\n" + err.message);
+                showToast("Profilbild konnte nicht verarbeitet werden:\n" + fehlerText(err), "error");
             }
         }
         async function removeAvatar() {
@@ -22348,7 +22411,7 @@ function App() {
                 setProfileData(pd => ({ ...(pd || {}), avatar_url: null }));
             }
             catch (err) {
-                showToast("Profilbild konnte nicht entfernt werden:\n" + (err.message || err));
+                showToast("Profilbild konnte nicht entfernt werden:\n" + (err.message || err), "error");
             }
         }
         function closeScreen() { setSettingsScreen(null); }
@@ -22506,7 +22569,7 @@ function App() {
                                                 await saveMyLocation(uid, val);
                                             }
                                             catch (err) {
-                                                showToast("Standort konnte nicht gespeichert werden:\n" + (err.message || err));
+                                                showToast("Standort konnte nicht gespeichert werden:\n" + (err.message || err), "error");
                                             }
                                         } },
                                         React.createElement("option", { value: "" }, "– Kein Standort –"),
@@ -22590,7 +22653,7 @@ function App() {
                                 React.createElement("input", { type: "checkbox", checked: practiceLogEnabled, onChange: e => {
                                         const val = e.target.checked;
                                         setPracticeLogEnabled(val);
-                                        savePracticeLogEnabled(uid, val).catch(err => { setPracticeLogEnabled(!val); showToast("Konnte nicht gespeichert werden:\n" + err.message); });
+                                        savePracticeLogEnabled(uid, val).catch(err => { setPracticeLogEnabled(!val); showToast("Konnte nicht gespeichert werden:\n" + fehlerText(err), "error"); });
                                     }, style: { width: 18, height: 18, flexShrink: 0 } }),
                                 React.createElement("span", { style: { fontSize: 14, fontWeight: 600 } }, "Beim Abhaken nach Status fragen")),
                             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "10px 0 0" } }, "Wenn aktiviert, kannst du bei jedem ADK-/Strecken-Punkt auf den Titel tippen, um mit Zeitstempel festzuhalten, wie es gelaufen ist (Angesprochen/Geübt/Gekonnt). Das Abhaken der Kästchen selbst ändert sich dadurch nicht. Nur für dein eigenes Konto, andere Fahrlehrer sind davon nicht betroffen.")),
@@ -22713,7 +22776,7 @@ function App() {
                                                     showFlash("✓ Als bezahlt markiert");
                                                 }
                                                 catch (e) {
-                                                    showToast("Fehler:\n" + e.message);
+                                                    showToast("Fehler:\n" + fehlerText(e), "error");
                                                 }
                                             } }, "Ich habe bezahlt"))),
                                 React.createElement("div", { className: "eyebrow" }, "Im Zugang enthalten"),
@@ -22759,7 +22822,7 @@ function App() {
                                             setCalendarFeedToken(token);
                                         }
                                         catch (err) {
-                                            showToast("Konnte nicht eingerichtet werden:\n" + err.message);
+                                            showToast("Konnte nicht eingerichtet werden:\n" + fehlerText(err), "error");
                                         }
                                         finally {
                                             setCalendarFeedBusy(false);
@@ -22776,7 +22839,7 @@ function App() {
                                                     showToast("Link kopiert");
                                                 }
                                                 catch (err) {
-                                                    showToast("Konnte nicht kopiert werden.");
+                                                    showToast("Konnte nicht kopiert werden.", "error");
                                                 }
                                             } }, "Kopieren")),
                                     React.createElement("div", { style: { display: "flex", gap: 14, marginTop: 12 } },
@@ -22790,7 +22853,7 @@ function App() {
                                                     showToast("Neuer Link erzeugt");
                                                 }
                                                 catch (err) {
-                                                    showToast("Fehler:\n" + err.message);
+                                                    showToast("Fehler:\n" + fehlerText(err), "error");
                                                 }
                                                 finally {
                                                     setCalendarFeedBusy(false);
@@ -22805,7 +22868,7 @@ function App() {
                                                     setCalendarFeedToken(null);
                                                 }
                                                 catch (err) {
-                                                    showToast("Fehler:\n" + err.message);
+                                                    showToast("Fehler:\n" + fehlerText(err), "error");
                                                 }
                                                 finally {
                                                     setCalendarFeedBusy(false);
@@ -22922,7 +22985,7 @@ function App() {
                                         showFlash("✓ Neuer Code erzeugt");
                                     }
                                     catch (e) {
-                                        showToast("Code konnte nicht erzeugt werden:\n" + (e.message || e));
+                                        showToast("Code konnte nicht erzeugt werden:\n" + (e.message || e), "error");
                                     }
                                 } }, "Neuen Code erzeugen")),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet. Über Per WhatsApp teilen verschickst du App-Link, Code und eine kurze Anleitung in einer Nachricht."))),
@@ -22947,7 +23010,7 @@ function App() {
                                                 await deleteSchoolLocation(school.id, loc.id);
                                             }
                                             catch (e) {
-                                                showToast("Standort konnte nicht gelöscht werden:\n" + e.message);
+                                                showToast("Standort konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
                                                 return;
                                             }
                                             setStudents(prev => (prev || []).map(s => s.location_id === loc.id ? { ...s, location_id: "" } : s));
@@ -23262,7 +23325,10 @@ function App() {
                                 offene.length > 0 && React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "baseline" } },
                                     React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, "Offen (noch einzul\u00F6sen)"),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(summeOffen))),
-                                (vouchers || []).length === 0
+                                vouchersErr
+                                    ? React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 13.5, color: "var(--red-ink)", background: "var(--red-soft)", border: "1px solid var(--red)", whiteSpace: "pre-line" } },
+                                        "Gutscheine konnten nicht geladen werden.\n" + vouchersErr)
+                                    : (vouchers || []).length === 0
                                     ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Noch keine Gutscheine angelegt.")
                                     : React.createElement("div", { className: "card", style: { padding: "6px 14px" } },
                                         (vouchers || []).map((v, i) => {
@@ -23493,7 +23559,7 @@ function App() {
             URL.revokeObjectURL(url);
         }
         catch (e) {
-            showToast("Fahrtenbuch konnte nicht exportiert werden.");
+            showToast("Fahrtenbuch konnte nicht exportiert werden.", "error");
         }
     }
     /* ── DATEV-Buchungsstapel (EXTF) für einen Monat ────────────────────────────────────────
@@ -23615,7 +23681,7 @@ function App() {
             showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen.");
         }
         catch (e) {
-            showToast("Export fehlgeschlagen: " + (e.message || "unbekannt"));
+            showToast("Export fehlgeschlagen: " + (e.message || "unbekannt"), "error");
         }
     }
     // Alle Rechnungen (über eigene Schüler hinweg) als CSV exportieren, z.B. für den Steuerberater.
@@ -23686,7 +23752,7 @@ function App() {
             URL.revokeObjectURL(url);
         }
         catch (e) {
-            showToast("Backup konnte nicht erstellt werden.");
+            showToast("Backup konnte nicht erstellt werden.", "error");
         }
     }
     function renderVideos() {
@@ -23731,7 +23797,7 @@ function App() {
                 setVideos(list => list.filter(x => x.id !== v.id));
             }
             catch (e) {
-                showToast("Löschen fehlgeschlagen:\n" + e.message);
+                showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
             }
         }
         return React.createElement("div", { className: "pad readable-shell" },
@@ -24895,7 +24961,9 @@ function App() {
                                 React.createElement("span", { className: "search-trigger-hint" }, "⌘K")),
                             React.createElement("div", { style: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5 } },
                                 React.createElement(WeatherWidget, { city: myCity, weather: weather }),
-                                React.createElement("div", { className: "save-pill" }, saved ? "✓ Gespeichert" : "Speichert…")),
+                                React.createElement("button", { className: "save-pill" + (saveError ? " err" : ""), onClick: () => { if (saveError) retrySave(); },
+                                    title: saveError ? "Erneut speichern" : undefined },
+                                    saveError ? "Nicht gespeichert · erneut" : (saved ? "✓ Gespeichert" : "Speichert…"))),
                             // Neu (spec 4.1): Fahrlehrer-Avatar rechts im Header, dieselbe Bild-/Initialen-Quelle
                             // wie der bestehende Profil-Avatar auf der Startseite (profileData.avatar_url/teacherName).
                             React.createElement("button", { onClick: () => { setSettingsScreen("profil"); setView("einstellungen"); }, "aria-label": "Profil", style: { padding: 0, border: "none", background: "none", cursor: "pointer", flexShrink: 0 } },
@@ -26062,7 +26130,7 @@ function App() {
                                         setCityTplModal(m => m ? { ...m, mine } : m);
                                     }
                                     catch (e) {
-                                        showToast("Konnte nicht zurückziehen:\n" + (e.message || e));
+                                        showToast("Konnte nicht zurückziehen:\n" + (e.message || e), "error");
                                     } } }, "Zur\u00FCckziehen"));
                         }),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, fontSize: 13 }, onClick: proposeCurrentStrecken, disabled: !myCity }, "+ Aktuelle Strecken vorschlagen")),
@@ -31782,7 +31850,7 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
                                 setModellEdit(null);
                                 ladeModelle();
                             }
-                            catch (e) { showToast(e.message || "Konnte nicht gespeichert werden"); }
+                            catch (e) { showToast(e.message || "Konnte nicht gespeichert werden", "error"); }
                         } }, "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setModellEdit(null) }, "Abbrechen"))));
 }
