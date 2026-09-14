@@ -3102,7 +3102,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.5.2";
+const APP_VERSION = "2.6.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3246,6 +3246,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.6.0", date: "September 2026", changes: [
+            "Streckenaufzeichnung geht nicht mehr verloren, wenn die App zwischendurch geschlossen wird. Beim n\u00E4chsten Start fragt die App, was mit der angefangenen Aufzeichnung passieren soll: Strecke speichern, Aufzeichnung fortsetzen, verwerfen oder sp\u00E4ter entscheiden. Vorher war sie in zwei F\u00E4llen einfach weg - wenn man den Hinweis wegtippte, und wenn die Fahrstunde es vor dem Schlie\u00DFen nicht mehr in die Cloud geschafft hatte",
+            "Die aufgezeichneten Punkte werden jetzt zus\u00E4tzlich in dem Moment gesichert, in dem die App in den Hintergrund geht oder geschlossen wird - vorher nur alle 1,2 Sekunden w\u00E4hrend der Fahrt",
+        ] },
     { v: "2.5.2", date: "September 2026", changes: [
             "Die Illustrationen auf den Termin-Karten sind wieder so gro\u00DF wie vorher. Beim Beheben der Text\u00FCberlappung waren sie zu klein geraten - jetzt behalten sie ihre Gr\u00F6\u00DFe, und stattdessen ist die Textspalte schmaler, sodass sich beide nicht mehr \u00FCberlagern",
         ] },
@@ -10381,6 +10385,11 @@ function App() {
     const recActiveRef = useRef(false);
     const [recSession, setRecSession] = useState(null); // null | {studentId,lessonId,studentName}
     const [recUi, setRecUi] = useState({ dist: 0, dur: 0, n: 0, tick: 0 });
+    // Gefundene, nicht beendete Aufzeichnung aus einem abgestürzten/geschlossenen App-Lauf.
+    // null | {buf, stu} - wird als eigenes Sheet mit drei echten Möglichkeiten angeboten
+    // (fortsetzen / Strecke sichern / verwerfen). Vorher war es ein Ja-Nein-Dialog, bei dem
+    // "Abbrechen" die Aufzeichnung gelöscht hat (Rückmeldung Fabian 2026-09-14).
+    const [recRestore, setRecRestore] = useState(null);
     // Prüfungssimulation: läuft wie die Live-Aufzeichnung als eigene Sitzung, die beim Navigieren
     // erhalten bleibt, bis sie abgeschlossen oder abgebrochen wird.
     const [pruefungssim, setPruefungssim] = useState(null); // null | {studentId,studentName,startedAt,step,draft,entries}
@@ -10427,10 +10436,39 @@ function App() {
     useEffect(() => {
         if (!recSession)
             return;
-        function onVisible() { if (document.visibilityState === "visible" && recSession && !recWakeLockRef.current)
-            acquireRecWakeLock(); }
+        // Zwischenspeicher sofort schreiben, sobald die App in den Hintergrund geht oder geschlossen
+        // wird. Ohne das hing es am 1,2-Sekunden-Takt in onPoint, und wer die App direkt nach dem
+        // Start wegwischte, verlor alles seither Aufgezeichnete. pagehide feuert auf iOS
+        // zuverlässiger als beforeunload (Rückmeldung Fabian 2026-09-14).
+        function pufferJetztSchreiben() {
+            if (!recActiveRef.current || !recPtsRef.current.length)
+                return;
+            try {
+                localStorage.setItem(recBufferKey(uid), JSON.stringify({
+                    studentId: recSession.studentId, lessonId: recSession.lessonId,
+                    studentName: recSession.studentName, startedAt: recStartRef.current,
+                    zuletzt: Date.now(), pts: recPtsRef.current }));
+            }
+            catch (_) { }
+        }
+        function onVisible() {
+            if (document.visibilityState === "visible") {
+                if (recSession && !recWakeLockRef.current)
+                    acquireRecWakeLock();
+            }
+            else
+                pufferJetztSchreiben();
+        }
         document.addEventListener("visibilitychange", onVisible);
-        return () => document.removeEventListener("visibilitychange", onVisible);
+        window.addEventListener("pagehide", pufferJetztSchreiben);
+        return () => {
+            document.removeEventListener("visibilitychange", onVisible);
+            window.removeEventListener("pagehide", pufferJetztSchreiben);
+        };
+        // Abhaengigkeiten bewusst nur [recSession]: uid wird weiter unten im Funktionskoerper
+        // deklariert und ist beim Auswerten der Abhaengigkeitsliste (waehrend des Renders) noch
+        // in der temporalen Todeszone - "Cannot access 'uid' before initialization". Im Callback
+        // selbst ist der Zugriff unproblematisch, der laeuft erst nach dem Render.
     }, [recSession]);
     useEffect(() => () => { recActiveRef.current = false; if (recWatchRef.current != null) {
         try {
@@ -11150,36 +11188,23 @@ function App() {
         if (!buf || !Array.isArray(buf.pts) || buf.pts.length === 0)
             return;
         const stu = students.find(s => s.id === buf.studentId);
-        const lesson = stu && (stu.lessons || []).find(l => l.id === buf.lessonId);
-        if (!stu || !lesson) {
+        // Nur wenn der SCHÜLER weg ist, lässt sich nichts mehr zuordnen - dann verfällt der Puffer.
+        // Eine fehlende Fahrstunde ist dagegen genau der Fall, um den es hier geht: startRecording
+        // legt die Stunde lokal an und schreibt sie erst mit 500ms Verzögerung in die Cloud. Wird
+        // die App vorher geschlossen, kam sie dort nie an - und der bisherige Code hat daraufhin
+        // die komplette aufgezeichnete Strecke gelöscht. Sie wird jetzt beim Sichern neu angelegt.
+        if (!stu) {
             try {
                 localStorage.removeItem(recBufferKey(uid));
             }
             catch (_) { }
             return;
         }
-        (async () => {
-            // Erst warten, bis der Dialog-Host wirklich gemountet ist (siehe waitForConfirmHost) -
-            // sonst würde askConfirm sich selbst automatisch mit "true" beantworten, ohne dass der
-            // Nutzer den Dialog je zu sehen bekommt.
-            const hostReady = await waitForConfirmHost();
-            if (!hostReady) return;
-            const min = Math.max(0, Math.round((Date.now() - buf.startedAt) / 60000));
-            // Name lokal berechnet statt über dispName() - dispName wird erst weiter unten im
-            // Funktionskörper definiert und wäre hier aus demselben TDZ-Grund riskant.
-            const stuName = [((stu.vorname || "").trim()), ((stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler";
-            const ok = await askConfirm({ title: "Unterbrochene Streckenaufzeichnung gefunden",
-                message: "Für " + (buf.studentName || stuName) + " liegen noch " + buf.pts.length + " aufgezeichnete Punkte aus einer nicht beendeten Aufzeichnung vor (Start vor " + (min < 1 ? "weniger als einer Minute" : min + (min === 1 ? " Minute" : " Minuten")) + "). Jetzt fortsetzen und weiter aufzeichnen?",
-                confirmLabel: "Fortsetzen" });
-            if (ok)
-                recResumeExecRef.current && recResumeExecRef.current(buf, stu);
-            else {
-                try {
-                    localStorage.removeItem(recBufferKey(uid));
-                }
-                catch (_) { }
-            }
-        })();
+        // Name lokal berechnet statt über dispName() - dispName wird erst weiter unten im
+        // Funktionskörper definiert und wäre hier ein TDZ-Risiko.
+        const stuName = [((stu.vorname || "").trim()), ((stu.name || "").trim())].filter(Boolean).join(" ") || "Neuer Schüler";
+        setRecRestore({ buf: buf, stu: stu, name: buf.studentName || stuName,
+            minuten: Math.max(0, Math.round((Date.now() - buf.startedAt) / 60000)) });
     }, [uid, students]);
     // Eigene Profildaten (Name, Adresse, Telefon, Geburtsdatum), müssen beim ersten Login vollständig sein.
     // "complete" bewusst true bei Ladefehler, damit niemand fälschlich blockiert wird. Steht hier (statt weiter
@@ -11246,7 +11271,10 @@ function App() {
     // schließbar ist - dann soll weder Escape noch der Wisch tiefer durchgreifen).
     function closeTopOverlay() {
         if (cmdOpen) return false;
-        if (apptChoice) setApptChoice(null);
+        // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
+        // entscheiden", nicht "verwerfen". Beim nächsten Start wird wieder gefragt.
+        if (recRestore) setRecRestore(null);
+        else if (apptChoice) setApptChoice(null);
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
         else if (invoiceDraft) setInvoiceDraft(null);
@@ -11308,7 +11336,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    }, [recRestore, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
     const viewSlideRef = useRef(null);
     // Leichtes Einblenden bei jedem Screen-/Reiter-Wechsel (Tap UND Wisch-Geste treffen das
     // gleichermaßen, da beide letztlich view/studentTab/settingsScreen ändern) - bewusst
@@ -11456,7 +11484,7 @@ function App() {
             document.removeEventListener("touchmove", onMove);
             document.removeEventListener("touchend", onEnd);
         };
-    }, [cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -14543,7 +14571,7 @@ function App() {
         // war die gesamte Streckenaufzeichnung weg, sobald die Seite/App neu geladen wurde,
         // weil recPtsRef/recSession nur im JS-Heap lebten.
         try {
-            localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, pts: recPtsRef.current }));
+            localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, zuletzt: Date.now(), pts: recPtsRef.current }));
         }
         catch (_) { }
         // accuracy (Meter, falls vom Gerät geliefert) wird geprüft, bevor ein Punkt übernommen
@@ -14564,7 +14592,7 @@ function App() {
                     recLastUiRef.current = now;
                     setRecUi(u => ({ dist: rmapPathLen(arr), dur: (now - recStartRef.current) / 1000, n: arr.length, tick: u.tick + 1 }));
                     try {
-                        localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, pts: arr }));
+                        localStorage.setItem(recBufferKey(uid), JSON.stringify({ studentId, lessonId, studentName, startedAt: recStartRef.current, zuletzt: now, pts: arr }));
                     }
                     catch (_) { }
                 }
@@ -14682,6 +14710,39 @@ function App() {
         recPtsRef.current = [];
         setRecSession(null);
         setRecUi({ dist: 0, dur: 0, n: 0, tick: 0 });
+    };
+    // Eine unterbrochene Aufzeichnung sichern, OHNE sie fortzusetzen - der Normalfall, wenn die
+    // Fahrstunde längst vorbei ist und die App nur zwischendurch geschlossen wurde. Vorher gab es
+    // diese Möglichkeit nicht: wer "Fortsetzen" ablehnte, verlor die Strecke (Rückmeldung 2026-09-14).
+    const streckeAusPufferSichern = (buf, stu) => {
+        const pts = bfRecAusduennen((buf.pts || []).slice(), 1500);
+        if (pts.length < 2) {
+            showToast("Zu wenige Punkte aufgezeichnet - Strecke nicht gespeichert.", "error");
+            try {
+                localStorage.removeItem(recBufferKey(uid));
+            }
+            catch (_) { }
+            return;
+        }
+        const route = { pts, dist: Math.round(rmapPathLen(pts)),
+            dur: Math.round(((buf.zuletzt || buf.startedAt) - buf.startedAt) / 1000),
+            recordedAt: new Date(buf.startedAt).toISOString() };
+        const aktuell = (students || []).find(x => x.id === stu.id) || stu;
+        const vorhanden = (aktuell.lessons || []).some(l => l.id === buf.lessonId);
+        // Fehlt die Fahrstunde, wird sie mit derselben ID neu angelegt - sie war lokal schon da,
+        // hat es aber vor dem Schließen der App nicht mehr in die Cloud geschafft.
+        const lessons = vorhanden
+            ? (aktuell.lessons || []).map(l => l.id === buf.lessonId ? { ...l, route } : l)
+            : [{ id: buf.lessonId, date: ymd(new Date(buf.startedAt)), thema: "", gut: "", schlecht: "",
+                    route, ratings: {}, note: "" }, ...(aktuell.lessons || [])];
+        writeStudent({ ...aktuell, lessons });
+        try {
+            localStorage.removeItem(recBufferKey(uid));
+        }
+        catch (_) { }
+        showToast(vorhanden
+            ? "Strecke gesichert (" + rmapFmtDist(route.dist) + ")."
+            : "Strecke gesichert, Fahrstunde neu angelegt (" + rmapFmtDist(route.dist) + ").");
     };
     // ── Prüfungssimulation (läuft wie die Streckenaufzeichnung weiter beim Navigieren) ──
     function startPruefungssim(studentId) {
@@ -27181,6 +27242,36 @@ function App() {
                     counterForm.error && React.createElement("div", { style: { fontSize: 13, color: "var(--red)", marginBottom: 12 } }, counterForm.error),
                     React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8, background: "#25D366", borderColor: "#25D366" }, disabled: counterForm.busy, onClick: sendCounterProposal }, counterForm.busy ? "Wird gespeichert\u2026" : "Neue Zeit senden"),
                     React.createElement("button", { className: "btn btn-ghost btn-block", disabled: counterForm.busy, onClick: () => setCounterForm(null) }, "Abbrechen")))),
+        // Unterbrochene Streckenaufzeichnung: drei echte Möglichkeiten statt Ja/Nein. Vorher war
+        // das ein askConfirm, dessen "Abbrechen" die Aufzeichnung gelöscht hat - ein Fahrlehrer
+        // verlor so regelmäßig die Strecke, wenn er die App zwischendurch geschlossen hatte
+        // (Rückmeldung 2026-09-14). Wegtippen behält den Puffer und fragt beim nächsten Start erneut.
+        recRestore && React.createElement("div", { onClick: () => setRecRestore(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Unterbrochene Streckenaufzeichnung", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
+                    padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)" } },
+                React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, "Nicht beendete Streckenaufzeichnung"),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 5, marginBottom: 18, lineHeight: 1.5 } },
+                    "Für " + recRestore.name + " liegen " + (recRestore.buf.pts || []).length + " aufgezeichnete Punkte von vor "
+                        + (recRestore.minuten < 60 ? recRestore.minuten + " Minuten" : Math.round(recRestore.minuten / 60) + " Stunden") + ". Die Aufzeichnung wurde nicht beendet."),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 },
+                        onClick: () => { const r = recRestore; setRecRestore(null); streckeAusPufferSichern(r.buf, r.stu); } },
+                    "Strecke speichern"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 },
+                        onClick: () => { const r = recRestore; setRecRestore(null); recResumeExecRef.current && recResumeExecRef.current(r.buf, r.stu); } },
+                    "Aufzeichnung fortsetzen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, color: "var(--red-ink)" },
+                        onClick: async () => { const r = recRestore;
+                            if (!(await askConfirm({ title: "Aufgezeichnete Strecke verwerfen?",
+                                message: "Die " + (r.buf.pts || []).length + " aufgezeichneten Punkte werden gelöscht. Das lässt sich nicht rückgängig machen." })))
+                                return;
+                            setRecRestore(null);
+                            try {
+                                localStorage.removeItem(recBufferKey(uid));
+                            }
+                            catch (_) { } } },
+                    "Verwerfen"),
+                React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setRecRestore(null) }, "Später entscheiden"))),
         apptChoice && React.createElement("div", { onClick: () => setApptChoice(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
