@@ -3092,7 +3092,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.6.5";
+const APP_VERSION = "2.6.6";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -31177,14 +31177,28 @@ function BookingPage({ code, appMode, onLogout }) {
         const day = wh && typeof wh === "object" ? wh[key] : null;
         return (day && day.von) ? day.von : "09:00";
     }
+    // Standard-Endzeit: eine Fahrstunde (45 Min) nach dem Start, aber nie ueber das
+    // Arbeitszeitfenster des Tages hinaus - sonst stuende im "Bis"-Menue direkt nach dem
+    // Oeffnen ein Wert, den die Liste selbst gar nicht anbietet, und der Vorschlag scheiterte
+    // erst beim Absenden an withinWorkHours().
+    function defaultSlotEnd(dateStr, start) {
+        const key = DOW_KEYS[new Date(dateStr + "T00:00:00").getDay()];
+        const wh = info && info.work_hours;
+        const day = wh && typeof wh === "object" ? wh[key] : null;
+        const end = addMinutesToTime(start, 45);
+        if (day && day.bis && end > day.bis)
+            return day.bis;
+        return end;
+    }
     function openForm(dateStr) {
         // Namen aus dem gespeicherten myName vorbelegen (erste Wort = Vorname, Rest = Nachname)
         const parts = (myName || "").trim().split(/\s+/);
         const vn = parts.length ? parts[0] : "";
         const nn = parts.length > 1 ? parts.slice(1).join(" ") : "";
         const d0 = dateStr || ymd(new Date());
+        const st0 = defaultSlotStart(d0);
         setForm({ vorname: vn, nachname: nn, note: "",
-            slots: [{ date: d0, start: defaultSlotStart(d0), end: "10:00", art: "" }] });
+            slots: [{ date: d0, start: st0, end: defaultSlotEnd(d0, st0), art: "" }] });
         setErr("");
         setSfStatus(null);
         let pin = "";
@@ -31202,7 +31216,8 @@ function BookingPage({ code, appMode, onLogout }) {
     }
     function addSlot() {
         setForm(f => { var _a; const d0 = ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date());
-            return ({ ...f, slots: [...f.slots, { date: d0, start: defaultSlotStart(d0), end: "10:00", art: "" }] }); });
+            const st = defaultSlotStart(d0);
+            return ({ ...f, slots: [...f.slots, { date: d0, start: st, end: defaultSlotEnd(d0, st), art: "" }] }); });
     }
     function removeSlot(i) {
         setForm(f => ({ ...f, slots: f.slots.filter((_, idx) => idx !== i) }));
@@ -31246,17 +31261,46 @@ function BookingPage({ code, appMode, onLogout }) {
                     if (idx !== i)
                         return s;
                     const merged = { ...s, ...patch };
-                    if (day2 && day2.von && day2.bis) {
-                        if (merged.start && (merged.start < day2.von || merged.start > day2.bis))
-                            merged.start = day2.von;
-                        if (merged.end && (merged.end < day2.von || merged.end > day2.bis))
-                            merged.end = "";
+                    const mn2 = (t) => { const [h4, m4] = (t || "0:0").split(":").map(Number); return h4 * 60 + m4; };
+                    // Bisherige Dauer merken, um sie hinter dem (ggf. korrigierten) Start
+                    // wiederherzustellen.
+                    const bisher2 = (s.start && s.end && mn2(s.end) > mn2(s.start)) ? mn2(s.end) - mn2(s.start) : 45;
+                    if (day2 && day2.von && day2.bis && merged.start && (merged.start < day2.von || merged.start > day2.bis))
+                        merged.start = day2.von;
+                    const grenze2 = (day2 && day2.bis) ? day2.bis : "23:45";
+                    // Die Endzeit nie leeren, sondern neu setzen: das "Bis"-Menue zeigt sonst
+                    // seinen Ersatzwert an, waehrend im Zustand gar keine Endzeit mehr steht -
+                    // abgeschickt wuerde dann ein Termin ohne Ende, obwohl eines dasteht.
+                    if (!merged.end || mn2(merged.end) <= mn2(merged.start) || merged.end > grenze2) {
+                        merged.end = addMinutesToTime(merged.start, bisher2);
+                        if (merged.end > grenze2 || mn2(merged.end) <= mn2(merged.start))
+                            merged.end = mn2(grenze2) > mn2(merged.start) ? grenze2 : addMinutesToTime(merged.start, 15);
                     }
                     return merged;
                 }) }));
             return;
         }
-        setForm(f => ({ ...f, slots: f.slots.map((s, idx) => idx === i ? { ...s, ...patch } : s) }));
+        setForm(f => ({ ...f, slots: f.slots.map((s, idx) => {
+                if (idx !== i)
+                    return s;
+                const merged = { ...s, ...patch };
+                // Startzeit verschoben: die bisherige Dauer mitnehmen, statt eine dadurch
+                // ungueltige Endzeit (Ende <= Start) stehen zu lassen - das "Bis"-Menue baut
+                // seine Liste ab dem Start auf und haette den alten Wert sonst still verworfen.
+                if (patch.start) {
+                    const mn = (t) => { const [h, m2] = (t || "0:0").split(":").map(Number); return h * 60 + m2; };
+                    const bisher = (s.start && s.end && mn(s.end) > mn(s.start)) ? mn(s.end) - mn(s.start) : 45;
+                    merged.end = addMinutesToTime(patch.start, bisher);
+                    const key3 = DOW_KEYS[new Date(merged.date + "T00:00:00").getDay()];
+                    const wh3 = info && info.work_hours;
+                    const day3 = wh3 && typeof wh3 === "object" ? wh3[key3] : null;
+                    if (day3 && day3.bis && merged.end > day3.bis)
+                        merged.end = day3.bis;
+                    if (mn(merged.end) <= mn(merged.start))
+                        merged.end = addMinutesToTime(merged.start, 15);
+                }
+                return merged;
+            }) }));
     }
     // Prüft, ob ein Termin (Datum + Start/Ende) buchbar ist.
     // Kein Eintrag für den Tag, oder Eintrag ohne Zeiten und ohne Sperrung = ganztägig buchbar.
@@ -31728,54 +31772,64 @@ function BookingPage({ code, appMode, onLogout }) {
                             React.createElement("label", null, "Datum",
                             React.createElement("input", { type: "date", min: ymd(new Date()), value: s.date, onChange: e => updateSlot(i, { date: e.target.value }) }))),
                         (() => {
-                            // Zeitfenster des gewählten Tages ermitteln. Die Auswahl enthält nur Zeiten
-                            // innerhalb dieses Fensters, in Viertelstunden-Schritten, damit außerhalb
-                            // technisch gar nicht wählbar ist (nicht nur eine min/max-Empfehlung).
+                            // Aufklappmenues statt Chip-Reihen (Wunsch Fabian, 2026-09-15): Start-
+                            // UND Endzeit sind hier frei einstellbar, in Viertelstunden-Schritten
+                            // innerhalb der Arbeitszeit des Tages. Vorher liess sich nur die
+                            // Startzeit antippen, das Ende ausschliesslich ueber die Schnellwahl
+                            // "1/2/3 Fahrstunden" - eine krumme Dauer war gar nicht waehlbar.
+                            // Die Dauer steht jetzt in den Bis-Eintraegen ("10:30 Uhr - 45 Min,
+                            // 1 Fahrstunde"), die separate Chip-Reihe entfaellt dadurch.
                             const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
                             const wh = info && info.work_hours;
                             const day = wh && typeof wh === "object" ? wh[key] : null;
                             const winStart = (day && day.von) ? day.von : "00:00";
                             const winEnd = (day && day.bis) ? day.bis : "23:45";
-                            const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+                            const toMin = (t) => { const [h, m] = (t || "0:0").split(":").map(Number); return h * 60 + m; };
                             const toHM = (min) => String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
-                            // 15-Minuten-Schritte statt 5 - eine handliche Chip-Reihe statt eines
-                            // <select> mit 90+ Einträgen. Das war die auffälligste Webseiten-Formular-
-                            // Stelle im Bereich: eine Aufklapp-Liste mit Betriebssystem-Optik direkt
-                            // neben der bereits vorhandenen Chip-Schnellwahl für die Dauer - zwei
-                            // völlig verschiedene Bedienmuster in einem Formular.
+                            // Der letzte Wert des Fensters scheidet als Start aus - danach bliebe
+                            // keine Viertelstunde mehr fuer ein Ende uebrig.
                             const startOpts = [];
-                            for (let m = toMin(winStart); m <= toMin(winEnd); m += 15)
+                            for (let m = toMin(winStart); m <= toMin(winEnd) - 15; m += 15)
                                 startOpts.push(toHM(m));
-                            // Effektiver Anzeigewert: liegt der gespeicherte Wert außerhalb des (neuen) Fensters,
-                            // wird nur für die Anzeige der erste gültige Wert genommen (kein setState beim Rendern).
+                            if (!startOpts.length)
+                                startOpts.push(winStart);
+                            // Effektiver Anzeigewert: liegt der gespeicherte Wert ausserhalb des (neuen)
+                            // Fensters, wird nur für die Anzeige der erste gültige Wert genommen
+                            // (kein setState beim Rendern).
                             const effStart = startOpts.indexOf(s.start) !== -1 ? s.start : (startOpts[0] || "00:00");
-                            return React.createElement("div", { className: "field", style: { marginBottom: 0 } },
-                                React.createElement("label", null, "Von"),
-                                React.createElement("div", { style: { display: "flex", gap: 7, overflowX: "auto", paddingBottom: 3, marginTop: 6 } }, startOpts.map(t => {
-                                    const on = t === effStart;
-                                    return React.createElement("button", { key: t, onClick: () => updateSlot(i, { start: t }), style: { flexShrink: 0, padding: "8px 13px", borderRadius: 9, border: "1.5px solid " + (on ? "var(--orange)" : "var(--line)"),
-                                            background: on ? "var(--orange-soft)" : "var(--card)", fontSize: 13, fontWeight: 700, fontVariantNumeric: "tabular-nums",
-                                            color: on ? "var(--orange-deep)" : "var(--ink)" } }, t);
-                                })));
-                        })(),
-                        (() => {
-                            // Schnellauswahl: 1/2/3 Fahrstunden à 45 Minuten ab der gewählten Startzeit.
-                            // Ein Knopf ist nur anwählbar, wenn die berechnete Endzeit noch ins erlaubte
-                            // Zeitfenster des Tages passt.
-                            const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
-                            const wh = info && info.work_hours;
-                            const day = wh && typeof wh === "object" ? wh[key] : null;
-                            const winEnd = (day && day.bis) ? day.bis : "23:45";
-                            return React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 9 } }, [1, 2, 3].map(n => {
-                                const end = addMinutesToTime(s.start || "09:00", n * 45);
-                                const disabled = end > winEnd;
-                                return React.createElement("button", { key: n, disabled: disabled, onClick: () => updateSlot(i, { end }), style: { flex: 1, padding: "8px 6px", borderRadius: 9, border: "1.5px solid " + (s.end === end ? "var(--orange)" : "var(--line)"),
-                                        background: s.end === end ? "var(--orange-soft)" : "var(--card)", fontSize: 12.5, fontWeight: 700,
-                                        color: disabled ? "var(--muted)" : (s.end === end ? "var(--orange-deep)" : "var(--ink)"), opacity: disabled ? 0.4 : 1 } },
-                                    n,
-                                    " Fahrstunde",
-                                    n > 1 ? "n" : "");
-                            }));
+                            // Endzeiten ab einer Viertelstunde nach dem Start, hoechstens vier Stunden
+                            // spaeter und nie ueber die Arbeitszeit hinaus. Vier Stunden liegen weit
+                            // ueber allem, was als Fahrstunde vorkommt (3 FS = 135 Min), halten die
+                            // Liste aber handlich.
+                            const endGrenze = Math.min(toMin(winEnd), toMin(effStart) + 240);
+                            const endOpts = [];
+                            for (let m = toMin(effStart) + 15; m <= endGrenze; m += 15)
+                                endOpts.push(toHM(m));
+                            const effEnd = endOpts.indexOf(s.end) !== -1 ? s.end
+                                : (endOpts.find(t => toMin(t) - toMin(effStart) === 45) || endOpts[0] || "");
+                            // Kurze Eintraege: ein <select> kuerzt am rechten Rand mit Ellipse ab
+                            // (siehe select{} im CSS), und "08:45 Uhr - 45 Min, 1 Fahrstunde" passte
+                            // auf 375px Breite nicht mehr hinein. Die glatten Vielfachen tragen den
+                            // Namen, den die Schueler kennen, alles andere die reine Minutenzahl;
+                            // die genaue Dauer steht darunter als eigene Zeile.
+                            const FS_TEXT = { 45: "1 Fahrstunde", 90: "2 Fahrstunden", 135: "3 Fahrstunden" };
+                            const endLabel = (t) => {
+                                const d = toMin(t) - toMin(effStart);
+                                return t + " Uhr \u2013 " + (FS_TEXT[d] || (d + " Min"));
+                            };
+                            const dauer = effEnd ? toMin(effEnd) - toMin(effStart) : 0;
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                                    React.createElement("label", { htmlFor: "slot-von-" + i }, "Von"),
+                                    React.createElement("select", { id: "slot-von-" + i, value: effStart, onChange: e => updateSlot(i, { start: e.target.value }) }, startOpts.map(t => React.createElement("option", { key: t, value: t }, t + " Uhr")))),
+                                React.createElement("div", { className: "field", style: { marginBottom: 0 } },
+                                    React.createElement("label", { htmlFor: "slot-bis-" + i }, "Bis"),
+                                    React.createElement("select", { id: "slot-bis-" + i, value: effEnd, onChange: e => updateSlot(i, { end: e.target.value }) }, endOpts.map(t => React.createElement("option", { key: t, value: t }, endLabel(t))))),
+                                dauer > 0 && (dauer < 45
+                                    ? React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
+                                        "Nur " + dauer + " Minuten - das ist k\u00FCrzer als eine Fahrstunde (45 Minuten). Bitte nur so vorschlagen, wenn du es mit deinem Fahrlehrer so besprochen hast.")
+                                    : React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 7 } },
+                                        "Dauer: " + dauer + " Minuten")));
                         })(),
                         (() => {
                             // Sonderfahrt-Auswahl: nur informativ (kein Hard-Block) - der Fahrlehrer
@@ -31790,18 +31844,12 @@ function BookingPage({ code, appMode, onLogout }) {
                             const chosen = s.art && sfStatus ? sfStatus.find(x => x.art_code === s.art) : null;
                             return React.createElement(React.Fragment, null,
                                 React.createElement("div", { className: "field", style: { marginTop: 10, marginBottom: 0 } },
-                                    React.createElement("label", null, "Art"),
-                                    React.createElement("div", { style: { display: "flex", gap: 7, overflowX: "auto", paddingBottom: 3, marginTop: 6 } }, artOptions.map(opt => {
-                                        const on = (s.art || "") === opt.code;
-                                        return React.createElement("button", { key: opt.code || "normal", onClick: () => updateSlot(i, { art: opt.code }),
-                                                style: { flexShrink: 0, padding: "8px 13px", borderRadius: 9, border: "1.5px solid " + (on ? "var(--orange)" : "var(--line)"),
-                                                    background: on ? "var(--orange-soft)" : "var(--card)", fontSize: 13, fontWeight: 700,
-                                                    color: on ? "var(--orange-deep)" : "var(--ink)" } }, opt.label);
-                                    }))),
+                                    React.createElement("label", { htmlFor: "slot-art-" + i }, "Art"),
+                                    React.createElement("select", { id: "slot-art-" + i, value: s.art || "", onChange: e => updateSlot(i, { art: e.target.value }) }, artOptions.map(opt => React.createElement("option", { key: opt.code || "normal", value: opt.code }, opt.label)))),
                                 chosen && !chosen.laenge_ok && React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
-                                    "Für " + chosen.label + " fehlt dir noch eine durchgehende 90-Minuten-Fahrt (Doppelstunde), wie gesetzlich vorgeschrieben. Wähle dafür am besten „2 Fahrstunden“ oben."),
+                                    "F\u00FCr " + chosen.label + " fehlt dir noch eine durchgehende 90-Minuten-Fahrt (Doppelstunde), wie gesetzlich vorgeschrieben. Stell dafür oben eine Endzeit 90 Minuten nach dem Start ein."),
                                 chosen && (chosen.total_ue + slotUe) > chosen.soll && React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
-                                    "Für " + chosen.label + " hättest du mit dieser Fahrt " + (chosen.total_ue + slotUe).toFixed(2).replace(".", ",") + " von " + chosen.soll + " UE - mehr als vorgeschrieben. Vielleicht lieber eine andere Sonderfahrt-Art wählen?"));
+                                    "F\u00FCr " + chosen.label + " h\u00E4ttest du mit dieser Fahrt " + (chosen.total_ue + slotUe).toFixed(2).replace(".", ",") + " von " + chosen.soll + " UE - mehr als vorgeschrieben. Vielleicht lieber eine andere Sonderfahrt-Art w\u00E4hlen?"));
                         })(),
                         (() => {
                             const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
