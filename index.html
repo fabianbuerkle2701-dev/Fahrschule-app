@@ -1151,12 +1151,19 @@
   [data-theme="dark"] .cal-today{box-shadow:0 0 0 2px var(--orange),0 10px 28px rgba(0,0,0,.35)}
   .cal-hourline{border-top:1px solid var(--line)}
   [data-theme="dark"] .cal-hourline{border-top-color:#38301F}
-  /* Wochenansicht Desktop: echtes 6-Spalten-Raster statt gestapelter Tageskarten – auf
-     schmalen Bildschirmen bleibt es die vertraute vertikale Liste. */
+  /* Wochenansicht Desktop: Tageskarten nebeneinander statt gestapelt – auf schmalen
+     Bildschirmen bleibt es die vertraute vertikale Liste.
+     Die Spaltenzahl waechst mit der Breite, statt ab 900px starr sechs zu sein: sechs Spalten
+     ergaben auf einem 1280er-Bildschirm rund 150px je Tag, und darin wurde die Terminzeile
+     (Farbstreifen + Bild + Uhrzeit + Name) so beschnitten, dass von "09:00" nur noch "09:"
+     uebrig blieb. Die Zeile braucht rund 300px, so viel wie sie auf dem Handy auch hat -
+     deshalb erst ab 1600px wirklich sechs Spalten (2026-09-15). */
   @media (min-width:900px){
-    .cal-week-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:12px;align-items:start}
+    .cal-week-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;align-items:start}
     .cal-week-grid .cal-day{margin-bottom:0!important}
   }
+  @media (min-width:1150px){ .cal-week-grid{grid-template-columns:repeat(3,1fr)} }
+  @media (min-width:1600px){ .cal-week-grid{grid-template-columns:repeat(6,1fr)} }
   /* ── ADK / Strecken: Zweispalten-Kartenraster auf Desktop ── */
   @media (min-width:900px){
     .sec-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;align-items:start}
@@ -3100,7 +3107,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.7.4";
+const APP_VERSION = "2.8.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -6491,6 +6498,49 @@ async function saveVerguetung(teacherId, modell, satz) {
     const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz: satz == null || satz === "" ? null : Number(satz) });
     if (error) { console.error(error); throw new Error(error.message || "Konnte nicht gespeichert werden"); }
 }
+/* ── Fahrschul-Dashboard: Schueler-Zuteilung und Akteneinsicht ──────────────────────────────
+   Alle fuenf RPCs pruefen serverseitig, dass der Aufrufer school_admin GENAU DIESER Fahrschule
+   ist (Migration schuladmin_dashboard_zuteilung). Der Client darf die Knoepfe also ruhig zeigen
+   oder verstecken - die Entscheidung faellt ohnehin in der Datenbank.
+   Warum ueberhaupt eigene RPCs: die RLS auf students laesst Lesen und Aendern nur dem Besitzer
+   und den per shared_with Freigegebenen zu. Ein Fahrschul-Admin kann fremde Schueler daher
+   weder auflisten noch umhaengen - das geht nur ueber SECURITY DEFINER. */
+async function fetchSchoolStudentsOverview(schoolId) {
+    const { data, error } = await sb.rpc("school_students_overview", { p_school_id: schoolId });
+    if (error) { console.error(error); throw new Error(fehlerText(error)); }
+    return (data || []).map(r => ({
+        id: r.student_id, vorname: r.vorname || "", name: r.name || "",
+        klasse: r.klasse || "", archived: !!r.archived,
+        teacherId: r.teacher_id, teacherName: r.teacher_name || "",
+        sharedWith: Array.isArray(r.shared_with) ? r.shared_with : [],
+        lessons: Number(r.lessons) || 0, minutes: Number(r.minutes) || 0,
+        tel: r.tel || "", locationId: r.location_id || null, createdAt: r.created_at || null,
+    }));
+}
+// Volle Akte eines Schuelers, auch wenn er einem anderen Fahrlehrer gehoert. Liefert exakt die
+// students-Zeile, also dasselbe Format wie fetchStudents - deshalb laeuft rowToStudent() darueber.
+async function fetchSchoolStudentAkte(studentId) {
+    const { data, error } = await sb.rpc("school_student_akte", { p_student_id: studentId });
+    if (error) { console.error(error); throw new Error(fehlerText(error)); }
+    const row = (data || [])[0];
+    if (!row) throw new Error("Dieser Schüler konnte nicht geladen werden.");
+    return rowToStudent(row);
+}
+// Besitzer wechseln. Eine vorhandene Freigabe an den neuen Besitzer raeumt die RPC selbst weg.
+async function schoolAssignStudent(studentId, teacherId) {
+    const { error } = await sb.rpc("school_assign_student", { p_student_id: studentId, p_teacher_id: teacherId });
+    if (error) { console.error(error); throw new Error(fehlerText(error)); }
+}
+// Zusaetzliche Freigabe setzen (p_on=true) oder entziehen - der Besitz bleibt unveraendert.
+async function schoolShareStudent(studentId, teacherId, an) {
+    const { error } = await sb.rpc("school_share_student", { p_student_id: studentId, p_teacher_id: teacherId, p_on: !!an });
+    if (error) { console.error(error); throw new Error(fehlerText(error)); }
+}
+async function fetchSchoolAssignmentLog(schoolId, limit) {
+    const { data, error } = await sb.rpc("school_assignment_log", { p_school_id: schoolId, p_limit: limit || 50 });
+    if (error) { console.error(error); return []; }
+    return data || [];
+}
 /* ════════ E-Rechnung (XRechnung, UBL 2.1 nach EN 16931) ════════
    BETA: Die Erzeugung deckt die Pflichtfelder ab und ist rechnerisch in sich konsistent
    (Positionssumme = Nettobetrag, Netto + Steuer = Brutto, ueber Rundungsfaelle geprueft).
@@ -8504,6 +8554,24 @@ function ToastConfirmHost() {
 function weekdayShort(d) { return new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short" }); }
 function dayMonth(d) { return new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }); }
 function isToday(d) { return ymd(d) === ymd(new Date()); }
+// ISO-Kalenderwoche (Montag als erster Tag, Woche 1 enthaelt den 4. Januar) - Fahrlehrer
+// planen und sprechen in KW, im Kalenderkopf stand sie bisher nirgends.
+function isoKW(d) {
+    const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+    t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+    const jahresStart = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+    return Math.ceil((((t - jahresStart) / 86400000) + 1) / 7);
+}
+// "14. - 19. September" statt "14.09. - 19.09.": ausgeschriebener Monat, und der Monatsname
+// steht nur einmal, solange die Woche nicht ueber einen Monatswechsel laeuft.
+function spanneLang(von, bis) {
+    const o = { timeZone: "Europe/Berlin" };
+    const mVon = von.toLocaleDateString("de-DE", { ...o, month: "long" });
+    const mBis = bis.toLocaleDateString("de-DE", { ...o, month: "long" });
+    return mVon === mBis
+        ? von.getDate() + ". – " + bis.getDate() + ". " + mBis
+        : von.getDate() + ". " + von.toLocaleDateString("de-DE", { ...o, month: "short" }) + " – " + bis.getDate() + ". " + bis.toLocaleDateString("de-DE", { ...o, month: "short" });
+}
 /* ════════ Feiertage ════════ */
 // Rein clientseitig berechnet, keine externe Quelle/Abhängigkeit. Die neun bundesweiten Feiertage
 // gelten überall in Deutschland; die übrigen hängen vom Bundesland der Fahrschule ab
@@ -21580,46 +21648,84 @@ function App() {
             // 150px im ersten Bildschirm, und zusammen mit den Blöcken darunter begann das
             // Wochenraster erst bei Pixel 678 von 739 nutzbaren - der Kalender zeigte beim Öffnen
             // keinen einzigen Termin. Welcher Bildschirm das ist, sagt der Reiter unten bereits.
-            React.createElement("div", { className: "seg", style: { marginBottom: 12 } },
-                React.createElement("button", { className: calMode === "woche" ? "on" : "", onClick: () => setCalMode("woche") }, "Woche"),
-                React.createElement("button", { className: calMode === "tag" ? "on" : "", onClick: () => setCalMode("tag") }, "Tag")),
-            // Stundenanzeige (UE diese Woche/Monat) bleibt bewusst ganz oben und immer sichtbar –
-            // für den Fahrlehrer die wichtigste Zahl auf einen Blick, kein Aufklappen nötig.
-            // 2026-09-14 kurzzeitig unter das Wochenraster verschoben, um Platz im ersten Bildschirm
-            // zu gewinnen - das war ein Fehler: ein Fahrlehrer hat noch am selben Tag gemeldet, dass
-            // er seine UE nicht mehr findet. Der Platzgewinn kommt aus Kopfkarte und doppeltem
-            // Aktionsbalken, nicht aus dieser Karte. Sie bleibt oben. Beide
-            // Zellen teilen bewusst denselben Ton (sky, die etablierte "Termine"-Kategoriefarbe der
-            // Fahrschüler-Seite, siehe kpi("sky","Termine",...)) statt zwei verschiedener Töne -
-            // unterschiedliche Farben pro Zelle wäre genau die bedeutungslose Farbaufteilung, die
-            // an anderer Stelle in diesem Redesign bewusst entfernt wurde.
-            React.createElement("div", { className: "card home-stats", style: { marginBottom: 14 } },
-                React.createElement("div", { className: "home-stat" },
-                    React.createElement("span", { className: "home-iconchip", style: { width: 30, height: 30, background: "var(--sky-bg)", color: "var(--sky-deep)" } },
+            // ── Kopfkarte ───────────────────────────────────────────────────────────────────
+            // Vorher standen hier vier lose Bloecke untereinander: Umschalter Woche/Tag, die
+            // UE-Karte, die Wochennavigation und die Pillen Karten/Zeitstrahl - vier Kanten,
+            // zwei verschiedene Umschalter-Muster direkt uebereinander, und der erste Termin
+            // begann weit unten. Jetzt EINE Karte: Navigation, Umschalter und UE-Zeile, durch
+            // eine Haarlinie getrennt.
+            // Die UE-Anzeige bleibt damit weiterhin ganz oben und immer sichtbar - genau das
+            // war die Vorgabe, nachdem ein Fahrlehrer sie am 2026-09-14 nicht mehr gefunden
+            // hatte, als sie unter das Wochenraster gerutscht war.
+            React.createElement("div", { className: "card", style: { padding: "13px 14px 11px", marginBottom: 14 } },
+                // Zeile 1: wo bin ich, und wie komme ich weiter
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, maxWidth: 440, margin: "0 auto" } },
+                    calMode === "woche" && React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche zurück",
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0, textAlign: "center" } },
+                        React.createElement("div", { className: "home-eyebrow" },
+                            calMode === "woche"
+                                ? ("KW " + isoKW(calWeek) + " · " + new Date(calWeek).getFullYear())
+                                : new Date(calDay).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long", year: "numeric" })),
+                        React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 17, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
+                            calMode === "woche"
+                                ? spanneLang(new Date(calWeek), new Date(weekEnd))
+                                : new Date(calDay).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "numeric", month: "long" }))),
+                    calMode === "woche" && React.createElement("button", { className: "btn btn-ghost", "aria-label": "Nächste Woche",
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
+                // Zeile 2: Zeitraum links, Darstellung rechts. Beides sind Ansichtsschalter und
+                // stehen deshalb nebeneinander statt in zwei getrennten Zeilen mit zwei Mustern.
+                // Die Darstellung als Symbolpaar: "Karten"/"Zeitstrahl" ausgeschrieben passte
+                // neben dem Zeitraum-Umschalter nicht auf 375px.
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginTop: 11, maxWidth: 440, margin: "11px auto 0" } },
+                    React.createElement("div", { className: "seg", style: { flex: 1, minWidth: 0, maxWidth: 240 } },
+                        React.createElement("button", { className: calMode === "woche" ? "on" : "", onClick: () => setCalMode("woche") }, "Woche"),
+                        React.createElement("button", { className: calMode === "tag" ? "on" : "", onClick: () => setCalMode("tag") }, "Tag")),
+                    (() => {
+                        const stil = calMode === "woche" ? calWeekStyle : calDayStyle;
+                        const setzen = calMode === "woche" ? setCalWeekStyle : setCalDayStyle;
+                        const knopf = (wert, label, pfade) => React.createElement("button", { key: wert, onClick: () => setzen(wert),
+                                "aria-label": label, "aria-pressed": stil === wert ? "true" : "false", title: label,
+                                style: { width: 44, height: 44, borderRadius: "var(--r-sm)", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                                    border: "1.5px solid " + (stil === wert ? "var(--orange)" : "var(--line)"),
+                                    background: stil === wert ? "var(--orange-soft)" : "transparent",
+                                    color: stil === wert ? "var(--orange-ink)" : "var(--ink-2)" } },
+                            React.createElement("svg", { width: "19", height: "19", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                                pfade.map((d, i) => React.createElement("path", { key: i, d: d }))));
+                        return React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } },
+                            knopf("karten", "Als Karten anzeigen", ["M3 5h18M3 12h18M3 19h18"]),
+                            knopf("zeitstrahl", "Als Zeitstrahl anzeigen", ["M6 3v18", "M6 7h13M6 13h9M6 19h11"]));
+                    })(),
+                    !(calMode === "woche" ? ymd(calWeek) === ymd(startOfWeek(new Date())) : isToday(calDay))
+                        && React.createElement("button", { className: "btn btn-ghost", style: { padding: "0 12px", minHeight: 44, flexShrink: 0, fontSize: 13 },
+                            onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalWeek(startOfWeek(d)); setCalDay(d); } }, "Heute")),
+                // Zeile 3: die wichtigste Zahl des Tages, durch eine Haarlinie abgesetzt statt
+                // in einer eigenen Karte mit eigener Kante.
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, maxWidth: 440, margin: "11px auto 0", paddingTop: 11, borderTop: "1px solid var(--line)" } },
+                    React.createElement("span", { className: "home-iconchip", style: { width: 30, height: 30, background: "var(--sky-bg)", color: "var(--sky-deep)", flexShrink: 0 } },
                         React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("circle", { cx: "12", cy: "12", r: "10" }),
                             React.createElement("path", { d: "M12 7v5l3 3" }))),
-                    React.createElement("span", null,
-                        React.createElement("div", { className: "home-stat-num" }, fmtUE(weekUE), React.createElement("span", { style: { fontSize: 13, fontWeight: 700, marginLeft: 3, opacity: .7 } }, "UE")),
-                        React.createElement("div", { className: "home-stat-label", style: { display: "flex", alignItems: "center", gap: 5 } },
-                            "Diese Woche",
-                            React.createElement(Help, { text: "UE = Unterrichtseinheit. 1 UE sind 45 Minuten. Gezählt werden nur bestätigte Termine." })))),
-                React.createElement("div", { className: "home-stat" },
-                    React.createElement("span", { className: "home-iconchip", style: { width: 30, height: 30, background: "var(--sky-bg)", color: "var(--sky-deep)" } },
-                        React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
-                            React.createElement("path", { d: "M8 2v4" }), React.createElement("path", { d: "M16 2v4" }), React.createElement("path", { d: "M3 10h18" }),
-                            React.createElement("path", { d: "M5 4h14a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" }))),
-                    React.createElement("span", null,
-                        React.createElement("div", { className: "home-stat-num" }, fmtUE(monthUE), React.createElement("span", { style: { fontSize: 13, fontWeight: 700, marginLeft: 3, opacity: .7 } }, "UE")),
-                        React.createElement("div", { className: "home-stat-label" }, new Date(calWeek).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long" }))))),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0, display: "flex", alignItems: "baseline", gap: 6, flexWrap: "wrap" } },
+                        React.createElement("span", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 17, fontVariantNumeric: "tabular-nums" } }, fmtUE(weekUE)),
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--ink-2)", fontWeight: 600 } }, "UE diese Woche"),
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--ink-3)" } }, "·"),
+                        React.createElement("span", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 15, fontVariantNumeric: "tabular-nums" } }, fmtUE(monthUE)),
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--ink-2)" } },
+                            "im " + new Date(calWeek).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long" }))),
+                    React.createElement(Help, { text: "UE = Unterrichtseinheit. 1 UE sind 45 Minuten. Gezählt werden nur bestätigte Termine." }))),
             // Der volle "+ Termin"-Balken ist 2026-09-14 entfallen: der [+] in der Tab-Leiste
             // öffnet dasselbe Formular, liegt näher am Daumen und ist auf jedem Bildschirm da.
             // Drei gleichrangige Wege zum selben Ziel auf einem Bildschirm waren einer zu viel.
-            attnCount > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden", border: "2px solid " + (attnUrgent ? "var(--red)" : "var(--amber)") } },
+            // Der Balken hatte einen 2px-Vollrahmen in Rot bzw. Amber - fuer eine Information,
+            // die fast jeden Tag dasteht, war das der lauteste Ton der ganzen Ansicht. Jetzt eine
+            // linke Akzentkante wie bei den uebrigen Hinweiskarten der App; die Dringlichkeit
+            // traegt weiterhin die Farbe, nur nicht mehr als Umrandung.
+            attnCount > 0 && React.createElement("div", { className: "card", style: { marginBottom: 14, overflow: "hidden", borderLeft: "4px solid " + (attnUrgent ? "var(--red)" : "var(--amber)") } },
                 React.createElement("button", { onClick: () => setPendingOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", textAlign: "left",
-                        background: attnUrgent ? "#FDECEA" : "var(--amber-bg)", borderBottom: pendingOpen ? "1px solid var(--line)" : "none",
-                        fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, color: attnUrgent ? "#B3362A" : "var(--amber)" } },
-                    React.createElement("span", { className: "home-iconchip", style: { background: "var(--card)", color: attnUrgent ? "var(--red)" : "var(--amber)", width: 30, height: 30, flexShrink: 0 } },
+                        background: attnUrgent ? "var(--red-soft)" : "var(--amber-bg)", borderBottom: pendingOpen ? "1px solid var(--line)" : "none",
+                        fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, color: attnUrgent ? "var(--red-ink)" : "var(--amber-ink)" } },
+                    React.createElement("span", { className: "home-iconchip", style: { background: "var(--card)", color: attnUrgent ? "var(--red-ink)" : "var(--amber-ink)", width: 30, height: 30, flexShrink: 0 } },
                         React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M8 2v4" }), React.createElement("path", { d: "M16 2v4" }), React.createElement("path", { d: "M3 10h18" }),
                             React.createElement("path", { d: "M5 4h14a2 2 0 0 1 2 2v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z" }))),
@@ -21658,14 +21764,6 @@ function App() {
                                     React.createElement("rect", { x: "9", y: "13", width: "12", height: "9", rx: "2" })),
                                 "Gegenvorschlag senden")))))),
             calMode === "woche" ? React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px", minWidth: 44 }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
-                    React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14 } }, dayMonth(calWeek) + " – " + dayMonth(weekEnd)),
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
-                React.createElement("div", { style: { display: "flex", justifyContent: "center", gap: 6, marginBottom: 14 } },
-                    [["karten", "Karten"], ["zeitstrahl", "Zeitstrahl"]].map(([v, lbl]) => React.createElement("button", { key: v, onClick: () => setCalWeekStyle(v), style: { padding: "5px 13px", minHeight: 44, borderRadius: 99, fontSize: 12.5, fontWeight: 700,
-                            border: "1.5px solid " + (calWeekStyle === v ? "var(--orange)" : "var(--line)"),
-                            background: calWeekStyle === v ? "var(--orange-soft)" : "transparent", color: calWeekStyle === v ? "var(--orange-deep)" : "var(--muted)" } }, lbl))),
                 calWeekStyle === "karten"
                     ? React.createElement("div", { className: "cal-week-grid" }, days.map(d => dayCard(d)))
                     : weekTimeline(days)) : React.createElement(React.Fragment, null,
@@ -21693,18 +21791,9 @@ function App() {
                                 React.createElement("span", { style: { width: 4, height: 4, borderRadius: "50%", background: dActive ? "#181512" : "var(--orange)", opacity: hatTermine ? 1 : 0 } }));
                         })),
                     React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche vor", style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalDay(addDays(calDay, 7)) }, "›")),
-                // Sektionskopf (spec 6.5) mit Sprung in die Wochenansicht.
-                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, padding: "0 2px 8px" } },
-                    React.createElement("span", { className: "home-v2-display", style: { fontWeight: 700, fontSize: 17, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, dayLabel),
-                    React.createElement("span", { style: { display: "flex", gap: 12, flexShrink: 0 } },
-                        // "Heute" bleibt erhalten (war vorher ein eigener Knopf in der Tages-Navigation),
-                        // nur sichtbar wenn man nicht ohnehin auf heute steht.
-                        !isToday(calDay) && React.createElement("button", { className: "btn-text", onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalDay(d); } }, "Heute"),
-                        React.createElement("button", { className: "btn-text", onClick: () => setCalMode("woche") }, "Alle anzeigen ›"))),
-                React.createElement("div", { style: { display: "flex", justifyContent: "center", gap: 6, marginBottom: 14 } },
-                    [["karten", "Karten"], ["zeitstrahl", "Zeitstrahl"]].map(([v, lbl]) => React.createElement("button", { key: v, onClick: () => setCalDayStyle(v), style: { padding: "5px 13px", minHeight: 44, borderRadius: 99, fontSize: 12.5, fontWeight: 700,
-                            border: "1.5px solid " + (calDayStyle === v ? "var(--orange)" : "var(--line)"),
-                            background: calDayStyle === v ? "var(--orange-soft)" : "transparent", color: calDayStyle === v ? "var(--orange-deep)" : "var(--muted)" } }, lbl))),
+                // Sektionskopf (Datum + "Heute" + "Alle anzeigen") 2026-09-15 entfernt: seit die
+                // Kopfkarte oben das Tagesdatum, den Heute-Sprung und den Woche/Tag-Umschalter
+                // traegt, stand hier alles drei ein zweites Mal - direkt untereinander.
                 dayLimit > 0 && (() => {
                     const used = confirmedMinutesOnDay(ymd(calDay));
                     const pct = Math.min(100, Math.round(used / dayLimit * 100));
@@ -22686,6 +22775,9 @@ function App() {
             { id: "abo", section: "konto", tone: "sky", label: "Abonnement", icon: IC.kosten, keywords: "abo abonnement bezahlen monatsbeitrag paypal lifetime zugang freischalten kosten rechnung mitgliedschaft",
                 status: (mySubscription && mySubscription.subscription_lifetime) ? "Lifetime" : ((mySubscription && mySubscription.subscription_active) ? ((mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Aktiv")) : "Kein Abo hinterlegt") },
             nativeApp && { id: "geraet", section: "konto", tone: "sky", label: "Gerät & Benachrichtigungen", icon: IC.geraet, keywords: "push benachrichtigung widget", status: deviceToken ? "Aktiv" : "Nicht aktiv" },
+            isSchoolAdmin && { id: "schulboard", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Fahrschule verwalten",
+                icon: IC.admin, keywords: "dashboard auswertung fahrlehrer team zuteilen zuordnung schueler umhaengen statistik grafik auslastung umsatz pruefungsquote offene posten",
+                status: "Alle Fahrlehrer · Schüler zuteilen", direct: () => setView("schulboard") },
             canModerateApp && { id: "admin", section: "konto", tone: "sky", label: "Fahrschulen verwalten", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator", status: "Alle Fahrschulen", direct: () => setView("admin") },
             { id: "hilfe", section: "konto", tone: "sky", label: "Hilfe & FAQ", icon: IC.hilfe, keywords: "faq hilfe frage", status: FAQ_ITEMS.length + " Fragen" },
             { id: "info", section: "konto", tone: "sky", label: "Info", icon: IC.info, keywords: "version changelog info app", status: "Version " + APP_VERSION },
@@ -25090,7 +25182,7 @@ function App() {
     // leuchtete auf. Beide gehören zum Schüler-Reiter; die Einträge im Mehr-Menü bleiben, sie
     // markieren dann nur den inhaltlich richtigen Reiter.
     const schuelerViews = ["liste", "uebersicht", "daten"];
-    const mehrViews = ["einstellungen", "videos", "auswertung", "tagesgeschaeft", "fuhrpark", "interessenten", "admin", "impressum", "datenschutz", ...fahrlehrerViews];
+    const mehrViews = ["einstellungen", "videos", "auswertung", "tagesgeschaeft", "fuhrpark", "interessenten", "schulboard", "admin", "impressum", "datenschutz", ...fahrlehrerViews];
     const ausbildungActive = ausbildungViews.indexOf(view) >= 0;
     const mehrActive = mehrViews.indexOf(view) >= 0;
     const schuelerActive = schuelerViews.indexOf(view) >= 0;
@@ -25210,10 +25302,11 @@ function App() {
                 view === "tagesgeschaeft" && renderTagesgeschaeft(),
                 view === "interessenten" && renderInteressenten(),
                 view === "fuhrpark" && renderFuhrpark(),
+                view === "schulboard" && isSchoolAdmin && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0 }),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
                 view === "impressum" && renderImpressum(),
-                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "auswertung" && view !== "tagesgeschaeft" && view !== "interessenten" && view !== "fuhrpark" && view !== "admin" && view !== "datenschutz" && view !== "impressum" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
+                view !== "home" && view !== "liste" && view !== "vorlage" && view !== "einstellungen" && view !== "videos" && view !== "kalender" && view !== "auswertung" && view !== "tagesgeschaeft" && view !== "interessenten" && view !== "fuhrpark" && view !== "schulboard" && view !== "admin" && view !== "datenschutz" && view !== "impressum" && view !== "theoriepilot" && view !== "theoriepilot-topic" && !active && React.createElement("div", { className: "pad" },
                     React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 10 } }, "Kein Sch\u00FCler ausgew\u00E4hlt"),
                         React.createElement("button", { className: "btn btn-primary", onClick: () => setView("liste") }, "Zur Sch\u00FClerliste"))),
@@ -32069,6 +32162,654 @@ function colorForName(name) {
    Schüler-Eigentümer zurück und werden hier eigens ausgewiesen, damit die Zahl nachvollziehbar
    bleibt statt still zu wandern.
    verguetung am profiles-Datensatz: { modell: "fest_ue"|"prozent", satz: number }. ── */
+/* ════════ Fahrschul-Dashboard (nur Fahrschul-Admins) ════════
+   Eine eigenstaendige Ansicht ueber ALLE Fahrlehrer der Fahrschule - Auslastung, Umsatz,
+   Pruefungsquoten, offene Posten, Schuelerzahlen, Ausbildungsfortschritt, Fahrzeuge und
+   Team-Aktivitaet - plus die Zuteilung von Schuelern zu Fahrlehrern.
+
+   Datenquellen sind ausschliesslich SECURITY-DEFINER-RPCs, die serverseitig pruefen, dass der
+   Aufrufer school_admin GENAU DIESER Fahrschule ist. Der Client entscheidet nichts ueber den
+   Zugriff, er zeigt nur an.
+
+   Bewusst EINE grosse Ladung beim Oeffnen und danach rein clientseitiges Filtern: school_leistungen
+   liefert jede Leistung mit Datum, der Zeitraum-Umschalter braucht deshalb keinen neuen
+   Serveraufruf. Das haelt das Umschalten zwischen Monat/3/12 Monaten sofortig. */
+
+// ── Kleine Diagramme, von Hand gebaut ─────────────────────────────────────────────────────
+// Ohne Bibliothek: die App laedt kein einziges externes Skript (Content-Security-Policy und
+// Offline-Faehigkeit), und fuer vier Diagrammtypen waere eine Bibliothek mehr Gewicht als Nutzen.
+// Alle Farben kommen aus Tokens, damit Hell- und Dunkelmodus ohne Sonderfall stimmen.
+
+// Waagerechte Balken. Bewusst als HTML statt SVG: die Breite folgt dem Container ohne viewBox-
+// Rechnerei, und die Beschriftung bricht bei langen Namen normal um.
+function DashBalken({ daten, farbe, einheit, leerText }) {
+    const max = Math.max(1, ...daten.map(d => Math.abs(d.wert)));
+    if (!daten.length)
+        return React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 0" } }, leerText || "Keine Daten im gewählten Zeitraum.");
+    return React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 11 } },
+        daten.map((d, i) => React.createElement("div", { key: d.label + i },
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 5 } },
+                React.createElement("span", { style: { fontSize: 13.5, fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" } }, d.label),
+                React.createElement("span", { style: { fontSize: 13.5, fontWeight: 800, fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums", flexShrink: 0, color: "var(--ink)" } },
+                    d.anzeige != null ? d.anzeige : (d.wert + (einheit ? " " + einheit : "")))),
+            React.createElement("div", { style: { height: 9, borderRadius: 99, background: "var(--field-bg)", overflow: "hidden" } },
+                React.createElement("div", { style: { height: "100%", width: Math.max(2, Math.round(Math.abs(d.wert) / max * 100)) + "%",
+                        background: d.farbe || farbe || "var(--orange)", borderRadius: 99, transition: "width .25s" } })),
+            d.unter && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 4 } }, d.unter))));
+}
+
+// Monatsverlauf als Flaeche mit Linie. SVG, weil hier echte Geometrie gebraucht wird.
+// preserveAspectRatio="none" laesst die Kurve mit dem Container mitwachsen; die Beschriftungen
+// stehen deshalb als HTML darunter statt als <text> im SVG (sonst wuerden sie mitverzerrt).
+function DashVerlauf({ punkte, farbe, formatWert }) {
+    if (!punkte.length)
+        return React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Keine Daten.");
+    const W = 300, H = 90;
+    const max = Math.max(1, ...punkte.map(p => p.wert));
+    const x = i => punkte.length < 2 ? W / 2 : (i / (punkte.length - 1)) * W;
+    const y = w => H - (w / max) * (H - 8) - 4;
+    const linie = punkte.map((p, i) => (i ? "L" : "M") + x(i).toFixed(1) + " " + y(p.wert).toFixed(1)).join(" ");
+    const flaeche = linie + " L" + W + " " + H + " L0 " + H + " Z";
+    const col = farbe || "var(--orange)";
+    const hoechster = punkte.reduce((a, b) => b.wert > a.wert ? b : a, punkte[0]);
+    return React.createElement("div", null,
+        React.createElement("svg", { viewBox: "0 0 " + W + " " + H, preserveAspectRatio: "none", role: "img",
+                "aria-label": "Verlauf über " + punkte.length + " Monate, höchster Wert " + (formatWert ? formatWert(hoechster.wert) : hoechster.wert) + " im Monat " + hoechster.label,
+                style: { width: "100%", height: 90, display: "block", overflow: "visible" } },
+            React.createElement("defs", null,
+                React.createElement("linearGradient", { id: "dashverlauf", x1: "0", y1: "0", x2: "0", y2: "1" },
+                    React.createElement("stop", { offset: "0%", stopColor: col, stopOpacity: "0.30" }),
+                    React.createElement("stop", { offset: "100%", stopColor: col, stopOpacity: "0.02" }))),
+            React.createElement("path", { d: flaeche, fill: "url(#dashverlauf)", stroke: "none" }),
+            React.createElement("path", { d: linie, fill: "none", stroke: col, strokeWidth: "2", vectorEffect: "non-scaling-stroke", strokeLinejoin: "round", strokeLinecap: "round" }),
+            punkte.map((p, i) => React.createElement("circle", { key: i, cx: x(i), cy: y(p.wert), r: "2.5", fill: col, vectorEffect: "non-scaling-stroke" }))),
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 6, fontSize: 11, color: "var(--muted)", fontVariantNumeric: "tabular-nums" } },
+            punkte.map((p, i) => React.createElement("span", { key: i, style: { flex: 1, textAlign: "center", overflow: "hidden" } },
+                punkte.length > 6 ? (i % 2 === 0 ? p.kurz : "") : p.kurz))));
+}
+
+// Ring fuer Verteilungen (Fuehrerscheinklassen). Der Ring traegt die Summe in der Mitte,
+// die Legende daneben die Einzelwerte - eine Zuordnung nur ueber Farbe waere zu wenig.
+function DashRing({ segmente }) {
+    const summe = segmente.reduce((a, s) => a + s.wert, 0);
+    if (!summe)
+        return React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Klassen hinterlegt.");
+    const R = 54, SW = 15, U = 2 * Math.PI * R;
+    let offset = 0;
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 18, flexWrap: "wrap" } },
+        React.createElement("svg", { width: 132, height: 132, viewBox: "0 0 132 132", role: "img",
+                "aria-label": "Verteilung auf " + segmente.length + " Klassen, insgesamt " + summe + " Schüler",
+                style: { flexShrink: 0 } },
+            React.createElement("circle", { cx: 66, cy: 66, r: R, fill: "none", stroke: "var(--field-bg)", strokeWidth: SW }),
+            segmente.map((s, i) => {
+                const laenge = (s.wert / summe) * U;
+                const el = React.createElement("circle", { key: i, cx: 66, cy: 66, r: R, fill: "none", stroke: s.farbe,
+                    strokeWidth: SW, strokeDasharray: laenge.toFixed(2) + " " + (U - laenge).toFixed(2),
+                    strokeDashoffset: (-offset).toFixed(2), transform: "rotate(-90 66 66)" });
+                offset += laenge;
+                return el;
+            }),
+            React.createElement("text", { x: 66, y: 62, textAnchor: "middle", fontSize: "24", fontWeight: "800",
+                fontFamily: "var(--font-d)", fill: "var(--ink)" }, summe),
+            React.createElement("text", { x: 66, y: 80, textAnchor: "middle", fontSize: "11", fill: "var(--muted)" }, "Schüler")),
+        React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flex: 1 } },
+            segmente.map((s, i) => React.createElement("div", { key: i, style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13 } },
+                React.createElement("span", { style: { width: 11, height: 11, borderRadius: 3, background: s.farbe, flexShrink: 0 } }),
+                React.createElement("span", { style: { flex: 1, minWidth: 0, overflowWrap: "anywhere" } }, s.label),
+                React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums" } }, s.wert)))));
+}
+
+// Gestapelter Quotenbalken (bestanden / nicht bestanden). Die Zahl steht immer daneben -
+// ein Balken allein beantwortet "wie viele?" nicht.
+function DashQuote({ bestanden, durchgefallen }) {
+    const ges = bestanden + durchgefallen;
+    const pct = ges ? Math.round(bestanden / ges * 100) : 0;
+    return React.createElement("div", null,
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5, gap: 10 } },
+            React.createElement("span", { style: { fontSize: 13, color: "var(--ink-2)" } },
+                ges ? (bestanden + " von " + ges + " bestanden") : "Keine Prüfungen im Zeitraum"),
+            ges > 0 && React.createElement("span", { style: { fontSize: 15, fontWeight: 800, fontFamily: "var(--font-d)", color: pct >= 70 ? "var(--green-ink)" : (pct >= 50 ? "var(--amber-ink)" : "var(--red-ink)") } }, pct + " %")),
+        React.createElement("div", { style: { display: "flex", height: 10, borderRadius: 99, overflow: "hidden", background: "var(--field-bg)" } },
+            bestanden > 0 && React.createElement("div", { style: { width: (bestanden / Math.max(1, ges) * 100) + "%", background: "var(--green)" } }),
+            durchgefallen > 0 && React.createElement("div", { style: { width: (durchgefallen / Math.max(1, ges) * 100) + "%", background: "var(--red)" } })));
+}
+
+// Abschnittskopf im Muster der Startseite: getoenter Symbol-Chip, Titel, optionaler Beisatz.
+function DashKopf({ titel, beisatz, ton, pfad }) {
+    const t = ton || "orange";
+    return React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, marginBottom: 12 } },
+        React.createElement("span", { className: "home-iconchip", style: { background: "var(--" + t + (t === "orange" ? "-soft" : "-bg") + ")", color: "var(--" + t + "-deep)", flexShrink: 0 } },
+            React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
+                pfad.map((d, i) => React.createElement("path", { key: i, d: d })))),
+        React.createElement("div", { style: { minWidth: 0 } },
+            React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16 } }, titel),
+            beisatz && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 1 } }, beisatz)));
+}
+
+// Feste Farbreihe fuer Fahrlehrer. Bewusst dieselbe Reihe wie im Kalender (CAL_COLORS), damit
+// ein Fahrlehrer ueberall in der App dieselbe Farbe traegt - dort ist sie nur weiter unten
+// definiert, deshalb hier eine eigene Konstante statt eines Vorgriffs.
+const DASH_LEHRERFARBEN = ["#E8871E", "#2E7DD1", "#1B8F4D", "#B3362A", "#7A4Fc9", "#0C8C8C", "#C7511F", "#8A6D00"];
+const DASH_MONATE_KURZ = ["Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez"];
+// Die Daten kommen als ISO-Text aus der Datenbank ("2026-09-10"). So steht sonst nirgends in
+// der App ein Datum - hier also einmal zentral auf das deutsche Format gebracht.
+function dashDatum(iso) {
+    if (!iso) return "";
+    const t = String(iso).slice(0, 10).split("-");
+    return t.length === 3 ? (t[2] + "." + t[1] + "." + t[0]) : String(iso);
+}
+// Deutsches Komma - toFixed() liefert immer einen Punkt.
+function dashZahl(n, stellen) {
+    return Number(n || 0).toLocaleString("de-DE", { minimumFractionDigits: stellen || 0, maximumFractionDigits: stellen || 0 });
+}
+
+// Grenzen des gewaehlten Zeitraums als YYYY-MM-DD. Die Leistungen tragen ihr Datum als Text in
+// genau diesem Format, ein Stringvergleich reicht also und spart jedes Date-Parsen pro Zeile.
+function dashZeitraum(z) {
+    if (z.modus === "monat") {
+        const von = new Date(z.jahr, z.monat - 1, 1), bis = new Date(z.jahr, z.monat, 0);
+        return { von: ymd(von), bis: ymd(bis), titel: von.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long", year: "numeric" }) };
+    }
+    const monate = z.modus === "3" ? 3 : 12;
+    const heute = new Date();
+    const von = new Date(heute.getFullYear(), heute.getMonth() - (monate - 1), 1);
+    return { von: ymd(von), bis: ymd(heute), titel: "Letzte " + monate + " Monate" };
+}
+
+function SchulDashboard({ schoolId, stdPreis }) {
+    const [daten, setDaten] = React.useState({ busy: true, error: "" });
+    const [zeitraum, setZeitraum] = React.useState(() => { const d = new Date(); return { modus: "monat", jahr: d.getFullYear(), monat: d.getMonth() + 1 }; });
+    const [suche, setSuche] = React.useState("");
+    const [filterLehrer, setFilterLehrer] = React.useState("");
+    const [mitArchiv, setMitArchiv] = React.useState(false);
+    const [zuteilen, setZuteilen] = React.useState(null);   // Schüler, für den das Zuteilen-Sheet offen ist
+    const [akte, setAkte] = React.useState(null);           // {busy, error, student, meta}
+    const [aktion, setAktion] = React.useState("");         // laufende Zuteilung, sperrt die Knöpfe
+
+    const laden = React.useCallback(() => {
+        if (!schoolId) { setDaten({ busy: false, error: "Diesem Konto ist keine Fahrschule zugeordnet." }); return; }
+        setDaten(d => ({ ...d, busy: true, error: "" }));
+        Promise.all([
+            adminFetchTeachers(schoolId),
+            fetchSchoolLeistungen(schoolId),
+            fetchSchoolExamStats(schoolId),
+            fetchSchoolOffenePosten(schoolId),
+            fetchVerguetungen(schoolId),
+            fetchSchoolStudentsOverview(schoolId),
+            fetchSchoolAssignmentLog(schoolId, 40),
+        ]).then(([lehrer, leistungen, pruefungen, offene, verguetung, schueler, protokoll]) => {
+            const vgMap = {};
+            (verguetung || []).forEach(v => { if (v.verguetung && v.verguetung.modell) vgMap[v.teacher_id] = v.verguetung; });
+            setDaten({ busy: false, error: "", lehrer, leistungen, pruefungen, offene, vgMap, schueler, protokoll });
+        }).catch(e => setDaten({ busy: false, error: fehlerText(e) }));
+    }, [schoolId]);
+    React.useEffect(() => { laden(); }, [laden]);
+
+    const gr = dashZeitraum(zeitraum);
+
+    // ── Ableitungen ───────────────────────────────────────────────────────────────────────
+    // Alles hier haengt nur an den geladenen Rohdaten und am Zeitraum - der Umschalter loest
+    // deshalb keinen Serveraufruf aus, sondern nur eine Neuberechnung.
+    const a = React.useMemo(() => {
+        if (daten.busy || daten.error) return null;
+        const lehrer = (daten.lehrer || []).slice().sort((x, y) => (x.display_name || x.email).localeCompare(y.display_name || y.email));
+        const farbe = {}, nameVon = {}, idVonMail = {};
+        lehrer.forEach((t, i) => { farbe[t.email] = DASH_LEHRERFARBEN[i % DASH_LEHRERFARBEN.length]; nameVon[t.email] = t.display_name || t.email.split("@")[0]; idVonMail[t.email] = t.id; });
+
+        const imZeitraum = (daten.leistungen || []).filter(l => l.date && l.date >= gr.von && l.date <= gr.bis);
+
+        // Auslastung und Umsatz je Fahrlehrer
+        const proLehrer = {};
+        imZeitraum.forEach(l => {
+            const k = l.teacher_email || "(unbekannt)";
+            proLehrer[k] = proLehrer[k] || { minuten: 0, umsatz: 0, stunden: 0 };
+            proLehrer[k].minuten += Number(l.minutes) || 0;
+            proLehrer[k].umsatz += Number(l.price) || 0;
+            proLehrer[k].stunden += 1;
+        });
+        const minutenGesamt = Object.values(proLehrer).reduce((s, v) => s + v.minuten, 0);
+        const umsatzGesamt = Object.values(proLehrer).reduce((s, v) => s + v.umsatz, 0);
+
+        // Verlauf: immer die letzten zwölf Monate bis zum Ende des Zeitraums, unabhängig davon,
+        // wie eng der Zeitraum gerade gestellt ist - sonst wäre ein Ein-Monats-Verlauf ein Punkt.
+        const endeD = new Date(gr.bis + "T00:00:00");
+        const verlauf = [];
+        for (let i = 11; i >= 0; i--) {
+            const d = new Date(endeD.getFullYear(), endeD.getMonth() - i, 1);
+            const praefix = d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
+            const min = (daten.leistungen || []).filter(l => (l.date || "").slice(0, 7) === praefix)
+                .reduce((s, l) => s + (Number(l.minutes) || 0), 0);
+            verlauf.push({ label: praefix, kurz: DASH_MONATE_KURZ[d.getMonth()], wert: Math.round(min / 45 * 10) / 10 });
+        }
+
+        // Prüfungen: exams ist ein Array je Schüler, jeder Eintrag {art, date, passed}.
+        const pruefProLehrer = {};
+        let bestGes = 0, durchGes = 0;
+        (daten.pruefungen || []).forEach(p => {
+            const k = p.teacher_email || "(unbekannt)";
+            (Array.isArray(p.exams) ? p.exams : []).forEach(e => {
+                if (!e || !e.date || e.date < gr.von || e.date > gr.bis) return;
+                pruefProLehrer[k] = pruefProLehrer[k] || { best: 0, durch: 0 };
+                if (e.passed) { pruefProLehrer[k].best++; bestGes++; } else { pruefProLehrer[k].durch++; durchGes++; }
+            });
+        });
+
+        // Offene Posten mit derselben Rechnung wie in der Schüleransicht (sumCharges/sumPayments).
+        const offeneListe = (daten.offene || []).map(r => {
+            const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [], packages: r.packages || [] };
+            const offen = sumCharges(stu, stdPreis) - sumPayments(stu);
+            return { studentId: r.student_id, name: (r.student_name || "").trim() || "Unbekannt", teacher: r.teacher_email || "", offen };
+        }).filter(x => x.offen > 0.005).sort((x, y) => y.offen - x.offen);
+        const offenProLehrer = {};
+        offeneListe.forEach(o => { offenProLehrer[o.teacher] = (offenProLehrer[o.teacher] || 0) + o.offen; });
+        const offenGesamt = offeneListe.reduce((s, o) => s + o.offen, 0);
+
+        // Schüler je Fahrlehrer und Klassenverteilung (nur aktive)
+        const aktiveSchueler = (daten.schueler || []).filter(s => !s.archived);
+        const schuelerProLehrer = {};
+        aktiveSchueler.forEach(s => { schuelerProLehrer[s.teacherId] = (schuelerProLehrer[s.teacherId] || 0) + 1; });
+        const klassen = {};
+        aktiveSchueler.forEach(s => { const k = s.klasse || "ohne Klasse"; klassen[k] = (klassen[k] || 0) + 1; });
+
+        // Ausbildungsfortschritt: auf welchen Stufen die Leistungen im Zeitraum liegen
+        const stufen = {};
+        imZeitraum.forEach(l => { const st = (l.stufe || "").trim(); if (st) stufen[st] = (stufen[st] || 0) + 1; });
+
+        // Fahrzeugnutzung
+        const fahrzeuge = {};
+        imZeitraum.forEach(l => { const v = (l.vehicle_name || "").trim(); if (v) fahrzeuge[v] = (fahrzeuge[v] || 0) + (Number(l.minutes) || 0); });
+
+        return { lehrer, farbe, nameVon, idVonMail, proLehrer, minutenGesamt, umsatzGesamt, verlauf,
+            pruefProLehrer, bestGes, durchGes, offeneListe, offenProLehrer, offenGesamt,
+            aktiveSchueler, schuelerProLehrer, klassen, stufen, fahrzeuge };
+    }, [daten, gr.von, gr.bis, stdPreis]);
+
+    // ── Aktionen ──────────────────────────────────────────────────────────────────────────
+    // Nach jeder Änderung wird neu geladen statt lokal nachgepflegt: die Zuteilung verschiebt
+    // Schüler zwischen Fahrlehrern und verändert damit gleichzeitig Schülerzahlen, offene Posten
+    // und Auslastung. Ein halber lokaler Abgleich wäre hier die fehleranfälligere Variante.
+    async function umhaengen(stud, lehrer) {
+        const ok = await askConfirm({
+            title: "Schüler umhängen?",
+            message: (stud.vorname + " " + stud.name).trim() + " wird von " + (stud.teacherName || "bisher") +
+                " auf " + lehrer.label + " übertragen.\n\n" + lehrer.label + " sieht den Schüler danach in der eigenen Liste, " +
+                (stud.teacherName || "der bisherige Fahrlehrer") + " nicht mehr. Alle Fahrstunden, Zahlungen und Notizen bleiben am Schüler.",
+            confirmLabel: "Umhängen", danger: false,
+        });
+        if (!ok) return;
+        setAktion(stud.id);
+        try {
+            await schoolAssignStudent(stud.id, lehrer.id);
+            showToast((stud.vorname + " " + stud.name).trim() + " gehört jetzt zu " + lehrer.label + ".");
+            setZuteilen(null);
+            laden();
+        } catch (e) { showToast(fehlerText(e), "error"); }
+        finally { setAktion(""); }
+    }
+    async function freigabe(stud, lehrer, an) {
+        setAktion(stud.id);
+        try {
+            await schoolShareStudent(stud.id, lehrer.id, an);
+            showToast(an ? (lehrer.label + " kann " + (stud.vorname || "den Schüler") + " jetzt mitbetreuen.")
+                         : ("Freigabe für " + lehrer.label + " entzogen."));
+            laden();
+        } catch (e) { showToast(fehlerText(e), "error"); }
+        finally { setAktion(""); }
+    }
+    async function akteOeffnen(stud) {
+        setAkte({ busy: true, meta: stud });
+        try {
+            const s = await fetchSchoolStudentAkte(stud.id);
+            setAkte({ busy: false, student: s, meta: stud });
+        } catch (e) { setAkte({ busy: false, error: fehlerText(e), meta: stud }); }
+    }
+
+    // Beim Öffnen eines Sheets die Zurück-Geste/Escape abfangen, wie überall sonst in der App.
+    React.useEffect(() => {
+        if (!zuteilen && !akte) return;
+        function onEsc(e) { if (e.key === "Escape") { if (akte) setAkte(null); else setZuteilen(null); } }
+        document.addEventListener("keydown", onEsc);
+        return () => document.removeEventListener("keydown", onEsc);
+    }, [zuteilen, akte]);
+
+    if (daten.busy)
+        return React.createElement("div", { className: "pad" },
+            React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Zahlen werden geladen…"));
+    if (daten.error)
+        return React.createElement("div", { className: "pad" },
+            React.createElement("div", { className: "card", style: { padding: "18px 16px", background: "var(--danger-bg)", border: "1.5px solid var(--red)" } },
+                React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16, color: "var(--red-ink)", marginBottom: 6 } }, "Konnte nicht geladen werden"),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 12 } }, daten.error),
+                React.createElement("button", { className: "btn btn-ghost", onClick: laden }, "Erneut versuchen")));
+
+    const lehrerWahl = a.lehrer.map(t => ({ id: t.id, label: t.display_name || t.email.split("@")[0], email: t.email }));
+    const monatVerschieben = delta => setZeitraum(z => {
+        const d = new Date(z.jahr, z.monat - 1 + delta, 1);
+        return { modus: "monat", jahr: d.getFullYear(), monat: d.getMonth() + 1 };
+    });
+
+    // Schülerliste für die Zuteilung
+    const q = suche.trim().toLowerCase();
+    const liste = (daten.schueler || [])
+        .filter(s => mitArchiv || !s.archived)
+        .filter(s => !filterLehrer || s.teacherId === filterLehrer)
+        .filter(s => !q || (s.vorname + " " + s.name + " " + s.klasse + " " + s.teacherName).toLowerCase().includes(q))
+        .sort((x, y) => (x.name + x.vorname).localeCompare(y.name + y.vorname));
+
+    // Variadisch: jeder Abschnitt ist eine Karte, deren Kinder direkt uebergeben werden.
+    // Die frueher noetige React.Fragment-Huelle darin war eine Klammerebene ohne Nutzen.
+    const abschnitt = (...kinder) => React.createElement("div", { className: "card", style: { padding: "16px 16px", marginBottom: 14 } }, ...kinder);
+
+    return React.createElement("div", { className: "pad" },
+        // ── Kopf mit Zeitraum ────────────────────────────────────────────────────────────
+        React.createElement("div", { style: { margin: "14px 2px 18px" } },
+            React.createElement("div", { className: "home-eyebrow" }, "Fahrschul-Verwaltung"),
+            React.createElement("h2", { className: "home-hi home-v2-display", style: { marginTop: 6, fontSize: 25 } }, "Dein Team im Überblick"),
+            React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginTop: 7, fontWeight: 500 } },
+                a.lehrer.length + (a.lehrer.length === 1 ? " Fahrlehrer" : " Fahrlehrer") + " · " + a.aktiveSchueler.length + " aktive Schüler")),
+        abschnitt(
+            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 } },
+                React.createElement("button", { className: "btn btn-ghost", "aria-label": "Monat zurück", disabled: zeitraum.modus !== "monat",
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0, opacity: zeitraum.modus === "monat" ? 1 : .3 }, onClick: () => monatVerschieben(-1) }, "‹"),
+                React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, gr.titel),
+                React.createElement("button", { className: "btn btn-ghost", "aria-label": "Monat vor", disabled: zeitraum.modus !== "monat",
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0, opacity: zeitraum.modus === "monat" ? 1 : .3 }, onClick: () => monatVerschieben(1) }, "›")),
+            React.createElement("div", { className: "seg" },
+                [["monat", "Monat"], ["3", "3 Monate"], ["12", "12 Monate"]].map(([m, l]) =>
+                    React.createElement("button", { key: m, className: zeitraum.modus === m ? "on" : "",
+                        onClick: () => setZeitraum(z => m === "monat" ? { modus: "monat", jahr: new Date().getFullYear(), monat: new Date().getMonth() + 1 } : { ...z, modus: m }) }, l)))),
+
+        // ── Kennzahlen ───────────────────────────────────────────────────────────────────
+        React.createElement("div", { className: "home-v2-stats", style: { marginBottom: 14 } }, [
+            { k: "ue", label: "Unterrichtseinheiten", wert: (Math.round(a.minutenGesamt / 45 * 10) / 10).toLocaleString("de-DE"), d: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] },
+            { k: "umsatz", label: "Umsatz im Zeitraum", wert: eurFmt(a.umsatzGesamt), d: ["M12 1v22", "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"] },
+            { k: "schueler", label: "Aktive Schüler", wert: a.aktiveSchueler.length, d: ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M23 21v-2a4 4 0 0 0-3-3.87"] },
+            { k: "offen", label: "Offene Beträge", wert: eurFmt(a.offenGesamt), d: ["M3 7h18v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 7l2-4h14l2 4", "M12 11v6"] },
+        ].map(k => React.createElement("div", { key: k.k, className: "home-v2-statcell" },
+            React.createElement("span", { className: "home-v2-stat-ic" },
+                React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
+                    k.d.map((d, i) => React.createElement("path", { key: i, d: d })))),
+            // Geldbeträge wie "77.252,00 €" sind für die 26px der Kachel zu lang und brachen
+            // vor dem Euro-Zeichen um. Ab neun Zeichen deshalb eine Stufe kleiner, und nie
+            // umbrechen - eine halbierte Zahl liest sich schlechter als eine kleinere.
+            React.createElement("div", { className: "home-v2-stat-num home-v2-display",
+                style: { whiteSpace: "nowrap", fontSize: String(k.wert).length > 11 ? 18 : (String(k.wert).length > 8 ? 21 : null) } }, k.wert),
+            React.createElement("div", { className: "home-v2-stat-label" }, k.label)))),
+
+        // ── Auslastung ───────────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Auslastung je Fahrlehrer", beisatz: "Unterrichtseinheiten im Zeitraum", ton: "orange",
+                pfad: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] }),
+            React.createElement(DashBalken, { daten: a.lehrer.map(t => {
+                    const v = a.proLehrer[t.email] || { minuten: 0, stunden: 0 };
+                    return { label: a.nameVon[t.email], wert: v.minuten, farbe: a.farbe[t.email],
+                        anzeige: (Math.round(v.minuten / 45 * 10) / 10).toLocaleString("de-DE") + " UE",
+                        unter: v.stunden + (v.stunden === 1 ? " Fahrstunde" : " Fahrstunden") };
+                }).sort((x, y) => y.wert - x.wert) }),
+            React.createElement("div", { style: { marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--line)" } },
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8, fontWeight: 600 } }, "Verlauf der ganzen Fahrschule, letzte 12 Monate (UE)"),
+                React.createElement(DashVerlauf, { punkte: a.verlauf, formatWert: w => w + " UE" }))),
+
+        // ── Umsatz & Vergütung ───────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Umsatz & Vergütung", beisatz: "Was jeder erwirtschaftet, und was hinterlegt ist", ton: "sage",
+                pfad: ["M12 1v22", "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"] }),
+            a.lehrer.map(t => {
+                const v = a.proLehrer[t.email] || { minuten: 0, umsatz: 0 };
+                const vg = daten.vgMap[t.id];
+                const ue = v.minuten / 45;
+                let lohn = null;
+                if (vg && vg.modell === "fest_ue" && vg.satz != null) lohn = ue * Number(vg.satz);
+                else if (vg && vg.modell === "prozent" && vg.satz != null) lohn = v.umsatz * Number(vg.satz) / 100;
+                return React.createElement("div", { key: t.id, style: { display: "flex", alignItems: "center", gap: 11, padding: "11px 0", borderTop: "1px solid var(--line)" } },
+                    React.createElement("span", { style: { width: 10, height: 34, borderRadius: 4, background: a.farbe[t.email], flexShrink: 0 } }),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflowWrap: "anywhere" } }, a.nameVon[t.email]),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
+                            vg && vg.modell === "fest_ue" ? ("Fest " + eurFmt(Number(vg.satz)) + " je UE")
+                            : vg && vg.modell === "prozent" ? (Number(vg.satz).toLocaleString("de-DE") + " % vom Umsatz")
+                            : "Keine Vergütung hinterlegt")),
+                    React.createElement("div", { style: { textAlign: "right", flexShrink: 0 } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, fontVariantNumeric: "tabular-nums" } }, eurFmt(v.umsatz)),
+                        lohn != null && React.createElement("div", { style: { fontSize: 12, color: "var(--sage-deep)", marginTop: 2, fontVariantNumeric: "tabular-nums" } }, "davon Lohn " + eurFmt(lohn))));
+            }),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 12, marginBottom: 0 } },
+                "Umsatz = Summe der abgerechneten Preise aller Leistungen im Zeitraum. Die Vergütung wird je Fahrlehrer in den Einstellungen hinterlegt; ohne Hinterlegung wird hier nichts gerechnet.")),
+
+        // ── Prüfungsquoten ───────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Prüfungsquoten", beisatz: "Bestanden im Zeitraum", ton: "sky",
+                pfad: ["M22 11.08V12a10 10 0 1 1-5.93-9.14", "M22 4L12 14.01l-3-3"] }),
+            React.createElement("div", { style: { marginBottom: 16 } },
+                React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", marginBottom: 6 } }, "Ganze Fahrschule"),
+                React.createElement(DashQuote, { bestanden: a.bestGes, durchgefallen: a.durchGes })),
+            a.lehrer.map(t => {
+                const p = a.pruefProLehrer[t.email];
+                if (!p) return null;
+                return React.createElement("div", { key: t.id, style: { paddingTop: 12, borderTop: "1px solid var(--line)", marginTop: 12 } },
+                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 6 } }, a.nameVon[t.email]),
+                    React.createElement(DashQuote, { bestanden: p.best, durchgefallen: p.durch }));
+            }).filter(Boolean),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 12, marginBottom: 0 } },
+                "Gezählt wird jeder Prüfungsversuch mit Datum im Zeitraum. Namen tauchen hier bewusst nicht auf - die Auswertung läuft über Klasse und Fahrlehrer.")),
+
+        // ── Offene Posten ────────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Offene Posten", beisatz: eurFmt(a.offenGesamt) + " insgesamt offen", ton: "clay",
+                pfad: ["M3 7h18v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 7l2-4h14l2 4", "M12 11v6"] }),
+            React.createElement(DashBalken, { daten: a.lehrer.map(t => ({ label: a.nameVon[t.email], wert: a.offenProLehrer[t.email] || 0,
+                    farbe: a.farbe[t.email], anzeige: eurFmt(a.offenProLehrer[t.email] || 0) }))
+                .filter(d => d.wert > 0.005).sort((x, y) => y.wert - x.wert),
+                leerText: "Nichts offen - alle Rechnungen sind ausgeglichen." }),
+            a.offeneListe.length > 0 && React.createElement("div", { style: { marginTop: 16, paddingTop: 14, borderTop: "1px solid var(--line)" } },
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8, fontWeight: 600 } }, "Größte Einzelbeträge"),
+                a.offeneListe.slice(0, 8).map(o => React.createElement("div", { key: o.studentId, style: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", fontSize: 13.5 } },
+                    React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: a.farbe[o.teacher] || "var(--muted)", flexShrink: 0 } }),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0, overflowWrap: "anywhere" } }, o.name),
+                    React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, a.nameVon[o.teacher] || ""),
+                    React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums", color: "var(--red-ink)", flexShrink: 0 } }, eurFmt(o.offen)))))),
+
+        // ── Schülerzahlen & Klassen ──────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Schüler & Klassen", beisatz: "Aktive Schüler, unabhängig vom Zeitraum", ton: "sage",
+                pfad: ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M23 21v-2a4 4 0 0 0-3-3.87"] }),
+            React.createElement(DashBalken, { daten: a.lehrer.map(t => ({ label: a.nameVon[t.email], wert: a.schuelerProLehrer[t.id] || 0,
+                farbe: a.farbe[t.email], anzeige: (a.schuelerProLehrer[t.id] || 0) + (a.schuelerProLehrer[t.id] === 1 ? " Schüler" : " Schüler") })).sort((x, y) => y.wert - x.wert) }),
+            React.createElement("div", { style: { marginTop: 18, paddingTop: 14, borderTop: "1px solid var(--line)" } },
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10, fontWeight: 600 } }, "Verteilung auf Führerscheinklassen"),
+                React.createElement(DashRing, { segmente: Object.keys(a.klassen).sort((x, y) => a.klassen[y] - a.klassen[x])
+                    .map((k, i) => ({ label: k, wert: a.klassen[k], farbe: DASH_LEHRERFARBEN[i % DASH_LEHRERFARBEN.length] })) }))),
+
+        // ── Ausbildungsfortschritt ───────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Ausbildungsfortschritt", beisatz: "Auf welchen Stufen im Zeitraum gefahren wurde", ton: "sky",
+                pfad: ["M3 3v18h18", "M7 15l4-4 3 3 5-6"] }),
+            React.createElement(DashBalken, { daten: Object.keys(a.stufen).sort((x, y) => a.stufen[y] - a.stufen[x])
+                    .map(st => ({ label: st, wert: a.stufen[st], anzeige: a.stufen[st] + (a.stufen[st] === 1 ? " Leistung" : " Leistungen") })),
+                farbe: "var(--sky)",
+                leerText: "Für den Zeitraum sind keine Leistungen mit Ausbildungsstufe erfasst." }),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 12, marginBottom: 0 } },
+                "Zeigt, wo die Ausbildung gerade stattfindet: viele Leistungen auf den Grundstufen bedeuten viele Anfänger, ein Schwerpunkt auf den oberen Stufen viele Prüfungskandidaten.")),
+
+        // ── Fahrzeuge ────────────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Fahrzeugnutzung", beisatz: "Fahrzeit je Fahrzeug im Zeitraum", ton: "clay",
+                pfad: ["M5 17h14M6.5 17l-1.2-5.4a2 2 0 0 1 .3-1.6l1.8-2.6A2 2 0 0 1 9.1 6.5h5.8a2 2 0 0 1 1.7.9l1.8 2.6a2 2 0 0 1 .3 1.6L17.5 17", "M7 20v-3M17 20v-3"] }),
+            React.createElement(DashBalken, { daten: Object.keys(a.fahrzeuge).sort((x, y) => a.fahrzeuge[y] - a.fahrzeuge[x])
+                    .map(v => ({ label: v, wert: a.fahrzeuge[v], anzeige: dashZahl(a.fahrzeuge[v] / 60, 1) + " h" })),
+                farbe: "var(--clay)",
+                leerText: "Für den Zeitraum ist an keiner Leistung ein Fahrzeug hinterlegt." })),
+
+        // ── Team-Aktivität ───────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Team-Aktivität", beisatz: "Wer die App wie zuletzt genutzt hat", ton: "orange",
+                pfad: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] }),
+            a.lehrer.map(t => {
+                const v = a.proLehrer[t.email] || { stunden: 0 };
+                const gesehen = t.last_seen ? new Date(t.last_seen) : null;
+                const tage = gesehen ? Math.floor((Date.now() - gesehen.getTime()) / 86400000) : null;
+                const ton = tage == null ? "var(--muted)" : (tage <= 2 ? "var(--green-ink)" : (tage <= 14 ? "var(--amber-ink)" : "var(--red-ink)"));
+                return React.createElement("div", { key: t.id, style: { display: "flex", alignItems: "center", gap: 11, padding: "10px 0", borderTop: "1px solid var(--line)" } },
+                    React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: a.farbe[t.email], flexShrink: 0 } }),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflowWrap: "anywhere" } },
+                            a.nameVon[t.email],
+                            t.school_admin && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "#1c1305", background: "var(--orange)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase", letterSpacing: ".04em" } }, "Admin")),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
+                            v.stunden + (v.stunden === 1 ? " Fahrstunde" : " Fahrstunden") + " im Zeitraum")),
+                    React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: ton, flexShrink: 0, textAlign: "right" } },
+                        tage == null ? "noch nie" : (tage === 0 ? "heute" : (tage === 1 ? "gestern" : "vor " + tage + " Tagen"))));
+            })),
+
+        // ── Schüler zuteilen ─────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Schüler zuteilen", beisatz: liste.length + " von " + (daten.schueler || []).length + " angezeigt", ton: "orange",
+                pfad: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M19 8v6M22 11h-6"] }),
+            React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                React.createElement("label", { htmlFor: "dash-suche" }, "Suchen"),
+                React.createElement("input", { id: "dash-suche", type: "text", value: suche, placeholder: "Name, Klasse oder Fahrlehrer",
+                    onChange: e => setSuche(e.target.value) })),
+            React.createElement("div", { style: { display: "flex", gap: 7, overflowX: "auto", paddingBottom: 4, marginBottom: 10 } },
+                [{ id: "", label: "Alle" }].concat(lehrerWahl).map(t => {
+                    const an = filterLehrer === t.id;
+                    return React.createElement("button", { key: t.id || "alle", onClick: () => setFilterLehrer(t.id),
+                        style: { flexShrink: 0, padding: "0 13px", minHeight: 44, borderRadius: 99, border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)"),
+                            background: an ? "var(--orange-soft)" : "var(--card)", color: an ? "var(--orange-ink)" : "var(--ink)",
+                            fontSize: 13, fontWeight: 700, fontFamily: "var(--font-d)" } }, t.label);
+                })),
+            React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 9, minHeight: 44, fontSize: 13, color: "var(--ink-2)", cursor: "pointer" } },
+                React.createElement("input", { type: "checkbox", checked: mitArchiv, onChange: e => setMitArchiv(e.target.checked), style: { width: 18, height: 18 } }),
+                "Archivierte Schüler mit anzeigen"),
+            liste.length === 0
+                ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "10px 0" } }, "Kein Schüler passt zu dieser Suche.")
+                : React.createElement("div", null, liste.slice(0, 120).map(s => React.createElement("div", { key: s.id,
+                        style: { display: "flex", alignItems: "center", gap: 11, padding: "11px 0", borderTop: "1px solid var(--line)", opacity: s.archived ? .55 : 1 } },
+                    // initials() liegt innerhalb von App() und ist hier nicht erreichbar -
+                    // dieselben zwei Zeilen also lokal, statt die Hilfsfunktion nach oben zu ziehen
+                    // und damit eine zweite Baustelle in einer fremden Komponente aufzumachen.
+                    React.createElement("span", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, borderRadius: "50%", fontSize: 13, flexShrink: 0 } },
+                        (((s.vorname || "").trim()[0] || "") + ((s.name || "").trim()[0] || "")) || "–"),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflowWrap: "anywhere" } },
+                            (s.vorname + " " + s.name).trim() || "Ohne Namen",
+                            s.archived && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase" } }, "Archiv")),
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+                            React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: a.farbe[(a.lehrer.find(t => t.id === s.teacherId) || {}).email] || "var(--muted)", flexShrink: 0 } }),
+                            s.teacherName || "ohne Fahrlehrer",
+                            s.klasse ? " · Klasse " + s.klasse : "",
+                            s.lessons ? " · " + s.lessons + " FS" : "",
+                            s.sharedWith.length > 0 ? " · " + s.sharedWith.length + " freigegeben" : "")),
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "0 12px", minHeight: 44, fontSize: 12.5, flexShrink: 0 },
+                        disabled: aktion === s.id, onClick: () => setZuteilen(s) }, aktion === s.id ? "…" : "Zuteilen")))),
+            liste.length > 120 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 10 } },
+                "Es werden die ersten 120 Treffer angezeigt - grenze die Suche weiter ein, um die übrigen " + (liste.length - 120) + " zu sehen.")),
+
+        // ── Protokoll ────────────────────────────────────────────────────────────────────
+        abschnitt(
+            React.createElement(DashKopf, { titel: "Letzte Änderungen", beisatz: "Jede Zuteilung wird mitgeschrieben", ton: "sky",
+                pfad: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] }),
+            (daten.protokoll || []).length === 0
+                ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Zuteilung vorgenommen.")
+                : React.createElement("div", null, (daten.protokoll || []).map(e => React.createElement("div", { key: e.id,
+                        style: { padding: "9px 0", borderTop: "1px solid var(--line)", fontSize: 13, lineHeight: 1.5 } },
+                    React.createElement("div", null,
+                        React.createElement("strong", null, e.student_name || "Schüler"),
+                        e.aktion === "umgehaengt" ? (" von " + (e.von_name || "?") + " zu " + (e.nach_name || "?") + " umgehängt")
+                        : e.aktion === "freigegeben" ? (" für " + (e.nach_name || "?") + " freigegeben")
+                        : (" - Freigabe für " + (e.nach_name || "?") + " entzogen")),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
+                        (e.durch_name || "unbekannt") + " · " + new Date(e.created_at).toLocaleString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) + " Uhr"))))),
+
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, padding: "0 4px 6px" } },
+            "Diese Ansicht sehen nur Fahrschul-Admins. Die zugrunde liegenden Abfragen prüfen das zusätzlich auf dem Server - ein Fahrlehrer ohne Adminrecht bekommt hier auch dann keine Daten, wenn er die Adresse kennt."),
+
+        // ── Sheet: Zuteilen ──────────────────────────────────────────────────────────────
+        zuteilen && React.createElement("div", { onClick: () => setZuteilen(null), className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
+                    borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "88dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 19, marginBottom: 4 } },
+                    (zuteilen.vorname + " " + zuteilen.name).trim() || "Schüler"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                    "Zuständig: " + (zuteilen.teacherName || "niemand") + (zuteilen.klasse ? " · Klasse " + zuteilen.klasse : "")),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 16 }, onClick: () => { const s = zuteilen; setZuteilen(null); akteOeffnen(s); } }, "Komplette Schülerakte ansehen"),
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } }, "Fahrlehrer"),
+                lehrerWahl.map(t => {
+                    const istBesitzer = t.id === zuteilen.teacherId;
+                    const istFrei = zuteilen.sharedWith.indexOf(t.id) !== -1;
+                    return React.createElement("div", { key: t.id, style: { padding: "12px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 9, marginBottom: istBesitzer ? 0 : 9 } },
+                            React.createElement("span", { style: { width: 10, height: 10, borderRadius: 99, background: a.farbe[t.email], flexShrink: 0 } }),
+                            React.createElement("span", { style: { flex: 1, fontSize: 14, fontWeight: 700, minWidth: 0, overflowWrap: "anywhere" } }, t.label),
+                            istBesitzer && React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "var(--orange-ink)", background: "var(--orange-soft)", borderRadius: 6, padding: "3px 8px", flexShrink: 0 } }, "zuständig"),
+                            !istBesitzer && istFrei && React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "var(--sage-deep)", background: "var(--sage-bg)", borderRadius: 6, padding: "3px 8px", flexShrink: 0 } }, "mitbetreuend")),
+                        !istBesitzer && React.createElement("div", { style: { display: "flex", gap: 8 } },
+                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, minHeight: 44, fontSize: 12.5 }, disabled: !!aktion,
+                                onClick: () => umhaengen(zuteilen, t) }, "Als zuständig setzen"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, minHeight: 44, fontSize: 12.5, color: istFrei ? "var(--red-ink)" : "var(--sage-deep)" }, disabled: !!aktion,
+                                onClick: () => freigabe(zuteilen, t, !istFrei) }, istFrei ? "Freigabe entziehen" : "Zusätzlich freigeben")));
+                }),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "14px 0 0" } },
+                    "„Als zuständig setzen\" überträgt den Schüler samt aller Fahrstunden, Zahlungen und Notizen - der bisherige Fahrlehrer sieht ihn danach nicht mehr. „Zusätzlich freigeben\" lässt den Besitz unverändert und gibt einem zweiten Fahrlehrer Zugriff, etwa für eine Vertretung."),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setZuteilen(null) }, "Schließen"))),
+
+        // ── Sheet: Schülerakte ───────────────────────────────────────────────────────────
+        akte && React.createElement("div", { onClick: () => setAkte(null), className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 155, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                akte.busy
+                    ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "20px 0", textAlign: "center" } }, "Akte wird geladen…")
+                    : akte.error
+                        ? React.createElement("div", { style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "11px 13px", fontSize: 13.5 } }, akte.error)
+                        : (() => {
+                            const s = akte.student || {};
+                            const fahrten = (s.drivenLessons || []).slice().sort((x, y) => (y.date || "").localeCompare(x.date || ""));
+                            const min = fahrten.reduce((t, l) => t + (Number(l.minutes) || 0), 0);
+                            const zeile = (k, v) => v ? React.createElement("div", { key: k, style: { display: "flex", gap: 10, padding: "6px 0", fontSize: 13.5, borderTop: "1px solid var(--line)" } },
+                                React.createElement("span", { style: { color: "var(--muted)", minWidth: 118, flexShrink: 0 } }, k),
+                                React.createElement("span", { style: { flex: 1, minWidth: 0, overflowWrap: "anywhere" } }, v)) : null;
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 2 } },
+                                    ((s.vorname || "") + " " + (s.name || "")).trim() || "Schüler"),
+                                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                                    "Zuständig: " + (akte.meta ? akte.meta.teacherName : "") + (s.klasse ? " · Klasse " + s.klasse : "")),
+                                React.createElement("div", { className: "home-v2-stats", style: { marginBottom: 16 } },
+                                    [{ l: "Fahrstunden", w: fahrten.length }, { l: "Unterrichtseinheiten", w: Math.round(min / 45 * 10) / 10 }].map(x =>
+                                        React.createElement("div", { key: x.l, className: "home-v2-statcell" },
+                                            React.createElement("div", { className: "home-v2-stat-num home-v2-display" }, String(x.w).replace(".", ",")),
+                                            React.createElement("div", { className: "home-v2-stat-label" }, x.l)))),
+                                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6, marginTop: 4 } }, "Stammdaten"),
+                                [zeile("Geburtsdatum", dashDatum(s.geb)), zeile("Telefon", s.tel), zeile("Festnetz", s.festnetz), zeile("Anschrift", s.anschrift),
+                                 zeile("Klasse", s.klasse), zeile("Theorie", s.theorie ? "bestanden" : ""), zeile("Sehhilfe", s.sehhilfe ? "ja" : ""),
+                                 zeile("Ausbildungsbeginn", dashDatum(s.ausbildungsbeginn)), zeile("Archiviert", s.archived ? "ja" : "")].filter(Boolean),
+                                s.bemerkungen && React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Bemerkungen"),
+                                    React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.55, whiteSpace: "pre-line", margin: 0 } }, s.bemerkungen)),
+                                (s.exams || []).length > 0 && React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Prüfungen"),
+                                    (s.exams || []).map((e, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, padding: "6px 0", fontSize: 13.5, borderTop: "1px solid var(--line)" } },
+                                        React.createElement("span", { style: { minWidth: 92, color: "var(--muted)", flexShrink: 0 } }, dashDatum(e.date)),
+                                        React.createElement("span", { style: { flex: 1 } }, e.art || "Prüfung"),
+                                        React.createElement("span", { style: { fontWeight: 800, color: e.passed ? "var(--green-ink)" : "var(--red-ink)", flexShrink: 0 } }, e.passed ? "bestanden" : "nicht bestanden")))),
+                                fahrten.length > 0 && React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } },
+                                        "Fahrstunden (" + fahrten.length + ")"),
+                                    fahrten.slice(0, 60).map((l, i) => React.createElement("div", { key: l.id || i, style: { padding: "8px 0", borderTop: "1px solid var(--line)", fontSize: 13 } },
+                                        React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "baseline" } },
+                                            React.createElement("span", { style: { minWidth: 92, color: "var(--muted)", flexShrink: 0, fontVariantNumeric: "tabular-nums" } }, dashDatum(l.date)),
+                                            React.createElement("span", { style: { flex: 1, minWidth: 0, overflowWrap: "anywhere" } }, (l.art || l.leistung || "Fahrstunde") + (l.stufe ? " · " + l.stufe : "")),
+                                            React.createElement("span", { style: { flexShrink: 0, fontWeight: 700, fontVariantNumeric: "tabular-nums" } }, (l.minutes || 0) + " min")),
+                                        l.note && React.createElement("div", { style: { color: "var(--muted)", marginTop: 3, lineHeight: 1.5, overflowWrap: "anywhere" } }, l.note))),
+                                    fahrten.length > 60 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
+                                        "Die 60 jüngsten Fahrstunden sind aufgeführt, insgesamt sind es " + fahrten.length + ".")),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "16px 0 0" } },
+                                    "Diese Einsicht ist nur lesend. Geändert wird ein Schüler weiterhin ausschließlich von dem Fahrlehrer, dem er zugeordnet ist."));
+                        })(),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
+}
 function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
     const [teacherModelle, setTeacherModelle] = React.useState({});
     const [modellEdit, setModellEdit] = React.useState(null); // null | {id, name, modell, satz}
