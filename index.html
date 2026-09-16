@@ -3130,7 +3130,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.1";
+const APP_VERSION = "2.9.2";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -10987,6 +10987,7 @@ function App() {
     // KI-Kalenderassistent: null = zu, sonst {busy, error, zusammenfassung, termine:[{id,empfehlung,grund,reihenfolge}],
     // auswahl:Set<id>, uebernehmen:bool}. Siehe kiPlanHolen() weiter unten.
     const [kiPlan, setKiPlan] = useState(null);
+    const [kiAnsicht, setKiAnsicht] = useState("liste"); // "liste" | "kalender" - Ansicht im Vorschlag-Sheet
     const [theme, setTheme] = useState(() => { try {
         return localStorage.getItem("v3_theme") || "dark";
     }
@@ -21260,10 +21261,73 @@ function App() {
         };
     }
 
+    /* Vorschau: wie die Woche nach dem Übernehmen aussieht.
+       Baut aus den bestätigten Terminen plus der aktuellen Auswahl eine Tagesliste mit
+       Zeitleiste. Reagiert unmittelbar auf jedes "Doch annehmen" - die Vorschau ist der
+       eigentliche Zweck des Sheets: sehen, was man da gleich bestätigt. */
+    function kiVorschauTage(plan) {
+        if (!plan || !plan.termine.length) return [];
+        const proTag = {};
+        // Erst die betroffenen Tage bestimmen: überall, wo ein Vorschlag liegt.
+        plan.termine.forEach(t => {
+            const a = (appts || []).find(x => x.id === t.id);
+            if (!a) return;
+            const k = ymd(a.start_at);
+            proTag[k] = proTag[k] || { key: k, eintraege: [] };
+        });
+        Object.keys(proTag).forEach(k => {
+            // Bestehende bestätigte Termine des Tages
+            (appts || []).filter(x => ymd(x.start_at) === k && x.status === "confirmed" && !isUrlaub(x))
+                .forEach(x => proTag[k].eintraege.push({
+                    id: x.id, art: "bestehend",
+                    von: toMin(hm(x.start_at)), bis: x.end_at ? toMin(hm(x.end_at)) : toMin(hm(x.start_at)) + 45,
+                    name: apptStudentName(x) || x.title || "Termin",
+                }));
+            // Dazu die Vorschläge dieses Tages, je nach aktueller Auswahl
+            plan.termine.forEach(t => {
+                const a = (appts || []).find(x => x.id === t.id);
+                if (!a || ymd(a.start_at) !== k) return;
+                proTag[k].eintraege.push({
+                    id: a.id, art: plan.auswahl.has(t.id) ? "neu" : "abgelehnt",
+                    von: toMin(hm(a.start_at)), bis: a.end_at ? toMin(hm(a.end_at)) : toMin(hm(a.start_at)) + 45,
+                    name: apptStudentName(a) || a.title || "Vorschlag",
+                    sonder: (SONDERFAHRT_ARTEN.find(x => x.code === apptArt(a)) || {}).label || null,
+                });
+            });
+        });
+        return Object.values(proTag).sort((x, y) => x.key.localeCompare(y.key)).map(tag => {
+            const d = new Date(tag.key + "T12:00:00");
+            const wh = workHours && typeof workHours === "object" ? workHours[LUECKEN_DOW[d.getDay()]] : null;
+            // Zeitfenster der Leiste: die hinterlegte Arbeitszeit, sonst die Spanne der Termine
+            // selbst - mit etwas Luft, damit der erste Block nicht an der Kante klebt.
+            const sichtbar = tag.eintraege.filter(e => e.art !== "abgelehnt");
+            // Das Zeitfenster muss ALLE Eintraege umfassen, auch die abgelehnten: die werden
+            // gestrichelt mitgezeichnet, und ein Block ausserhalb der Achse wuerde links
+            // anklemmen und damit eine falsche Uhrzeit vortaeuschen.
+            const alle = tag.eintraege;
+            let von = (wh && !wh.blocked && wh.von) ? toMin(wh.von) : Math.max(0, Math.min(...alle.map(e => e.von)) - 30);
+            let bis = (wh && !wh.blocked && wh.bis) ? toMin(wh.bis) : Math.min(1440, Math.max(...alle.map(e => e.bis)) + 30);
+            alle.forEach(e => { if (e.von < von) von = e.von; if (e.bis > bis) bis = e.bis; });
+            if (bis - von < 120) bis = von + 120;
+            // Leerlauf zwischen den Terminen, die nach dem Übernehmen tatsächlich dastehen
+            const belegt = sichtbar.slice().sort((x, y) => x.von - y.von);
+            const luecken = [];
+            for (let i = 1; i < belegt.length; i++) {
+                const l = belegt[i].von - belegt[i - 1].bis;
+                if (l >= 45) luecken.push({ von: belegt[i - 1].bis, bis: belegt[i].von, min: l });
+            }
+            const minuten = belegt.reduce((sum, e) => sum + (e.bis - e.von), 0);
+            return { ...tag, d, von, bis, luecken, minuten,
+                label: d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" }),
+                eintraege: tag.eintraege.slice().sort((x, y) => x.von - y.von) };
+        });
+    }
+
     async function kiPlanHolen() {
         const offen = (appts || []).filter(a => a.status === "pending")
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
         if (!offen.length) { showToast("Es gibt gerade keine offenen Terminvorschläge."); return; }
+        setKiAnsicht("liste");
         setKiPlan({ busy: true, error: "", termine: [], zusammenfassung: "", auswahl: new Set() });
         try {
             const vorschlaege = offen.map(a => kiFaktenFuer(a, offen));
@@ -27654,8 +27718,51 @@ function App() {
                             React.createElement("div", { style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "11px 13px", fontSize: 13.5, lineHeight: 1.5, marginBottom: 12 } }, kiPlan.error),
                             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: kiPlanHolen }, "Erneut versuchen"))
                         : React.createElement(React.Fragment, null,
-                            kiPlan.zusammenfassung && React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, kiPlan.zusammenfassung),
-                            kiPlan.termine.map(t => {
+                            kiPlan.zusammenfassung && React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 14 } }, kiPlan.zusammenfassung),
+                            React.createElement("div", { className: "seg", style: { marginBottom: 14 } },
+                                React.createElement("button", { className: kiAnsicht === "liste" ? "on" : "", onClick: () => setKiAnsicht("liste") }, "Entscheiden"),
+                                React.createElement("button", { className: kiAnsicht === "kalender" ? "on" : "", onClick: () => setKiAnsicht("kalender") }, "So sieht die Woche aus")),
+                            // ── Vorschau: der Kalender, wie er nach dem Übernehmen aussähe ──
+                            kiAnsicht === "kalender" && React.createElement("div", { style: { marginBottom: 14 } },
+                                kiVorschauTage(kiPlan).map(tag => React.createElement("div", { key: tag.key, style: { marginBottom: 16 } },
+                                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginBottom: 6 } },
+                                        React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, tag.label),
+                                        React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", fontVariantNumeric: "tabular-nums" } },
+                                            // fmtUE lebt in renderKalender(), das Sheet rendert in App() - deshalb hier lokal.
+                                            (Number.isInteger(tag.minuten / 45) ? String(tag.minuten / 45) : (tag.minuten / 45).toFixed(1).replace(".", ",")) + " UE"
+                                            + (tag.luecken.length ? " · " + tag.luecken.reduce((m, l) => m + l.min, 0) + " Min Leerlauf" : ""))),
+                                    // Die Leiste: ein Tag von links nach rechts, Blöcke anteilig
+                                    // positioniert. Abgelehnte stehen gestrichelt daneben - man
+                                    // sieht damit, was man gerade WEGLÄSST, nicht nur was bleibt.
+                                    React.createElement("div", { style: { position: "relative", height: 34, borderRadius: "var(--r-xs)", background: "var(--field-bg)", overflow: "hidden" } },
+                                        tag.eintraege.map(e => {
+                                            const spanne = Math.max(1, tag.bis - tag.von);
+                                            const links = Math.max(0, (e.von - tag.von) / spanne * 100);
+                                            const breite = Math.max(2.5, (e.bis - e.von) / spanne * 100);
+                                            const stil = e.art === "neu"
+                                                ? { background: "var(--orange)", color: "#1c1305", border: "none" }
+                                                : e.art === "abgelehnt"
+                                                    ? { background: "transparent", color: "var(--muted)", border: "1.5px dashed var(--line)", opacity: .75 }
+                                                    : { background: "var(--sky-bg)", color: "var(--sky-deep)", border: "1px solid var(--sky)" };
+                                            return React.createElement("div", { key: e.id, title: e.name + " · " + fromMin(e.von) + "–" + fromMin(e.bis),
+                                                style: { position: "absolute", left: links + "%", width: breite + "%", top: 3, bottom: 3,
+                                                    borderRadius: "var(--r-xs)", display: "flex", alignItems: "center", justifyContent: "center",
+                                                    fontSize: 10, fontWeight: 700, overflow: "hidden", whiteSpace: "nowrap", ...stil } },
+                                                breite > 14 ? fromMin(e.von) : "");
+                                        })),
+                                    React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 10.5, color: "var(--muted)", marginTop: 3, fontVariantNumeric: "tabular-nums" } },
+                                        React.createElement("span", null, fromMin(tag.von)),
+                                        React.createElement("span", null, fromMin(tag.bis))),
+                                    tag.luecken.length > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 5, lineHeight: 1.5 } },
+                                        tag.luecken.map(l => fromMin(l.von) + "–" + fromMin(l.bis) + " frei (" + l.min + " Min)").join(" · ")))),
+                                React.createElement("div", { style: { display: "flex", gap: 14, flexWrap: "wrap", fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
+                                    React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
+                                        React.createElement("span", { style: { width: 12, height: 12, borderRadius: 3, background: "var(--orange)" } }), "neu dazu"),
+                                    React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
+                                        React.createElement("span", { style: { width: 12, height: 12, borderRadius: 3, background: "var(--sky-bg)", border: "1px solid var(--sky)" } }), "steht schon"),
+                                    React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 5 } },
+                                        React.createElement("span", { style: { width: 12, height: 12, borderRadius: 3, border: "1.5px dashed var(--line)" } }), "abgelehnt"))),
+                            kiAnsicht === "liste" && kiPlan.termine.map(t => {
                                 const a = (appts || []).find(x => x.id === t.id);
                                 if (!a) return null;
                                 const an = kiPlan.auswahl.has(t.id);
@@ -27700,7 +27807,7 @@ function App() {
                                     React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em", marginTop: 2,
                                             color: an ? "var(--orange-ink)" : "var(--muted)" } }, an ? "annehmen" : "ablehnen"));
                             }).filter(Boolean),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "4px 0 14px" } },
+                            kiAnsicht === "liste" && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "4px 0 14px" } },
                                 "Jede Empfehlung lässt sich einzeln umdrehen – übernommen wird genau das, was hier steht. Pflichtfahrten (Überland, Autobahn, Dämmerung) dürfen ruhig alleine stehen; dort ist eine Lücke davor normal."),
                             React.createElement("button", { className: "btn btn-primary btn-block", disabled: !!kiPlan.uebernehmen, onClick: kiPlanUebernehmen },
                                 kiPlan.uebernehmen ? "Wird übernommen…"
