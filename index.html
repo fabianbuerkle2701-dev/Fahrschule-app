@@ -20784,11 +20784,47 @@ function App() {
             return;
         }
         const candidates = waitlistCandidates(freedAppt);
-        if (candidates.length)
-            setWaitlistOffer({ appt: freedAppt, candidates, queue: queue || [] });
+        // Der Schueler, dessen Termin ausgefallen ist, braucht selbst einen Ersatz. Frueher
+        // erschien das Sheet nur, wenn ANDERE Schueler passten - fiel der Termin ohne passende
+        // Kandidaten aus, passierte gar nichts und er war einfach raus.
+        const betroffen = (students || []).find(x => x.id === freedAppt.student_id) || null;
+        if (candidates.length || betroffen)
+            setWaitlistOffer({ appt: freedAppt, candidates, betroffen, queue: queue || [] });
         else
             offerNextInQueue(queue);
     }
+    /* Setzt den Schueler, dessen Termin gerade ausgefallen ist, auf die Warteliste.
+       Die Wunschliste gehoert eigentlich dem Schueler (er pflegt sie ueber den Buchungslink),
+       deshalb wird eine bestehende NICHT ueberschrieben, sondern nur ergaenzt: der Wochentag
+       kommt dazu, das Zeitfenster wird nur geweitet, nie verengt. Hat er noch keine, wird der
+       ausgefallene Termin selbst zur Vorgabe - er hat ja gezeigt, wann der Schueler kann. */
+    async function betroffenenAufWarteliste() {
+        const wo = waitlistOffer;
+        if (!wo || !wo.betroffen) return;
+        const stu = (students || []).find(x => x.id === wo.betroffen.id) || wo.betroffen;
+        const d = new Date(wo.appt.start_at);
+        const teile = berlinParts(d);
+        const wochentag = teile.weekday;
+        const von = String(teile.hour).padStart(2, "0") + ":" + String(teile.minute).padStart(2, "0");
+        const endeD = wo.appt.end_at ? new Date(wo.appt.end_at) : new Date(d.getTime() + 45 * 60000);
+        const endeT = berlinParts(endeD);
+        const bis = String(endeT.hour).padStart(2, "0") + ":" + String(endeT.minute).padStart(2, "0");
+        const alt = (stu.wunschliste && typeof stu.wunschliste === "object") ? stu.wunschliste : null;
+        const tage = alt && Array.isArray(alt.weekdays) ? alt.weekdays.slice() : [];
+        if (!tage.includes(wochentag)) tage.push(wochentag);
+        const neu = {
+            active: true,
+            weekdays: tage.sort((a, b) => a - b),
+            von: (alt && alt.von && alt.von < von) ? alt.von : von,
+            bis: (alt && alt.bis && alt.bis > bis) ? alt.bis : bis,
+        };
+        writeStudent({ ...stu, wunschliste: neu });
+        setWaitlistOffer(w => w ? ({ ...w, betroffenGesetzt: true }) : w);
+        // Kein globales Wochentags-Kuerzel vorhanden - hier direkt aus dem Datum ableiten.
+        const tagKurz = d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short" });
+        showToast(dispName(stu) + " steht jetzt auf der Warteliste – " + tagKurz + " " + neu.von + "–" + neu.bis + ".");
+    }
+
     async function createWaitlistOffer() {
         if (!waitlistOffer)
             return;
@@ -27991,12 +28027,26 @@ function App() {
                 waitlistOffer.queue && waitlistOffer.queue.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } },
                     "Noch " + waitlistOffer.queue.length + (waitlistOffer.queue.length === 1 ? " weiterer freier Termin danach" : " weitere freie Termine danach")),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
-                    waitlistOffer.candidates.length + " Schüler warten auf einen früheren Termin"),
+                    waitlistOffer.candidates.length
+                        ? (waitlistOffer.candidates.length + (waitlistOffer.candidates.length === 1 ? " Schüler wartet auf einen früheren Termin" : " Schüler warten auf einen früheren Termin"))
+                        : "Termin ist frei geworden"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
                     fmtDLong(waitlistOffer.appt.start_at) + ", " + hm(waitlistOffer.appt.start_at) + " Uhr ist frei geworden. Passt das für die Warteliste?"),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
+                // Der Schueler, dessen Termin ausgefallen ist: er braucht selbst einen Ersatz,
+                // taucht aber in den Kandidaten bewusst nicht auf. Steht deshalb zuerst.
+                waitlistOffer.betroffen && React.createElement("div", { style: { padding: "12px 13px", marginBottom: 14, borderRadius: "var(--r-tile)",
+                        background: "var(--sage-bg)", border: "1px solid var(--sage)" } },
+                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 2 } },
+                        dispName(waitlistOffer.betroffen) + " hat den Termin verloren"),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: waitlistOffer.betroffenGesetzt ? 0 : 10 } },
+                        waitlistOffer.betroffenGesetzt
+                            ? "Steht jetzt auf der Warteliste und rückt nach, sobald etwas frei wird."
+                            : "Auf die Warteliste setzen, damit er nachrückt, sobald etwas frei wird – mit der Zeit dieses Termins als Wunsch."),
+                    !waitlistOffer.betroffenGesetzt && React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 44, width: "100%" }, onClick: betroffenenAufWarteliste },
+                        "Auf die Warteliste setzen")),
+                waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
                     "Auf der Warteliste anbieten"),
-                React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } },
+                waitlistOffer.candidates.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } },
                     "Wartende Schüler (optional direkt anschreiben)"),
                 waitlistOffer.candidates.map(s => {
                     const num = s.tel ? waNumber(s.tel) : "";
