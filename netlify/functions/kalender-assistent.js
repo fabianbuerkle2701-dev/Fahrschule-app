@@ -69,6 +69,7 @@ exports.handler = async function (event) {
     bis: cs(v && v.bis, 5),
     minuten: cn(v && v.minuten),
     art: cs(v && v.art, 60),
+    sonderfahrt: v && v.sonderfahrt ? cs(v.sonderfahrt, 40) : null,
     klasse: cs(v && v.klasse, 20),
     hinweise: Array.isArray(v && v.hinweise) ? v.hinweise.slice(0, 8).map((h) => cs(h, 200)) : [],
     leerlaufDavorMin: v && v.leerlaufDavorMin == null ? null : cn(v.leerlaufDavorMin),
@@ -77,6 +78,16 @@ exports.handler = async function (event) {
     minutenAmTag: cn(v && v.minutenAmTag),
     schuelerFahrstunden: cn(v && v.schuelerFahrstunden),
     schuelerStand: cs(v && v.schuelerStand, 120),
+  }));
+
+  // Die Woche drumherum: Arbeitszeit, schon belegte Minuten und freie Luecken je Tag.
+  // Damit kann der Assistent sagen, wo noch Platz waere, statt nur Vorschlag fuer Vorschlag
+  // zu urteilen.
+  const woche = (Array.isArray(body.woche) ? body.woche.slice(0, 18) : []).map((t) => ({
+    tag: cs(t && t.tag, 30),
+    arbeitszeit: cs(t && t.arbeitszeit, 30),
+    bestaetigteMinuten: cn(t && t.bestaetigteMinuten),
+    freieLuecken: Array.isArray(t && t.freieLuecken) ? t.freieLuecken.slice(0, 6).map((l) => cs(l, 20)) : [],
   }));
 
   const k = body.kontext && typeof body.kontext === "object" ? body.kontext : {};
@@ -94,7 +105,8 @@ WICHTIG ZUR ARBEITSTEILUNG: Alle harten Prüfungen sind bereits erledigt und ste
 
 So entscheidest du:
 - Steht in "hinweise" ein harter Konflikt (Überschneidung, Limit überschritten, außerhalb der Arbeitszeit, Feiertag/Sonntag), dann "ablehnen". Das ist nicht verhandelbar.
-- Ist der Leerlauf davor oder danach größer als ${kontext.leerlaufGrenzeMin} Minuten, ist der Termin wirtschaftlich fragwürdig: der Fahrlehrer wartet dann zwischen zwei Fahrstunden herum. Empfiehl dann "ablehnen" und sag im Grund, wie lang die Lücke ist - es sei denn, es ist der einzige Termin an dem Tag (dann gibt es keinen Leerlauf, sondern nur einen kurzen Arbeitstag) oder der Schüler braucht den Termin dringend.
+- SONDERFAHRTEN SIND DIE WICHTIGSTE AUSNAHME. Steht in "sonderfahrt" ein Wert (Überland, Autobahn, Dämmerungsfahrt), dann ist das eine nach FahrschAusbO vorgeschriebene Pflichtfahrt, die an eine Tageszeit oder Streckenart gebunden ist. Eine Dämmerungsfahrt MUSS abends oder in der Dämmerung stattfinden, Überland- und Autobahnfahrten brauchen lange Strecken am Stück. Dass so ein Termin weit weg von den übrigen liegt, ist dort völlig normal und KEIN Ablehnungsgrund - empfiehl sie im Zweifel "annehmen" und erwähne den Leerlauf höchstens als Nebensatz. Lehne eine Sonderfahrt nur ab, wenn ein echter harter Konflikt in "hinweise" steht.
+- Ist der Leerlauf davor oder danach größer als ${kontext.leerlaufGrenzeMin} Minuten, ist ein NORMALER Termin wirtschaftlich fragwürdig: der Fahrlehrer wartet dann zwischen zwei Fahrstunden herum. Empfiehl dann "ablehnen" und sag im Grund, wie lang die Lücke ist - es sei denn, es ist der einzige Termin an dem Tag (dann gibt es keinen Leerlauf, sondern nur einen kurzen Arbeitstag) oder der Schüler braucht den Termin dringend.
 - Termine, die sich nahtlos oder mit kurzer Pause an bestehende anschließen, sind besonders wertvoll - hebe das hervor.
 - Wer erst wenige Fahrstunden hat oder laut "schuelerStand" bald zur Prüfung will, bekommt im Zweifel den Vorzug.
 - Bleibt ein Vorschlag ohne jeden Einwand, dann "annehmen" - ohne lange Begründung.
@@ -104,7 +116,11 @@ Für jeden Vorschlag lieferst du:
 - grund: EIN kurzer, konkreter Satz auf Deutsch, der den Ausschlag nennt. Keine Floskeln, keine Wiederholung des Termins. Beispiele: "Schließt direkt an die Fahrstunde um 10:00 an." / "Danach 2,5 Stunden Leerlauf bis zum nächsten Termin." / "Überschneidet sich mit Lena Berger um 14:00."
 - reihenfolge: 1 für den Vorschlag, den er zuerst bestätigen sollte, dann aufsteigend. Abgelehnte bekommen die hohen Zahlen.
 
-Dazu eine "zusammenfassung": zwei Sätze, was insgesamt zu tun ist. Nenne Zahlen (wie viele annehmen, wie viele ablehnen).
+Dazu eine "zusammenfassung": zwei bis drei Sätze zur ganzen Woche, nicht nur zu den einzelnen Vorschlägen. Nenne Zahlen (wie viele annehmen, wie viele ablehnen) und nutze die Wochenübersicht: wenn ein Tag nach dem Bestätigen noch große freie Lücken hat oder auffällig leer bleibt, sag das - der Fahrlehrer kann dann gezielt jemanden nachrücken lassen. Ist die Woche dagegen gut gefüllt, sag auch das.
+
+Steht bei einem Tag "nicht hinterlegt", dann sind für diesen Wochentag schlicht keine Arbeitszeiten eingetragen - dann sind auch die freien Lücken unbekannt. Sag in diesem Fall NICHT, der Tag sei frei oder leer, und leite daraus keine Empfehlung ab. Trifft das auf die ganze Woche zu, erwähne einmal beiläufig, dass hinterlegte Arbeitszeiten (Einstellungen) die Planung deutlich genauer machen würden.
+
+Der Fahrlehrer kann jede deiner Empfehlungen im Anschluss einzeln umdrehen. Schreib deshalb so, dass er die Entscheidung nachvollziehen und bewusst anders entscheiden kann - nicht so, als wäre sie schon getroffen.
 
 Sprich den Fahrlehrer direkt an, sachlich und knapp. Die Entscheidung trifft am Ende er - du bereitest sie vor.`;
 
@@ -147,6 +163,7 @@ Sprich den Fahrlehrer direkt an, sachlich und knapp. Die Entscheidung trifft am 
         tools: [werkzeug],
         tool_choice: { type: "tool", name: "kalender_empfehlung" },
         messages: [{ role: "user", content: "Rahmenbedingungen:\n" + JSON.stringify(kontext, null, 2)
+          + "\n\nDie Woche drumherum (Arbeitszeit, schon belegte Minuten, freie Lücken je Tag):\n" + JSON.stringify(woche, null, 2)
           + "\n\nOffene Terminvorschläge:\n" + JSON.stringify(vorschlaege, null, 2) }],
       }),
     });

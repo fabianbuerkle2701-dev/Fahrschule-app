@@ -3130,7 +3130,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.0";
+const APP_VERSION = "2.9.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -21240,6 +21240,11 @@ function App() {
             von: hm(a.start_at), bis: a.end_at ? hm(a.end_at) : "",
             minuten: mins,
             art: artLabelPlain(apptArt(a)) || "",
+            // Sonderfahrten (Ueberland/Autobahn/Daemmerung) sind nach FahrschAusbO Pflicht und
+            // an Tageszeit bzw. Streckenart gebunden. Eine Daemmerungsfahrt MUSS abends
+            // stattfinden - der Leerlauf davor ist dort keine schlechte Planung, sondern
+            // unvermeidbar. Ohne dieses Feld haette die KI keine Chance, das zu erkennen.
+            sonderfahrt: (SONDERFAHRT_ARTEN.find(x => x.code === apptArt(a)) || {}).label || null,
             klasse: (stu && stu.klasse) || "",
             hinweise,
             leerlaufDavorMin: davor,
@@ -21262,6 +21267,28 @@ function App() {
         setKiPlan({ busy: true, error: "", termine: [], zusammenfassung: "", auswahl: new Set() });
         try {
             const vorschlaege = offen.map(a => kiFaktenFuer(a, offen));
+            // Alle Tage, um die es geht - plus die restliche Woche drumherum, damit der
+            // Assistent auch sagen kann, wo noch Platz waere.
+            const tage = [];
+            const gesehen = new Set();
+            offen.forEach(a => {
+                const wochenStart = startOfWeek(new Date(ymd(a.start_at) + "T12:00:00"));
+                for (let i = 0; i < 6; i++) {
+                    const d = addDays(wochenStart, i);
+                    const k = ymd(d);
+                    if (gesehen.has(k)) continue;
+                    gesehen.add(k);
+                    const wh = workHours && typeof workHours === "object" ? workHours[LUECKEN_DOW[d.getDay()]] : null;
+                    tage.push({
+                        tag: d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" }),
+                        arbeitszeit: (wh && wh.blocked) ? "frei"
+                            : (wh && wh.von && wh.bis) ? (wh.von + "-" + wh.bis)
+                            : "nicht hinterlegt",
+                        bestaetigteMinuten: confirmedMinutesOnDay(k),
+                        freieLuecken: freieLueckenAmTag(k, 45).slice(0, 6).map(l => l.from + "-" + l.to),
+                    });
+                }
+            });
             const wochentage = { mo: "Mo", di: "Di", mi: "Mi", do: "Do", fr: "Fr", sa: "Sa", so: "So" };
             const az = workHours && typeof workHours === "object"
                 ? Object.keys(wochentage).map(k => {
@@ -21275,6 +21302,7 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({
                     vorschlaege,
+                    woche: tage.slice(0, 18),
                     kontext: {
                         heute: new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" }),
                         arbeitszeiten: az,
@@ -27632,13 +27660,14 @@ function App() {
                                 if (!a) return null;
                                 const an = kiPlan.auswahl.has(t.id);
                                 const stu = a.student_id ? (students || []).find(x => x.id === a.student_id) : null;
-                                return React.createElement("button", { key: t.id,
-                                    onClick: () => setKiPlan(k => {
-                                        if (!k) return k;
-                                        const neuAuswahl = new Set(k.auswahl);
-                                        if (neuAuswahl.has(t.id)) neuAuswahl.delete(t.id); else neuAuswahl.add(t.id);
-                                        return { ...k, auswahl: neuAuswahl };
-                                    }),
+                                const sonder = (SONDERFAHRT_ARTEN.find(x => x.code === apptArt(a)) || {}).label || null;
+                                const umdrehen = () => setKiPlan(k => {
+                                    if (!k) return k;
+                                    const neuAuswahl = new Set(k.auswahl);
+                                    if (neuAuswahl.has(t.id)) neuAuswahl.delete(t.id); else neuAuswahl.add(t.id);
+                                    return { ...k, auswahl: neuAuswahl };
+                                });
+                                return React.createElement("div", { key: t.id,
                                     style: { width: "100%", textAlign: "left", display: "flex", gap: 11, alignItems: "flex-start", padding: "11px 12px", marginBottom: 8,
                                         borderRadius: "var(--r-tile)", background: an ? "var(--orange-soft)" : "var(--field-bg)",
                                         border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)") } },
@@ -27650,16 +27679,29 @@ function App() {
                                             border: an ? "none" : "1.5px solid var(--line)", fontSize: 13, fontWeight: 800 } }, an ? "✓" : "✕"),
                                     React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                         React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflowWrap: "anywhere" } },
-                                            apptStudentName(a) || a.title || "Vorschlag"),
+                                            apptStudentName(a) || a.title || "Vorschlag",
+                                            // Sonderfahrten sichtbar auszeichnen: sie sind Pflicht und duerfen
+                                            // ruhig alleine stehen - der Fahrlehrer soll das auf einen Blick sehen,
+                                            // bevor er eine wegen "Leerlauf" wegklickt.
+                                            sonder && React.createElement("span", { style: { fontSize: 10, fontWeight: 800, color: "var(--sky-deep)", background: "var(--sky-bg)",
+                                                    borderRadius: 5, padding: "2px 6px", marginLeft: 7, textTransform: "uppercase", letterSpacing: ".03em" } }, sonder)),
                                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 2 } },
                                             fmtDLong(a.start_at) + ", " + hm(a.start_at) + (a.end_at ? " – " + hm(a.end_at) : "") + " Uhr"
                                             + (stu && stu.klasse ? " · Klasse " + stu.klasse : "")),
-                                        React.createElement("div", { style: { fontSize: 12.5, color: an ? "var(--orange-ink)" : "var(--muted)", marginTop: 4, lineHeight: 1.5, overflowWrap: "anywhere" } }, t.grund)),
+                                        React.createElement("div", { style: { fontSize: 12.5, color: an ? "var(--orange-ink)" : "var(--muted)", marginTop: 4, lineHeight: 1.5, overflowWrap: "anywhere" } }, t.grund),
+                                        // Beschriftet die AKTION, nicht den Zustand: "Doch annehmen" sagt, was
+                                        // ein Tippen bewirkt. Genau der Fall, den Fabian genannt hat - eine
+                                        // Nachtfahrt, die weit weg liegt, trotzdem bestaetigen.
+                                        React.createElement("button", { onClick: umdrehen,
+                                            style: { marginTop: 8, minHeight: 44, padding: "0 14px", borderRadius: "var(--r-chip)", fontSize: 12.5, fontWeight: 700,
+                                                fontFamily: "var(--font-d)", background: "var(--card)", color: an ? "var(--red-ink)" : "var(--sage-deep)",
+                                                border: "1.5px solid " + (an ? "var(--line)" : "var(--sage)") } },
+                                            an ? "Doch ablehnen" : "Doch annehmen")),
                                     React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em", marginTop: 2,
                                             color: an ? "var(--orange-ink)" : "var(--muted)" } }, an ? "annehmen" : "ablehnen"));
                             }).filter(Boolean),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "4px 0 14px" } },
-                                "Tippe einen Termin an, um die Entscheidung umzudrehen. Übernommen wird genau das, was hier steht – nicht mehr."),
+                                "Jede Empfehlung lässt sich einzeln umdrehen – übernommen wird genau das, was hier steht. Pflichtfahrten (Überland, Autobahn, Dämmerung) dürfen ruhig alleine stehen; dort ist eine Lücke davor normal."),
                             React.createElement("button", { className: "btn btn-primary btn-block", disabled: !!kiPlan.uebernehmen, onClick: kiPlanUebernehmen },
                                 kiPlan.uebernehmen ? "Wird übernommen…"
                                     : (kiPlan.auswahl.size + (kiPlan.auswahl.size === 1 ? " bestätigen" : " bestätigen")
