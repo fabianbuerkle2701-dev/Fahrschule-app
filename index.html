@@ -3130,7 +3130,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.3";
+const APP_VERSION = "2.9.4";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -20727,6 +20727,115 @@ function App() {
         showToast(dispName(stu) + " steht jetzt auf der Warteliste – " + tagKurz + " " + neu.von + "–" + neu.bis + ".");
     }
 
+    /* ── Absage-Sofortplan: fällt ein Termin kurzfristig aus, muss der Fahrlehrer in wenigen
+       Minuten entscheiden, wen er anschreibt. Die Kandidatenliste selbst ist nur zeitlich
+       gefiltert (waitlistCandidates) - sie sagt nichts darüber, WER die Stunde am dringendsten
+       braucht. Genau das ergänzt die KI: Reihenfolge, ein Satz Begründung und eine fertige
+       Nachricht je Schüler.
+
+       Arbeitsteilung wie beim Kalenderassistenten: alle Zahlen werden HIER exakt gerechnet -
+       Ausbildungsstand über ampel()/pruefungsreife() mit allen vier Parametern, offene
+       Sonderfahrten, Tage seit der letzten Fahrstunde, Tage bis zum nächsten geplanten Termin,
+       Tage bis zur Prüfung. Claude gewichtet sie nur gegeneinander und formuliert.
+       Siehe netlify/functions/absage-sofortplan.js. ── */
+    const ABSAGE_WD_KURZ = ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"];
+    function absageFaktenFuer(stu, freedAppt) {
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const vorlage = tplFor(vk);
+        const reife = pruefungsreife(stu, vorlage.adk, vorlage.strecken, sonderfahrtenSoll);
+        const amp = ampel(stu, vorlage.adk, vorlage.strecken, sonderfahrtenSoll);
+        const heuteKey = ymd(new Date());
+        const tageBis = k => Math.round((new Date(k + "T12:00:00") - new Date(heuteKey + "T12:00:00")) / 86400000);
+        // Letzte Fahrstunde: Fahrtenbuch UND vergangene bestätigte Termine. Das Fahrtenbuch allein
+        // reicht nicht - es wird nicht von jeder Fahrschule konsequent gepflegt (siehe
+        // rueckwaertsFahrplan()), der Kalender dagegen schon.
+        const gefahren = (stu.drivenLessons || []).map(l => l.date).filter(Boolean)
+            .concat((appts || []).filter(a => a.student_id === stu.id && a.status === "confirmed"
+                && ymd(a.start_at) < heuteKey).map(a => ymd(a.start_at)))
+            .sort();
+        const letzte = gefahren.length ? gefahren[gefahren.length - 1] : null;
+        // Der ausgefallene Termin selbst zählt nicht mehr als geplanter Termin.
+        const kuenftig = (appts || []).filter(a => a.student_id === stu.id && a.id !== freedAppt.id
+            && (a.status === "confirmed" || a.status === "pending") && ymd(a.start_at) >= heuteKey)
+            .map(a => ymd(a.start_at)).sort();
+        // Prüfungstermin: erster noch offener Versuch aus dem Führerschein-Reiter, sonst ein
+        // zugeteilter Prüfplatz (exam_slots).
+        const pruefungen = (stu.exams || []).filter(e => e && e.date && e.date >= heuteKey && !e.passed)
+            .map(e => ({ datum: e.date, art: e.art === "praxis" ? "Praxis" : (e.art === "theorie" ? "Theorie" : String(e.art || "Prüfung")) }))
+            .concat((examSlots || []).filter(x => x.student_id === stu.id && x.datum && x.datum >= heuteKey)
+                .map(x => ({ datum: x.datum, art: String(x.art || "Prüfung") })))
+            .sort((a, b) => a.datum.localeCompare(b.datum));
+        const pruefung = pruefungen.length ? pruefungen[0] : null;
+        const sf = SONDERFAHRT_ARTEN.find(x => x.code === apptArt(freedAppt)) || null;
+        const wl = (stu.wunschliste && typeof stu.wunschliste === "object") ? stu.wunschliste : {};
+        return {
+            id: stu.id,
+            name: dispName(stu),
+            klasse: vk,
+            fahrstunden: (stu.drivenLessons || []).length,
+            gefahreneUE: Math.round(lessonUE(stu) * 10) / 10,
+            letzteFahrstundeVorTagen: letzte ? -tageBis(letzte) : null,
+            naechsterTerminInTagen: kuenftig.length ? tageBis(kuenftig[0]) : null,
+            termineNaechste14Tage: kuenftig.filter(k => tageBis(k) <= 14).length,
+            offeneSonderfahrten: reife.offeneSonderfahrten.map(o => o.label),
+            // Nur wahr, wenn der freie Termin selbst eine Sonderfahrt IST und genau diese Art dem
+            // Schüler noch fehlt - sonst wäre es kein Argument, sondern Zufall.
+            brauchtGenauDieseSonderfahrt: !!(sf && reife.offeneSonderfahrten.some(o => o.key === sf.key)),
+            reife: amp.text,
+            theorieBestanden: !!stu.theorie,
+            pruefungInTagen: pruefung ? tageBis(pruefung.datum) : null,
+            pruefung: pruefung ? (pruefung.art + " am " + pruefung.datum.split("-").reverse().join(".")) : "",
+            wunschfenster: ((Array.isArray(wl.weekdays) ? wl.weekdays.map(d => ABSAGE_WD_KURZ[d]).filter(Boolean).join(", ") : "")
+                + (wl.von && wl.bis ? " " + wl.von + "-" + wl.bis : "")).trim(),
+        };
+    }
+
+    async function absageSofortplan() {
+        const wo = waitlistOffer;
+        if (!wo || !wo.candidates || !wo.candidates.length)
+            return;
+        const appt = wo.appt;
+        // "fuer" haelt fest, zu WELCHEM freien Termin dieser Plan gehoert: waehrend die Anfrage
+        // laeuft, kann der Fahrlehrer das Sheet schliessen und die Queue den naechsten Termin
+        // anbieten - die spaete Antwort darf dann nicht in dessen Liste landen.
+        setWaitlistOffer(w => w ? ({ ...w, plan: { busy: true, error: "", eintraege: [], zusammenfassung: "", fuer: appt.id } }) : w);
+        const passt = (w) => w && w.plan && w.plan.fuer === appt.id;
+        try {
+            const kandidaten = wo.candidates.map(s => absageFaktenFuer(s, appt));
+            const freedStudent = (students || []).find(x => x.id === appt.student_id) || null;
+            const sf = SONDERFAHRT_ARTEN.find(x => x.code === apptArt(appt)) || null;
+            const heuteKey = ymd(new Date());
+            const resp = await fetch("/.netlify/functions/absage-sofortplan", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({
+                    kandidaten,
+                    termin: {
+                        tag: new Date(appt.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" }),
+                        von: hm(appt.start_at),
+                        bis: appt.end_at ? hm(appt.end_at) : "",
+                        minuten: apptMin(appt),
+                        inTagen: Math.round((new Date(ymd(appt.start_at) + "T12:00:00") - new Date(heuteKey + "T12:00:00")) / 86400000),
+                        art: artLabelPlain(apptArt(appt)) || "",
+                        sonderfahrt: sf ? sf.label : null,
+                        klasse: (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE,
+                        abgesagtVon: freedStudent ? dispName(freedStudent) : "",
+                        heute: new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" }),
+                    },
+                }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out || !Array.isArray(out.kandidaten)) {
+                setWaitlistOffer(w => passt(w) ? ({ ...w, plan: { ...w.plan, busy: false, error: (out && out.error) || "Der Sofortplan konnte nicht erstellt werden." } }) : w);
+                return;
+            }
+            setWaitlistOffer(w => passt(w) ? ({ ...w, plan: { ...w.plan, busy: false, error: "", eintraege: out.kandidaten, zusammenfassung: out.zusammenfassung || "" } }) : w);
+        }
+        catch (e) {
+            setWaitlistOffer(w => passt(w) ? ({ ...w, plan: { ...w.plan, busy: false, error: fehlerText(e) } }) : w);
+        }
+    }
+
     async function createWaitlistOffer() {
         if (!waitlistOffer)
             return;
@@ -27948,20 +28057,53 @@ function App() {
                         "Auf die Warteliste setzen")),
                 waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
                     "Auf der Warteliste anbieten"),
-                waitlistOffer.candidates.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } },
-                    "Wartende Schüler (optional direkt anschreiben)"),
-                waitlistOffer.candidates.map(s => {
-                    const num = s.tel ? waNumber(s.tel) : "";
-                    const waText = "Hallo " + (s.vorname || s.name) + ", bei uns ist eine frühere Fahrstunde am "
-                        + fmtDLong(waitlistOffer.appt.start_at) + " um " + hm(waitlistOffer.appt.start_at) + " Uhr frei geworden. "
-                        + "Schau in der App vorbei, wenn du sie dir sichern möchtest – wer zuerst zusagt, bekommt sie.";
-                    return React.createElement("div", { key: s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--line)" } },
-                        React.createElement("div", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, dispName(s)),
-                        num
-                            ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waText), target: "_blank", rel: "noopener noreferrer",
-                                    style: { flexShrink: 0, padding: "6px 12px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12, fontWeight: 700, textDecoration: "none" } }, "WhatsApp")
-                            : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "keine Nummer"));
-                }),
+                // Kandidatenliste: ohne KI in der bisherigen Reihenfolge, mit KI nach Dringlichkeit
+                // sortiert, je Schüler ein Satz Begründung und eine fertige Nachricht im
+                // WhatsApp-Knopf. Verschickt wird weiterhin nichts von allein - der Knopf öffnet nur
+                // den Entwurf. Siehe absageSofortplan().
+                waitlistOffer.candidates.length > 0 && (() => {
+                    const plan = waitlistOffer.plan || null;
+                    const fertig = !!(plan && !plan.busy && !plan.error && plan.eintraege && plan.eintraege.length);
+                    const nach = {};
+                    if (fertig)
+                        plan.eintraege.forEach(e => { nach[e.id] = e; });
+                    // Wen die KI nicht eingeordnet hat, hängt hinten dran statt zu verschwinden.
+                    const liste = waitlistOffer.candidates.slice().sort((a, b) =>
+                        (((nach[a.id] || {}).rang) || 99) - (((nach[b.id] || {}).rang) || 99));
+                    return React.createElement(React.Fragment, null,
+                        !plan && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12, gap: 8 }, onClick: absageSofortplan },
+                            React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
+                                React.createElement("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" })),
+                            "Wen zuerst fragen?"),
+                        plan && plan.busy && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, padding: "2px 0 12px" } },
+                            "Die Warteliste wird sortiert – Ausbildungsstand, offene Sonderfahrten, Prüfungstermine…"),
+                        plan && plan.error && React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "11px 13px", fontSize: 13, lineHeight: 1.5, marginBottom: 10 } }, plan.error),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12 }, onClick: absageSofortplan }, "Erneut versuchen")),
+                        fertig && plan.zusammenfassung && React.createElement("div", { style: { padding: "11px 13px", marginBottom: 12, borderRadius: "var(--r-tile)",
+                                background: "var(--orange-tint)", color: "var(--ink-2)", fontSize: 13, lineHeight: 1.55 } }, plan.zusammenfassung),
+                        React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } },
+                            fertig ? "Reihenfolge der KI – direkt anschreiben" : "Wartende Schüler (optional direkt anschreiben)"),
+                        ...liste.map(s => {
+                            const e = nach[s.id] || null;
+                            const num = s.tel ? waNumber(s.tel) : "";
+                            // Ohne Plan - oder wenn die KI genau diesen Schüler nicht eingeordnet hat -
+                            // bleibt der bisherige Standardtext, der Knopf funktioniert also immer.
+                            const waText = (e && e.nachricht) || ("Hallo " + (s.vorname || s.name) + ", bei uns ist eine frühere Fahrstunde am "
+                                + fmtDLong(waitlistOffer.appt.start_at) + " um " + hm(waitlistOffer.appt.start_at) + " Uhr frei geworden. "
+                                + "Schau in der App vorbei, wenn du sie dir sichern möchtest – wer zuerst zusagt, bekommt sie.");
+                            return React.createElement("div", { key: s.id, style: { padding: "8px 0", borderTop: "1px solid var(--line)" } },
+                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                                    e && React.createElement("span", { style: { flexShrink: 0, width: 21, height: 21, borderRadius: 99, background: "var(--orange-soft)", color: "var(--orange-ink)",
+                                            fontSize: 11.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", fontVariantNumeric: "tabular-nums" } }, String(e.rang)),
+                                    React.createElement("div", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } }, dispName(s)),
+                                    num
+                                        ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waText), target: "_blank", rel: "noopener noreferrer",
+                                                style: { flexShrink: 0, padding: "6px 12px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12, fontWeight: 700, textDecoration: "none" } }, "WhatsApp")
+                                        : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "keine Nummer")),
+                                e && e.grund && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45, marginTop: 4, paddingLeft: 31 } }, e.grund));
+                        }));
+                })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => offerNextInQueue(waitlistOffer.queue) }, "Nicht anbieten"))),
         // Willkommensnachricht nach Übernahme einer Anmeldung - gleiches Muster wie waitlistOffer:
         // fertiger Text, ein Klick öffnet WhatsApp, die App verschickt nichts von allein.
