@@ -3130,7 +3130,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.8.5";
+const APP_VERSION = "2.9.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -10984,6 +10984,9 @@ function App() {
     const [calToolsOpen, setCalToolsOpen] = useState(false); // Klappmenü: Buchungslink, Screenshot-Import, Urlaub
     const [qrModal, setQrModal] = useState(false); // QR-Code des Buchungslinks anzeigen (z.B. zum Aushängen/Ausdrucken)
     const [pendingOpen, setPendingOpen] = useState(false); // Klappzustand der offenen Terminvorschläge
+    // KI-Kalenderassistent: null = zu, sonst {busy, error, zusammenfassung, termine:[{id,empfehlung,grund,reihenfolge}],
+    // auswahl:Set<id>, uebernehmen:bool}. Siehe kiPlanHolen() weiter unten.
+    const [kiPlan, setKiPlan] = useState(null);
     const [theme, setTheme] = useState(() => { try {
         return localStorage.getItem("v3_theme") || "dark";
     }
@@ -11400,6 +11403,7 @@ function App() {
         // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
         // entscheiden", nicht "verwerfen". Beim nächsten Start wird wieder gefragt.
         if (recRestore) setRecRestore(null);
+        else if (kiPlan) { if (!kiPlan.uebernehmen) setKiPlan(null); }
         else if (apptChoice) setApptChoice(null);
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
@@ -11462,7 +11466,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    }, [recRestore, kiPlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
     const viewSlideRef = useRef(null);
     // Leichtes Einblenden bei jedem Screen-/Reiter-Wechsel (Tap UND Wisch-Geste treffen das
     // gleichermaßen, da beide letztlich view/studentTab/settingsScreen ändern) - bewusst
@@ -11610,7 +11614,7 @@ function App() {
             document.removeEventListener("touchmove", onMove);
             document.removeEventListener("touchend", onEnd);
         };
-    }, [recRestore, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -21166,6 +21170,166 @@ function App() {
     // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
     // studentId ist optional - ohne ihn wird nur das Gesamtlimit des Fahrlehrers geprüft, nicht
     // das Limit je Schüler (z.B. bei „Sonstige Tätigkeit" ohne verknüpften Schüler).
+    /* ── KI-Kalenderassistent ────────────────────────────────────────────────────────────
+       Sammelt zu jedem offenen Terminvorschlag die harten Fakten und laesst Claude daraus
+       eine Empfehlung je Termin ableiten (siehe netlify/functions/kalender-assistent.js).
+
+       Die Aufgabenteilung ist Absicht: Ueberschneidungen, Limits, Arbeitszeiten, Feiertage
+       und der Leerlauf zwischen Terminen werden HIER exakt ausgerechnet - mit denselben
+       Funktionen, die auch das manuelle Bestaetigen benutzt (limitProblem, findOverlaps).
+       Ein Sprachmodell rechnet mit Zeiten nachweislich schlechter als Code. Claude bekommt
+       die fertigen Fakten und macht das, was Code nicht kann: abwaegen und begruenden. */
+    function kiFaktenFuer(a, pendingListe) {
+        const dKey = ymd(a.start_at);
+        const d = new Date(dKey + "T12:00:00");
+        const mins = apptMin(a);
+        const hinweise = [];
+
+        const ueber = findOverlaps(appts, a.start_at, a.end_at, a.id)
+            .filter(x => x.status !== "pending");
+        if (ueber.length) {
+            const c = ueber[0];
+            hinweise.push("Überschneidet sich mit einem bestätigten Termin: "
+                + (apptStudentName(c) || c.title || "Termin") + " um " + hm(c.start_at) + ".");
+        }
+        // Zwei offene Vorschläge können sich auch gegenseitig überschneiden - das sieht die
+        // Einzelprüfung beim Bestätigen nicht, weil dort jeder für sich geprüft wird.
+        const gegenseitig = (pendingListe || []).filter(x => x.id !== a.id
+            && ymd(x.start_at) === dKey
+            && findOverlaps([x], a.start_at, a.end_at, a.id).length);
+        if (gegenseitig.length) {
+            hinweise.push("Überschneidet sich mit einem anderen offenen Vorschlag ("
+                + (apptStudentName(gegenseitig[0]) || gegenseitig[0].title || "Vorschlag")
+                + " um " + hm(gegenseitig[0].start_at) + ") - nur einer von beiden geht.");
+        }
+
+        const lp = limitProblem(dKey, mins, a.id, a.student_id);
+        if (lp) hinweise.push(String(lp).split("\n")[0]);
+
+        const wh = workHours && typeof workHours === "object" ? workHours[LUECKEN_DOW[d.getDay()]] : null;
+        if (wh && wh.blocked) hinweise.push("An diesem Wochentag ist laut Arbeitszeiten frei.");
+        else if (wh && wh.von && wh.bis) {
+            const von = toMin(hm(a.start_at));
+            const bis = a.end_at ? toMin(hm(a.end_at)) : von + 45;
+            if (von < toMin(wh.von) || bis > toMin(wh.bis))
+                hinweise.push("Liegt außerhalb der Arbeitszeit (" + wh.von + " – " + wh.bis + ").");
+        }
+        if (d.getDay() === 0) hinweise.push("Sonntag.");
+        const ft = feiertagFuer(d, school && school.bundesland);
+        if (ft) hinweise.push("Feiertag: " + ft + ".");
+
+        // Leerlauf zu den bestätigten Nachbarterminen desselben Tages. null heißt: an dieser
+        // Seite liegt nichts, also entsteht dort auch keine Wartezeit.
+        const nachbarn = (appts || [])
+            .filter(x => x.id !== a.id && ymd(x.start_at) === dKey && x.status === "confirmed" && !isUrlaub(x))
+            .map(x => ({ von: toMin(hm(x.start_at)), bis: x.end_at ? toMin(hm(x.end_at)) : toMin(hm(x.start_at)) + 45 }))
+            .sort((x, y) => x.von - y.von);
+        const meinVon = toMin(hm(a.start_at));
+        const meinBis = a.end_at ? toMin(hm(a.end_at)) : meinVon + 45;
+        let davor = null, danach = null;
+        nachbarn.forEach(n => {
+            if (n.bis <= meinVon) { const l = meinVon - n.bis; if (davor === null || l < davor) davor = l; }
+            if (n.von >= meinBis) { const l = n.von - meinBis; if (danach === null || l < danach) danach = l; }
+        });
+
+        const stu = a.student_id ? (students || []).find(x => x.id === a.student_id) : null;
+        return {
+            id: a.id,
+            schueler: apptStudentName(a) || a.title || "Unbekannt",
+            tag: new Date(a.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit" }),
+            von: hm(a.start_at), bis: a.end_at ? hm(a.end_at) : "",
+            minuten: mins,
+            art: artLabelPlain(apptArt(a)) || "",
+            klasse: (stu && stu.klasse) || "",
+            hinweise,
+            leerlaufDavorMin: davor,
+            leerlaufDanachMin: danach,
+            bestaetigteAmTag: nachbarn.length,
+            minutenAmTag: confirmedMinutesOnDay(dKey, a.id),
+            schuelerFahrstunden: stu ? (stu.drivenLessons || []).length : 0,
+            // Bewusst KEIN ampel(): die braucht vier Parameter (Vorlage, Strecken,
+            // Sonderfahrten-Soll) und rechnet den ganzen Ausbildungsstand nach. Fuer die
+            // Priorisierung reicht, was hier sicher bekannt ist - alles andere waere geraten.
+            schuelerStand: stu ? ((stu.theorie ? "Theorie bestanden" : "Theorie offen")
+                + ((stu.termin || "").trim() ? ", Pruefungstermin steht" : "")) : "",
+        };
+    }
+
+    async function kiPlanHolen() {
+        const offen = (appts || []).filter(a => a.status === "pending")
+            .sort((a, b) => a.start_at.localeCompare(b.start_at));
+        if (!offen.length) { showToast("Es gibt gerade keine offenen Terminvorschläge."); return; }
+        setKiPlan({ busy: true, error: "", termine: [], zusammenfassung: "", auswahl: new Set() });
+        try {
+            const vorschlaege = offen.map(a => kiFaktenFuer(a, offen));
+            const wochentage = { mo: "Mo", di: "Di", mi: "Mi", do: "Do", fr: "Fr", sa: "Sa", so: "So" };
+            const az = workHours && typeof workHours === "object"
+                ? Object.keys(wochentage).map(k => {
+                    const w = workHours[k];
+                    if (!w || w.blocked || !w.von || !w.bis) return wochentage[k] + " frei";
+                    return wochentage[k] + " " + w.von + "-" + w.bis;
+                }).join(", ")
+                : "nicht hinterlegt";
+            const resp = await fetch("/.netlify/functions/kalender-assistent", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                body: JSON.stringify({
+                    vorschlaege,
+                    kontext: {
+                        heute: new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "2-digit", year: "numeric" }),
+                        arbeitszeiten: az,
+                        tageslimitMin: dayLimit || 0,
+                        wochenlimitMin: weekLimit || 0,
+                        leerlaufGrenzeMin: 60,
+                    },
+                }),
+            });
+            const out = await resp.json().catch(() => null);
+            if (!resp.ok || !out || !Array.isArray(out.termine)) {
+                setKiPlan(k => k ? ({ ...k, busy: false, error: (out && out.error) || "Der Vorschlag konnte nicht erstellt werden." }) : k);
+                return;
+            }
+            // Vorausgewählt ist genau das, was die KI annehmen würde - der Fahrlehrer kann
+            // jedes Häkchen einzeln umstellen, bevor er übernimmt.
+            const auswahl = new Set(out.termine.filter(t => t.empfehlung === "annehmen").map(t => t.id));
+            const sortiert = out.termine.slice().sort((x, y) => (x.reihenfolge || 99) - (y.reihenfolge || 99));
+            setKiPlan(k => k ? ({ ...k, busy: false, error: "", termine: sortiert, zusammenfassung: out.zusammenfassung || "", auswahl }) : k);
+        } catch (e) {
+            setKiPlan(k => k ? ({ ...k, busy: false, error: fehlerText(e) }) : k);
+        }
+    }
+
+    // Übernimmt den Plan: angehakte Vorschläge bestätigen, nicht angehakte ablehnen.
+    // Nacheinander statt parallel - jedes Bestätigen prüft Limits gegen den Stand DANACH,
+    // parallel würden zwei Termine denselben freien Platz für sich beanspruchen.
+    async function kiPlanUebernehmen() {
+        const plan = kiPlan;
+        if (!plan || !plan.termine.length) return;
+        const annehmen = plan.termine.filter(t => plan.auswahl.has(t.id));
+        const ablehnen = plan.termine.filter(t => !plan.auswahl.has(t.id));
+        const ok = await askConfirm({
+            title: "Vorschlag übernehmen?",
+            message: annehmen.length + (annehmen.length === 1 ? " Termin wird bestätigt" : " Termine werden bestätigt")
+                + (ablehnen.length ? (", " + ablehnen.length + (ablehnen.length === 1 ? " wird abgelehnt" : " werden abgelehnt")) : "")
+                + ".\n\nDie Fahrschüler bekommen darüber wie gewohnt Bescheid.",
+            confirmLabel: "Übernehmen",
+        });
+        if (!ok) return;
+        setKiPlan(k => k ? ({ ...k, uebernehmen: true }) : k);
+        let gut = 0, schlecht = 0;
+        for (const t of annehmen) {
+            try { await confirmAppt(t.id); gut++; } catch (e) { schlecht++; }
+        }
+        for (const t of ablehnen) {
+            try { await rejectAppt(t.id); gut++; } catch (e) { schlecht++; }
+        }
+        setKiPlan(null);
+        showToast(schlecht
+            ? (gut + " übernommen, " + schlecht + " nicht - bitte im Kalender nachsehen.")
+            : ("Fertig: " + annehmen.length + " bestätigt" + (ablehnen.length ? ", " + ablehnen.length + " abgelehnt" : "") + "."),
+            schlecht ? "error" : undefined);
+    }
+
     function limitProblem(dateKey, minutes, exceptId, studentId) {
         if (dayLimit > 0) {
             const used = confirmedMinutesOnDay(dateKey, exceptId);
@@ -21773,6 +21937,16 @@ function App() {
                     React.createElement("span", { style: { flex: 1 } }, attnParts.join(" · ")),
                     React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)" } }, pendingOpen ? "Einklappen" : "Ansehen"),
                     React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: pendingOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
+                // Der Weg fuer alle auf einmal: statt jeden Vorschlag einzeln zu pruefen,
+                // bereitet die KI einen kompletten Plan vor (siehe kiPlanHolen). Steht ueber der
+                // Einzelliste, weil er sie in den meisten Faellen ersetzt.
+                pending.length > 1 && React.createElement("div", { style: { padding: "10px 14px", borderTop: "1px solid var(--line)" } },
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { gap: 8 }, onClick: kiPlanHolen },
+                        React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" })),
+                        "Alle " + pending.length + " auf einmal einplanen"),
+                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5, textAlign: "center" } },
+                        "Die KI ordnet die Vorschläge, schlägt vor, was du annehmen solltest, und nennt den Grund.")),
                 pendingOpen && React.createElement(React.Fragment, null,
                     cancelRequests.map(a => React.createElement("div", { key: a.id, style: { padding: "12px 14px", borderTop: "1px solid var(--line)" } },
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 2 } }, fmtDLong(a.start_at)),
@@ -27433,6 +27607,65 @@ function App() {
         // das ein askConfirm, dessen "Abbrechen" die Aufzeichnung gelöscht hat - ein Fahrlehrer
         // verlor so regelmäßig die Strecke, wenn er die App zwischendurch geschlossen hatte
         // (Rückmeldung 2026-09-14). Wegtippen behält den Puffer und fragt beim nächsten Start erneut.
+        // ── Sheet: KI-Kalenderassistent ────────────────────────────────────────────────
+        kiPlan && React.createElement("div", { onClick: () => { if (!kiPlan.uebernehmen) setKiPlan(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 170, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 11, marginBottom: 6 } },
+                    React.createElement("span", { className: "home-iconchip", style: { background: "var(--orange-soft)", color: "var(--orange-deep)", flexShrink: 0 } },
+                        React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
+                            React.createElement("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" }))),
+                    React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 19 } }, "Vorschlag für deine Woche")),
+                kiPlan.busy
+                    ? React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, padding: "18px 0" } },
+                        "Die Termine werden geprüft – Überschneidungen, Limits, Arbeitszeiten und Leerlauf dazwischen…")
+                    : kiPlan.error
+                        ? React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "11px 13px", fontSize: 13.5, lineHeight: 1.5, marginBottom: 12 } }, kiPlan.error),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: kiPlanHolen }, "Erneut versuchen"))
+                        : React.createElement(React.Fragment, null,
+                            kiPlan.zusammenfassung && React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 16 } }, kiPlan.zusammenfassung),
+                            kiPlan.termine.map(t => {
+                                const a = (appts || []).find(x => x.id === t.id);
+                                if (!a) return null;
+                                const an = kiPlan.auswahl.has(t.id);
+                                const stu = a.student_id ? (students || []).find(x => x.id === a.student_id) : null;
+                                return React.createElement("button", { key: t.id,
+                                    onClick: () => setKiPlan(k => {
+                                        if (!k) return k;
+                                        const neuAuswahl = new Set(k.auswahl);
+                                        if (neuAuswahl.has(t.id)) neuAuswahl.delete(t.id); else neuAuswahl.add(t.id);
+                                        return { ...k, auswahl: neuAuswahl };
+                                    }),
+                                    style: { width: "100%", textAlign: "left", display: "flex", gap: 11, alignItems: "flex-start", padding: "11px 12px", marginBottom: 8,
+                                        borderRadius: "var(--r-tile)", background: an ? "var(--orange-soft)" : "var(--field-bg)",
+                                        border: "1.5px solid " + (an ? "var(--orange)" : "var(--line)") } },
+                                    // Haken/Kreuz statt Checkbox: die Entscheidung ist hier nicht "an/aus",
+                                    // sondern "bestätigen/ablehnen" - beides sind echte Aktionen.
+                                    React.createElement("span", { "aria-hidden": "true", style: { width: 24, height: 24, minWidth: 24, borderRadius: "50%", marginTop: 1, flexShrink: 0,
+                                            display: "flex", alignItems: "center", justifyContent: "center",
+                                            background: an ? "var(--orange)" : "var(--card)", color: an ? "#1c1305" : "var(--muted)",
+                                            border: an ? "none" : "1.5px solid var(--line)", fontSize: 13, fontWeight: 800 } }, an ? "✓" : "✕"),
+                                    React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                        React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflowWrap: "anywhere" } },
+                                            apptStudentName(a) || a.title || "Vorschlag"),
+                                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 2 } },
+                                            fmtDLong(a.start_at) + ", " + hm(a.start_at) + (a.end_at ? " – " + hm(a.end_at) : "") + " Uhr"
+                                            + (stu && stu.klasse ? " · Klasse " + stu.klasse : "")),
+                                        React.createElement("div", { style: { fontSize: 12.5, color: an ? "var(--orange-ink)" : "var(--muted)", marginTop: 4, lineHeight: 1.5, overflowWrap: "anywhere" } }, t.grund)),
+                                    React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, textTransform: "uppercase", letterSpacing: ".04em", marginTop: 2,
+                                            color: an ? "var(--orange-ink)" : "var(--muted)" } }, an ? "annehmen" : "ablehnen"));
+                            }).filter(Boolean),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "4px 0 14px" } },
+                                "Tippe einen Termin an, um die Entscheidung umzudrehen. Übernommen wird genau das, was hier steht – nicht mehr."),
+                            React.createElement("button", { className: "btn btn-primary btn-block", disabled: !!kiPlan.uebernehmen, onClick: kiPlanUebernehmen },
+                                kiPlan.uebernehmen ? "Wird übernommen…"
+                                    : (kiPlan.auswahl.size + (kiPlan.auswahl.size === 1 ? " bestätigen" : " bestätigen")
+                                        + (kiPlan.termine.length - kiPlan.auswahl.size ? ", " + (kiPlan.termine.length - kiPlan.auswahl.size) + " ablehnen" : ""))),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: !!kiPlan.uebernehmen, onClick: () => setKiPlan(null) }, "Abbrechen"))))
+        ,
         recRestore && React.createElement("div", { onClick: () => setRecRestore(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Unterbrochene Streckenaufzeichnung", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
                     padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)" } },
