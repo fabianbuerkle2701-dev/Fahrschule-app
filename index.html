@@ -43,6 +43,40 @@
       if (m) m.setAttribute("content", "width=device-width, initial-scale=1.0, viewport-fit=cover");
     } catch (e) { /* im Zweifel gesperrt lassen - das ist der harmlosere Fehler */ }
   })();
+
+  // ── Tastaturhoehe als --kb bereitstellen ───────────────────────────────────────────────
+  // iOS verkleinert beim Aufklappen der Tastatur NICHT das Layout-Viewport, sondern schiebt nur
+  // den sichtbaren Ausschnitt darueber. Alles mit position:fixed klebt deshalb weiter am unteren
+  // Rand des LAYOUTS - also hinter der Tastatur - und wandert beim Tippen und Scrollen sichtbar
+  // gegen den Inhalt. Genau das melden Fahrlehrer als "die App schwimmt".
+  // Der sichtbare Ausschnitt steht als window.visualViewport bereit; die Differenz zum Layout
+  // ist die Hoehe dessen, was die Tastatur verdeckt. Das CSS haengt sich als html.kb-auf und
+  // var(--kb) daran (siehe Abschnitt "Tastatur" im Stylesheet).
+  (function () {
+    var vv = window.visualViewport;
+    if (!vv) return;
+    var wurzel = document.documentElement;
+    var letzte = -1;
+    function messen() {
+      // offsetTop zaehlt mit: hat iOS die Seite schon hochgeschoben, um das Feld freizulegen,
+      // fehlt dieser Teil sonst in der Rechnung und die Tastatur waere scheinbar halb so hoch.
+      var verdeckt = Math.round(window.innerHeight - vv.height - vv.offsetTop);
+      // Unter 120px ist es die ein- und ausfahrende Adressleiste von Safari, keine Tastatur.
+      var kb = verdeckt > 120 ? verdeckt : 0;
+      // Beim Hineinzoomen schrumpft der sichtbare Ausschnitt genauso - dieselbe Rechnung wuerde
+      // dort faelschlich eine Tastatur erkennen und die Tab-Leiste ausblenden. scale ist genau
+      // dann groesser als 1, also hier abfangen.
+      if (vv.scale && vv.scale > 1.05) kb = 0;
+      if (kb === letzte) return;
+      letzte = kb;
+      wurzel.style.setProperty("--kb", kb + "px");
+      wurzel.classList.toggle("kb-auf", kb > 0);
+    }
+    vv.addEventListener("resize", messen);
+    vv.addEventListener("scroll", messen);
+    window.addEventListener("orientationchange", function () { setTimeout(messen, 300); });
+    messen();
+  })();
 </script>
 <meta name="theme-color" content="#181512">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -537,6 +571,23 @@
     background:var(--surface);border-top:1px solid var(--line);
     display:flex;align-items:flex-end;padding:8px 4px calc(8px + env(safe-area-inset-bottom));
     min-height:64px;z-index:48}
+
+  /* ══ Tastatur ══════════════════════════════════════════════════════════════════════════
+     Warum es diesen Abschnitt gibt, steht ausfuehrlich beim messenden Skript im Kopf: bei
+     offener Tastatur bleibt alles mit position:fixed am unteren Rand des LAYOUTS haengen,
+     also hinter der Tastatur, und wandert beim Tippen sichtbar gegen den Inhalt ("die App
+     schwimmt", gemeldet 2026-09-16 und erneut 2026-09-17, im iOS-Simulator nachgestellt).
+     In der installierten App greift dasselbe: dort steht contentInset auf "never", das
+     WKWebView raeumt der Tastatur also von sich aus keinen Platz ein. */
+  :root{--kb:0px}
+  /* Die Tab-Leiste liegt bei offener Tastatur ohnehin unerreichbar dahinter. */
+  html.kb-auf .tabbar{display:none}
+  /* Bodenstaendige Sheets enden ueber der Tastatur - sonst liegt genau das Feld dahinter, in
+     das gerade getippt wird. Die Hoehendeckelung braucht !important: die Sheets tragen ihr
+     max-height inline (90dvh), und dvh weiss nichts von der Tastatur. */
+  html.kb-auf .modal-overlay{padding-bottom:var(--kb)}
+  html.kb-auf .modal-overlay>*{max-height:calc(100dvh - var(--kb) - 20px)!important}
+  html.kb-auf .cmdk-overlay{padding-bottom:var(--kb)}
   /* Aktiver Reiter: nur noch Icon+Label in --orange (Gewicht 700), kein Füllhintergrund mehr
      (spec 4.4) - vorher eine gefüllte Orange-Pille (Redesign 2026, Etappe 1 dieser Session). */
   /* Beschriftungen bewusst auf --ink-2 statt --ink-3: die Tab-Leiste ist die Hauptnavigation und
@@ -3130,7 +3181,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.9";
+const APP_VERSION = "2.9.10";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -8690,6 +8741,61 @@ function berlinOffsetMinutes(d) {
 // Fahrlehrer sich z.B. auf Teneriffa befindet, das ganzjährig eine Stunde hinter Deutschland
 // liegt). Für die Anzeige/Positionierung geplanter Termine im Kalender genauso wichtig wie
 // combineDT() beim Anlegen - sonst rutschen Terminblöcke im Tages-Raster in die falsche Zeile.
+/* ── Mehrzeilige Felder wachsen mit ihrem Inhalt ───────────────────────────────────────────
+   Auf dem iPhone laesst sich in einem zwei Zeilen hohen Textfeld praktisch nicht scrollen: der
+   Finger scrollt die Seite darunter, nicht den Feldinhalt. Wer viel hineinschreibt, sieht danach
+   nur die ersten Zeilen und kommt an den Rest nicht mehr heran (gemeldet 2026-09-17 fuer die
+   Fahrstunden-Notizen, im iOS-Simulator nachgestellt). Statt am Scrollen zu basteln bekommt das
+   Feld die Hoehe, die sein Inhalt braucht - dann gibt es drinnen nichts mehr zu scrollen, nur
+   noch die Seite selbst.
+   Bewusst global statt an den 23 einzelnen Textfeldern: so gilt es auch fuer jedes, das spaeter
+   dazukommt, und es entsteht keine zweite Sorte Textfeld, die sich anders verhaelt. */
+const AUTO_HOEHE_MAX = 600; // darueber wird doch gescrollt, sonst sprengt ein Roman die Seite
+function autoHoehe(el) {
+    if (!el || el.tagName !== "TEXTAREA")
+        return;
+    el.style.height = "auto";
+    const noetig = el.scrollHeight;
+    // Nicht messbar heisst: das Feld haengt (noch) in einem unsichtbaren Teil des Baums. Dann
+    // die Hoehe ganz zurueckgeben statt sie auf 0 zu nageln - sonst bliebe es platt, sobald es
+    // sichtbar wird.
+    if (!noetig) {
+        el.style.height = "";
+        return;
+    }
+    el.style.height = Math.min(noetig + 2, AUTO_HOEHE_MAX) + "px";
+    el.style.overflowY = (noetig + 2) > AUTO_HOEHE_MAX ? "auto" : "hidden";
+}
+(function () {
+    function alleDarin(wurzel) {
+        // childElementCount === 0 heisst: kann gar kein Textfeld enthalten. Der Test ist billiger
+        // als die Teilbaum-Suche, und beim Umschalten einer ganzen Ansicht kommen viele solcher
+        // Blattknoten auf einmal herein.
+        if (wurzel && wurzel.childElementCount && wurzel.querySelectorAll)
+            wurzel.querySelectorAll("textarea").forEach(autoHoehe);
+    }
+    // Waehrend des Tippens. capture, damit es auch dann feuert, wenn ein Feld das Ereignis
+    // selbst behandelt und die Ausbreitung stoppt.
+    document.addEventListener("input", function (e) {
+        if (e.target && e.target.tagName === "TEXTAREA")
+            autoHoehe(e.target);
+    }, true);
+    // Beim Erscheinen: React haengt die Felder erst beim Rendern ein, und genau dann muss die
+    // Hoehe schon stimmen - sonst steht der lange Text abgeschnitten da, bevor jemand tippt.
+    new MutationObserver(function (list) {
+        list.forEach(function (m) {
+            m.addedNodes.forEach(function (n) {
+                if (n.nodeType !== 1)
+                    return;
+                if (n.tagName === "TEXTAREA")
+                    autoHoehe(n);
+                else
+                    alleDarin(n);
+            });
+        });
+    }).observe(document.documentElement, { childList: true, subtree: true });
+    alleDarin(document);
+})();
 function berlinParts(d) {
     const dtf = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Berlin", hourCycle: "h23",
         weekday: "short", hour: "2-digit", minute: "2-digit" });
@@ -17994,7 +18100,9 @@ function App() {
                                         fontSize: 16, background: "var(--orange-soft)", resize: "vertical" } }),
                                 React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 4 } }, "Sichtbar für den Schüler")),
                             // Redesign 2.0.0 Etappe 6 (spec 8.6): "Das lief gut" als .card.green,
-                            // "Nächstes Mal" als .card.tint. Bewusst weiterhin Freitext-Felder statt
+                            // "Was lief schlecht" als .card.tint (hiess bis 2.9.10 "Nächstes Mal" /
+                            // "Hier gibt es noch Potenzial" - Fahrlehrer wollten die klare alte
+                            // Beschriftung zurueck, gemeldet 2026-09-17). Bewusst weiterhin Freitext-Felder statt
                             // der im Auftrag skizzierten Chips - Chips wären eine Änderung daran, WIE
                             // die Daten erfasst/gespeichert werden, nicht nur am Aussehen.
                             React.createElement("div", { className: "card green" },
@@ -18017,8 +18125,8 @@ function App() {
                                             React.createElement("circle", { cx: "12", cy: "12", r: "6" }),
                                             React.createElement("circle", { cx: "12", cy: "12", r: "2" }))),
                                     React.createElement("div", { style: { minWidth: 0 } },
-                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15 } }, "Nächstes Mal"),
-                                        React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)" } }, "Hier gibt es noch Potenzial"))),
+                                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15 } }, "Was lief schlecht"),
+                                        React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)" } }, "Schwächen aus dieser Stunde"))),
                                 React.createElement("textarea", { key: l.id + ":schlecht:" + (lessonFieldRev[l.id + ":schlecht"] || 0), rows: 2, defaultValue: l.schlecht || "", onBlur: e => { if (e.target.value !== (l.schlecht || ""))
                                         updateLesson(l.id, { schlecht: e.target.value }); }, placeholder: "Woran noch arbeiten…", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px",
                                         fontSize: 16, background: "var(--field-bg)", resize: "vertical" } }),
