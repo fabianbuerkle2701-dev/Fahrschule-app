@@ -3365,7 +3365,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.17";
+const APP_VERSION = "2.9.18";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -6673,6 +6673,23 @@ async function fetchSchoolLeistungen(schoolId) {
     if (error) {
         console.error(error);
         throw new Error(error.message || "Leistungen konnten nicht geladen werden");
+    }
+    return data || [];
+}
+/* ALLE Fahrtenbucheintraege einer Fahrschule - im Unterschied zu fetchSchoolLeistungen(),
+   das nur die als Leistung markierten UND unterschriebenen Eintraege liefert.
+   Genau diese Verwechslung war der Fehler im Fahrschul-Dashboard: es hing an der
+   Leistungs-Abfrage, und da der Nachweis-Ablauf mit Unterschrift kaum genutzt wird, kam
+   davon in der Fahrschule V3 genau EIN Eintrag von 382 zurueck - im Dashboard stand
+   deshalb fast alles auf 0 (gemeldet 2026-09-21).
+   Die Spalten sind identisch, zusaetzlich sagen leistung/signed_at, ob ein Eintrag auch
+   ein unterschriebener Nachweis ist. Die Sicherheitspruefung laeuft wie dort in der
+   Datenbank-Funktion selbst (nur Fahrschul-Admin/zentraler Admin). */
+async function fetchSchoolFahrstunden(schoolId) {
+    const { data, error } = await sb.rpc("school_fahrstunden", { p_school_id: schoolId });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message || "Fahrstunden konnten nicht geladen werden");
     }
     return data || [];
 }
@@ -34342,7 +34359,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
         setDaten(d => ({ ...d, busy: true, error: "" }));
         Promise.all([
             adminFetchTeachers(schoolId),
-            fetchSchoolLeistungen(schoolId),
+            fetchSchoolFahrstunden(schoolId),
             fetchSchoolExamStats(schoolId),
             fetchSchoolOffenePosten(schoolId),
             fetchVerguetungen(schoolId),
@@ -34422,7 +34439,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
         const klassen = {};
         aktiveSchueler.forEach(s => { const k = s.klasse || "ohne Klasse"; klassen[k] = (klassen[k] || 0) + 1; });
 
-        // Ausbildungsfortschritt: auf welchen Stufen die Leistungen im Zeitraum liegen
+        // Ausbildungsfortschritt: auf welchen Stufen die Fahrstunden im Zeitraum liegen
         const stufen = {};
         imZeitraum.forEach(l => { const st = (l.stufe || "").trim(); if (st) stufen[st] = (stufen[st] || 0) + 1; });
 
@@ -34585,7 +34602,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
                         lohn != null && React.createElement("div", { style: { fontSize: 12, color: "var(--sage-deep)", marginTop: 2, fontVariantNumeric: "tabular-nums" } }, "davon Lohn " + eurFmt(lohn))));
             }),
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 12, marginBottom: 0 } },
-                "Umsatz = Summe der abgerechneten Preise aller Leistungen im Zeitraum. Die Vergütung wird je Fahrlehrer in den Einstellungen hinterlegt; ohne Hinterlegung wird hier nichts gerechnet.")),
+                "Umsatz = Summe der abgerechneten Preise aller Fahrstunden im Zeitraum. Die Vergütung wird je Fahrlehrer in den Einstellungen hinterlegt; ohne Hinterlegung wird hier nichts gerechnet.")),
 
         // ── Prüfungsquoten ───────────────────────────────────────────────────────────────
         abschnitt(
@@ -34636,11 +34653,11 @@ function SchulDashboard({ schoolId, stdPreis }) {
             React.createElement(DashKopf, { titel: "Ausbildungsfortschritt", beisatz: "Auf welchen Stufen im Zeitraum gefahren wurde", ton: "sky",
                 pfad: ["M3 3v18h18", "M7 15l4-4 3 3 5-6"] }),
             React.createElement(DashBalken, { daten: Object.keys(a.stufen).sort((x, y) => a.stufen[y] - a.stufen[x])
-                    .map(st => ({ label: st, wert: a.stufen[st], anzeige: a.stufen[st] + (a.stufen[st] === 1 ? " Leistung" : " Leistungen") })),
+                    .map(st => ({ label: st, wert: a.stufen[st], anzeige: a.stufen[st] + (a.stufen[st] === 1 ? " Fahrstunde" : " Fahrstunden") })),
                 farbe: "var(--sky)",
-                leerText: "Für den Zeitraum sind keine Leistungen mit Ausbildungsstufe erfasst." }),
+                leerText: "An den Fahrstunden dieses Zeitraums ist keine Ausbildungsstufe hinterlegt - die wird nur beim Leistungsnachweis mit Unterschrift erfasst." }),
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 12, marginBottom: 0 } },
-                "Zeigt, wo die Ausbildung gerade stattfindet: viele Leistungen auf den Grundstufen bedeuten viele Anfänger, ein Schwerpunkt auf den oberen Stufen viele Prüfungskandidaten.")),
+                "Zeigt, wo die Ausbildung gerade stattfindet: viele Fahrstunden auf den Grundstufen bedeuten viele Anfänger, ein Schwerpunkt auf den oberen Stufen viele Prüfungskandidaten.")),
 
         // ── Fahrzeuge ────────────────────────────────────────────────────────────────────
         abschnitt(
@@ -34649,7 +34666,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
             React.createElement(DashBalken, { daten: Object.keys(a.fahrzeuge).sort((x, y) => a.fahrzeuge[y] - a.fahrzeuge[x])
                     .map(v => ({ label: v, wert: a.fahrzeuge[v], anzeige: dashZahl(a.fahrzeuge[v] / 60, 1) + " h" })),
                 farbe: "var(--clay)",
-                leerText: "Für den Zeitraum ist an keiner Leistung ein Fahrzeug hinterlegt." })),
+                leerText: "An den Fahrstunden dieses Zeitraums ist kein Fahrzeug hinterlegt - das wird nur beim Leistungsnachweis mit Unterschrift erfasst." })),
 
         // ── Team-Aktivität ───────────────────────────────────────────────────────────────
         abschnitt(
