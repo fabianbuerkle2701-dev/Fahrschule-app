@@ -7065,8 +7065,11 @@ async function adminFetchTeacherTemplate(ownerUid) {
 async function fetchAppointments(uid) {
     const { data, error } = await sb.from("appointments").select("*").eq("owner", uid).order("start_at", { ascending: true });
     if (error) {
+        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
+        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
+        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
         console.error(error);
-        return [];
+        throw new Error(error.message || "Termine konnten nicht geladen werden");
     }
     return data || [];
 }
@@ -7137,8 +7140,11 @@ async function dbDeleteAppt(id) {
 async function fetchExamSlots(uid) {
     const { data, error } = await sb.from("exam_slots").select("*").eq("owner", uid).order("datum", { ascending: true });
     if (error) {
+        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
+        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
+        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
         console.error(error);
-        return [];
+        throw new Error(error.message || "Prüfplätze konnten nicht geladen werden");
     }
     return data || [];
 }
@@ -7266,8 +7272,11 @@ const STAFF_CATEGORIES = [
 async function fetchStaffFiles(instructorUid) {
     const { data, error } = await sb.from("staff_files").select("*").eq("instructor_uid", instructorUid).order("created_at", { ascending: false });
     if (error) {
+        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
+        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
+        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
         console.error(error);
-        return [];
+        throw new Error(error.message || "Unterlagen konnten nicht geladen werden");
     }
     const list = data || [];
     // Signed Links direkt beim Laden vorbereiten (statt erst beim Antippen), damit "Öffnen" ein
@@ -7329,8 +7338,11 @@ const STUDENT_FILE_CATEGORIES = [
 async function fetchStudentFiles(studentId) {
     const { data, error } = await sb.from("student_files").select("*").eq("student_id", studentId).order("created_at", { ascending: false });
     if (error) {
+        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
+        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
+        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
         console.error(error);
-        return [];
+        throw new Error(error.message || "Dokumente konnten nicht geladen werden");
     }
     const list = data || [];
     await Promise.all(list.map(async (f) => { f.signedUrl = await studentFileSignedUrl(f.storage_path); }));
@@ -7379,8 +7391,11 @@ async function fetchVideos(uid, schoolId) {
     q = schoolId ? q.or(`owner.eq.${uid},school_id.eq.${schoolId}`) : q.eq("owner", uid);
     const { data, error } = await q.order("created_at", { ascending: false });
     if (error) {
+        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
+        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
+        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
         console.error(error);
-        return [];
+        throw new Error(error.message || "Videos konnten nicht geladen werden");
     }
     return data || [];
 }
@@ -11437,6 +11452,12 @@ function App() {
     const [staffFiles, setStaffFiles] = useState(null); // null | Dateien des ausgewählten Fahrlehrers (Admin-Ansicht)
     const [staffUploading, setStaffUploading] = useState(false);
     const [myStaffFiles, setMyStaffFiles] = useState(null); // null | eigene Unterlagen (Fahrlehrer-Ansicht)
+    // Für die Staleness-Prüfung beim Eintreffen von Datei-Listen (statt eines setState-Updaters mit
+    // Nebenwirkung, den React nicht verlässlich sofort ausführt).
+    const staffInstructorRef = useRef(staffInstructor);
+    staffInstructorRef.current = staffInstructor;
+    const activeIdRef = useRef(activeId);
+    activeIdRef.current = activeId;
     useEffect(() => {
         if (ADMIN_ONLY_SETTINGS.has(settingsScreen) && !(isAdmin(session) || isSchoolAdmin))
             setSettingsScreen(null);
@@ -12109,7 +12130,12 @@ function App() {
     useEffect(() => {
         if (view !== "videos" || !uid)
             return;
-        fetchVideos(uid, school && school.id).then(setVideos).catch(e => { console.error(e); setVideos([]); });
+        // Bei Fehler den bisherigen Stand behalten (nur beim allerersten Laden leere Liste statt
+        // endlos "Lädt…") und Bescheid geben - vorher sah ein Fehler aus wie "keine Videos".
+        fetchVideos(uid, school && school.id).then(setVideos).catch(e => {
+            setVideos(v => v === null ? [] : v);
+            showToast("Videos konnten nicht geladen werden:\n" + fehlerText(e), "error");
+        });
     }, [view, uid, school]);
     // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
     const [workHours, setWorkHours] = useState(null); // null solange nicht geladen
@@ -12407,7 +12433,13 @@ function App() {
                 }
             }).catch(() => { });
             // Rechte separat, aber verlässlich (ohne Race Condition) für die Admin-Vorlage-Prüfung holen
-            return Promise.all([fetchStudents(uid), fetchTemplate(uid, sc.name), fetchAppointments(uid), fetchBookingCode(uid), fetchMyRights(uid).catch(() => false)])
+            // Termine getrennt abfangen: ein Fehler dort soll weder Schüler noch Vorlage blockieren,
+            // und statt eines leeren Kalenders bleibt der bisherige Stand (Cache) mit Hinweis.
+            const apptsP = fetchAppointments(uid).catch(e => {
+                showToast("Termine konnten nicht geladen werden:\n" + fehlerText(e), "error");
+                return null;
+            });
+            return Promise.all([fetchStudents(uid), fetchTemplate(uid, sc.name), apptsP, fetchBookingCode(uid), fetchMyRights(uid).catch(() => false)])
                 .then(res => [...res, sc]); // Fahrschule selbst mit durchreichen, ohne auf State-Timing angewiesen zu sein
         }).then(([list, tplData, apptData, code, rights, sc]) => {
             myRights = rights;
@@ -12422,7 +12454,8 @@ function App() {
             });
             putTpl(tplData);
             saveTplCache(uid, tplData);
-            applyFetchedAppts(apptData || []);
+            if (apptData)
+                applyFetchedAppts(apptData);
             setBookingCode(code || null);
             // Vorlage des Fahrschul-Admins vorsorglich laden, als möglicher Ausgangspunkt für Klassen,
             // die man selbst noch nicht angelegt hat. Der Abgleich, ob eine Klasse wirklich leer ist,
@@ -12469,7 +12502,11 @@ function App() {
                 const now = Date.now();
                 if (now - lastRefresh < 600) return;
                 lastRefresh = now;
-                fetchAppointments(uid).then(list => applyFetchedAppts(list)).catch(() => { });
+                // Scheitert das Neuladen, bleibt der bisherige Kalender stehen (fetchAppointments
+                // wirft jetzt statt [] zu liefern) - nur ein kurzer Hinweis, kein Fehlerfenster,
+                // weil das beim Wechsel in die App bei schwachem Netz öfter passiert.
+                fetchAppointments(uid).then(list => applyFetchedAppts(list))
+                    .catch(() => showFlash("Termine konnten nicht aktualisiert werden (Verbindung?)"));
             }
         }
         document.addEventListener("visibilitychange", refresh);
@@ -12872,7 +12909,16 @@ function App() {
         // Anfrage noch läuft, darf ihre (evtl. später eintreffende) Antwort nicht mehr die Liste
         // des inzwischen ausgewählten Fahrlehrers überschreiben - sonst sieht der Admin Dateien
         // von A unter dem Namen von B und könnte per Löschen-Button tatsächlich A's Datei entfernen.
-        fetchStaffFiles(instrUid).then(list => setStaffInstructor(cur => { if (cur === instrUid) setStaffFiles(list); return cur; }));
+        staffInstructorRef.current = instrUid;
+        fetchStaffFiles(instrUid).then(list => { if (staffInstructorRef.current === instrUid)
+            setStaffFiles(list); })
+            .catch(e => {
+            if (staffInstructorRef.current !== instrUid)
+                return;
+            // Zurück zur Fahrlehrer-Auswahl statt endlos "Lädt…" - erneutes Antippen lädt neu.
+            showToast("Unterlagen konnten nicht geladen werden:\n" + fehlerText(e), "error");
+            setStaffInstructor(null);
+        });
     }
     async function handleStaffUpload(file) {
         if (!file || !staffInstructor || !school)
@@ -12880,9 +12926,12 @@ function App() {
         setStaffUploading(true);
         try {
             await uploadStaffFile(school.id, staffInstructor, uid, file, staffCategory);
-            const list = await fetchStaffFiles(staffInstructor);
-            setStaffFiles(list);
             showFlash("✓ Hochgeladen");
+            // Liste getrennt nachladen: scheitert nur das, ist die Datei trotzdem hochgeladen.
+            const forUid = staffInstructor;
+            fetchStaffFiles(forUid).then(list => { if (staffInstructorRef.current === forUid)
+                setStaffFiles(list); })
+                .catch(e => showToast("Liste konnte nicht aktualisiert werden:\n" + fehlerText(e)));
         }
         catch (e) {
             showToast("Hochladen fehlgeschlagen:\n" + (e.message || e), "error");
@@ -12904,7 +12953,9 @@ function App() {
     }
     function loadMyStaffFiles() {
         setMyStaffFiles(null);
-        fetchStaffFiles(uid).then(list => setMyStaffFiles(list));
+        // Bei Fehler bleibt null -> der Knopf "Unterlagen laden" steht wieder da.
+        fetchStaffFiles(uid).then(list => setMyStaffFiles(list))
+            .catch(e => showToast("Unterlagen konnten nicht geladen werden:\n" + fehlerText(e), "error"));
     }
     function loadStudentFiles() {
         if (!active)
@@ -12914,7 +12965,11 @@ function App() {
         // Staleness-Check wie bei openStaffInstructor: wechselt der Nutzer schnell zu einem anderen
         // Schüler, während diese Anfrage noch läuft, darf ihre (evtl. später eintreffende) Antwort
         // nicht mehr die (ggf. sensiblen) Dokumente des inzwischen aktiven Schülers überschreiben.
-        fetchStudentFiles(studentId).then(list => setActiveId(cur => { if (cur === studentId) setStudentFiles(list); return cur; }));
+        // Bei Fehler bleibt null -> der Knopf "Dokumente laden" steht wieder da.
+        fetchStudentFiles(studentId).then(list => { if (activeIdRef.current === studentId)
+            setStudentFiles(list); })
+            .catch(e => { if (activeIdRef.current === studentId)
+            showToast("Dokumente konnten nicht geladen werden:\n" + fehlerText(e), "error"); });
     }
     async function handleStudentFileUpload(file) {
         if (!file || !active)
@@ -12923,11 +12978,13 @@ function App() {
         setStudentFileUploading(true);
         try {
             await uploadStudentFile(studentId, uid, file, studentFileCategory);
-            const list = await fetchStudentFiles(studentId);
+            showFlash("✓ Hochgeladen");
             // Staleness-Check wie bei loadStudentFiles(): wechselt der Nutzer während des Uploads
             // zu einem anderen Schüler, darf diese Antwort nicht mehr dessen Dokumentenliste treffen.
-            setActiveId(cur => { if (cur === studentId) setStudentFiles(list); return cur; });
-            showFlash("✓ Hochgeladen");
+            // Getrennt nachladen: scheitert nur das, ist die Datei trotzdem hochgeladen.
+            fetchStudentFiles(studentId).then(list => { if (activeIdRef.current === studentId)
+                setStudentFiles(list); })
+                .catch(e => showToast("Liste konnte nicht aktualisiert werden:\n" + fehlerText(e)));
         }
         catch (e) {
             showToast("Hochladen fehlgeschlagen:\n" + (e.message || e), "error");
