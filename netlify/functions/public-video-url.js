@@ -63,6 +63,22 @@ exports.handler = async function (event) {
     if (!video || !video.storage_path)
       return { statusCode: 404, headers, body: JSON.stringify({ error: "Video nicht gefunden." }) };
 
+    // Nur Dateien aus dem eigenen Ordner des Video-Besitzers signieren (Audit 2026-09, L-H1):
+    // storage_path war beim Anlegen frei wählbar, eine videos-Zeile konnte also auf die Datei
+    // eines FREMDEN Fahrlehrers zeigen - mit dem Service-Key hier wäre die sonst unerreichbar.
+    // Die Tabellen-Policy verhindert solche Zeilen inzwischen; das hier deckt Altbestände ab.
+    const ownerResp = await fetch(
+      SUPABASE_URL + "/rest/v1/videos?id=eq." + encodeURIComponent(videoId) + "&select=owner,storage_path",
+      { headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey } }
+    );
+    if (!ownerResp.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: "Video konnte nicht geprüft werden." }) };
+    const ownerRows = await ownerResp.json().catch(() => []);
+    const row = Array.isArray(ownerRows) ? ownerRows[0] : null;
+    if (!row || !row.owner || row.storage_path !== video.storage_path || !video.storage_path.startsWith(row.owner + "/")) {
+      console.error("public-video-url: Pfad liegt nicht im Ordner des Besitzers", videoId);
+      return { statusCode: 404, headers, body: JSON.stringify({ error: "Video nicht gefunden." }) };
+    }
+
     const signResp = await fetch(
       SUPABASE_URL + "/storage/v1/object/sign/videos/" + video.storage_path.split("/").map(encodeURIComponent).join("/"),
       {
@@ -84,6 +100,7 @@ exports.handler = async function (event) {
     return { statusCode: 200, headers, body: JSON.stringify({ url }) };
   } catch (e) {
     console.error("public-video-url:", e);
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
+    // Anonym erreichbar - e.message (Host-/DNS-Angaben) bleibt im Server-Log.
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Video-Link konnte nicht erstellt werden." }) };
   }
 };

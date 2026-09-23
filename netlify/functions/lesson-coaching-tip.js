@@ -19,7 +19,9 @@ const LESSON_FIELDS = [
   { id: "bedien", label: "Fahrzeugbedienung" },
 ];
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -134,6 +136,7 @@ Sei konkret und praxisnah, keine allgemeinen Floskeln wie "einfach mehr üben". 
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -164,6 +167,7 @@ Sei konkret und praxisnah, keine allgemeinen Floskeln wie "einfach mehr üben". 
 
     return { statusCode: 200, headers, body: JSON.stringify({ tip: parsed }) };
   } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
   }
 };
