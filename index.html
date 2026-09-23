@@ -11447,6 +11447,8 @@ function App() {
     const apptWritesRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
+    // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
+    const lueckenOfferRef = useRef(new Set());
     // Aktueller Stand von students/school/tpl/appts als Ref - Grundlage für jedes "erst berechnen,
     // dann setzen und speichern". Das frühere Muster "let x = null; setStudents(prev => { x = ...;
     // return x; }); if (!x) return;" hat nur beim ersten Aufruf funktioniert: React 18.2 führt den
@@ -22661,7 +22663,13 @@ function App() {
             .sort((a, b) => a.from.localeCompare(b.from));
         let cursor = vonHHMM;
         for (const b of busy) {
-            if (b.from > cursor && toMin(b.from) - toMin(cursor) >= minMinutes)
+            // Die Lücke endet am nächsten Termin, aber spätestens bei "bis" - vorher zählte ein
+            // Termin weit nach Feierabend als Ende und das Fenster ragte über "bis" hinaus
+            // (16:30-17:15 bei bis 17:00, Audit F-M6).
+            if (cursor >= bisHHMM)
+                break;
+            const ende = b.from < bisHHMM ? b.from : bisHHMM;
+            if (ende > cursor && toMin(ende) - toMin(cursor) >= minMinutes)
                 return { from: cursor, to: fromMin(toMin(cursor) + minMinutes) };
             if (b.to > cursor)
                 cursor = b.to;
@@ -22688,8 +22696,12 @@ function App() {
         const out = [];
         let cursor = wh.von;
         for (const b of busy) {
-            if (b.from > cursor && toMin(b.from) - toMin(cursor) >= minMinutes)
-                out.push({ from: cursor, to: b.from });
+            // Wie in findFreeWindow: eine Lücke endet spätestens mit der Arbeitszeit.
+            if (cursor >= wh.bis)
+                break;
+            const ende = b.from < wh.bis ? b.from : wh.bis;
+            if (ende > cursor && toMin(ende) - toMin(cursor) >= minMinutes)
+                out.push({ from: cursor, to: ende });
             if (b.to > cursor)
                 cursor = b.to;
         }
@@ -22726,6 +22738,15 @@ function App() {
                     return;
                 const von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
                 const bis = s.wunschliste.bis < dayBis ? s.wunschliste.bis : dayBis;
+                // Warteliste-Angebote tragen keine student_id (jeder passende Schüler sieht sie) -
+                // die Prüfung oben greift für sie also nie. Liegt an diesem Tag schon ein Angebot
+                // für seine Klasse in seinem Wunschfenster, ist er versorgt; sonst rückte nach
+                // jedem "Anbieten" das nächste Fenster für denselben Schüler nach (Audit F-M7).
+                const klasse = s.klasse || DEFAULT_KLASSE;
+                const schonAngeboten = (appts || []).some(a => a.status === "offered" && ymd(a.start_at) === dateKey
+                    && (a.offer_klasse || DEFAULT_KLASSE) === klasse && hm(a.start_at) < bis && (a.end_at ? hm(a.end_at) : hm(a.start_at)) > von);
+                if (schonAngeboten)
+                    return;
                 if (toMin(bis) - toMin(von) < 45)
                     return;
                 const slot = findFreeWindow(dateKey, von, bis, 45);
@@ -22738,6 +22759,12 @@ function App() {
     // Ein gefundenes Fenster als Warteliste-Angebot anlegen - exakt dasselbe Prinzip wie
     // createWaitlistOffer, nur ohne vorher einen bestehenden Termin gelöscht zu haben.
     async function offerLueckenSlot(f) {
+        // Doppeltipp-Sperre: bis die Antwort da ist, steht das neue Angebot noch nicht in appts,
+        // ein zweiter Tipp hätte dasselbe Fenster ein zweites Mal angeboten.
+        const sperre = f.dateKey + " " + f.from;
+        if (lueckenOfferRef.current.has(sperre))
+            return;
+        lueckenOfferRef.current.add(sperre);
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: combineDT(f.dateKey, f.from), end_at: combineDT(f.dateKey, f.to), art: "ÜST",
@@ -22748,6 +22775,9 @@ function App() {
         }
         catch (e) {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
+        }
+        finally {
+            lueckenOfferRef.current.delete(sperre);
         }
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
