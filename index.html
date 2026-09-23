@@ -6996,7 +6996,7 @@ function buildXRechnung(o) {
       groesste.netto = xrR2(groesste.netto + diff);
     }
   }
-  const faellig = (() => {
+  const faellig = inv.faellig || (() => {
     const d = new Date(inv.date + "T12:00:00");
     d.setDate(d.getDate() + (zahlungszielTage || 14));
     return d.toISOString().slice(0, 10);
@@ -8919,6 +8919,51 @@ function sumCharges(s, pricePerUE) {
 }
 function sumPayments(s) {
     return (s.payments || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+}
+// Leistungszeitraum einer Rechnung (§14 Abs. 4 Nr. 6 UStG) als { von, bis } oder null. Neue
+// Rechnungen tragen ihn an den Fahrstunden-Positionen (von/bis, siehe confirmInvoice) - die
+// Positionen speichert create_invoice unverändert und atomar mit. Ältere Rechnungen: Datum der
+// Einzelposition (altes Format "Fahrstunde (90 Min · 2,00 UE)") oder, falls auch das fehlt, die
+// Fahrstunden, die noch auf diese Rechnungsnummer zeigen. Eine Stornorechnung übernimmt den
+// Zeitraum der stornierten Rechnung.
+function rechnungsLeistungszeitraum(s, inv) {
+    if (!inv)
+        return null;
+    const quelle = inv.stornoOf ? ((s && s.invoices) || []).find(x => x.number === inv.stornoOf) : inv;
+    if (!quelle)
+        return null;
+    const daten = [];
+    const iso = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+    (quelle.items || []).forEach(it => [it.von, it.bis, it.date].forEach(d => { if (iso(d))
+        daten.push(d); }));
+    if (daten.length === 0)
+        ((s && s.drivenLessons) || []).forEach(l => { if (l.invoiced === quelle.number && iso(l.date))
+            daten.push(l.date); });
+    if (daten.length === 0)
+        return null;
+    daten.sort();
+    return { von: daten[0], bis: daten[daten.length - 1] };
+}
+// Fälligkeit einer Rechnung als YYYY-MM-DD. Seit v2.10.x beim Anlegen festgeschrieben (faellig),
+// damit ein späteres Ändern des Zahlungsziels in den Einstellungen nicht rückwirkend alte
+// Rechnungen überfällig macht oder Mahnstufen springen lässt (Audit F-N17). Ältere Rechnungen
+// ohne das Feld rechnen wie bisher: Rechnungsdatum + aktuelles Zahlungsziel.
+function rechnungFaellig(inv, zahlungszielTage) {
+    if (inv && /^\d{4}-\d{2}-\d{2}$/.test(String(inv.faellig || "")))
+        return inv.faellig;
+    if (!inv || !/^\d{4}-\d{2}-\d{2}/.test(String(inv.date || "")))
+        return null;
+    const d = new Date(String(inv.date).slice(0, 10) + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + (Number(zahlungszielTage) || 0));
+    return d.toISOString().slice(0, 10);
+}
+// Ganze Tage über die Fälligkeit hinaus (<= 0: noch nicht überfällig), null ohne Datum.
+// Gleiche Zählung wie früher "Tage seit Rechnungsdatum minus Zahlungsziel".
+function tageUeberfaellig(inv, zahlungszielTage, heuteMs) {
+    const f = rechnungFaellig(inv, zahlungszielTage);
+    if (!f)
+        return null;
+    return Math.floor((heuteMs - new Date(f).getTime()) / 86400000);
 }
 // Auf eine bestimmte Rechnung verbuchte Zahlungen. Zahlungen ohne invoiceId sind
 // Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
@@ -14428,11 +14473,8 @@ function App() {
         (students || []).filter(s => s._isMine).forEach(s => (s.invoices || []).forEach(inv => {
             if (invoiceStatus(s, inv) === "bezahlt" || inv.cancelledBy || inv.stornoOf)
                 return;
-            const d = inv.date ? new Date(inv.date).getTime() : null;
-            if (!d)
-                return;
-            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
-            if (tage <= 0)
+            const tage = tageUeberfaellig(inv, ZAHLUNGSZIEL_TAGE, heuteMs);
+            if (tage == null || tage <= 0)
                 return;
             rows.push({ inv, stu: s, tage, offen: invoiceOpen(s, inv), stufe: mahnstufe(tage) });
         }));
@@ -19599,13 +19641,19 @@ function App() {
                 return; // vollständig im Paket enthalten, nichts zu berechnen
             const k = String(einzel);
             if (!byPrice[k])
-                byPrice[k] = { einzel, ids: [], anzahl: 0 };
+                byPrice[k] = { einzel, ids: [], anzahl: 0, daten: [] };
             byPrice[k].ids.push(l.id);
             byPrice[k].anzahl += 1;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(l.date || ""))
+                byPrice[k].daten.push(l.date);
         });
         Object.keys(byPrice).forEach(k => {
             const g = byPrice[k];
+            g.daten.sort();
+            // von/bis: erster und letzter Tag dieser Stunden - Grundlage für den Leistungszeitraum
+            // auf der Rechnung (siehe rechnungsLeistungszeitraum).
             rows.push({ key: "lessons:" + k, kind: "lessongroup", ids: g.ids,
+                von: g.daten[0] || "", bis: g.daten[g.daten.length - 1] || "",
                 label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
                 date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
         });
@@ -19649,7 +19697,9 @@ function App() {
             return;
         }
         const chosenCostIds = costRows.map(r => r.id);
-        const items = chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" }));
+        const items = chosen.map(r => r.kind === "lessongroup" && r.von
+            ? { label: r.label, amount: r.amount, date: r.date || "", von: r.von, bis: r.bis || r.von }
+            : { label: r.label, amount: r.amount, date: r.date || "" });
         let inv;
         try {
             inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIds, d.note || "");
@@ -19659,6 +19709,11 @@ function App() {
             showToast("Rechnung konnte nicht erstellt werden:\n" + fehlerText(e), "error");
             return;
         }
+        // Fälligkeit mit dem HEUTIGEN Zahlungsziel festschreiben (F-N17). create_invoice kennt das
+        // Feld nicht; es kommt mit dem Speichern unten an die Rechnung.
+        const faellig = rechnungFaellig(inv, zahlungszielTage);
+        if (faellig)
+            inv = { ...inv, faellig };
         // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
         // den lokalen Stand nachziehen.
         // Die JETZT durch ein Paket gedeckte UE wird pro Stunde eingefroren (invoicedCoveredUE) -
@@ -21052,11 +21107,8 @@ function App() {
             const stu = mine.find(x => x.id === inv.studentId);
             if (!stu || invoiceStatus(stu, inv) === "bezahlt" || inv.cancelledBy || inv.stornoOf)
                 return null;
-            const d = inv.date ? new Date(inv.date).getTime() : null;
-            if (!d)
-                return null;
-            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
-            if (tage <= 0)
+            const tage = tageUeberfaellig(inv, ZAHLUNGSZIEL_TAGE, heuteMs);
+            if (tage == null || tage <= 0)
                 return null;
             return { inv, stu, tage, offen: invoiceOpen(stu, inv), stufe: mahnstufe(tage) };
         }).filter(Boolean).sort((a, b) => b.tage - a.tage);
@@ -27817,6 +27869,14 @@ function App() {
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
+        // Pflichtangabe Zeitpunkt/Zeitraum der Leistung (§14 Abs. 4 Nr. 6 UStG, Audit F-M11). Ohne
+        // datierte Fahrstunden (nur Grundbetrag o.ä.) gilt der übliche Satz "Leistungsdatum
+        // entspricht dem Rechnungsdatum".
+        const deDatum = d => new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" });
+        const zeitraum = rechnungsLeistungszeitraum(active, inv);
+        const leistungText = zeitraum
+            ? (zeitraum.von === zeitraum.bis ? "Leistungsdatum: " + deDatum(zeitraum.von) : "Leistungszeitraum: " + deDatum(zeitraum.von) + " \u2013 " + deDatum(zeitraum.bis))
+            : "Leistungsdatum entspricht dem Rechnungsdatum";
         return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10.5pt", lineHeight: 1.5 } },
             React.createElement("div", { className: "ps-inv-head" },
                 React.createElement("div", null,
@@ -27839,6 +27899,10 @@ function App() {
                     React.createElement("div", { style: { fontSize: "9.5pt", color: "#444", marginTop: 4 } },
                         "Datum: ",
                         inv.date ? new Date(inv.date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : ""),
+                    React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, leistungText),
+                    // Nur bei festgeschriebener Fälligkeit (neue Rechnungen) - für ältere wäre ein aus
+                    // dem heutigen Zahlungsziel errechnetes Datum nicht das, was damals vereinbart war.
+                    inv.faellig && !inv.stornoOf && !inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, "Zahlbar bis: " + deDatum(inv.faellig)),
                     inv.stornoOf && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert Rechnung " + inv.stornoOf),
                     inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert durch " + inv.cancelledBy))),
             React.createElement("div", { style: { marginBottom: 18 } },
@@ -27883,7 +27947,9 @@ function App() {
             // g\u00FCltig ist (z.B. keine kaputte IBAN in den Einstellungen) - fehlt eine dieser
             // Voraussetzungen, blendet sich der Block einfach aus, wie das Wetter-Pill auch.
             (() => {
-                if (!iv.iban || inv.stornoOf)
+                // Auch nicht auf der stornierten Originalrechnung (F-M5): wer sie nachdruckt und den
+                // Code scannt, zahlt eine Rechnung, die es nicht mehr gibt.
+                if (!iv.iban || inv.stornoOf || inv.cancelledBy)
                     return null;
                 const offen = invoiceOpen(active, inv);
                 if (offen <= 0.005)
