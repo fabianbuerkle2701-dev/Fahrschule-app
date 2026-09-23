@@ -6825,7 +6825,8 @@ async function fetchSchoolAssignmentLog(schoolId, limit) {
 }
 /* ════════ E-Rechnung (XRechnung, UBL 2.1 nach EN 16931) ════════
    BETA: Die Erzeugung deckt die Pflichtfelder ab und ist rechnerisch in sich konsistent
-   (Positionssumme = Nettobetrag, Netto + Steuer = Brutto, ueber Rundungsfaelle geprueft).
+   (Positionssumme = Nettobetrag, Netto + Steuer + ggf. ausgewiesener Rundungsbetrag =
+   Brutto, ueber Rundungsfaelle geprueft).
    Eine formale Schematron-Pruefung ist im Browser nicht praktikabel - die erste erzeugte
    Datei gehoert einmal durch einen offiziellen Validator, bevor sie an Firmenkunden geht.
    Genau deshalb ist die Funktion in der Oberflaeche als Beta gekennzeichnet.
@@ -6845,16 +6846,38 @@ function buildXRechnung(o) {
   // dann auf die aktuelle Fahrschul-Einstellung zurückfallen, wie bei exportDatev()/exportRechnungen()/
   // invoiceSheet(), statt sie fälschlich als regelbesteuert (19% USt) zu behandeln.
   const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!kUntFallback;
+  // Pflichtangaben, ohne die jeder XRechnung-Validator die Datei ablehnt - lieber hier mit
+  // klarer Meldung abbrechen als eine ungueltige Datei ausliefern (der Aufrufer prueft das
+  // schon vorher mit Hinweis, wo man es eintraegt; das hier ist nur das Sicherheitsnetz).
+  //   BR-DE-1  Zahlungsweg (PaymentMeans) - bei Ueberweisung nur mit IBAN moeglich
+  //   BR-DE-6/7 Telefon und E-Mail des Verkaeufer-Kontakts
+  //   BT-49    elektronische Adresse des Kaeufers (in XRechnung 3.0 Pflicht)
+  if (!seller.iban) throw new Error("IBAN der Fahrschule fehlt (Rechnungsdaten).");
+  if (!seller.tel) throw new Error("Telefonnummer der Fahrschule fehlt (Standorte).");
+  if (!seller.email) throw new Error("E-Mail-Adresse der Fahrschule fehlt.");
+  if (!buyer.email) throw new Error("E-Mail-Adresse des Firmenkunden fehlt (Schülerdaten › Firmenkunde).");
   const satz = kUnt ? 0 : 19;
   const brutto = xrR2(inv.total);
-  // Netto aus der Bruttosumme ableiten, damit die Summe exakt zur gedruckten Rechnung passt.
+  // Netto aus der Bruttosumme ableiten, damit es exakt zur gedruckten Rechnung passt
+  // (dort ebenfalls round(brutto / 1.19)).
   const netto = kUnt ? brutto : xrR2(brutto / 1.19);
-  const steuer = xrR2(brutto - netto);
+  // Steuer nach Pruefregel BR-CO-17 aus dem Netto rechnen (round(netto * Satz)), NICHT als
+  // brutto - netto: bei rund jedem sechsten Betrag weichen beide um 1 Cent ab (z.B. 10,05 EUR:
+  // netto 8,45, brutto - netto = 1,60, aber 8,45 * 19 % = 1,61). Ein anderes Netto hilft dabei
+  // nie - fuer genau diese Betraege gibt es kein Netto n mit n + round(n * 19 %) = brutto
+  // (per Skript ueber alle Betraege bis 3.000 EUR geprueft). Den Cent weist die Datei deshalb
+  // offen als Rundungsbetrag (BT-114) aus, sodass der Zahlbetrag trotzdem exakt der
+  // gedruckten Rechnung entspricht.
+  const steuer = kUnt ? 0 : xrR2(netto * satz / 100);
+  const rundung = xrR2(brutto - netto - steuer);
   // Positionsnetti einzeln runden und die Differenz auf die groesste Position legen -
   // sonst summieren sich Rundungsreste und die Pruefregel "Summe der Positionen =
   // Nettobetrag" schlaegt fehl.
   let pos = (inv.items || []).map((it, i) => ({ i: i + 1, label: it.label || ("Position " + (i + 1)),
     brutto: xrR2(it.amount), netto: kUnt ? xrR2(it.amount) : xrR2(xrR2(it.amount) / 1.19) }));
+  // Hinweis Abzuege (z.B. Empfehlungsbonus als negative Position): ein negativer Einzelpreis
+  // verstoesst gegen BR-27. Solche Positionen werden unten als Menge -1 mit positivem Preis
+  // geschrieben - der Positionsbetrag (Menge x Preis) bleibt dabei negativ und korrekt.
   // Eine Rechnung ohne Einzelpositionen wuerde die Pruefregel "Summe der Positionen =
   // Nettobetrag" verletzen (Summe waere 0). Deshalb eine Sammelposition ueber den Gesamtbetrag.
   if (pos.length === 0)
@@ -6914,11 +6937,10 @@ function buildXRechnung(o) {
   if (buyer.ustId) L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(buyer.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
   L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(buyer.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
   L.push('  </cac:Party></cac:AccountingCustomerParty>');
-  if (seller.iban) {
-    L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
-    L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
-    L.push('  </cac:PaymentMeans>');
-  }
+  // Immer ausgeben: die IBAN ist oben Pflicht (BR-DE-1), 58 = SEPA-Ueberweisung.
+  L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
+  L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
+  L.push('  </cac:PaymentMeans>');
   L.push(`  <cac:PaymentTerms><cbc:Note>Zahlbar bis ${xrEsc(faellig)}</cbc:Note></cac:PaymentTerms>`);
   L.push(`  <cac:TaxTotal><cbc:TaxAmount currencyID="EUR">${xrF2(steuer)}</cbc:TaxAmount>`);
   L.push('    <cac:TaxSubtotal>');
@@ -6931,22 +6953,24 @@ function buildXRechnung(o) {
   L.push('  <cac:LegalMonetaryTotal>');
   L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(netto)}</cbc:LineExtensionAmount>`);
   L.push(`    <cbc:TaxExclusiveAmount currencyID="EUR">${xrF2(netto)}</cbc:TaxExclusiveAmount>`);
-  L.push(`    <cbc:TaxInclusiveAmount currencyID="EUR">${xrF2(brutto)}</cbc:TaxInclusiveAmount>`);
+  L.push(`    <cbc:TaxInclusiveAmount currencyID="EUR">${xrF2(netto + steuer)}</cbc:TaxInclusiveAmount>`);
+  // BT-114 nur bei Bedarf (siehe steuer oben); die UBL-Reihenfolge verlangt es direkt vor PayableAmount.
+  if (rundung !== 0) L.push(`    <cbc:PayableRoundingAmount currencyID="EUR">${xrF2(rundung)}</cbc:PayableRoundingAmount>`);
   L.push(`    <cbc:PayableAmount currencyID="EUR">${xrF2(brutto)}</cbc:PayableAmount>`);
   L.push('  </cac:LegalMonetaryTotal>');
   pos.forEach(p => {
     L.push('  <cac:InvoiceLine>');
     L.push(`    <cbc:ID>${p.i}</cbc:ID>`);
-    L.push('    <cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity>');
+    L.push(`    <cbc:InvoicedQuantity unitCode="C62">${p.netto < 0 ? "-1" : "1"}</cbc:InvoicedQuantity>`);
     L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(p.netto)}</cbc:LineExtensionAmount>`);
     L.push(`    <cac:Item><cbc:Name>${xrEsc(p.label)}</cbc:Name>`);
     L.push(`      <cac:ClassifiedTaxCategory><cbc:ID>${kat}</cbc:ID><cbc:Percent>${satz}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:ClassifiedTaxCategory>`);
     L.push('    </cac:Item>');
-    L.push(`    <cac:Price><cbc:PriceAmount currencyID="EUR">${xrF2(p.netto)}</cbc:PriceAmount></cac:Price>`);
+    L.push(`    <cac:Price><cbc:PriceAmount currencyID="EUR">${xrF2(Math.abs(p.netto))}</cbc:PriceAmount></cac:Price>`);
     L.push('  </cac:InvoiceLine>');
   });
   L.push('</ubl:Invoice>');
-  return { xml: L.join("\n"), netto, steuer, brutto, positionen: pos };
+  return { xml: L.join("\n"), netto, steuer, brutto, rundung, positionen: pos };
 }
 // KI-Erklärung zu einer Theoriefrage. Läuft über eine eigene Netlify-Function, weil der
 // API-Schlüssel niemals in den Client gehört. Absicherung dort wie beim Buchungs-Chat über
@@ -14333,6 +14357,34 @@ function App() {
                 showToast("Dieser Schüler ist nicht als Firmenkunde hinterlegt. Firmenname und Anschrift stehen unter Schülerdaten.");
                 return;
             }
+            // Weitere XRechnung-Pflichtangaben vorab prüfen und sagen, WO sie fehlen - sonst
+            // entstand eine Datei, die jeder Validator ablehnt (BR-DE-1 Zahlungsweg ohne IBAN,
+            // BR-DE-6/7 Telefon/E-Mail des Verkäufers, BT-49 E-Mail des Käufers).
+            if (!iv.iban) {
+                showToast("Für eine E-Rechnung braucht es deine IBAN (Zahlung per Überweisung). Bitte unter Einstellungen › Rechnungsdaten eintragen.");
+                return;
+            }
+            const ibanPruefung = validateIban(iv.iban);
+            if (!ibanPruefung.valid) {
+                showToast("Die IBAN in den Rechnungsdaten ist ungültig (" + ibanPruefung.reason + "). Bitte unter Einstellungen › Rechnungsdaten korrigieren.");
+                return;
+            }
+            // Telefon/E-Mail der Fahrschule stehen an den Standorten: zuerst der Standort des
+            // Schülers, sonst der erste Standort, der die Angabe hat. E-Mail notfalls die Login-
+            // Adresse (wie bisher).
+            const standorte = ((school && school.locations) || []).filter(Boolean);
+            const stuStandort = standorte.find(l => l.id === stu.location_id) || null;
+            const vkTel = (stuStandort && stuStandort.phone) || ((standorte.find(l => l.phone) || {}).phone) || "";
+            const vkMail = (stuStandort && stuStandort.email) || ((standorte.find(l => l.email) || {}).email)
+                || (session && session.user && session.user.email) || "";
+            if (!vkTel) {
+                showToast("Für eine E-Rechnung braucht es eine Telefonnummer der Fahrschule. Bitte unter Einstellungen › Standorte beim Standort eintragen.");
+                return;
+            }
+            if (!stu.firmaEmail) {
+                showToast("Für eine E-Rechnung braucht es die E-Mail-Adresse der Firma für den Rechnungsempfang. Bitte in den Schülerdaten unter Firmenkunde eintragen.");
+                return;
+            }
             // "PLZ Ort" aus einem Feld trennen - die App speichert beides zusammen.
             const teile = (t) => { const m = String(t || "").match(/^\s*(\d{4,5})\s+(.+)$/); return m ? { plz: m[1], ort: m[2].trim() } : { plz: "", ort: String(t || "").trim() }; };
             const vk = teile(iv.plzOrt);
@@ -14341,9 +14393,9 @@ function App() {
                 inv,
                 seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
                     plz: vk.plz, ort: vk.ort, ustId: iv.ustId || "", steuernummer: iv.steuernummer || "",
-                    iban: iv.iban || "", email: (session && session.user && session.user.email) || "" },
+                    iban: ibanPruefung.iban, tel: vkTel, email: vkMail },
                 buyer: { name: stu.firmaName, strasse: stu.firmaStrasse || "", plz: kd.plz, ort: kd.ort,
-                    ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "" },
+                    ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "", email: String(stu.firmaEmail).trim() },
                 zahlungszielTage: zahlungszielTage,
                 kUntFallback: !!iv.kleinunternehmer,
             });
@@ -21013,6 +21065,12 @@ function App() {
                         React.createElement("label", null, "PLZ und Ort",
                         React.createElement("input", { type: "text", defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
                             onBlur: e => { if (e.target.value !== (active.firmaPlzOrt || "")) updateActive({ firmaPlzOrt: e.target.value }); } }))),
+                    // Pflicht für die XRechnung (BT-49, elektronische Adresse des Käufers) -
+                    // die Schüler-Daten haben sonst keine E-Mail-Adresse der Firma.
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "E-Mail für Rechnungen (für E-Rechnung nötig)",
+                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
+                            onBlur: e => { if (e.target.value.trim() !== (active.firmaEmail || "")) updateActive({ firmaEmail: e.target.value.trim() }); } }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "USt-IdNr. (optional)",
                         React.createElement("input", { type: "text", defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
