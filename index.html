@@ -10731,6 +10731,76 @@ function App() {
     const apptWritesRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
+    // Aktueller Stand von students/school/tpl/appts als Ref - Grundlage für jedes "erst berechnen,
+    // dann setzen und speichern". Das frühere Muster "let x = null; setStudents(prev => { x = ...;
+    // return x; }); if (!x) return;" hat nur beim ersten Aufruf funktioniert: React 18.2 führt den
+    // Updater nur dann sofort aus, wenn für die Komponente gerade kein anderes Update ansteht -
+    // danach lief er erst beim nächsten Rendern, x blieb null und das Speichern wurde still
+    // übersprungen (Fahrschul-Einstellungen wurden seit dem 28.08. nicht mehr gespeichert, auch
+    // Belege, Verträge, Paketverkäufe und Ausfallgebühren waren betroffen).
+    // updateStudents()/putSchool()/putTpl() rechnen deshalb synchron gegen die Ref, ziehen sie
+    // sofort nach und setzen den State mit dem fertigen Wert. Der Abgleich beim Rendern ist nur
+    // das Sicherheitsnetz für einen direkten set...-Aufruf: eigene, über die Helfer geschriebene
+    // Werte (ownWrites) überschreiben die Ref dort nie, sonst könnte ein Zwischen-Render mit einem
+    // älteren Stand eine eben geschriebene Änderung in der Ref wieder zurückdrehen.
+    const studentsRef = useRef(students), studentsSeenRef = useRef(students);
+    const schoolRef = useRef(school), schoolSeenRef = useRef(school);
+    const tplRef = useRef(tpl), tplSeenRef = useRef(tpl);
+    const ownWritesRef = useRef(null);
+    if (!ownWritesRef.current)
+        ownWritesRef.current = new WeakSet();
+    const syncStateRef = (val, seenRef, ref) => {
+        if (val === seenRef.current)
+            return;
+        seenRef.current = val;
+        if (!(val && typeof val === "object" && ownWritesRef.current.has(val)))
+            ref.current = val;
+    };
+    syncStateRef(students, studentsSeenRef, studentsRef);
+    syncStateRef(school, schoolSeenRef, schoolRef);
+    syncStateRef(tpl, tplSeenRef, tplRef);
+    // Termine werden hier nur gelesen (frischer Stand nach einem await), nicht darüber geschrieben.
+    const apptsRef = useRef(appts);
+    apptsRef.current = appts;
+    function markOwnWrite(val) {
+        if (val && typeof val === "object")
+            ownWritesRef.current.add(val);
+    }
+    // Wie setStudents(prev => ...), liefert aber den neuen Stand SOFORT zurück (siehe oben).
+    function updateStudents(fnOrValue) {
+        const next = typeof fnOrValue === "function" ? fnOrValue(studentsRef.current) : fnOrValue;
+        studentsRef.current = next;
+        markOwnWrite(next);
+        setStudents(next);
+        return next;
+    }
+    // Einen Schüler gegen den AKTUELLEN Stand (studentsRef) patchen und den fertigen Datensatz
+    // zurückgeben - null, wenn es ihn nicht mehr gibt oder fn nichts ändern will (null liefert).
+    // Ersatz für das kaputte Einfang-Muster an den Stellen, die danach speichern/drucken müssen.
+    function patchStudentNow(sid, fn) {
+        const cur = (studentsRef.current || []).find(s => s.id === sid);
+        if (!cur)
+            return null;
+        const patched = fn(cur);
+        if (!patched)
+            return null;
+        updateStudents(prev => (prev || []).map(s => s.id === sid ? patched : s));
+        return patched;
+    }
+    function putSchool(fnOrValue) {
+        const next = typeof fnOrValue === "function" ? fnOrValue(schoolRef.current) : fnOrValue;
+        schoolRef.current = next;
+        markOwnWrite(next);
+        setSchool(next);
+        return next;
+    }
+    function putTpl(fnOrValue) {
+        const next = typeof fnOrValue === "function" ? fnOrValue(tplRef.current) : fnOrValue;
+        tplRef.current = next;
+        markOwnWrite(next);
+        setTpl(next);
+        return next;
+    }
     const [waitlistOffer, setWaitlistOffer] = useState(null); // { appt, candidates } | null - Warteliste (Task #68)
     const [welcomeOffer, setWelcomeOffer] = useState(null); // Schüler | null - Willkommensnachricht nach Übernahme einer Anmeldung (Verwaltung-ersetzen-Fahrplan, Phase 1)
     const [briefing, setBriefing] = useState(null); // { busy, text, err } | null - Tages-Briefing (Verwaltung-ersetzen-Fahrplan, Phase 2)
@@ -11088,53 +11158,57 @@ function App() {
     // Empfehlungsbonus ("Freund wirbt Freund"): Betrag, den Werber und Geworbener je als
     // Gutschrift bekommen. Default 20, falls die Fahrschule noch nichts eingestellt hat.
     const referralReward = (school && school.referral_reward != null) ? Number(school.referral_reward) : 20;
+    // Alle Einstellungs-Speicher unten patchen FUNKTIONAL gegen den aktuellen Stand (writeSchool
+    // reicht den Stand aus schoolRef herein) statt {...school, ...} aus dem Render einzufangen -
+    // sonst setzte z.B. ein Aufruf nach einem Bestätigungsdialog (Standort löschen) oder zwei
+    // schnelle Änderungen vor dem nächsten Render andere, eben geänderte Felder wieder zurück.
     function saveReferralReward(v) { if (school)
-        writeSchool({ ...school, referral_reward: (v === "" ? 20 : Number(v)) }); }
+        writeSchool(s => s && ({ ...s, referral_reward: (v === "" ? 20 : Number(v)) })); }
     // Standard-Ausfallgebühr: null heißt "nichts eingestellt" - reportNoShow() schlägt dann
     // weiterhin die Hälfte des UE-Preises vor (bisheriges Verhalten), statt einer erzwungenen Zahl.
     const noShowFeeDefault = (school && school.no_show_fee_default != null) ? Number(school.no_show_fee_default) : null;
     function saveNoShowFeeDefault(v) { if (school)
-        writeSchool({ ...school, no_show_fee_default: (v === "" ? null : Number(v)) }); }
+        writeSchool(s => s && ({ ...s, no_show_fee_default: (v === "" ? null : Number(v)) })); }
     // Stornofrist für kurzfristige Absagen im Schülerportal: null heißt "keine Frist eingestellt"
     // (keine Warnung, keine Gebührenfrage) - bewusst wie noShowFeeDefault standardmäßig aus, damit
     // sich am Verhalten für Fahrschulen ohne eigene Regelung dazu nichts ändert.
     const stornoFristStunden = (school && school.storno_frist_stunden != null) ? Number(school.storno_frist_stunden) : null;
     function saveStornoFristStunden(v) { if (school)
-        writeSchool({ ...school, storno_frist_stunden: (v === "" ? null : Number(v)) }); }
+        writeSchool(s => s && ({ ...s, storno_frist_stunden: (v === "" ? null : Number(v)) })); }
     // Zahlungsziel für "überfällig" (Mahnungen-Cockpit, Abrechnung): war an zwei Stellen fest auf
     // 14 Tage verdrahtet (siehe ZAHLUNGSZIEL_TAGE-Konstanten dort) - jetzt einstellbar, 14 bleibt
     // der Standardwert, damit sich am Verhalten ohne eigene Einstellung nichts ändert.
     const zahlungszielTage = (school && school.zahlungsziel_tage != null) ? Number(school.zahlungsziel_tage) : 14;
     function saveZahlungszielTage(v) { if (school)
-        writeSchool({ ...school, zahlungsziel_tage: (v === "" ? null : Number(v)) }); }
+        writeSchool(s => s && ({ ...s, zahlungsziel_tage: (v === "" ? null : Number(v)) })); }
     // Puffer für den Rückwärts-Fahrplan (Behördenbearbeitung + Prüfungstermin-Wartezeit), oben auf
     // die reine Fahrstundenzeit gerechnet - 6 Wochen als vorsichtiger Standard (siehe Marktstudie:
     // Behördenstau bis zu 3 Monate in Einzelfällen, hier bewusst konservativ statt spekulativ hoch).
     const planungPufferWochen = (school && school.planung_puffer_wochen != null) ? Number(school.planung_puffer_wochen) : 6;
     function savePlanungPufferWochen(v) { if (school)
-        writeSchool({ ...school, planung_puffer_wochen: (v === "" ? null : Number(v)) }); }
+        writeSchool(s => s && ({ ...s, planung_puffer_wochen: (v === "" ? null : Number(v)) })); }
     function savePricePerHour(v) { if (school)
-        writeSchool({ ...school, price_hour: (v === "" ? "" : v) }); }
+        writeSchool(s => s && ({ ...s, price_hour: (v === "" ? "" : v) })); }
     function savePackages(list) { if (school)
-        writeSchool({ ...school, packages: list }); }
+        writeSchool(s => s && ({ ...s, packages: list })); }
     function saveVehicles(list) { if (school)
-        writeSchool({ ...school, vehicles: list }); }
+        writeSchool(s => s && ({ ...s, vehicles: list })); }
     function saveKlassen(list) { if (school)
-        writeSchool({ ...school, klassen: list }); }
+        writeSchool(s => s && ({ ...s, klassen: list })); }
     function saveArten(list) { if (school)
-        writeSchool({ ...school, arten: list }); }
+        writeSchool(s => s && ({ ...s, arten: list })); }
     // Sonderfahrten-Soll je Klasse (Überland-/Autobahn-/Dämmerungs-UE) - überschreibt/ergänzt
     // DEFAULT_SONDERFAHRTEN_SOLL, siehe sonderfahrtenBilanz().
     const sonderfahrtenSoll = (school && school.sonderfahrten_soll) || {};
     function saveSonderfahrtenSoll(klasse, patch) { if (school)
-        writeSchool({ ...school, sonderfahrten_soll: { ...sonderfahrtenSoll, [klasse]: { ...(sonderfahrtenSoll[klasse] || {}), ...patch } } }); }
+        writeSchool(s => s && ({ ...s, sonderfahrten_soll: { ...(s.sonderfahrten_soll || {}), [klasse]: { ...((s.sonderfahrten_soll || {})[klasse] || {}), ...patch } } })); }
     // Führerscheinreform 2027 (Drucksache 21/7404) - Stichtag, ab dem diese Fahrschule die geplante,
     // flexiblere Auslegung auf NEU begonnene Ausbildungen anwenden möchte. Siehe neueRegelnGelten().
     function saveReformStichtag(v) { if (school)
-        writeSchool({ ...school, reform_stichtag: v || null }); }
+        writeSchool(s => s && ({ ...s, reform_stichtag: v || null })); }
     // Standardisierte Preismeldung - siehe preismeldungSheet().
     function savePreismeldungPreis(field, v) { if (school)
-        writeSchool({ ...school, [field]: (v === "" ? null : v) }); }
+        writeSchool(s => s && ({ ...s, [field]: (v === "" ? null : v) })); }
     async function openPreismeldung() {
         if (!school)
             return;
@@ -11176,7 +11250,7 @@ function App() {
         setArtEdit(null);
     }
     function saveInvoiceSettings(patch) { if (school)
-        writeSchool({ ...school, invoice_settings: { ...(school.invoice_settings || {}), ...patch } }); }
+        writeSchool(s => s && ({ ...s, invoice_settings: { ...(s.invoice_settings || {}), ...patch } })); }
     // DATEV-Buchungsstapel: Kontenrahmen-abhaengige Standardwerte, damit der Inhaber nur
     // Berater- und Mandantennummer eintragen muss. SKR03 ist bei kleinen Betrieben der
     // Regelfall, SKR04 waehlbar. Die Konten sind Vorschlaege - der Steuerberater kann sie
@@ -11199,9 +11273,9 @@ function App() {
         return "";
     }
     function saveDatevSettings(patch) { if (school)
-        writeSchool({ ...school, datev_settings: { ...(school.datev_settings || {}), ...patch } }); }
+        writeSchool(s => s && ({ ...s, datev_settings: { ...(s.datev_settings || {}), ...patch } })); }
     function saveLocations(list) { if (school)
-        writeSchool({ ...school, locations: list }); }
+        writeSchool(s => s && ({ ...s, locations: list })); }
     const [stuSig, setStuSig] = useState(null);
     const [updateToast, setUpdateToast] = useState(false);
     const [showChangelog, setShowChangelog] = useState(false);
@@ -11990,11 +12064,8 @@ function App() {
             // dem vor der (potenziell mehrere Sekunden dauernden) Speicher-Schleife berechneten
             // Snapshot zu überschreiben - sonst würden zwischenzeitliche Änderungen (Hintergrund-
             // Reload, Kollegen-Änderung an einem geteilten Schüler) hier stillschweigend verworfen.
-            let finalList = null;
-            setStudents(prev => {
-                finalList = (prev || []).map(s => zielIds.has(s.id) ? { ...s, location_id: validMyLocationId } : s);
-                return finalList;
-            });
+            // updateStudents rechnet synchron gegen studentsRef und gibt den neuen Stand zurück.
+            const finalList = updateStudents(prev => (prev || []).map(s => zielIds.has(s.id) ? { ...s, location_id: validMyLocationId } : s));
             if (uid && finalList)
                 saveCache(uid, finalList);
             showFlash("✓ " + ziel.length + " Schüler aktualisiert");
@@ -12223,9 +12294,9 @@ function App() {
     // Load students + template + school when logged in: cache first, then cloud
     useEffect(() => {
         if (!uid) {
-            setStudents(null);
-            setTpl(null);
-            setSchool(null);
+            updateStudents(null);
+            putTpl(null);
+            putSchool(null);
             setAppts([]);
             // Ohne diesen Reset überlebte eine laufende Prüfungssimulation/Schaltkompetenz-Sitzung
             // einen Kontowechsel (App() bleibt beim Sign-out gemountet) - das Live-Banner zeigte
@@ -12259,15 +12330,15 @@ function App() {
         }
         const cached = loadCache(uid);
         if (cached && cached.length) {
-            setStudents(cached);
+            updateStudents(cached);
             setActiveId(a => a || cached[0].id);
         }
         const cachedTpl = loadTplCache(uid);
         if (cachedTpl)
-            setTpl(cachedTpl);
+            putTpl(cachedTpl);
         const cachedSchool = loadSchoolCache(uid);
         if (cachedSchool) {
-            setSchool(cachedSchool);
+            putSchool(cachedSchool);
             applySchoolColor(cachedSchool.color);
         }
         // Fahrlehrer-Unterschrift kontogebunden laden (wie die Preis/Pakete-Migration weiter unten):
@@ -12298,7 +12369,7 @@ function App() {
         let myRights = false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
         fetchMySchool(uid).then(schoolData => {
             const sc = schoolData || { ...DEFAULT_SCHOOL };
-            setSchool(sc);
+            putSchool(sc);
             saveSchoolCache(uid, sc);
             applySchoolColor(sc.color);
             fetchIsModerator(uid).then(setIsModerator).catch(() => { });
@@ -12323,9 +12394,11 @@ function App() {
                                 merged.price_hour = Number(oldPrice);
                             if (needPkg)
                                 merged.packages = oldPkg;
-                            setSchool(merged);
-                            saveSchoolCache(uid, merged);
-                            saveSchool(merged).catch(() => { });
+                            // Über writeSchool statt direkt saveSchool(): das übernimmt nach dem
+                            // Speichern das neue updated_at in den State. Vorher blieb das alte
+                            // stehen und die nächste Änderung in den Einstellungen scheiterte als
+                            // vermeintlicher Konflikt mit einer anderen Sitzung (Audit A2-N9).
+                            writeSchool(merged);
                         }
                         localStorage.removeItem("v3_price_hour_" + uid);
                         localStorage.removeItem("v3_packages_" + uid);
@@ -12339,7 +12412,7 @@ function App() {
         }).then(([list, tplData, apptData, code, rights, sc]) => {
             myRights = rights;
             setSyncing(false);
-            setStudents(list || []);
+            updateStudents(list || []);
             saveCache(uid, list || []);
             setActiveId(a => {
                 const currentStuId = findCurrentApptStudentId(apptData);
@@ -12347,7 +12420,7 @@ function App() {
                     return currentStuId;
                 return list.find(s => s.id === a) ? a : (list[0] ? list[0].id : null);
             });
-            setTpl(tplData);
+            putTpl(tplData);
             saveTplCache(uid, tplData);
             applyFetchedAppts(apptData || []);
             setBookingCode(code || null);
@@ -12374,9 +12447,9 @@ function App() {
             setSyncing(false);
             setLoadErr(String(err && err.message ? err.message : err));
             if (!cached)
-                setStudents([]); // don't stay stuck on grey
+                updateStudents([]); // don't stay stuck on grey
             if (!cachedTpl)
-                setTpl({ adk: deepCopy(DEFAULT_ADK), strecken: deepCopy(DEFAULT_STRECKEN) });
+                putTpl({ adk: deepCopy(DEFAULT_ADK), strecken: deepCopy(DEFAULT_STRECKEN) });
         });
     }, [uid]);
     // Wenn die App wieder in den Vordergrund kommt: Termine neu laden,
@@ -12424,7 +12497,7 @@ function App() {
             lastRefresh = now;
             fetchStudents(uid).then(list => {
                 const busy = studentWritesRef.current;
-                setStudents(prev => {
+                updateStudents(prev => {
                     const byId = new Map((list || []).map(s => [s.id, s]));
                     // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
                     // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
@@ -12552,39 +12625,66 @@ function App() {
     // eingefangenen, mittlerweile veralteten "school"-Snapshot wieder reinzuschreiben und damit
     // zwischenzeitliche Änderungen (z.B. an anderen Preisfeldern) stillschweigend zu verwerfen.
     // Bestehende Aufrufer mit einem fertigen Objekt sind davon unberührt (kein Funktionstyp).
+    // Laufender Speichervorgang (Promise). Der nächste wartet darauf, damit er mit dem frischen
+    // updated_at des vorigen losgeht - siehe runSchoolSave.
+    const schoolSaveChainRef = useRef(Promise.resolve());
     const writeSchool = useCallback((nextOrFn) => {
-        let next = null;
-        setSchool(prev => { next = typeof nextOrFn === "function" ? nextOrFn(prev) : nextOrFn; return next; });
+        // Synchron gegen schoolRef rechnen statt im setSchool-Updater (siehe studentsRef oben) -
+        // sonst blieb "next" ab dem zweiten Aufruf null und nichts wurde mehr gespeichert.
+        const cur = schoolRef.current;
+        let next = typeof nextOrFn === "function" ? nextOrFn(cur) : nextOrFn;
         if (!next)
             return;
+        // Ein fertiges Objekt ({...school, ...}) stammt aus dem letzten Render und kann noch das
+        // updated_at von VOR dem letzten Speichern tragen - dann das neuere aus der Ref nehmen,
+        // sonst hielte saveSchool die eigene Änderung für einen Konflikt mit einer anderen Sitzung.
+        if (cur && next.id === cur.id && cur.updated_at && (!next.updated_at || next.updated_at < cur.updated_at))
+            next = { ...next, updated_at: cur.updated_at };
+        putSchool(next);
         if (uid)
             saveSchoolCache(uid, next);
         applySchoolColor(next.color);
         setSaved(false);
         if (schoolTimer.current)
             clearTimeout(schoolTimer.current);
-        schoolTimer.current = setTimeout(async () => {
-            try {
-                const saved = await saveSchool(next);
-                // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die
-                // nächste Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst
-                // erkannt (school.updated_at im React-State bliebe sonst auf dem alten Wert stehen).
-                if (saved && saved.updated_at)
-                    setSchool(cur => cur ? { ...cur, updated_at: saved.updated_at } : cur);
-                setSaved(true);
-            }
-            catch (e) {
-                if (e.isConflict) {
-                    showToast(e.message);
-                    fetchMySchool(uid).then(fresh => { if (fresh)
-                        setSchool(fresh); });
-                }
-                else {
-                    showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
-                }
-            }
+        schoolTimer.current = setTimeout(() => {
+            schoolTimer.current = null;
+            schoolSaveChainRef.current = schoolSaveChainRef.current.then(runSchoolSave, runSchoolSave);
         }, 500);
     }, [uid]);
+    // Gespeichert wird der Stand ZUM ZEITPUNKT DES SPEICHERNS aus schoolRef, nicht das beim Tippen
+    // eingefangene Objekt: Das trug noch das updated_at von vor dem letzten Speichern - lief das
+    // vorige Speichern noch, als weitergetippt wurde, meldete saveSchool einen Konflikt mit sich
+    // selbst, lud die Fahrschule neu und die Eingabe war weg (Audit A2-M3).
+    async function runSchoolSave() {
+        const cur = schoolRef.current;
+        if (!cur)
+            return;
+        try {
+            const saved = await saveSchool(cur);
+            // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die
+            // nächste Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst
+            // erkannt (school.updated_at im React-State bliebe sonst auf dem alten Wert stehen).
+            if (saved && saved.updated_at) {
+                const synced = putSchool(s => s ? { ...s, updated_at: saved.updated_at } : s);
+                if (uid && synced)
+                    saveSchoolCache(uid, synced);
+            }
+            // Nur "gespeichert" melden, wenn nicht schon die nächste Änderung wartet.
+            if (!schoolTimer.current)
+                setSaved(true);
+        }
+        catch (e) {
+            if (e.isConflict) {
+                showToast(e.message);
+                fetchMySchool(uid).then(fresh => { if (fresh)
+                    putSchool(fresh); }).catch(() => { });
+            }
+            else {
+                showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
+            }
+        }
+    }
     // Wiederherstellung nach einem fehlgeschlagenen Einladungscode-Beitritt bei der Registrierung
     // (siehe schoolRecovery-State oben) - beide Pfade nutzen dieselben, schon bestehenden und
     // getesteten Funktionen wie die Registrierung selbst (Auth().submit()).
@@ -12596,7 +12696,7 @@ function App() {
             await joinSchoolByCode(schoolRecovery.code);
             const fresh = await fetchMySchool(uid);
             if (fresh) {
-                setSchool(fresh);
+                putSchool(fresh);
                 saveSchoolCache(uid, fresh);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
@@ -12616,7 +12716,7 @@ function App() {
             await createAndAssignSchool(schoolRecovery.newName);
             const fresh = await fetchMySchool(uid);
             if (fresh) {
-                setSchool(fresh);
+                putSchool(fresh);
                 saveSchoolCache(uid, fresh);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
@@ -12630,34 +12730,47 @@ function App() {
     }
     // Save template (debounced)
     const tplTimer = useRef(null);
+    const tplSaveChainRef = useRef(Promise.resolve());
     const writeTemplate = useCallback((next) => {
-        setTpl(next);
+        putTpl(next);
         if (uid)
             saveTplCache(uid, next);
         setSaved(false);
         if (tplTimer.current)
             clearTimeout(tplTimer.current);
-        tplTimer.current = setTimeout(async () => {
-            try {
-                const saved = await saveTemplate(uid, next);
-                // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die nächste
-                // Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst erkannt.
-                if (saved && saved.updated_at)
-                    setTpl(cur => cur ? { ...cur, updated_at: saved.updated_at } : cur);
-                setSaved(true);
-            }
-            catch (e) {
-                if (e.isConflict) {
-                    showToast(e.message);
-                    fetchTemplate(uid, school && school.name).then(fresh => { if (fresh)
-                        setTpl(fresh); });
-                }
-                else {
-                    showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
-                }
-            }
+        tplTimer.current = setTimeout(() => {
+            tplTimer.current = null;
+            tplSaveChainRef.current = tplSaveChainRef.current.then(runTplSave, runTplSave);
         }, 500);
     }, [uid]);
+    // Wie runSchoolSave: gespeichert wird der AKTUELLE Stand aus tplRef (mit dem updated_at des
+    // zuletzt abgeschlossenen Speicherns), nacheinander statt parallel - sonst meldete ein zweites
+    // Speichern, das startete, bevor das erste zurück war, einen Konflikt mit sich selbst.
+    async function runTplSave() {
+        const cur = tplRef.current;
+        if (!cur || !uid)
+            return;
+        try {
+            const saved = await saveTemplate(uid, cur);
+            // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die nächste
+            // Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst erkannt.
+            if (saved && saved.updated_at)
+                putTpl(t => t ? { ...t, updated_at: saved.updated_at } : t);
+            if (!tplTimer.current)
+                setSaved(true);
+        }
+        catch (e) {
+            if (e.isConflict) {
+                showToast(e.message);
+                const sc = schoolRef.current;
+                fetchTemplate(uid, sc && sc.name).then(fresh => { if (fresh)
+                    putTpl(fresh); }).catch(() => { });
+            }
+            else {
+                showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+            }
+        }
+    }
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
     // gespeicherte ADK, wird die Standard-ADK angezeigt (V3 die gewohnte Karte, sonst BVF),
     // damit die Karte nie leer ist. Sobald etwas bearbeitet wird, wird sie für die Klasse gespeichert.
@@ -12951,7 +13064,7 @@ function App() {
     }, [saveError, students, scheduleSave]);
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
-        setStudents(prev => {
+        updateStudents(prev => {
             const arr = (prev || []).map(s => {
                 if (s.id !== next.id)
                     return s;
@@ -12981,7 +13094,7 @@ function App() {
     // erfasste Einträge auf eine nicht mehr existierende ID zeigen und der wiederhergestellte
     // Termin erneut zur Bestätigung vorgeschlagen (Doppel-Eintrag-Gefahr).
     const relinkApptId = useCallback((oldId, newId) => {
-        setStudents(prev => {
+        updateStudents(prev => {
             let changed = false;
             const next = (prev || []).map(stu => {
                 const hasDriven = (stu.drivenLessons || []).some(l => l.apptId === oldId);
@@ -13532,7 +13645,7 @@ function App() {
             showToast("Konnte nicht speichern. Internetverbindung prüfen.", "error");
             return;
         }
-        setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+        updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
         setActiveId(created.id);
         setView("daten");
     }
@@ -13612,7 +13725,7 @@ function App() {
                 showToast("Konnte nicht übernommen werden. Internetverbindung prüfen.", "error");
                 return;
             }
-            setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+            updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
             try {
                 // Status auf "angemeldet" setzen statt den Eintrag zu löschen - sonst verschwindet
                 // jede tatsächliche Umwandlung sofort aus Zähler UND Nenner der Umwandlungsquote
@@ -13678,7 +13791,7 @@ function App() {
             return;
         try {
             await dbDelete(s.id);
-            setStudents(prev => (prev || []).filter(x => x.id !== s.id));
+            updateStudents(prev => (prev || []).filter(x => x.id !== s.id));
         }
         catch (e) {
             showToast("Konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
@@ -14174,7 +14287,7 @@ function App() {
         for (const d of neu) {
             try {
                 const created = await dbInsert(uid, draftFromImportData(d));
-                if (created) setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                if (created) updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
                 else fehler.push((d.vorname + " " + d.name).trim() || "(ohne Namen)");
             }
             catch (e) { fehler.push((d.vorname + " " + d.name).trim() || "(ohne Namen)"); }
@@ -14254,7 +14367,7 @@ function App() {
                 "pinChanged","pins","referralCode","referredByCode","referralRewardApplied","referrals",
                 "wunschliste","dismissedAppts","termin",
                 "terminLabel","klasse","location_id"];
-            setStudents(prev => {
+            updateStudents(prev => {
                 const arr = (prev || []).map(st => {
                     if (st.id !== d.stu.id) return st;
                     const neu = { ...st };
@@ -14397,7 +14510,7 @@ function App() {
             const zahlung = (res.zahlung && typeof res.zahlung === "object")
                 ? { id: res.zahlung.id || uniqueId("pay"), date: res.zahlung.date, amount: Number(res.zahlung.amount) || betrag, method: res.zahlung.method }
                 : { id: uniqueId("pay"), date: ymd(new Date()), amount: betrag, method: "Gutschein " + res.code };
-            setStudents(prev => (prev || []).map(st => st.id === active.id
+            updateStudents(prev => (prev || []).map(st => st.id === active.id
                 ? { ...st, payments: [...(st.payments || []), zahlung] } : st));
             setVouchers(prev => prev.map(v => v.code === res.code
                 ? { ...v, status: "eingeloest", redeemed_student_id: active.id, redeemed_at: new Date().toISOString() } : v));
@@ -14444,7 +14557,7 @@ function App() {
             showToast("Konnte nicht speichern. Internetverbindung prüfen.", "error");
             return;
         }
-        setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+        updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
         setActiveId(created.id);
         setImportState(null);
         setView("daten");
@@ -14726,7 +14839,14 @@ function App() {
             // Kalender-Screenshot-Import schon für genau diesen Fall nutzt (siehe normHM()-Kommentar).
             // combineDT() statt new Date(...) direkt: Termine sind immer als Berlin-Ortszeit
             // gemeint, unabhängig von der Geräte-Zeitzone (siehe combineDT()).
-            const start = new Date(combineDT(p.date || today0(), normHM(p.time) || "00:00"));
+            // Unlesbare Uhrzeit NICHT still auf 00:00 setzen (Termin mitten in der Nacht), sondern
+            // abbrechen und Bescheid geben.
+            const zeit = normHM(p.time);
+            if (!zeit) {
+                showToast("Uhrzeit nicht erkannt. Bitte erneut versuchen.");
+                return;
+            }
+            const start = new Date(combineDT(p.date || today0(), zeit));
             if (isNaN(start.getTime())) {
                 showToast("Datum oder Uhrzeit ungültig. Bitte erneut versuchen.");
                 return;
@@ -14751,7 +14871,9 @@ function App() {
                 if (!await askConfirm({ message: txt }))
                     return;
             }
-            addAppt({
+            // Abwarten statt "fire and forget" - sonst stand "✓ Termin angelegt" da, auch wenn das
+            // Speichern scheiterte (addAppt zeigt den Fehler dann selbst an).
+            const created = await addAppt({
                 student_id: stu ? stu.id : null,
                 title: p.title || (stu ? dispName(stu) : "Termin"),
                 start_at: start.toISOString(),
@@ -14759,6 +14881,8 @@ function App() {
                 status: "confirmed",
                 note: "",
             });
+            if (!created)
+                return;
             setAssistant(null);
             setView("kalender");
             showFlash("✓ Termin angelegt");
@@ -14921,7 +15045,7 @@ function App() {
             showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message, "error");
             return;
         }
-        setStudents(prev => {
+        updateStudents(prev => {
             const arr = (prev || []).filter(x => x.id !== s.id);
             saveCache(uid, arr);
             if (s.id === activeId)
@@ -14931,7 +15055,7 @@ function App() {
         showUndo(dispName(s) + " gelöscht", async () => {
             const created = await dbInsert(uid, backup);
             if (created) {
-                setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
                 setActiveId(created.id);
             }
             else
@@ -15648,47 +15772,41 @@ function App() {
             // geändert hat. writeStudent() ersetzt außerdem den KOMPLETTEN Datensatz - mit einem
             // veralteten active würden dabei alle in der Zwischenzeit vorgenommenen Änderungen
             // (neue/gelöschte Fahrstunden, Zahlungen) unbemerkt rückgängig gemacht. Deshalb läuft
-            // die komplette Leerfeld-Prüfung UND das Schreiben erst hier drin, funktional gegen den
-            // GERADE AKTUELLEN State - React ruft den setStudents-Updater immer mit dem neuesten
-            // Stand auf, nie mit einem veralteten Schnappschuss.
-            let patch = null, patchedStudent = null;
-            setStudents(prev => {
-                const next = (prev || []).map(s => {
-                    if (s.id !== active.id)
-                        return s;
-                    const lessons = (s.lessons || []).map(x => {
-                        if (x.id !== l.id)
-                            return x;
-                        const p = {};
-                        if (!x.thema && d0.thema) p.thema = String(d0.thema).slice(0, 200);
-                        if (!x.hinweis && d0.hinweis) p.hinweis = String(d0.hinweis).slice(0, 500);
-                        if (!x.gut && d0.gut) p.gut = String(d0.gut).slice(0, 500);
-                        if (!x.schlecht && d0.schlecht) p.schlecht = String(d0.schlecht).slice(0, 500);
-                        if (!x.note && d0.note) p.note = String(d0.note).slice(0, 500);
-                        if (d0.ratings && typeof d0.ratings === "object") {
-                            const ratings = { ...(x.ratings || {}) };
-                            let changed = false;
-                            LESSON_FIELDS.forEach(f => {
-                                if (ratings[f.id] == null && [1, 2, 3].includes(d0.ratings[f.id])) {
-                                    ratings[f.id] = d0.ratings[f.id];
-                                    changed = true;
-                                }
-                            });
-                            if (changed) p.ratings = ratings;
+            // die komplette Leerfeld-Prüfung UND das Schreiben erst JETZT, gegen den GERADE
+            // AKTUELLEN Stand aus studentsRef (nicht im setStudents-Updater: den führt React 18.2 nur
+            // beim ersten Mal sofort aus, danach blieb "patch" null und der Entwurf verschwand).
+            const curStu = (studentsRef.current || []).find(s => s.id === active.id);
+            const x = curStu && (curStu.lessons || []).find(y => y.id === l.id);
+            const patch = {};
+            if (x) {
+                if (!x.thema && d0.thema) patch.thema = String(d0.thema).slice(0, 200);
+                if (!x.hinweis && d0.hinweis) patch.hinweis = String(d0.hinweis).slice(0, 500);
+                if (!x.gut && d0.gut) patch.gut = String(d0.gut).slice(0, 500);
+                if (!x.schlecht && d0.schlecht) patch.schlecht = String(d0.schlecht).slice(0, 500);
+                if (!x.note && d0.note) patch.note = String(d0.note).slice(0, 500);
+                if (d0.ratings && typeof d0.ratings === "object") {
+                    const ratings = { ...(x.ratings || {}) };
+                    let changed = false;
+                    LESSON_FIELDS.forEach(f => {
+                        if (ratings[f.id] == null && [1, 2, 3].includes(d0.ratings[f.id])) {
+                            ratings[f.id] = d0.ratings[f.id];
+                            changed = true;
                         }
-                        patch = p;
-                        return Object.keys(p).length > 0 ? { ...x, ...p } : x;
                     });
-                    patchedStudent = { ...s, lessons };
-                    if (patch && Object.keys(patch).length > 0)
-                        markDirtyKeys(s.id, s, patchedStudent);
-                    return patchedStudent;
+                    if (changed) patch.ratings = ratings;
+                }
+            }
+            let patchedStudent = null;
+            if (Object.keys(patch).length > 0) {
+                patchedStudent = patchStudentNow(active.id, s => {
+                    const p = { ...s, lessons: (s.lessons || []).map(y => y.id === l.id ? { ...y, ...patch } : y) };
+                    markDirtyKeys(s.id, s, p);
+                    return p;
                 });
-                if (uid)
-                    saveCache(uid, next);
-                return next;
-            });
-            if (patch && Object.keys(patch).length > 0) {
+                if (uid && patchedStudent)
+                    saveCache(uid, studentsRef.current);
+            }
+            if (patchedStudent) {
                 scheduleSave(patchedStudent);
                 // Nur die tatsächlich gepatchten Felder remounten (eigener Zähler je Feld) -
                 // sonst würde z.B. ein KI-Entwurf, der nur "hinweis" befüllt, auch das "gut"-Feld
@@ -15747,7 +15865,10 @@ function App() {
             return created;
         }
         catch (e) {
+            // Fehler ist hier schon gemeldet - Aufrufer erkennen ihn am Rückgabewert null und
+            // brechen ab (Formular offen lassen, kein "✓ angelegt", keine WhatsApp-Nachricht).
             showToast("Termin konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+            return null;
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15889,7 +16010,11 @@ function App() {
         setCounterForm({ ...f, busy: true, error: "" });
         const startISO = combineDT(f.date, f.start);
         const endISO = f.end ? combineDT(f.date, f.end) : null;
-        await updateAppt(f.id, { start_at: startISO, end_at: endISO });
+        if (!await updateAppt(f.id, { start_at: startISO, end_at: endISO })) {
+            // Nicht gespeichert: keinen WhatsApp-Link mit einer Zeit anbieten, die es nicht gibt.
+            setCounterForm({ ...f, busy: false, error: "Die neue Zeit konnte nicht gespeichert werden. Bitte erneut versuchen." });
+            return;
+        }
         const stu = f.student_id ? students.find(s => s.id === f.student_id) : matchStudentByName(f.title || "");
         const num = stu && stu.tel ? waNumber(stu.tel) : "";
         const slot = { start_at: startISO, end_at: endISO, art: f.art };
@@ -15923,13 +16048,17 @@ function App() {
                     writeStudent({ ...stu, drivenLessons: stu.drivenLessons.map(l => l.apptId === id ? { ...l, art: patch.art || "ÜST" } : l) });
                 });
             }
+            return true;
         }
         catch (e) {
             // Speichern fehlgeschlagen: optimistische Änderung zurücknehmen, damit die Liste zur
-            // Datenbank passt (gleiches Rollback-Muster wie in removeAppt()).
+            // Datenbank passt (gleiches Rollback-Muster wie in removeAppt()). false zurückgeben:
+            // Der Fehler wird hier schon angezeigt, die Aufrufer dürfen danach aber nicht so tun,
+            // als hätte es geklappt (Modal schließen, WhatsApp-Bestätigung anbieten, ...).
             if (current)
                 setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Änderung fehlgeschlagen:\n" + fehlerText(e), "error");
+            return false;
         }
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
@@ -15959,7 +16088,9 @@ function App() {
         finally {
             apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
         }
-        if (backup && !(opts && opts.noUndo)) {
+        // Undo nur nach erfolgreichem Löschen - nach einem Fehlschlag steht der Termin ja wieder
+        // in der Liste, ein "Rückgängig" hätte ihn dann ein zweites Mal angelegt.
+        if (ok && backup && !(opts && opts.noUndo)) {
             const label = (opts && opts.label) || "Termin gelöscht";
             showUndo(label, async () => {
                 apptWritesRef.current++;
@@ -16022,16 +16153,17 @@ function App() {
         const patch = { status: "confirmed" };
         if (matchedStu)
             patch.student_id = matchedStu.id;
-        await updateAppt(id, patch);
+        // Bestätigen fehlgeschlagen (Fehler zeigt updateAppt schon an): keine WhatsApp-Bestätigung
+        // für einen Termin anbieten, der in der Datenbank weiterhin offen ist.
+        if (!await updateAppt(id, patch))
+            return;
         // WhatsApp-Bestätigung anbieten, gebündelt für alle Termine dieses Schülers. students/appts
-        // frisch abfragen statt der vor dem await eingefangenen Closure-Werte - kurzes Peek über den
-        // funktionalen setState-Updater (kein Re-Render, da unverändert zurückgegeben wird), damit ein
+        // frisch aus den Refs lesen statt der vor dem await eingefangenen Closure-Werte, damit ein
         // zwischenzeitliches Update (z.B. neuer Schüler, geänderter Terminstatus) nicht zu einer
-        // unvollständigen/veralteten WhatsApp-Nachricht führt.
+        // unvollständigen/veralteten WhatsApp-Nachricht führt. (Früher per "Peek" über einen
+        // setState-Updater - den führt React 18.2 aber nicht verlässlich sofort aus.)
         if (appt) {
-            let freshStudents = students, freshAppts = appts;
-            setStudents(prev => { freshStudents = prev; return prev; });
-            setAppts(prev => { freshAppts = prev; return prev; });
+            const freshStudents = studentsRef.current || [], freshAppts = apptsRef.current || [];
             const stu = matchedStu || (appt.student_id ? freshStudents.find(x => x.id === appt.student_id) : null);
             const thisAppt = { ...appt, status: "confirmed", student_id: (stu ? stu.id : appt.student_id) };
             // Alle bestätigten Termine sammeln, die zu diesem Schüler bzw. Namen gehören (heute oder Zukunft)
@@ -16276,7 +16408,7 @@ function App() {
     // Ausfallgebühr für eine kurzfristig stornierte Fahrstunde - eigenständig statt reportNoShow()
     // wiederzuverwenden, weil hier (anders als beim Melden vom Schülerprofil aus) "active" nicht
     // zwingend derselbe Schüler ist, dessen Termin gerade storniert wurde. Schreibt deshalb
-    // funktional gegen den GERADE AKTUELLEN Schülerstand (setStudents-Updater), nicht gegen eine
+    // gegen den GERADE AKTUELLEN Schülerstand (patchStudentNow/studentsRef), nicht gegen eine
     // beim Aufruf eingefangene Kopie - zwischen den awaits unten kann sich einiges ändern.
     async function chargeAusfallgebuehrFuerTermin(appt) {
         const sid = appt.student_id;
@@ -16298,13 +16430,7 @@ function App() {
         const parsed = parseFloat(raw.indexOf(",") >= 0 ? raw.replace(/\./g, "").replace(",", ".") : raw);
         if (isNaN(parsed) || parsed <= 0)
             return;
-        let patchedStudent = null;
-        setStudents(prev => prev.map(s => {
-            if (s.id !== sid)
-                return s;
-            patchedStudent = { ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount: parsed })] };
-            return patchedStudent;
-        }));
+        const patchedStudent = patchStudentNow(sid, s => ({ ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount: parsed })] }));
         if (patchedStudent) {
             scheduleSave(patchedStudent);
             showFlash("✓ Ausfallgebühr gebucht");
@@ -17226,17 +17352,14 @@ function App() {
         // Wie chargeAusfallgebuehrFuerTermin: zwischen den awaits oben können Minuten vergehen, in
         // denen ein Kollege denselben (geteilten) Schüler ändert und der Fokus-Refetch dessen neuen
         // Stand in "active" einspielt. Schreibt darum funktional gegen den GERADE AKTUELLEN
-        // Schülerstand (setStudents-Updater), nicht gegen die beim Klick eingefangene "active"-Kopie -
+        // Schülerstand (patchStudentNow/studentsRef), nicht gegen die beim Klick eingefangene "active"-Kopie -
         // sonst würde updateActive() Kollegen-Änderungen beim Speichern wieder überschreiben.
-        let patchedStudent = null;
-        setStudents(prev => prev.map(s => {
-            if (s.id !== sid)
-                return s;
-            patchedStudent = { ...s, noShows: [...(s.noShows || []), entry] };
+        const patchedStudent = patchStudentNow(sid, s => {
+            const p = { ...s, noShows: [...(s.noShows || []), entry] };
             if (amount !== null)
-                patchedStudent.costItems = [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount })];
-            return patchedStudent;
-        }));
+                p.costItems = [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount })];
+            return p;
+        });
         if (patchedStudent) {
             scheduleSave(patchedStudent);
             showFlash(amount !== null ? "✓ Vermerkt + Gebühr gebucht" : "✓ Vermerkt");
@@ -18558,7 +18681,7 @@ function App() {
         // während der RPC-Laufzeit an diesem Schüler gemacht wurde (neue Fahrstunde, Zahlung,
         // paralleler Kollege bei geteiltem Schüler), hier stillschweigend wieder verworfen (gleiches
         // Muster wie draftLessonEntry() weiter oben).
-        setStudents(prev => (prev || []).map(s => {
+        updateStudents(prev => (prev || []).map(s => {
             if (s.id !== active.id)
                 return s;
             const coveredById = {};
@@ -18602,7 +18725,7 @@ function App() {
         // eingefangene "active" - der Prompt-Dialog kann durch Tippzeit beliebig lange offen
         // bleiben, ein größeres Zeitfenster für zwischenzeitliche Änderungen als bei confirmInvoice()
         // (gleicher Bug, gleicher Fix - siehe dortiger Kommentar).
-        setStudents(prev => (prev || []).map(s => {
+        updateStudents(prev => (prev || []).map(s => {
             if (s.id !== active.id)
                 return s;
             const drivenLessons = (s.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
@@ -18646,29 +18769,24 @@ function App() {
             // ...patch}), baut also auf dem vor dem RPC-await eingefangenen, jetzt veralteten "active"
             // auf) - sonst würden alle während der Belegnummer-Vergabe an diesem Schüler vorgenommenen
             // Änderungen (neue Fahrstunde, neuer Posten) hier stillschweigend verworfen. scheduleSave()
-            // bewusst NACH dem setStudents-Aufruf, nicht im Updater selbst (der kann von React mehrfach
-            // aufgerufen werden) - gleiches Muster wie draftLessonEntry() weiter oben.
+            // bewusst NACH dem Schreiben in den State (patchStudentNow rechnet synchron gegen
+            // studentsRef, siehe dort) - gleiches Muster wie draftLessonEntry() weiter oben.
             // Über p.id statt idx zuordnen, falls vorhanden - idx zeigt auf die zum Klickzeitpunkt
             // gültige Position, kann sich aber während der RPC-Laufzeit verschieben (Löschen/Anlegen
             // einer anderen Zahlung), sodass idx danach zu einer ANDEREN Zahlung gehören kann. Alte,
             // vor diesem Fix erfasste Zahlungen ohne id fallen weiter auf den Index zurück.
             const pId = p.id;
-            let patchedStudent = null, savedPayment = null;
-            setStudents(prev => (prev || []).map(s => {
-                if (s.id !== active.id)
-                    return s;
-                const payments = (s.payments || []).map((x, i) => {
-                    const match = pId ? x.id === pId : i === idx;
-                    if (!match)
-                        return x;
-                    const withNumber = { ...x, receiptNumber: number };
-                    savedPayment = withNumber;
-                    return withNumber;
-                });
-                patchedStudent = { ...s, payments };
-                return patchedStudent;
-            }));
-            if (!patchedStudent || !savedPayment)
+            const cur = (studentsRef.current || []).find(s => s.id === active.id);
+            const payIdx = cur ? (cur.payments || []).findIndex((x, i) => pId ? x.id === pId : i === idx) : -1;
+            if (payIdx < 0) {
+                // Zahlung wurde in der Zwischenzeit gelöscht - Nummer ist verbraucht, aber es gibt
+                // nichts mehr zu drucken. Sagen statt still nichts zu tun.
+                showToast("Die Zahlung gibt es nicht mehr - Beleg wurde nicht erstellt.");
+                return;
+            }
+            const savedPayment = { ...cur.payments[payIdx], receiptNumber: number };
+            const patchedStudent = patchStudentNow(active.id, s => ({ ...s, payments: (s.payments || []).map((x, i) => i === payIdx ? savedPayment : x) }));
+            if (!patchedStudent)
                 return;
             scheduleSave(patchedStudent);
             setReceiptPreview(savedPayment);
@@ -18713,18 +18831,15 @@ function App() {
             // veralteten "active" auf) - sonst würden während der Wartezeit an diesem Schüler
             // vorgenommene Änderungen (neue Fahrstunde, Zahlung, paralleler Kollege) hier
             // stillschweigend verworfen. Gleiches Muster wie printReceipt()/confirmInvoice() oben.
-            let patchedStudent = null, c = null;
-            setStudents(prev => (prev || []).map(s => {
-                if (s.id !== active.id)
-                    return s;
+            let c = null;
+            const patchedStudent = patchStudentNow(active.id, s => {
                 const lastPkg = (s.packages && s.packages.length) ? s.packages[s.packages.length - 1] : null;
                 c = { id: uniqueId("vtr"), number, date: ymd(new Date()),
                     klasse: s.klasse || DEFAULT_KLASSE, priceUE: price,
                     packageName: lastPkg ? lastPkg.name : "", packageAmount: lastPkg ? lastPkg.amount : 0, includedUE: lastPkg ? (Number(lastPkg.includedUE) || 0) : 0 };
-                patchedStudent = { ...s, contracts: [...(s.contracts || []), c] };
-                return patchedStudent;
-            }));
-            if (!patchedStudent)
+                return { ...s, contracts: [...(s.contracts || []), c] };
+            });
+            if (!patchedStudent || !c)
                 return;
             scheduleSave(patchedStudent);
             setContractPreview(c);
@@ -18778,22 +18893,15 @@ function App() {
         // darf er nicht mehr verschwinden. Schützt nur vor diesem Wettlauf mit dem echten
         // Datensatz, nicht vor gezielter Umgehung über die Konsole - dafür bräuchte es wie bei
         // dbCancelInvoice() eine serverseitige Sperre, die es für Verträge (noch) nicht gibt.
-        let patchedStudent = null, blockedSigned = false;
-        setStudents(prev => (prev || []).map(s => {
-            if (!active || s.id !== active.id)
-                return s;
-            const current = (s.contracts || []).find(x => x.id === c.id);
-            if (current && current.instrSignature && current.studentSignature) {
-                blockedSigned = true;
-                return s;
-            }
-            patchedStudent = { ...s, contracts: (s.contracts || []).filter(x => x.id !== c.id) };
-            return patchedStudent;
-        }));
-        if (blockedSigned) {
+        if (!active)
+            return;
+        const curStu = (studentsRef.current || []).find(s => s.id === active.id);
+        const current = curStu && (curStu.contracts || []).find(x => x.id === c.id);
+        if (current && current.instrSignature && current.studentSignature) {
             showToast("Ein bereits unterschriebener Vertrag kann nicht gelöscht werden.");
             return;
         }
+        const patchedStudent = patchStudentNow(active.id, s => ({ ...s, contracts: (s.contracts || []).filter(x => x.id !== c.id) }));
         if (patchedStudent)
             scheduleSave(patchedStudent);
     }
@@ -19083,18 +19191,12 @@ function App() {
                         // Funktional gegen den aktuellen Datensatz statt updateActive() - der Confirm-
                         // Dialog kann durch Zögern/Tippen offen bleiben, in der Zeit gemachte Änderungen
                         // an costItems/drivenLessons/payments/packages würden sonst hier verworfen.
-                        let patchedStudent = null;
                         // costItem.id wird auch am packages-Eintrag hinterlegt (costItemId) - so kann
                         // removeItem() beim Löschen des Postens die zugehörige Paket-Guthaben-Zeile
                         // wiederfinden und mit entfernen (siehe dortiger Kommentar).
                         const costItem = neuerKostenposten({ label: p.name, amount: p.amount });
-                        setStudents(prev => (prev || []).map(s => {
-                            if (s.id !== active.id)
-                                return s;
-                            patchedStudent = { ...s, costItems: [...(s.costItems || []), costItem],
-                                packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()), costItemId: costItem.id }] };
-                            return patchedStudent;
-                        }));
+                        const patchedStudent = patchStudentNow(active.id, s => ({ ...s, costItems: [...(s.costItems || []), costItem],
+                            packages: [...(s.packages || []), { name: p.name, amount: p.amount, includedUE: Number(p.includedUE) || 0, date: ymd(new Date()), costItemId: costItem.id }] }));
                         if (patchedStudent)
                             scheduleSave(patchedStudent);
                     } },
@@ -21284,7 +21386,7 @@ function App() {
         if (uid) {
             try {
                 aktuelleSchueler = await fetchStudents(uid);
-                setStudents(aktuelleSchueler);
+                updateStudents(aktuelleSchueler);
             }
             catch (e) {
                 console.error("Schüler für Warteliste-Abgleich konnten nicht aktualisiert werden:", e);
@@ -22517,7 +22619,10 @@ function App() {
         if (!ok)
             return;
         try {
-            await updateAppt(v.appt.id, { start_at: v.start, end_at: v.ende });
+            // updateAppt meldet einen Fehler selbst und wirft nicht - ohne diese Prüfung stand
+            // danach trotzdem "Verschoben auf ..." da.
+            if (!await updateAppt(v.appt.id, { start_at: v.start, end_at: v.ende }))
+                return;
             setLeerlaufPlan(l => {
                 if (!l)
                     return l;
@@ -22888,11 +22993,13 @@ function App() {
         apptSavingRef.current = true;
         setApptForm({ ...f, busy: true });
         try {
-            if (f.id) {
-                await updateAppt(f.id, payload);
-            }
-            else {
-                await addAppt(payload);
+            // updateAppt/addAppt fangen Speicherfehler selbst ab (und zeigen sie an) - sie melden
+            // Erfolg nur über den Rückgabewert. Vorher schloss das Fenster auch bei einem Fehler,
+            // alle Eingaben waren weg (Audit H-M2).
+            const ok = f.id ? await updateAppt(f.id, payload) : !!(await addAppt(payload));
+            if (!ok) {
+                setApptForm({ ...f, busy: false });
+                return;
             }
             setApptForm(null);
         }
@@ -25026,7 +25133,6 @@ function App() {
                                 React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } },
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => { if (await askConfirm({ message: "Standort \"" + loc.name + "\" löschen? Zugewiesene Schüler verlieren die Zuordnung." })) {
-                                            const next = locations.filter((_, j) => j !== i);
                                             // Server räumt zuerst ALLE betroffenen Schüler auf (auch die anderer
                                             // Fahrlehrer, die der Client gar nicht geladen hat) und die eigene
                                             // Standort-Vorauswahl jedes Fahrlehrers - danach erst den Standort selbst
@@ -25038,10 +25144,13 @@ function App() {
                                                 showToast("Standort konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
                                                 return;
                                             }
-                                            setStudents(prev => (prev || []).map(s => s.location_id === loc.id ? { ...s, location_id: "" } : s));
+                                            updateStudents(prev => (prev || []).map(s => s.location_id === loc.id ? { ...s, location_id: "" } : s));
                                             if (myLocationId === loc.id)
                                                 setMyLocationId("");
-                                            saveLocations(next);
+                                            // Gegen den AKTUELLEN Stand filtern, nicht gegen die vor dem Dialog und dem
+                                            // Server-Aufruf eingefangene Liste (Audit I-H1: zusammen mit dem Einfang-
+                                            // Muster in writeSchool wurde das Löschen gar nicht gespeichert).
+                                            writeSchool(sc => sc && ({ ...sc, locations: (sc.locations || []).filter(x => x !== loc && !(loc.id && x.id === loc.id)) }));
                                         } } }, "Löschen")))),
                             locEdit ? React.createElement("div", { style: { marginTop: 14, paddingTop: 14, borderTop: "1px solid var(--line)" } },
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10 } }, locEdit.index === null ? "Neuer Standort" : "Standort bearbeiten"),
@@ -28110,7 +28219,7 @@ function App() {
                                     const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: validMyLocationId || "" };
                                     const created = await dbInsert(uid, draft);
                                     if (created) {
-                                        setStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                                        updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
                                     }
                                 }
                                 setOnboarding({ step: 2 });
