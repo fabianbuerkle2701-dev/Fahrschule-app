@@ -3365,7 +3365,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.24";
+const APP_VERSION = "2.9.25";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -11498,6 +11498,10 @@ function App() {
     const [saveError, setSaveError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     const saveTimers = useRef({});
+    // Debounce-Timer für den lokalen localStorage-Cache (saveCache) - siehe writeStudent() weiter
+    // unten. Ein einziger Timer statt pro Schüler wie bei saveTimers, weil saveCache() ohnehin
+    // immer den GESAMTEN Schülerstand als ein JSON-Blob schreibt, nicht pro Schüler einzeln.
+    const cacheSaveTimerRef = useRef(null);
     // IDs von Schülern mit gerade laufendem (angestoßenem, aber noch nicht abgeschlossenem)
     // Speichervorgang - verhindert, dass ein Hintergrund-Neuladen der Schülerliste eine eigene,
     // noch nicht bestätigte Änderung durch den älteren Serverstand ersetzt.
@@ -12950,8 +12954,18 @@ function App() {
                 markDirtyKeys(next.id, s, next);
                 return next;
             });
-            if (uid)
-                saveCache(uid, arr);
+            // Debounced wie scheduleSave (Cloud-Save) statt bei jedem einzelnen Aufruf synchron die
+            // komplette Schülerliste zu serialisieren - vorher schrieb z.B. jeder einzelne
+            // ADK-Haken sofort JSON.stringify() über alle Schüler in den localStorage-Cache, das
+            // konnte beim schnellen Durchklicken der ADK-Liste auf dem Tablet ruckeln (Audit-Fund
+            // P4, 22.9.2026). Ein einziger Timer statt einer pro Schüler wie bei scheduleSave, da
+            // saveCache() ohnehin immer den GESAMTEN Stand schreibt - mehrere schnelle Änderungen
+            // an verschiedenen Schülern sollen trotzdem nur einen Schreibvorgang auslösen.
+            if (uid) {
+                if (cacheSaveTimerRef.current)
+                    clearTimeout(cacheSaveTimerRef.current);
+                cacheSaveTimerRef.current = setTimeout(() => saveCache(uid, arr), 500);
+            }
             return arr;
         });
         scheduleSave(next);
