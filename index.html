@@ -5542,15 +5542,16 @@ async function dbInsert(uid, s) {
     // mit Kollegen geteilte Freigabe beim Wiederherstellen erhalten bleibt.
     const sharedWith = s._shared || [];
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }), _isMine: true }; }
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("students")
-            .insert({ owner: uid, data: cleanData(s), shared_with: sharedWith }).select().single();
-        if (error) {
-            console.error(error);
-            return null;
-        }
+    // Vorher lief das über withNetworkRetry, gab bei Fehlern aber null zurück statt zu werfen -
+    // die Wiederholung griff dadurch nie. insertEinmal wiederholt echte Netzabbrüche ohne
+    // Doppel-Schüler; der Vertrag "null bei Fehler" für die Aufrufer bleibt.
+    try {
+        const data = await insertEinmal("students", { owner: uid, data: cleanData(s), shared_with: sharedWith }, "Schüler konnte nicht gespeichert werden");
         return { ...rowToStudent(data), _isMine: true };
-    });
+    }
+    catch (e) {
+        return null;
+    }
 }
 // Schreibt über die RPC students_teacher_update statt direkt per .update({data:...}) - die RPC
 // bewahrt serverseitig die schülereigenen Felder (PIN, Theorie-Fortschritt, begleitete Fahrten
@@ -5631,14 +5632,10 @@ async function fetchInteressenten(uid) {
     return { list: data || [], missing: false, error: null };
 }
 async function dbInsertInteressent(uid, row) {
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("interessenten").insert({ ...row, owner: uid }).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message || "Interessent konnte nicht gespeichert werden");
-        }
-        return data;
-    });
+    // Wiederholbar ohne Doppel-Eintrag, siehe insertEinmal. Eine evtl. mitgegebene id wird
+    // bewusst verworfen - nur die frische Client-UUID macht die Wiederholung sicher.
+    const { id, ...rest } = row || {};
+    return await insertEinmal("interessenten", { ...rest, owner: uid }, "Interessent konnte nicht gespeichert werden");
 }
 async function dbUpdateInteressent(id, patch) {
     await withNetworkRetry(async () => {
@@ -7096,19 +7093,55 @@ async function withNetworkRetry(fn, tries) {
     }
     throw lastErr;
 }
+// Eine UUID aus dem Client für neue Zeilen. Hintergrund: withNetworkRetry wiederholt bei
+// "Load failed" - ging dabei aber nur die ANTWORT verloren, war der Insert auf dem Server längst
+// durch und die Wiederholung legte einen zweiten, identischen Termin/Prüfplatz/Interessenten an.
+// Mit fester id trifft die Wiederholung stattdessen auf den Primärschlüssel (siehe insertEinmal).
+// Die id-Spalten (appointments, exam_slots, interessenten, students) sind uuid mit
+// gen_random_uuid() als Vorgabe und nehmen eine mitgeschickte id an.
+function neueClientUuid() {
+    try {
+        if (window.crypto && window.crypto.randomUUID)
+            return window.crypto.randomUUID();
+        if (window.crypto && window.crypto.getRandomValues) {
+            const b = new Uint8Array(16);
+            window.crypto.getRandomValues(b);
+            b[6] = (b[6] & 0x0f) | 0x40; // Version 4
+            b[8] = (b[8] & 0x3f) | 0x80; // Variante RFC 4122
+            const h = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+            return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+        }
+    }
+    catch (e) { }
+    return null;
+}
+// Insert, der bei Netzabbrüchen gefahrlos wiederholt werden darf. Meldet die Wiederholung
+// 23505 (Schlüssel schon vorhanden), ist das unsere eigene Zeile aus dem vorigen Versuch - die
+// id ist zufällig und nur hier bekannt -, also diese Zeile holen statt einen Fehler zu zeigen.
+// Ohne Krypto-Zufall (uralter Browser) gibt es keine feste id; dann lieber gar nicht
+// wiederholen als doppelt anlegen.
+async function insertEinmal(table, row, meldung) {
+    const id = neueClientUuid();
+    const zeile = id ? { ...row, id } : row;
+    return await withNetworkRetry(async () => {
+        const { data, error } = await sb.from(table).insert(zeile).select().single();
+        if (!error)
+            return data;
+        if (id && error.code === "23505") {
+            const { data: vorhanden } = await sb.from(table).select("*").eq("id", id).maybeSingle();
+            if (vorhanden)
+                return vorhanden;
+        }
+        console.error(error);
+        throw new Error(error.message || meldung || "Speichern fehlgeschlagen");
+    }, id ? 3 : 1);
+}
 async function dbInsertAppt(uid, appt) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST" }; }
     const row = { owner: uid, student_id: appt.student_id || null, title: appt.title || "",
         start_at: appt.start_at, end_at: appt.end_at || null, status: appt.status || "confirmed", note: appt.note || "",
         art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null };
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("appointments").insert(row).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-        return data;
-    });
+    return await insertEinmal("appointments", row, "Termin konnte nicht gespeichert werden");
 }
 async function dbUpdateAppt(id, patch) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
@@ -7145,14 +7178,7 @@ async function fetchExamSlots(uid) {
 async function dbInsertExamSlot(uid, slot) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Prüfplätze werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit||null, ort: slot.ort||null, student_id: null, status: "frei" }; }
     const row = { owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit || null, ort: slot.ort || null };
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("exam_slots").insert(row).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-        return data;
-    });
+    return await insertEinmal("exam_slots", row, "Prüfplatz konnte nicht gespeichert werden");
 }
 async function dbUpdateExamSlot(id, patch) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
