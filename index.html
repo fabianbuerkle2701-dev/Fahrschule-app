@@ -34227,12 +34227,37 @@ function BookingPage({ code, appMode, onLogout }) {
     const [week, setWeek] = React.useState(() => startOfWeek(new Date()));
     const [busy, setBusy] = React.useState([]);
     const [loadingBusy, setLoadingBusy] = React.useState(false);
+    // Eigene, auf diesem Gerät gesendete Termine: [{id, start, end, t}]. Früher nur die Startzeit -
+    // dann galt jeder fremde Termin mit derselben Startzeit als "Dein Termin", und die Liste wuchs
+    // ewig. Jetzt mit Termin-ID (aus der Buchungsantwort) und Ende; alte Einträge (reine
+    // Startzeit-Strings) werden übernommen, Vergangenes fällt beim Laden weg. t = Zeitpunkt des
+    // Merkens, damit eine ältere Belegungsabfrage einen frisch gesendeten Termin nicht verwirft.
     const [mineSlots, setMineSlots] = React.useState(() => { try {
-        return JSON.parse(localStorage.getItem("v3_mine_" + code) || "[]");
+        const roh = JSON.parse(localStorage.getItem("v3_mine_" + code) || "[]");
+        const heute0 = new Date(); heute0.setHours(0, 0, 0, 0);
+        return (Array.isArray(roh) ? roh : [])
+            .map(x => typeof x === "string" ? { id: null, start: x, end: null, t: 0 } : x)
+            .filter(x => x && x.start && Date.parse(x.start) >= heute0.getTime());
     }
     catch (e) {
         return [];
     } });
+    // Aktueller Stand für Rechnungen außerhalb des Renders (Abgleich nach dem Laden der Belegung,
+    // Merken nach dem Senden) - der Wert wird vorher berechnet und dann gesetzt, nie im Updater.
+    const mineRef = React.useRef(mineSlots);
+    function mineSetzen(list) {
+        mineRef.current = list;
+        setMineSlots(list);
+        try { localStorage.setItem("v3_mine_" + code, JSON.stringify(list)); }
+        catch (e) { /* Speicher nicht verfügbar, dann eben ohne Hervorhebung */ }
+    }
+    // Gehört eine Belegung zu einem hier gemerkten Termin? Liefert der Server irgendwann die
+    // Termin-ID mit, zählt nur sie; bis dahin Start UND Ende (sofern bekannt) statt nur Start.
+    function istGemerkt(m, b) {
+        if (m.id && b.id) return m.id === b.id;
+        if (Date.parse(m.start) !== Date.parse(b.start_at)) return false;
+        return !m.end || !b.end_at || Date.parse(m.end) === Date.parse(b.end_at);
+    }
     // Name des Fahrschülers (bleibt auf dem Gerät gespeichert), um eigene Termine geräteübergreifend
     // wiederzuerkennen. In der App ist der Name durch den Login bereits bekannt - ihn dort erneut
     // abzutippen wäre unnötig und fehleranfällig (er muss exakt zum Login-Namen passen).
@@ -34267,13 +34292,25 @@ function BookingPage({ code, appMode, onLogout }) {
         if (checkinCode)
             runTheoryCheckin(checkinCode);
     }, [code]);
-    const [form, setForm] = React.useState(null); // {date,start,end,name,note}
+    const [form, setForm] = React.useState(null); // {vorname,nachname,note,slots:[{date,start,end,art,fehler}],gesendet:[...]}
+    // Läuft gerade ein Senden? Solange darf das Formular nicht zugehen (Escape, Hintergrund,
+    // Abbrechen) - sonst landet ein Fehler oder Teilerfolg in einem unsichtbaren Formular.
+    const [sending, setSending] = React.useState(false);
     React.useEffect(() => {
         if (!form) return;
-        function onEsc(e) { if (e.key === "Escape") setForm(null); }
+        function onEsc(e) { if (e.key === "Escape") formSchliessen(); }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [form]);
+    }, [form, sending]);
+    // Formular schließen - nie während des Sendens. Wurden nach einem Teilerfolg schon Termine
+    // gesendet, bleibt deren Stand als Bestätigung oben auf der Seite stehen.
+    function formSchliessen() {
+        if (sending)
+            return;
+        if (form && (form.gesendet || []).length)
+            setDone({ zeilen: form.gesendet });
+        setForm(null);
+    }
     const [howtoOpen, setHowtoOpen] = React.useState(false); // Anleitung auf-/zuklappbar
     // Sonderfahrten-Stand des eingeloggten Schülers (Soll/Ist je Art, Doppelstunden-Pflicht) -
     // geladen, sobald das Buchungsformular aufgeht und ein PIN vorliegt. null = nicht eingeloggt
@@ -34345,9 +34382,11 @@ function BookingPage({ code, appMode, onLogout }) {
         }
         setChatBusy(false);
     }
-    const [done, setDone] = React.useState(false);
-    const [doneInstant, setDoneInstant] = React.useState(0); // wie viele der zuletzt gesendeten Termine sofort verbindlich gebucht wurden (statt nur angefragt)
-    const [doneTotal, setDoneTotal] = React.useState(0);
+    // Bestätigung nach dem Senden: null oder {zeilen:[{date,start,end,status,kurzfristig}]}.
+    // Bleibt stehen, bis der Schüler sie wegtippt - vorher verschwand sie nach 4 Sekunden oben
+    // auf der Seite, während man meist weiter unten bei den Tagen stand, und wurde kaum gesehen.
+    // Jede neue Bestätigung ist ein neues Objekt und lädt damit Belegung/Zahlstatus neu.
+    const [done, setDone] = React.useState(null);
     // Guthaben-Modus: Zahlstatus des angemeldeten Schuelers. Wird ueber "done" mit neu geladen,
     // damit der Hinweis nach einer Buchung bzw. nach einer verbuchten Zahlung aktuell ist.
     const [payStatus, setPayStatus] = React.useState(null); // null | {modus, offen, iban, empfaenger}
@@ -34368,7 +34407,6 @@ function BookingPage({ code, appMode, onLogout }) {
         publicStudentPaymentStatus(code, loginName.trim(), pin).then(r => { if (on) setPayStatus(r); }).catch(() => { if (on) setPayStatus(null); });
         return () => { on = false; };
     }, [code, done]);
-    const [sending, setSending] = React.useState(false);
     const [err, setErr] = React.useState("");
     // In der App beginnt man auf der Startseite (wie in der Fahrlehrer-App), auf der
     // öffentlichen Buchungsseite dagegen direkt bei den Terminen - dort gibt es keine Startseite.
@@ -34443,8 +34481,24 @@ function BookingPage({ code, appMode, onLogout }) {
         const bis = addDays(startOfWeek(week), 7).toISOString();
         // "on"-Guard verhindert, dass bei schnellem Wochenwechsel eine spät eintreffende
         // Antwort für eine bereits verlassene Woche die aktuell angezeigten Belegungen überschreibt.
-        publicBusyTimes(code, von, bis).then(rows => { if (on) { setBusy(rows || []); setLoadingBusy(false); } })
-            .catch(() => { if (on) { setBusy([]); setLoadingBusy(false); } });
+        const abfrageSeit = Date.now();
+        publicBusyTimes(code, von, bis).then(rows => {
+            if (!on) return;
+            setBusy(rows || []);
+            setLoadingBusy(false);
+            // Gemerkte eigene Termine dieser Woche, die es laut Server nicht mehr gibt (abgesagt,
+            // verschoben, abgelehnt), vergessen - sonst würde ein später dort eingetragener
+            // fremder Termin als "Dein Termin" erscheinen. Nur Einträge, die älter als diese
+            // Abfrage sind: ein gerade eben gesendeter Termin fehlt in einer älteren Antwort noch.
+            const vonMs = Date.parse(von), bisMs = Date.parse(bis);
+            const alt = mineRef.current || [];
+            const neu = alt.filter(m => {
+                const ts = Date.parse(m.start);
+                if (!(ts >= vonMs && ts < bisMs) || (m.t || 0) >= abfrageSeit) return true;
+                return (rows || []).some(b => istGemerkt(m, b));
+            });
+            if (neu.length !== alt.length) mineSetzen(neu);
+        }).catch(() => { if (on) { setBusy([]); setLoadingBusy(false); } });
         return () => { on = false; };
     }, [info, week, code, done]);
     // Eigene Termine per Name laden (geräteübergreifende Wiedererkennung). Bereits bestätigte
@@ -34484,46 +34538,146 @@ function BookingPage({ code, appMode, onLogout }) {
     const canGoBack = ymd(startOfWeek(week)) > ymd(startOfWeek(new Date()));
     const byDay = {};
     busy.forEach(b => { const k = ymd(b.start_at); (byDay[k] = byDay[k] || []).push(b); });
-    // Menge der eigenen Startzeiten (auf Minute genau), zur Hervorhebung.
-    // Kombiniert lokal gespeicherte Termine (dieses Gerät) mit per Name gefundenen (geräteübergreifend).
-    const mineSet = new Set([...(mineSlots || []), ...(nameSlots || [])].map(x => new Date(x).getTime()));
-    const isMine = (b) => mineSet.has(new Date(b.start_at).getTime());
-    // Standard-Startzeit für ein neues Wunschtermin-Slot, an das Arbeitszeitfenster des gewählten
-    // Tages angepasst statt hart "09:00" - sonst zeigte die "Von"-Auswahl direkt nach dem Öffnen
-    // einen anderen (korrigierten) Chip als ausgewählt an als den tatsächlich in s.start
-    // gespeicherten Wert, und ein Absenden ohne die Zeit bewusst anzutippen scheiterte mit einer
-    // für den Nutzer widersprüchlichen "liegt vor der Arbeitszeit"-Meldung. updateSlot() klemmt
-    // s.start bereits genauso, aber nur bei einer nachträglichen Datums-Änderung, nicht beim
-    // ersten Anlegen eines Slots.
-    function defaultSlotStart(dateStr) {
-        const key = DOW_KEYS[new Date(dateStr + "T00:00:00").getDay()];
-        const wh = info && info.work_hours;
-        const day = wh && typeof wh === "object" ? wh[key] : null;
-        return (day && day.von) ? day.von : "09:00";
+    // Eigene Termine zur Hervorhebung: auf diesem Gerät gesendete (Termin-ID bzw. Start+Ende, siehe
+    // istGemerkt) plus die, die der Server per Name/PIN als eigene meldet (geräteübergreifend).
+    const nameSet = new Set((nameSlots || []).map(x => new Date(x).getTime()));
+    const isMine = (b) => nameSet.has(new Date(b.start_at).getTime()) || (mineSlots || []).some(m => istGemerkt(m, b));
+    // Zähler aus den aktuell geladenen Daten der angezeigten Woche (wie "Offene Anfragen" und
+    // "Buchbare Tage" daneben) statt aus der ewig wachsenden Liste im Gerätespeicher.
+    const meineInWoche = busy.filter(isMine);
+    // ── Fahrlehrer-Limit (M5) ──
+    // Belegte Minuten wie in der Tageskarte und in der Sofortbuchungs-Prüfung des Servers: alles
+    // außer offenen Anfragen. Bekannt ist das nur für die angezeigte Woche; für andere Wochen
+    // entscheidet der Server (aus einer Sofortbuchung wird dann eine normale Anfrage).
+    const belegtMin = (rows) => rows.filter(b => b.status !== "pending").reduce((sum, b) => {
+        const s = new Date(b.start_at).getTime();
+        const e = b.end_at ? new Date(b.end_at).getTime() : s + 45 * 60000;
+        return sum + Math.max(0, Math.round((e - s) / 60000));
+    }, 0);
+    const wocheVonKey = ymd(startOfWeek(week)), wocheBisKey = ymd(weekEnd);
+    const wochenBelegt = belegtMin(busy.filter(b => { const k = ymd(b.start_at); return k >= wocheVonKey && k <= wocheBisKey; }));
+    // "tag" = Tageslimit des Fahrlehrers erreicht, "woche" = Wochenlimit, "" = frei oder unbekannt.
+    function tagVoll(dateStr) {
+        if (!info || dateStr < wocheVonKey || dateStr > wocheBisKey)
+            return "";
+        const dayLim = info.day_limit || 0, weekLim = info.week_limit || 0;
+        if (dayLim > 0 && belegtMin(byDay[dateStr] || []) >= dayLim)
+            return "tag";
+        if (weekLim > 0 && wochenBelegt >= weekLim)
+            return "woche";
+        return "";
     }
-    // Standard-Endzeit: eine Fahrstunde (45 Min) nach dem Start, aber nie ueber das
-    // Arbeitszeitfenster des Tages hinaus - sonst stuende im "Bis"-Menue direkt nach dem
-    // Oeffnen ein Wert, den die Liste selbst gar nicht anbietet, und der Vorschlag scheiterte
-    // erst beim Absenden an withinWorkHours().
-    function defaultSlotEnd(dateStr, start) {
+    // Start-/Endzeiten, die das Formular für einen Tag anbietet - dieselbe Rechnung für die
+    // Auswahllisten, die Vorbelegung und das Absenden, damit das Angezeigte auch gesendet wird.
+    // Viertelstunden innerhalb der Arbeitszeit; heute nur Startzeiten, die noch in der Zukunft
+    // liegen (vorher stand dort z.B. um 15 Uhr noch "08:00" zur Auswahl und scheiterte erst
+    // beim Absenden). Endet die Arbeitszeit krumm (z.B. 17:50), steht dieses Ende zusätzlich
+    // in der Bis-Liste - vorher zeigte das Menü dann 17:45, gespeichert war aber 17:50 (N11).
+    const hmZuMin = (t) => { const [h, m] = (t || "0:0").split(":").map(Number); return h * 60 + m; };
+    const minZuHm = (min) => String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
+    function zeitOptionen(dateStr, start, end) {
         const key = DOW_KEYS[new Date(dateStr + "T00:00:00").getDay()];
         const wh = info && info.work_hours;
         const day = wh && typeof wh === "object" ? wh[key] : null;
-        const end = addMinutesToTime(start, 45);
-        if (day && day.bis && end > day.bis)
-            return day.bis;
-        return end;
+        const winStart = (day && day.von) ? day.von : "00:00";
+        const winEnd = (day && day.bis) ? day.bis : "23:45";
+        const jetzt = Date.now();
+        // Der letzte Wert des Fensters scheidet als Start aus - danach bliebe keine
+        // Viertelstunde mehr fuer ein Ende uebrig.
+        const alleStarts = [];
+        for (let m = hmZuMin(winStart); m <= hmZuMin(winEnd) - 15; m += 15)
+            alleStarts.push(minZuHm(m));
+        const startOpts = alleStarts.filter(t => Date.parse(combineDT(dateStr, t)) > jetzt);
+        // Effektiver Anzeigewert: liegt der gespeicherte Wert ausserhalb des Fensters, wird nur
+        // für die Anzeige der erste gültige Wert genommen (kein setState beim Rendern). Ist er
+        // nur inzwischen vergangen (Formular lange offen), bleibt er sichtbar stehen - das
+        // Absenden meldet das dann klar, statt still eine andere Zeit zu schicken.
+        const effStart = (start && alleStarts.indexOf(start) !== -1) ? start : (startOpts[0] || winStart);
+        // Endzeiten ab einer Viertelstunde nach dem Start, hoechstens vier Stunden spaeter (so
+        // prüft es auch der Server, TOOLONG) und nie ueber die Arbeitszeit hinaus.
+        const endGrenze = Math.min(hmZuMin(winEnd), hmZuMin(effStart) + 240);
+        const endOpts = [];
+        for (let m = hmZuMin(effStart) + 15; m <= endGrenze; m += 15)
+            endOpts.push(minZuHm(m));
+        if (hmZuMin(winEnd) <= endGrenze && hmZuMin(winEnd) > hmZuMin(effStart) && endOpts.indexOf(winEnd) === -1)
+            endOpts.push(winEnd);
+        // Gewünschtes Ende nicht in der Liste (z.B. über die Arbeitszeit hinaus): das späteste
+        // angebotene Ende davor, sonst eine Fahrstunde, sonst das letzte mögliche Ende.
+        let effEnd = (end && endOpts.indexOf(end) !== -1) ? end : "";
+        if (!effEnd && end) {
+            const davor = endOpts.filter(t => hmZuMin(t) <= hmZuMin(end));
+            effEnd = davor[davor.length - 1] || "";
+        }
+        if (!effEnd)
+            effEnd = endOpts.find(t => hmZuMin(t) - hmZuMin(effStart) === 45) || endOpts[endOpts.length - 1] || "";
+        return { startOpts, effStart, endOpts, effEnd };
+    }
+    // Überschneidet sich [start, start+dauer) an diesem Tag mit einer bekannten Belegung?
+    function kollidiert(dateStr, start, dauer) {
+        const s = Date.parse(combineDT(dateStr, start)), e = s + dauer * 60000;
+        return (byDay[dateStr] || []).some(b => {
+            const bs = new Date(b.start_at).getTime();
+            const be = b.end_at ? new Date(b.end_at).getTime() : bs + 45 * 60000;
+            return bs < e && be > s;
+        });
+    }
+    // Vorbelegung (M7): die erste noch freie Viertelstunde des Tages in der Zukunft. Ist alles
+    // belegt oder unbekannt, die erste zukünftige Startzeit; "" = an dem Tag geht nichts mehr.
+    function ersterStart(dateStr) {
+        const opts = zeitOptionen(dateStr).startOpts;
+        return opts.find(t => !kollidiert(dateStr, t, 45)) || opts[0] || "";
+    }
+    // Kann an diesem Tag überhaupt noch ein Termin angefragt werden? Sonntag, gesperrte Tage,
+    // erreichtes Fahrlehrer-Limit und "heute schon vorbei" scheiden aus.
+    function tagBuchbar(dateStr) {
+        if (!dateStr || dateStr < ymd(new Date()))
+            return false;
+        const key = DOW_KEYS[new Date(dateStr + "T00:00:00").getDay()];
+        if (key === "so")
+            return false;
+        const wh = info && info.work_hours;
+        const day = wh && typeof wh === "object" ? wh[key] : null;
+        if (day && day.blocked)
+            return false;
+        if (tagVoll(dateStr))
+            return false;
+        return zeitOptionen(dateStr).startOpts.length > 0;
+    }
+    // Nächster buchbarer Tag ab dateStr (einschließlich); höchstens drei Wochen weit suchen,
+    // niemals endlos. "" wenn keiner gefunden wurde.
+    function naechsterBuchbarerTag(dateStr) {
+        let d = new Date((dateStr && dateStr > ymd(new Date()) ? dateStr : ymd(new Date())) + "T00:00:00");
+        for (let i = 0; i < 21; i++) {
+            if (tagBuchbar(ymd(d)))
+                return ymd(d);
+            d = new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+        }
+        return "";
+    }
+    // Neuer Wunschtermin-Slot: Start = erste freie Viertelstunde in der Zukunft (ersterStart),
+    // Ende = eine Fahrstunde (45 Min) später, aber nie über die Arbeitszeit hinaus - sonst stünde
+    // im "Bis"-Menü direkt nach dem Öffnen ein Wert, den die Liste gar nicht anbietet.
+    function neuerSlot(dateStr) {
+        const st = ersterStart(dateStr) || zeitOptionen(dateStr).effStart;
+        return { date: dateStr, start: st, end: zeitOptionen(dateStr, st, addMinutesToTime(st, 45)).effEnd, art: "" };
     }
     function openForm(dateStr) {
+        // Während des Sendens nicht neu aufmachen (z.B. über den runden Knopf in der Leiste) -
+        // das würde das laufende Formular samt späterer Fehlermeldung überschreiben.
+        if (sending)
+            return;
         // Namen aus dem gespeicherten myName vorbelegen (erste Wort = Vorname, Rest = Nachname)
         const parts = (myName || "").trim().split(/\s+/);
         const vn = parts.length ? parts[0] : "";
         const nn = parts.length > 1 ? parts.slice(1).join(" ") : "";
-        const d0 = dateStr || ymd(new Date());
-        const st0 = defaultSlotStart(d0);
-        setForm({ vorname: vn, nachname: nn, note: "",
-            slots: [{ date: d0, start: st0, end: defaultSlotEnd(d0, st0), art: "" }] });
-        setErr("");
+        // Vorbelegung (M7): der gewählte Tag, sofern dort noch etwas geht, sonst der nächste
+        // buchbare Tag. Vorher stand ohne Tag immer "heute ab Arbeitsbeginn" da - abends also
+        // eine längst vergangene Zeit, sonntags ein gesperrter Tag.
+        const d0 = (dateStr && tagBuchbar(dateStr)) ? dateStr : (naechsterBuchbarerTag(dateStr) || dateStr || ymd(new Date()));
+        setForm({ vorname: vn, nachname: nn, note: "", slots: [neuerSlot(d0)], gesendet: [] });
+        setErr(dateStr && d0 !== dateStr
+            ? "Am " + dayMonth(new Date(dateStr + "T00:00:00")) + " ist kein Termin mehr frei, deshalb ist der nächste freie Tag vorausgewählt."
+            : "");
         setSfStatus(null);
         let pin = "";
         try { pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
@@ -34538,93 +34692,64 @@ function BookingPage({ code, appMode, onLogout }) {
             publicStudentSonderfahrtenStatus(code, personName, pin).then(setSfStatus);
         }
     }
+    // Alle Formular-Updater prüfen auf f: ein bereits geschlossenes Formular (null) darf nie
+    // wieder "aufgefüllt" werden - {...null, slots} ergäbe ein Formular ohne vorname (TypeError).
     function addSlot() {
-        setForm(f => { var _a; const d0 = ((_a = f.slots[f.slots.length - 1]) === null || _a === void 0 ? void 0 : _a.date) || ymd(new Date());
-            const st = defaultSlotStart(d0);
-            return ({ ...f, slots: [...f.slots, { date: d0, start: st, end: defaultSlotEnd(d0, st), art: "" }] }); });
+        setForm(f => { if (!f) return f;
+            const letzter = f.slots[f.slots.length - 1];
+            const d0 = (letzter && letzter.date && tagBuchbar(letzter.date)) ? letzter.date
+                : (naechsterBuchbarerTag(letzter && letzter.date) || ymd(new Date()));
+            return ({ ...f, slots: [...f.slots, neuerSlot(d0)] }); });
     }
     function removeSlot(i) {
-        setForm(f => ({ ...f, slots: f.slots.filter((_, idx) => idx !== i) }));
+        setForm(f => f ? ({ ...f, slots: f.slots.filter((_, idx) => idx !== i) }) : f);
     }
     const DOW_KEYS = ["so", "mo", "di", "mi", "do", "fr", "sa"]; // Date.getDay(): 0=So..6=Sa
     function updateSlot(i, patch) {
-        // Wählt jemand einen gesperrten Tag (Sonntag fest, oder vom Fahrlehrer explizit gesperrt),
-        // automatisch auf den nächsten wirklich buchbaren Tag springen, statt erst beim Absenden
-        // eine Fehlermeldung zu zeigen.
+        // Wählt jemand einen Tag, an dem nichts mehr geht (Sonntag, vom Fahrlehrer gesperrt,
+        // Fahrlehrer-Limit erreicht, heute schon vorbei), automatisch auf den nächsten wirklich
+        // buchbaren Tag springen, statt erst beim Absenden eine Fehlermeldung zu zeigen.
         if (patch.date) {
-            let d = new Date(patch.date + "T00:00:00");
-            const wh = info && info.work_hours;
-            const isBlocked = (dt) => {
-                const key = DOW_KEYS[dt.getDay()];
-                if (key === "so")
-                    return true;
-                const day = wh && typeof wh === "object" ? wh[key] : null;
-                return !!(day && day.blocked);
-            };
-            if (isBlocked(d)) {
-                let jumped = false;
-                for (let i2 = 0; i2 < 8; i2++) { // maximal eine Woche weitersuchen, niemals endlos
-                    d = new Date(d.getTime() + 86400000);
-                    if (!isBlocked(d)) {
-                        jumped = true;
-                        break;
-                    }
-                }
-                if (jumped) {
-                    patch = { ...patch, date: ymd(d) };
-                    setErr("An diesem Tag werden keine Termine angeboten, auf den nächsten freien Tag gesprungen.");
+            if (!tagBuchbar(patch.date)) {
+                const naechster = naechsterBuchbarerTag(patch.date);
+                if (naechster && naechster !== patch.date) {
+                    const grund = tagVoll(patch.date) ? "ist dein Fahrlehrer schon ausgebucht"
+                        : patch.date === ymd(new Date()) ? "ist heute kein Termin mehr möglich"
+                            : "werden keine Termine angeboten";
+                    setErr("Am " + dayMonth(new Date(patch.date + "T00:00:00")) + " " + grund + ", deshalb ist der nächste freie Tag gewählt.");
+                    patch = { ...patch, date: naechster };
                 }
             }
-            // Sicherheitsbereinigung: passen die bisherigen Start-/Endzeiten nicht mehr zum neuen Tag
-            // (z.B. weil der neue Tag ein engeres Zeitfenster hat), aktiv im State zurücksetzen, statt
-            // nur in der Anzeige zu filtern. Verhindert, dass ein alter, nicht mehr gültiger Wert
-            // unbemerkt bis zum Absenden erhalten bleibt.
-            const key2 = DOW_KEYS[d.getDay()];
-            const day2 = wh && typeof wh === "object" ? wh[key2] : null;
-            setForm(f => ({ ...f, slots: f.slots.map((s, idx) => {
+            const neuDatum = patch.date;
+            // Passen die bisherigen Start-/Endzeiten nicht mehr zum neuen Tag (engeres Zeitfenster,
+            // heute schon vorbei), aktiv im State zurücksetzen statt nur in der Anzeige zu filtern -
+            // sonst bliebe ein nicht mehr gültiger Wert unbemerkt bis zum Absenden erhalten. Die
+            // bisherige Dauer bleibt dabei erhalten, soweit die Arbeitszeit es zulässt.
+            setForm(f => f ? ({ ...f, slots: f.slots.map((s, idx) => {
                     if (idx !== i)
                         return s;
-                    const merged = { ...s, ...patch };
-                    const mn2 = (t) => { const [h4, m4] = (t || "0:0").split(":").map(Number); return h4 * 60 + m4; };
-                    // Bisherige Dauer merken, um sie hinter dem (ggf. korrigierten) Start
-                    // wiederherzustellen.
-                    const bisher2 = (s.start && s.end && mn2(s.end) > mn2(s.start)) ? mn2(s.end) - mn2(s.start) : 45;
-                    if (day2 && day2.von && day2.bis && merged.start && (merged.start < day2.von || merged.start > day2.bis))
-                        merged.start = day2.von;
-                    const grenze2 = (day2 && day2.bis) ? day2.bis : "23:45";
-                    // Die Endzeit nie leeren, sondern neu setzen: das "Bis"-Menue zeigt sonst
-                    // seinen Ersatzwert an, waehrend im Zustand gar keine Endzeit mehr steht -
-                    // abgeschickt wuerde dann ein Termin ohne Ende, obwohl eines dasteht.
-                    if (!merged.end || mn2(merged.end) <= mn2(merged.start) || merged.end > grenze2) {
-                        merged.end = addMinutesToTime(merged.start, bisher2);
-                        if (merged.end > grenze2 || mn2(merged.end) <= mn2(merged.start))
-                            merged.end = mn2(grenze2) > mn2(merged.start) ? grenze2 : addMinutesToTime(merged.start, 15);
-                    }
+                    const merged = { ...s, ...patch, fehler: "" };
+                    const bisher = (s.start && s.end && hmZuMin(s.end) > hmZuMin(s.start)) ? hmZuMin(s.end) - hmZuMin(s.start) : 45;
+                    if (zeitOptionen(neuDatum).startOpts.indexOf(merged.start) === -1)
+                        merged.start = ersterStart(neuDatum) || zeitOptionen(neuDatum).effStart;
+                    merged.end = zeitOptionen(neuDatum, merged.start, addMinutesToTime(merged.start, bisher)).effEnd;
                     return merged;
-                }) }));
+                }) }) : f);
             return;
         }
-        setForm(f => ({ ...f, slots: f.slots.map((s, idx) => {
+        setForm(f => f ? ({ ...f, slots: f.slots.map((s, idx) => {
                 if (idx !== i)
                     return s;
-                const merged = { ...s, ...patch };
+                const merged = { ...s, ...patch, fehler: "" };
                 // Startzeit verschoben: die bisherige Dauer mitnehmen, statt eine dadurch
                 // ungueltige Endzeit (Ende <= Start) stehen zu lassen - das "Bis"-Menue baut
-                // seine Liste ab dem Start auf und haette den alten Wert sonst still verworfen.
+                // seine Liste ab dem Start auf. zeitOptionen klemmt auf die Arbeitszeit.
                 if (patch.start) {
-                    const mn = (t) => { const [h, m2] = (t || "0:0").split(":").map(Number); return h * 60 + m2; };
-                    const bisher = (s.start && s.end && mn(s.end) > mn(s.start)) ? mn(s.end) - mn(s.start) : 45;
-                    merged.end = addMinutesToTime(patch.start, bisher);
-                    const key3 = DOW_KEYS[new Date(merged.date + "T00:00:00").getDay()];
-                    const wh3 = info && info.work_hours;
-                    const day3 = wh3 && typeof wh3 === "object" ? wh3[key3] : null;
-                    if (day3 && day3.bis && merged.end > day3.bis)
-                        merged.end = day3.bis;
-                    if (mn(merged.end) <= mn(merged.start))
-                        merged.end = addMinutesToTime(merged.start, 15);
+                    const bisher = (s.start && s.end && hmZuMin(s.end) > hmZuMin(s.start)) ? hmZuMin(s.end) - hmZuMin(s.start) : 45;
+                    merged.end = zeitOptionen(merged.date, patch.start, addMinutesToTime(patch.start, bisher)).effEnd;
                 }
                 return merged;
-            }) }));
+            }) }) : f);
     }
     // Prüft, ob ein Termin (Datum + Start/Ende) buchbar ist.
     // Kein Eintrag für den Tag, oder Eintrag ohne Zeiten und ohne Sperrung = ganztägig buchbar.
@@ -34647,7 +34772,34 @@ function BookingPage({ code, appMode, onLogout }) {
             return true; // keine Zeit eingetragen = ganztägig buchbar
         return start >= day.von && end <= day.bis; // Zeit eingetragen = nur innerhalb erlaubt
     }
+    // Kurzbeschreibung eines Termins für Bestätigung und Fehlerliste ("Mo. 12.10., 10:00–10:45 Uhr").
+    function slotText(z) {
+        const d = new Date(z.date + "T00:00:00");
+        return weekdayShort(d) + " " + dayMonth(d) + ", " + z.start + (z.end ? "–" + z.end : "") + " Uhr";
+    }
+    // Serverantwort von public_book_or_propose_appointment in einen verständlichen Grund
+    // übersetzen. zeit = eine andere Uhrzeit/ein anderer Tag könnte helfen (steuert den Zusatz
+    // "Bitte eine andere Zeit wählen", der bei einer offenen Rechnung o.ä. in die Irre führte).
+    function buchungsFehler(msg) {
+        const m = String(msg || "");
+        if (/OVERLAP/i.test(m)) return { reason: "schon belegt oder angefragt", zeit: true };
+        if (/NOPAST/i.test(m)) return { reason: "liegt schon in der Vergangenheit", zeit: true };
+        if (/OUTSIDE_HOURS/i.test(m)) return { reason: "liegt außerhalb der Arbeitszeit deines Fahrlehrers", zeit: true };
+        if (/INVALID_TIME/i.test(m)) return { reason: "das Ende muss nach dem Start liegen", zeit: true };
+        if (/TOOLONG/i.test(m)) return { reason: "höchstens 4 Stunden am Stück möglich", zeit: true };
+        if (/DAYLIMIT/i.test(m)) return { reason: "dein Tageslimit ist an diesem Tag erreicht", zeit: true };
+        if (/WEEKLIMIT/i.test(m)) return { reason: "dein Wochenlimit ist in dieser Woche erreicht", zeit: true };
+        if (/UNPAID/i.test(m)) return { reason: "wegen einer offenen Rechnung gesperrt", unpaid: true };
+        if (/NONAME/i.test(m)) return { reason: "ohne Vor- und Nachname nicht möglich" };
+        if (/TOOMANY/i.test(m)) return { reason: "heute sind schon sehr viele Anfragen eingegangen, bitte morgen erneut versuchen" };
+        if (/INVALID_ART/i.test(m)) return { reason: "unbekannte Fahrstunden-Art" };
+        if (/Ungültiger Code/i.test(m)) return { reason: "der Buchungslink ist nicht mehr gültig, bitte frag deinen Fahrlehrer nach einem neuen" };
+        if (/Failed to fetch|NetworkError|Load failed|network/i.test(m)) return { reason: "keine Verbindung, bitte erneut senden" };
+        return { reason: "nicht verfügbar", zeit: true };
+    }
     async function send() {
+        if (sending || !form)
+            return;
         if (!form.vorname.trim() || !form.nachname.trim()) {
             setErr("Bitte Vor- und Nachname angeben.");
             return;
@@ -34656,7 +34808,15 @@ function BookingPage({ code, appMode, onLogout }) {
             setErr("Bitte mindestens einen Termin angeben.");
             return;
         }
-        for (const s of form.slots) {
+        // Gesendet wird genau das, was die Auswahllisten anzeigen: das Ende läuft durch
+        // dieselbe Rechnung wie das "Bis"-Menü (zeitOptionen), statt eines davon abweichenden
+        // gespeicherten Werts.
+        const plan = form.slots.map(s => {
+            if (!s.date || !s.start) return s;
+            const z = zeitOptionen(s.date, s.start, s.end);
+            return { ...s, start: z.effStart, end: z.effEnd };
+        });
+        for (const s of plan) {
             if (!s.date || !s.start) {
                 setErr("Bitte bei jedem Termin Datum und Uhrzeit angeben.");
                 return;
@@ -34665,15 +34825,28 @@ function BookingPage({ code, appMode, onLogout }) {
                 setErr("Bitte bei jedem Termin einen Tag ab heute wählen.");
                 return;
             }
-            if (s.end && s.end <= s.start) {
-                setErr("Die Endzeit (" + s.end + " Uhr) muss nach der Startzeit (" + s.start + " Uhr) liegen. Bitte korrigieren.");
+            const dTxt = dayMonth(new Date(s.date + "T00:00:00"));
+            // Das Formular kann lange offen stehen - eine anfangs gültige Startzeit von heute
+            // ist dann womöglich schon vorbei. Hier klar sagen, statt es am Server scheitern zu lassen.
+            if (Date.parse(combineDT(s.date, s.start)) <= Date.now()) {
+                setErr(s.start + " Uhr am " + dTxt + " ist schon vorbei. Bitte eine spätere Zeit wählen.");
+                return;
+            }
+            if (!s.end || s.end <= s.start) {
+                setErr("Die Endzeit (" + (s.end || "–") + " Uhr) muss nach der Startzeit (" + s.start + " Uhr) liegen. Bitte korrigieren.");
+                return;
+            }
+            // Fahrlehrer-Limit (M5): gleiche Sperre wie "Ausgebucht" in der Tageskarte, auch
+            // wenn der Tag über "+ Termin vorschlagen" oder den runden Knopf gewählt wurde.
+            const voll = tagVoll(s.date);
+            if (voll) {
+                setErr("Am " + dTxt + " ist dein Fahrlehrer schon ausgebucht (" + (voll === "woche" ? "Wochenlimit" : "Tageslimit") + " erreicht). Bitte einen anderen Tag wählen.");
                 return;
             }
             if (!withinWorkHours(s.date, s.start, s.end)) {
                 const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
                 const wh = info && info.work_hours;
                 const day = wh && typeof wh === "object" ? wh[key] : null;
-                const dTxt = dayMonth(new Date(s.date + "T00:00:00"));
                 let msg;
                 if (key === "so" || (day && day.blocked)) {
                     msg = "Am " + dTxt + " werden keine Termine angeboten.";
@@ -34694,47 +34867,31 @@ function BookingPage({ code, appMode, onLogout }) {
         setSending(true);
         setErr("");
         const fullName = (form.vorname.trim() + " " + form.nachname.trim()).trim();
+        const bisherGesendet = form.gesendet || [];
         const results = []; // sammelt Erfolg/Fehler je Termin
-        const newMine = []; // erfolgreich vorgeschlagene eigene Termine (Startzeit)
+        const newMine = []; // erfolgreich gesendete eigene Termine {id, start, end, t}
         let myPin = "";
         try { myPin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
-        for (const s of form.slots) {
+        for (const s of plan) {
             try {
                 const startISO = combineDT(s.date, s.start);
-                const res = await publicBookOrProposeAppointment(code, startISO, s.end ? combineDT(s.date, s.end) : null, fullName, form.note || "", myPin, s.art || null);
-                results.push({ ok: true, s, status: res && res.status });
-                newMine.push(startISO);
+                const endISO = combineDT(s.date, s.end);
+                const res = await publicBookOrProposeAppointment(code, startISO, endISO, fullName, form.note || "", myPin, s.art || null);
+                const status = (res && res.status) || "pending";
+                // Seit der Server-Härtung wird eine Sofortbuchung unter 2 Stunden Vorlauf (oder bei
+                // vollem Fahrlehrer-Limit) nur als Anfrage angelegt. Für eingeloggte Schüler den
+                // kurzfristigen Fall ausdrücklich erklären, sonst wundert man sich über "offen".
+                const kurzfristig = status === "pending" && !!myPin && !s.art && Date.parse(startISO) < Date.now() + 2 * 3600000;
+                results.push({ ok: true, s, zeile: { date: s.date, start: s.start, end: s.end, status, kurzfristig } });
+                newMine.push({ id: (res && res.id) || null, start: startISO, end: endISO, t: Date.now() });
             }
             catch (e) {
-                const msg = String(e && e.message || "");
-                let reason = "nicht verfügbar";
-                if (/OVERLAP/i.test(msg))
-                    reason = "schon belegt oder angefragt";
-                else if (/NOPAST/i.test(msg))
-                    reason = "bereits vergangen";
-                else if (/DAYLIMIT/i.test(msg))
-                    reason = "Tageslimit für dich erreicht";
-                else if (/WEEKLIMIT/i.test(msg))
-                    reason = "Wochenlimit für dich erreicht";
-                else if (/UNPAID/i.test(msg))
-                    reason = "wegen einer offenen Rechnung gesperrt";
-                else if (/NONAME/i.test(msg))
-                    reason = "ohne Vor- und Nachname nicht möglich";
-                else if (/TOOMANY/i.test(msg))
-                    reason = "heute sind schon sehr viele Anfragen eingegangen - bitte morgen erneut";
-                else if (/INVALID_ART/i.test(msg))
-                    reason = "unbekannte Fahrstunden-Art";
-                results.push({ ok: false, s, reason, unpaid: /UNPAID/i.test(msg) });
+                results.push({ ok: false, s, ...buchungsFehler(e && e.message) });
             }
         }
         // Eigene Termine im Browser merken (dieses Gerät) und Namen für geräteübergreifende Wiedererkennung speichern
         if (newMine.length) {
-            try {
-                const merged = Array.from(new Set([...(mineSlots || []), ...newMine]));
-                localStorage.setItem("v3_mine_" + code, JSON.stringify(merged));
-                setMineSlots(merged);
-            }
-            catch (e) { /* Speicher nicht verfügbar, dann eben ohne Hervorhebung */ }
+            mineSetzen([...(mineRef.current || []), ...newMine]);
             try {
                 localStorage.setItem("v3_myname_" + code, fullName);
                 setMyName(fullName);
@@ -34742,7 +34899,7 @@ function BookingPage({ code, appMode, onLogout }) {
             catch (e) { }
         }
         setSending(false);
-        const ok = results.filter(r => r.ok).length;
+        const okZeilen = results.filter(r => r.ok).map(r => r.zeile);
         const fail = results.filter(r => !r.ok);
         // belegte Zeiten neu laden
         const von = startOfWeek(week).toISOString();
@@ -34750,23 +34907,29 @@ function BookingPage({ code, appMode, onLogout }) {
         publicBusyTimes(code, von, bis).then(rows => setBusy(rows || [])).catch(() => { });
         if (fail.length === 0) {
             setForm(null);
-            setDoneInstant(results.filter(r => r.status === "confirmed").length);
-            setDoneTotal(ok);
-            setDone(true);
-            setTimeout(() => setDone(false), 4000);
+            setErr("");
+            setDone({ zeilen: [...bisherGesendet, ...okZeilen] });
+            // Die Bestätigung steht oben auf der Seite - dorthin scrollen, sonst sieht sie
+            // niemand, der zuvor unten bei einem Tag auf "+ Termin" getippt hat.
+            try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { window.scrollTo(0, 0); }
+            return;
         }
-        else if (ok > 0) {
-            // Einige gingen, einige nicht: nur die fehlgeschlagenen im Formular lassen
-            setForm(f => ({ ...f, slots: fail.map(r => r.s) }));
-            setErr(ok + " Termin" + (ok === 1 ? "" : "e") + " gesendet. " + fail.length + " Zeit" + (fail.length === 1 ? "" : "en") + " war" + (fail.length === 1 ? "" : "en") + " " + fail[0].reason + ". Bitte ändern.");
+        // Mindestens einer ging nicht: nur die fehlgeschlagenen bleiben im Formular, jeder mit
+        // seinem eigenen Grund; die gesendeten stehen darüber als "gesendet" (Status je Termin).
+        setForm(f => f ? ({ ...f, slots: fail.map(r => ({ ...r.s, fehler: r.reason })), gesendet: [...(f.gesendet || []), ...okZeilen] }) : f);
+        if (okZeilen.length > 0) {
+            setErr(okZeilen.length + " von " + results.length + " Terminen gesendet. Die übrigen konnten nicht gesendet werden, der Grund steht jeweils beim Termin. Bitte ändern oder entfernen.");
         }
         else if (fail.every(f => f.unpaid)) {
             // Eine andere Uhrzeit hilft hier nicht - deshalb bewusst NICHT der generische
             // "bitte andere Uhrzeiten waehlen"-Text, der in die Irre fuehren wuerde.
-            setErr("Buchen ist gerade nicht m\u00F6glich, weil noch eine Rechnung offen ist. Sobald deine Zahlung verbucht ist, geht es wieder. Bei Fragen melde dich bei deinem Fahrlehrer.");
+            setErr("Buchen ist gerade nicht möglich, weil noch eine Rechnung offen ist. Sobald deine Zahlung verbucht ist, geht es wieder. Bei Fragen melde dich bei deinem Fahrlehrer.");
+        }
+        else if (fail.length === 1) {
+            setErr("Nicht gesendet: " + fail[0].reason + "." + (fail[0].zeit ? " Bitte eine andere Zeit wählen." : ""));
         }
         else {
-            setErr("Diese Zeiten sind " + fail[0].reason + ". Bitte andere Uhrzeiten wählen.");
+            setErr("Keiner der Termine konnte gesendet werden, der Grund steht jeweils beim Termin.");
         }
     }
     // Begrüßungszeile im Stil der Fahrlehrer-Startseite (Redesign 2026): dieselbe Tageszeit-
@@ -34907,12 +35070,40 @@ function BookingPage({ code, appMode, onLogout }) {
             tab === "theorie" && theorieVerfuegbar(info, appMode) && React.createElement(TheoryPractice, { code: code }),
             tab === "begleitung" && begleitungVerfuegbar(appMode) && React.createElement(BegleitFahrten, { code: code }),
             tab === "termine" && React.createElement(React.Fragment, null,
+                // Bestätigung nach dem Senden (M8): ganz oben im Reiter, bleibt stehen, bis sie
+                // weggetippt wird, und nennt den Stand je Termin (fest gebucht / angefragt /
+                // wegen kurzer Vorlaufzeit nur angefragt).
+                done && (() => {
+                    const zeilen = done.zeilen || [];
+                    const fest = zeilen.filter(z => z.status === "confirmed").length;
+                    const kurz = zeilen.some(z => z.kurzfristig);
+                    const text = fest === 0
+                        ? (zeilen.length > 1 ? "Deine Anfragen sind eingegangen. Dein Fahrlehrer prüft die Termine und bestätigt sie. Du bekommst dann Bescheid."
+                            : "Deine Anfrage ist eingegangen. Dein Fahrlehrer prüft den Termin und bestätigt ihn. Du bekommst dann Bescheid.")
+                        : (fest === zeilen.length
+                            ? (fest > 1 ? "Deine Termine stehen schon fest" : "Dein Termin steht schon fest") + ", ohne dass dein Fahrlehrer erst bestätigen muss. Du bekommst keine gesonderte Nachricht mehr."
+                            : fest + " von " + zeilen.length + " Terminen stehen schon fest. Die übrigen prüft dein Fahrlehrer noch.");
+                    const statusText = z => z.status === "confirmed" ? "fest gebucht"
+                        : z.kurzfristig ? "als Anfrage gesendet, da kurzfristig (weniger als 2 Stunden vorher)"
+                            : "angefragt";
+                    return React.createElement("div", { className: "card", role: "status", style: { padding: "16px", marginBottom: 14, background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
+                        React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 10 } },
+                            React.createElement("div", { className: "home-v2-display", style: { flex: 1, fontWeight: 800, fontSize: 16, color: "var(--green)", paddingTop: 4 } }, fest > 0 && fest === zeilen.length ? "✓ Direkt gebucht!" : "✓ Vielen Dank!"),
+                            React.createElement("button", { onClick: () => setDone(null), "aria-label": "Hinweis schließen", style: { flexShrink: 0, width: 44, height: 44, marginTop: -8, marginRight: -8, borderRadius: "50%", border: "none", background: "transparent", color: "var(--green)", fontSize: 18 } }, "✕")),
+                        React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } }, text),
+                        (zeilen.length > 1 || kurz) && React.createElement("div", { style: { marginTop: 10, display: "flex", flexDirection: "column", gap: 6 } },
+                            zeilen.map((z, i) => React.createElement("div", { key: i, style: { fontSize: 13, lineHeight: 1.45, color: "var(--ink-2)" } },
+                                React.createElement("span", { style: { fontWeight: 700, fontVariantNumeric: "tabular-nums" } }, slotText(z)),
+                                ": ", statusText(z)))),
+                        kurz && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8, lineHeight: 1.5 } },
+                            "So kurzfristige Termine bestätigt dein Fahrlehrer selbst. Du siehst sie hier als „offen“, bis er zusagt."));
+                })(),
                 // home-v2-stats statt der älteren home-kpis-Kachelreihe (drei bunte Einzelkacheln)
                 // - dieselbe Sprache wie die Fahrlehrer-Startseite und der Start-Tab dieser App.
                 // cols-3, weil hier drei statt vier Kennzahlen stehen (siehe CSS-Variante oben).
                 React.createElement("div", { className: "home-v2-stats cols-3", style: { marginBottom: 4 } }, [
-                    { key: "mine", label: "Meine Termine", value: mineSet.size, d: ["M8 2v4M16 2v4M3 10h18", "M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z", "M9 16l2 2 4-4"] },
-                    { key: "offen", label: "Offene Anfragen", value: busy.filter(b => isMine(b) && b.status === "pending").length, d: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] },
+                    { key: "mine", label: "Meine Termine", value: meineInWoche.length, d: ["M8 2v4M16 2v4M3 10h18", "M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z", "M9 16l2 2 4-4"] },
+                    { key: "offen", label: "Offene Anfragen", value: meineInWoche.filter(b => b.status === "pending").length, d: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] },
                     { key: "tage", label: "Buchbare Tage", value: days.length, d: ["M8 2v4M16 2v4M3 10h18", "M19 4H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2z"] },
                  ].map(k => React.createElement("div", { key: k.key, className: "home-v2-statcell" },
                     React.createElement("span", { className: "home-v2-stat-ic" },
@@ -34963,12 +35154,6 @@ function BookingPage({ code, appMode, onLogout }) {
                                 : React.createElement(React.Fragment, null,
                                     React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16, color: "var(--danger)" } }, "Konnte nicht eingecheckt werden"),
                                     React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } }, /EXPIRED/i.test(theoryCheckinResult.error || "") ? "Der Code ist abgelaufen - bitte deinen Fahrlehrer um einen neuen." : "Bitte kurz beim Fahrlehrer nachfragen."))),
-                done && React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 14, background: "var(--green-bg)", border: "1.5px solid var(--green)" } },
-                    React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16, color: "var(--green)" } }, doneInstant > 0 ? "\u2713 Direkt gebucht!" : "\u2713 Vielen Dank!"),
-                    React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.5 } },
-                        doneInstant === 0 ? "Deine Anfrage ist eingegangen. Dein Fahrlehrer pr\u00FCft den Termin und best\u00E4tigt ihn. Du bekommst dann Bescheid."
-                            : "Dein Termin steht schon fest, ohne dass dein Fahrlehrer erst best\u00E4tigen muss. Du bekommst keine gesonderte Nachricht mehr."
-                                + (doneInstant < doneTotal ? " F\u00FCr die \u00FCbrigen " + (doneTotal - doneInstant) + " gilt wie gewohnt: dein Fahrlehrer pr\u00FCft sie noch." : ""))),
                 React.createElement("div", { className: "card", style: { padding: 0, marginBottom: 14, borderLeft: "4px solid var(--orange)", overflow: "hidden" } },
                     React.createElement("button", { onClick: () => setHowtoOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 12,
                             padding: "14px 16px", background: "transparent", border: "none", textAlign: "left" } },
@@ -35008,7 +35193,7 @@ function BookingPage({ code, appMode, onLogout }) {
                             catch (err) { }
                         } })),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 7, lineHeight: 1.45 } }, "Gib deinen Namen ein, dann werden deine eigenen Termine farbig hervorgehoben, auch wenn du den Link sp\u00E4ter erneut oder auf einem anderen Ger\u00E4t \u00F6ffnest. Schreib ihn genau so wie beim Vorschlagen.")),
-                (mineSet.size > 0) && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, padding: "9px 12px", borderRadius: 10, background: "var(--orange-soft)", border: "1px solid var(--orange)" } },
+                (meineInWoche.length > 0) && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, padding: "9px 12px", borderRadius: 10, background: "var(--orange-soft)", border: "1px solid var(--orange)" } },
                     React.createElement("div", { style: { width: 14, height: 14, borderRadius: 4, background: "var(--orange)", flexShrink: 0 } }),
                     React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45 } }, "Farbig hervorgehoben sind deine eigenen Termine.")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 14 }, onClick: () => openForm() }, "+ Termin vorschlagen"),
@@ -35033,15 +35218,13 @@ function BookingPage({ code, appMode, onLogout }) {
                     const hoursLabel = dayBlocked ? null : (hasTimeLimit ? dayHours.von + " – " + dayHours.bis + " Uhr" : "ganztägig geöffnet");
                     // Belegte Minuten an diesem Tag (bestätigte Termine), für die Limit-Anzeige
                     const dayLim = (info && info.day_limit) || 0;
-                    const usedMin = (byDay[k] || []).filter(b => b.status !== "pending").reduce((sum, b) => {
-                        const s = new Date(b.start_at).getTime();
-                        const e = b.end_at ? new Date(b.end_at).getTime() : s + 45 * 60000;
-                        return sum + Math.max(0, Math.round((e - s) / 60000));
-                    }, 0);
-                    const dayFull = dayLim > 0 && usedMin >= dayLim;
+                    const usedMin = belegtMin(byDay[k] || []);
+                    // "Ausgebucht" auch, wenn das Wochenlimit des Fahrlehrers erreicht ist - dieselbe
+                    // Prüfung (tagVoll) sperrt den Tag im Formular und beim Absenden.
+                    const dayFull = !!tagVoll(k);
                     const pct = dayLim > 0 ? Math.min(100, Math.round(usedMin / dayLim * 100)) : 0;
                     const near = dayLim > 0 && usedMin >= dayLim * 0.85;
-                    const barCol = dayFull ? "var(--danger)" : (near ? "var(--amber)" : "var(--orange)");
+                    const barCol = (dayLim > 0 && usedMin >= dayLim) ? "var(--danger)" : (near ? "var(--amber)" : "var(--orange)");
                     // Sanfte Ton-Rotation je Wochentag (sage/clay/sky/orange), passend zum
                     // Farbsystem der Startseite, statt jeden Tag im selben Orange zu zeigen.
                     // "Heute" bekommt zusätzlich den Ring-Schatten wie im Kalender (.cal-today).
@@ -35098,7 +35281,9 @@ function BookingPage({ code, appMode, onLogout }) {
                                         : React.createElement("span", { style: { flex: 1, fontSize: 14, color: "var(--muted)" } }, b.status === "pending" ? "angefragt" : "belegt"));
                             })));
                 })),
-            form && React.createElement("div", { onClick: () => setForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            // Während des Sendens nicht schließbar (M9): sonst landete eine Fehlermeldung oder ein
+            // Teilerfolg in einem Formular, das niemand mehr sieht.
+            form && React.createElement("div", { onClick: formSchliessen, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
                 React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                         borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                     React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -35111,12 +35296,21 @@ function BookingPage({ code, appMode, onLogout }) {
                             React.createElement("label", null, "Nachname",
                             React.createElement("input", { type: "text", value: form.nachname, onChange: e => setForm({ ...form, nachname: e.target.value }), placeholder: "Mustermann" })))),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 8 } }, "Wunschtermine"),
-                    form.slots.map((s, i) => React.createElement("div", { key: i, style: { border: "1.5px solid var(--line)", borderRadius: 12, padding: "12px", marginBottom: 10, position: "relative" } },
+                    // Teilerfolg (M8): schon gesendete Termine stehen hier mit ihrem Stand, die
+                    // übrigen darunter jeweils mit dem Grund, warum sie nicht gingen.
+                    (form.gesendet || []).length > 0 && React.createElement("div", { role: "status", style: { background: "var(--green-bg)", border: "1.5px solid var(--green)", borderRadius: 12, padding: "10px 12px", marginBottom: 10 } },
+                        (form.gesendet || []).map((z, gi) => React.createElement("div", { key: gi, style: { fontSize: 13, lineHeight: 1.5, color: "var(--ink-2)" } },
+                            React.createElement("span", { style: { color: "var(--green)", fontWeight: 800 } }, "\u2713 "),
+                            React.createElement("span", { style: { fontWeight: 700 } }, slotText(z)),
+                            ": " + (z.status === "confirmed" ? "fest gebucht" : z.kurzfristig ? "als Anfrage gesendet, da kurzfristig" : "angefragt")))),
+                    form.slots.map((s, i) => React.createElement("div", { key: i, style: { border: "1.5px solid " + (s.fehler ? "var(--danger)" : "var(--line)"), borderRadius: 12, padding: "12px", marginBottom: 10, position: "relative" } },
                         form.slots.length > 1 && React.createElement("button", { onClick: () => removeSlot(i), "aria-label": "Entfernen", style: { position: "absolute", top: 8, right: 8, width: 30, height: 30, borderRadius: 6, border: "none",
                                 background: "var(--field-bg)", color: "var(--danger)", fontSize: 16, lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center" } }, "\u00D7"),
                         React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 8 } },
                             "Termin ",
                             i + 1),
+                        s.fehler && React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--red-ink)", background: "var(--danger-bg)", borderRadius: 8, padding: "7px 10px", marginBottom: 10, marginRight: form.slots.length > 1 ? 34 : 0, lineHeight: 1.45 } },
+                            "Nicht gesendet: " + s.fehler),
                         React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                             React.createElement("label", null, "Datum",
                             React.createElement("input", { type: "date", min: ymd(new Date()), value: s.date, onChange: e => updateSlot(i, { date: e.target.value }) }))),
@@ -35128,34 +35322,12 @@ function BookingPage({ code, appMode, onLogout }) {
                             // "1/2/3 Fahrstunden" - eine krumme Dauer war gar nicht waehlbar.
                             // Die Dauer steht jetzt in den Bis-Eintraegen ("10:30 Uhr - 45 Min,
                             // 1 Fahrstunde"), die separate Chip-Reihe entfaellt dadurch.
-                            const key = DOW_KEYS[new Date(s.date + "T00:00:00").getDay()];
-                            const wh = info && info.work_hours;
-                            const day = wh && typeof wh === "object" ? wh[key] : null;
-                            const winStart = (day && day.von) ? day.von : "00:00";
-                            const winEnd = (day && day.bis) ? day.bis : "23:45";
-                            const toMin = (t) => { const [h, m] = (t || "0:0").split(":").map(Number); return h * 60 + m; };
-                            const toHM = (min) => String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
-                            // Der letzte Wert des Fensters scheidet als Start aus - danach bliebe
-                            // keine Viertelstunde mehr fuer ein Ende uebrig.
-                            const startOpts = [];
-                            for (let m = toMin(winStart); m <= toMin(winEnd) - 15; m += 15)
-                                startOpts.push(toHM(m));
-                            if (!startOpts.length)
-                                startOpts.push(winStart);
-                            // Effektiver Anzeigewert: liegt der gespeicherte Wert ausserhalb des (neuen)
-                            // Fensters, wird nur für die Anzeige der erste gültige Wert genommen
-                            // (kein setState beim Rendern).
-                            const effStart = startOpts.indexOf(s.start) !== -1 ? s.start : (startOpts[0] || "00:00");
-                            // Endzeiten ab einer Viertelstunde nach dem Start, hoechstens vier Stunden
-                            // spaeter und nie ueber die Arbeitszeit hinaus. Vier Stunden liegen weit
-                            // ueber allem, was als Fahrstunde vorkommt (3 FS = 135 Min), halten die
-                            // Liste aber handlich.
-                            const endGrenze = Math.min(toMin(winEnd), toMin(effStart) + 240);
-                            const endOpts = [];
-                            for (let m = toMin(effStart) + 15; m <= endGrenze; m += 15)
-                                endOpts.push(toHM(m));
-                            const effEnd = endOpts.indexOf(s.end) !== -1 ? s.end
-                                : (endOpts.find(t => toMin(t) - toMin(effStart) === 45) || endOpts[0] || "");
+                            // Listen aus zeitOptionen - dieselbe Rechnung wie Vorbelegung und Absenden.
+                            // Heute stehen nur noch zukünftige Startzeiten zur Wahl (M7).
+                            const toMin = hmZuMin;
+                            const z = zeitOptionen(s.date, s.start, s.end);
+                            const effStart = z.effStart, effEnd = z.effEnd, endOpts = z.endOpts;
+                            const startOpts = z.startOpts.indexOf(effStart) === -1 ? [effStart].concat(z.startOpts) : z.startOpts;
                             // Kurze Eintraege: ein <select> kuerzt am rechten Rand mit Ellipse ab
                             // (siehe select{} im CSS), und "08:45 Uhr - 45 Min, 1 Fahrstunde" passte
                             // auf 375px Breite nicht mehr hinein. Die glatten Vielfachen tragen den
@@ -35225,13 +35397,13 @@ function BookingPage({ code, appMode, onLogout }) {
                     React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                         React.createElement("label", null, "Nachricht (optional)",
                         React.createElement("input", { type: "text", value: form.note, onChange: e => setForm({ ...form, note: e.target.value }), placeholder: "z.B. lieber nachmittags" }))),
-                    err && React.createElement("div", { style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, err),
+                    err && React.createElement("div", { role: "alert", style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, err),
                     React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: sending, onClick: send }, sending ? "Wird gesendet…" : (form.slots.length > 1 ? form.slots.length + " Termine vorschlagen" : "Vorschlag senden")),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, textAlign: "center", marginBottom: 10 } },
                         "Mit dem Absenden best\u00E4tigst du, die ",
                         React.createElement("a", { href: window.location.origin + "/?datenschutz=1", target: "_blank", rel: "noopener noreferrer", style: { color: "var(--orange-deep)", fontWeight: 600 } }, "Datenschutzerkl\u00E4rung"),
                         " gelesen zu haben und mit der Verarbeitung deiner Daten zur Terminvereinbarung einverstanden zu sein."),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setForm(null) }, "Abbrechen"))),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", disabled: sending, onClick: formSchliessen }, "Abbrechen"))),
         // Läuft eine Streckenaufzeichnung, während man in einem anderen Reiter unterwegs ist,
         // erinnert dieser Streifen daran - sonst läuft sie unbemerkt bis zum Akku-Ende weiter.
         appMode && bfRec.aktiv && tab !== "begleitung" && React.createElement("button", {
