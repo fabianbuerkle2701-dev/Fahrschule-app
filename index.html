@@ -6885,7 +6885,11 @@ function buildXRechnung(o) {
   // (per Skript ueber alle Betraege bis 3.000 EUR geprueft). Den Cent weist die Datei deshalb
   // offen als Rundungsbetrag (BT-114) aus, sodass der Zahlbetrag trotzdem exakt der
   // gedruckten Rechnung entspricht.
-  const steuer = kUnt ? 0 : xrR2(netto * satz / 100);
+  // In ganzen Cent rechnen: xrR2(netto * 0.19) rundete bei exakten Halb-Cent-Faellen durch
+  // Gleitkomma-Fehler ab (z.B. 1,50 * 19 % = 0,285 ergab 0,28 statt 0,29 - bei 246 Betraegen
+  // bis 3.000 EUR), und genau das prueft BR-CO-17. Cent x Satz ist ganzzahlig, /100 liefert
+  // ein exakt darstellbares x,5 - Math.round rundet das korrekt kaufmaennisch auf.
+  const steuer = kUnt ? 0 : Math.round(Math.round(netto * 100) * satz / 100) / 100;
   const rundung = xrR2(brutto - netto - steuer);
   // Positionsnetti einzeln runden und die Differenz auf die groesste Position legen -
   // sonst summieren sich Rundungsreste und die Pruefregel "Summe der Positionen =
@@ -7189,9 +7193,15 @@ async function insertEinmal(table, row, meldung) {
         if (!error)
             return data;
         if (id && error.code === "23505") {
-            const { data: vorhanden } = await sb.from(table).select("*").eq("id", id).maybeSingle();
+            const { data: vorhanden, error: leseFehler } = await sb.from(table).select("*").eq("id", id).maybeSingle();
             if (vorhanden)
                 return vorhanden;
+            // Bricht genau dieses Nachladen wieder am Netz ab, den Netzfehler werfen statt der
+            // 23505-Meldung: nur so wiederholt withNetworkRetry (Insert -> 23505 -> Nachladen).
+            // Sonst sah der Nutzer "duplicate key", obwohl der Eintrag gespeichert ist, und legte
+            // ihn womöglich von Hand ein zweites Mal an.
+            if (leseFehler && isTransientNetworkError(leseFehler))
+                throw new Error(leseFehler.message);
         }
         console.error(error);
         throw new Error(error.message || meldung || "Speichern fehlgeschlagen");
