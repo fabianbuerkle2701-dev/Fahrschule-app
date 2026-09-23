@@ -159,8 +159,43 @@ Regeln:
     // Modellantwort gegen die tatsächlich übergebenen Daten gegenprüfen, statt ihr blind zu
     // vertrauen - ein Treffer, der auf ein studentId/invoiceId-Paar zeigt, das gar nicht in den
     // Eingabedaten stand, wird verworfen statt dem Fahrlehrer als Vorschlag vorgelegt.
+    //
+    // Regel 4 des Prompts ("jede Zeile höchstens einmal, jede Rechnung höchstens einmal") war
+    // bisher nur eine Bitte an das Modell, keine Prüfung: ordnete es zwei Zeilen derselben
+    // Rechnung zu, sah der Fahrlehrer zwei Vorschläge und konnte beide buchen - die Rechnung
+    // galt dann doppelt als bezahlt. Jetzt hart durchgesetzt: je Zeile und je Rechnung nur der
+    // sicherste Treffer. Außerdem wird der vorgeschlagene Betrag geprüft (> 0 und höchstens die
+    // Rechnungssumme) - ein unplausibler Betrag wird verworfen, der Client nimmt dann den
+    // offenen Betrag der Rechnung.
+    const rang = { hoch: 0, mittel: 1, niedrig: 2 };
+    const rechnungen = new Map();
+    students.forEach((s) => s.invoices.forEach((iv) => rechnungen.set(s.id + " " + iv.id, iv)));
+    const zeilenVergeben = new Set();
+    const rechnungenVergeben = new Set();
     const matches = (Array.isArray(parsed.matches) ? parsed.matches : [])
-      .filter((m) => m && typeof m === "object" && validPairs.has(String(m.studentId) + " " + String(m.invoiceId)));
+      .filter((m) => m && typeof m === "object" && validPairs.has(String(m.studentId) + " " + String(m.invoiceId)))
+      .filter((m) => Number.isInteger(m.lineIndex) && m.lineIndex >= 0 && m.lineIndex < lines.length)
+      .sort((a, b) => (rang[a.confidence] != null ? rang[a.confidence] : 1) - (rang[b.confidence] != null ? rang[b.confidence] : 1))
+      .filter((m) => {
+        const rechnung = String(m.invoiceId);
+        if (zeilenVergeben.has(m.lineIndex) || rechnungenVergeben.has(rechnung)) return false;
+        zeilenVergeben.add(m.lineIndex);
+        rechnungenVergeben.add(rechnung);
+        return true;
+      })
+      .map((m) => {
+        const iv = rechnungen.get(String(m.studentId) + " " + String(m.invoiceId));
+        const obergrenze = Math.max(iv.total || 0, iv.offen || 0);
+        const b = Number(m.betrag);
+        const betragOk = Number.isFinite(b) && b > 0 && b <= obergrenze + 0.005;
+        return {
+          lineIndex: m.lineIndex,
+          studentId: String(m.studentId),
+          invoiceId: String(m.invoiceId),
+          betrag: betragOk ? Math.round(b * 100) / 100 : null,
+          confidence: rang[m.confidence] != null ? m.confidence : "niedrig",
+        };
+      });
     return { statusCode: 200, headers, body: JSON.stringify({ matches }) };
   } catch (e) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };

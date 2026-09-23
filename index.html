@@ -3364,7 +3364,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.28";
+const APP_VERSION = "2.9.29";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -23919,6 +23919,16 @@ function App() {
         const stu = (students || []).find(s => s.id === v.studentId);
         if (!stu || !(betrag > 0))
             return;
+        // Letzte Schranke gegen Doppelbuchungen: dieselbe Rechnung kann über zwei Vorschläge
+        // hereinkommen (z.B. exakter Rechnungsnummer-Treffer UND ein KI-Vorschlag aus einer
+        // anderen Kontoauszug-Zeile). Ist sie inzwischen voll bezahlt, wird nicht noch einmal
+        // gebucht - sonst stand die Rechnung am Ende doppelt als bezahlt da.
+        const rechnung = (stu.invoices || []).find(iv => iv.id === v.invoiceId);
+        if (rechnung && invoiceOpen(stu, rechnung) <= 0.005) {
+            showToast("Diese Rechnung ist bereits vollständig bezahlt – keine zweite Buchung.");
+            setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "bezahlt" } : x) } : z);
+            return;
+        }
         const eintrag = { id: uniqueId("pay"), date: v.datum || ymd(new Date()), amount: Math.round(betrag * 100) / 100,
             method: "Überweisung", invoiceId: v.invoiceId };
         writeStudent({ ...stu, payments: [...(stu.payments || []), eintrag] });
@@ -23957,10 +23967,16 @@ function App() {
                 return;
             }
             const matches = Array.isArray(out.matches) ? out.matches : [];
+            // Rechnungen, die schon einen buchbaren oder gebuchten Vorschlag haben (z.B. aus dem
+            // exakten Rechnungsnummer-Abgleich), nicht ein zweites Mal vorschlagen.
+            const schonVergeben = new Set((zahlungsImport.vorschlaege || [])
+                .filter(v => ["ok", "abweichend", "ki_vorschlag", "gebucht"].includes(v.status))
+                .map(v => v.invoiceId));
             const neue = matches.map((m, i) => {
                 const zeile = kandidaten[m.lineIndex];
-                if (zeile == null)
+                if (zeile == null || schonVergeben.has(m.invoiceId))
                     return null;
+                schonVergeben.add(m.invoiceId);
                 const stu = (students || []).find(s => s.id === m.studentId);
                 if (!stu)
                     return null;
