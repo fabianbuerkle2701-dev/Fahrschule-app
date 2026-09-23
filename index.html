@@ -19621,7 +19621,9 @@ function App() {
             const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
             const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
             const invoices = [...(cur.invoices || []), inv];
-            writeStudent({ ...cur, drivenLessons, costItems, invoices });
+            // Beim Storno vorgemerkte Zahlungen (siehe cancelInvoice) gehören jetzt zu dieser Rechnung.
+            const payments = (cur.payments || []).map(pay => (pay.umbuchenVon && !pay.invoiceId) ? (() => { const { umbuchenVon, ...rest } = pay; return { ...rest, invoiceId: inv.id, umgebuchtVon: umbuchenVon }; })() : pay);
+            writeStudent({ ...cur, drivenLessons, costItems, invoices, payments });
         }
         setInvoiceDraft(null);
         setInvoicePreview(inv);
@@ -19645,6 +19647,21 @@ function App() {
         });
         if (reason === null)
             return;
+        // Schon eingegangene Zahlungen hingen bisher an der stornierten Rechnung fest: die
+        // Ersatzrechnung galt als offen, wurde überfällig und gemahnt, obwohl der Schüler längst
+        // bezahlt hatte (Audit F-H2). Deshalb fragen, ob sie auf die Ersatzrechnung wandern sollen
+        // (Standard: ja). Die Ersatzrechnung gibt es in diesem Moment noch nicht - die Zahlungen
+        // werden bis dahin als "umbuchenVon" vorgemerkt und von confirmInvoice() der nächsten
+        // Rechnung dieses Schülers zugeordnet.
+        const bezahlt = invoicePaid(active, inv.id);
+        let umbuchen = false;
+        if (bezahlt > 0.005) {
+            umbuchen = await askConfirm({
+                title: "Zahlungen übernehmen?",
+                message: "Auf " + inv.number + " sind schon " + eurFmt(bezahlt) + " eingegangen. Sollen diese Zahlungen der nächsten Rechnung (Ersatzrechnung) gutgeschrieben werden?\n\nBei \u201ENein\u201C bleiben sie bei der stornierten Rechnung, etwa wenn du das Geld zurückzahlst.",
+                confirmLabel: "Ja, gutschreiben", cancelLabel: "Nein", danger: false,
+            });
+        }
         let storno;
         try {
             storno = await dbCancelInvoice(active.id, school.id, inv.id, reason);
@@ -19657,14 +19674,21 @@ function App() {
         // eingefangene "active" - der Prompt-Dialog kann durch Tippzeit beliebig lange offen
         // bleiben, ein größeres Zeitfenster für zwischenzeitliche Änderungen als bei confirmInvoice()
         // (gleicher Bug, gleicher Fix - siehe dortiger Kommentar).
-        updateStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
-            const drivenLessons = (s.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
-            const costItems = (s.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
-            const invoices = (s.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
-            return { ...s, drivenLessons, costItems, invoices };
-        }));
+        const cur = (studentsRef.current || []).find(s => s.id === active.id);
+        if (cur) {
+            const drivenLessons = (cur.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
+            const costItems = (cur.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
+            const invoices = (cur.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
+            const next = { ...cur, drivenLessons, costItems, invoices };
+            if (umbuchen) {
+                next.payments = (cur.payments || []).map(pay => pay.invoiceId === inv.id ? (() => { const { invoiceId, ...rest } = pay; return { ...rest, umbuchenVon: inv.number }; })() : pay);
+                // Die Vormerkung muss gespeichert werden (übersteht sonst kein Neuladen).
+                writeStudent(next);
+                showToast(eurFmt(bezahlt) + " werden der nächsten Rechnung für " + dispName(cur) + " gutgeschrieben.");
+            }
+            else
+                updateStudents(prev => (prev || []).map(s => s.id === cur.id ? next : s));
+        }
         setInvoicePreview(storno);
         doPrint("invoice");
     }
@@ -20144,7 +20168,10 @@ function App() {
                         React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
                             p.date ? new Date(p.date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : "",
                             p.method ? " \u00B7 " + p.method : "",
-                            p.receiptNumber ? " \u00B7 " + p.receiptNumber : "")),
+                            p.receiptNumber ? " \u00B7 " + p.receiptNumber : "",
+                            // Nach einem Storno vorgemerkt (siehe cancelInvoice), damit sichtbar ist,
+                            // warum die Zahlung gerade keiner Rechnung zugeordnet ist.
+                            (p.umbuchenVon && !p.invoiceId) ? " \u00B7 aus " + p.umbuchenVon + ", f\u00FCr die n\u00E4chste Rechnung" : "")),
                     React.createElement("button", { onClick: () => printReceipt(pays.indexOf(p)), "aria-label": "Beleg drucken", title: "Beleg drucken", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", display: "inline-flex" } },
                         React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M6 9V2h12v7" }),
@@ -24939,6 +24966,10 @@ function App() {
             const total = Number(hit.inv.total) || 0;
             const basis = { key: i, ...t, studentId: hit.stu.id, studentName: dispName(hit.stu),
                 invoiceId: hit.inv.id, offen: offen, total: total };
+            // Stornierte Rechnungen und Stornorechnungen sind nicht mehr zahlbar. Vorher wurde auf
+            // sie als "ok" gebucht - die Ersatzrechnung blieb dann offen und wurde gemahnt (F-H2).
+            if (hit.inv.cancelledBy || hit.inv.stornoOf)
+                return { ...basis, status: "storniert", ersatzHinweis: hit.inv.cancelledBy ? ("storniert durch " + hit.inv.cancelledBy) : ("Stornorechnung zu " + hit.inv.stornoOf) };
             if (offen <= 0.005)
                 return { ...basis, status: "bezahlt" };
             // Betrag nur dann vorbelegen, wenn er eindeutig ist: entweder genau einer gefunden,
@@ -24965,6 +24996,10 @@ function App() {
         // anderen Kontoauszug-Zeile). Ist sie inzwischen voll bezahlt, wird nicht noch einmal
         // gebucht - sonst stand die Rechnung am Ende doppelt als bezahlt da.
         const rechnung = (stu.invoices || []).find(iv => iv.id === v.invoiceId);
+        if (rechnung && (rechnung.cancelledBy || rechnung.stornoOf)) {
+            showToast("Rechnung " + rechnung.number + " ist storniert \u2013 bitte die Zahlung beim Schüler der Ersatzrechnung zuordnen.");
+            return;
+        }
         if (rechnung && invoiceOpen(stu, rechnung) <= 0.005) {
             showToast("Diese Rechnung ist bereits vollständig bezahlt – keine zweite Buchung.");
             setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "bezahlt" } : x) } : z);
@@ -29620,10 +29655,12 @@ function App() {
                         const farbe = v.status === "gebucht" ? "var(--sage-deep)"
                             : v.status === "ok" ? "var(--sage-deep)"
                                 : v.status === "ki_vorschlag" ? "var(--sky-deep)"
-                                    : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)" : "var(--amber)";
+                                    : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)"
+                                        : v.status === "storniert" ? "var(--red)" : "var(--amber)";
                         const hinweis = v.status === "gebucht" ? "Gebucht"
                             : v.status === "unbekannt" ? "Keine Rechnung mit dieser Nummer gefunden"
                                 : v.status === "bezahlt" ? "Diese Rechnung ist bereits vollst\u00E4ndig bezahlt"
+                                : v.status === "storniert" ? "Storniert (" + v.ersatzHinweis + ") \u2013 Zahlung bitte beim Sch\u00FCler der Ersatzrechnung zuordnen"
                                     : v.status === "kein_betrag" ? "Kein Betrag in der Zeile erkennbar"
                                         : v.status === "mehrdeutig" ? "Mehrere Betr\u00E4ge in der Zeile \u2013 bitte w\u00E4hlen"
                                             : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab"
