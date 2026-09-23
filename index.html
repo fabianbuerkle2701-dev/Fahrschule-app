@@ -3289,7 +3289,9 @@ function stageIcon(tone) {
         return React.createElement("svg", p, React.createElement("path", { d: "M12 3l7 3.2v5.3c0 5-3 8.2-7 9.5-4-1.3-7-4.5-7-9.5V6.2L12 3z" }), React.createElement("path", { d: "M9 12l2 2 4-4" }));
     return null;
 }
-const PALETTE = ["#1E7A46", "#1d3557", "#9A6210", "#0F6E78", "#4A4A78", "#7E3B86", "#A23A2E", "#C2410C", "#2E5E8C", "#0F6E78"];
+// Zehn unterscheidbare Farben (alle mit weisser Schrift lesbar, Kontrast >= 4.5:1). Die letzte war
+// versehentlich ein Duplikat von #0F6E78 - der 4. und 10. Eintrag sahen dadurch gleich aus.
+const PALETTE = ["#1E7A46", "#1d3557", "#9A6210", "#0F6E78", "#4A4A78", "#7E3B86", "#A23A2E", "#C2410C", "#2E5E8C", "#5B6B2E"];
 function uniqueId(prefix) { return prefix + "_" + Math.random().toString(36).slice(2, 9); }
 // Kryptographisch sichere Zufallswerte fuer sicherheitsrelevante Codes/PINs (Buchungscode,
 // Invite-Code, Schueler-PIN) - Math.random ist dafuer kein geeigneter Generator.
@@ -5542,15 +5544,16 @@ async function dbInsert(uid, s) {
     // mit Kollegen geteilte Freigabe beim Wiederherstellen erhalten bleibt.
     const sharedWith = s._shared || [];
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }), _isMine: true }; }
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("students")
-            .insert({ owner: uid, data: cleanData(s), shared_with: sharedWith }).select().single();
-        if (error) {
-            console.error(error);
-            return null;
-        }
+    // Vorher lief das über withNetworkRetry, gab bei Fehlern aber null zurück statt zu werfen -
+    // die Wiederholung griff dadurch nie. insertEinmal wiederholt echte Netzabbrüche ohne
+    // Doppel-Schüler; der Vertrag "null bei Fehler" für die Aufrufer bleibt.
+    try {
+        const data = await insertEinmal("students", { owner: uid, data: cleanData(s), shared_with: sharedWith }, "Schüler konnte nicht gespeichert werden");
         return { ...rowToStudent(data), _isMine: true };
-    });
+    }
+    catch (e) {
+        return null;
+    }
 }
 // Schreibt über die RPC students_teacher_update statt direkt per .update({data:...}) - die RPC
 // bewahrt serverseitig die schülereigenen Felder (PIN, Theorie-Fortschritt, begleitete Fahrten
@@ -5631,14 +5634,10 @@ async function fetchInteressenten(uid) {
     return { list: data || [], missing: false, error: null };
 }
 async function dbInsertInteressent(uid, row) {
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("interessenten").insert({ ...row, owner: uid }).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message || "Interessent konnte nicht gespeichert werden");
-        }
-        return data;
-    });
+    // Wiederholbar ohne Doppel-Eintrag, siehe insertEinmal. Eine evtl. mitgegebene id wird
+    // bewusst verworfen - nur die frische Client-UUID macht die Wiederholung sicher.
+    const { id, ...rest } = row || {};
+    return await insertEinmal("interessenten", { ...rest, owner: uid }, "Interessent konnte nicht gespeichert werden");
 }
 async function dbUpdateInteressent(id, patch) {
     await withNetworkRetry(async () => {
@@ -5828,10 +5827,25 @@ const LEITNER_INTERVALL = [0, 1, 3, 7, 21];
 // im hoechsten Fach sass zuletzt viermal hintereinander, eine ungesehene ist ein Muenzwurf
 // zwischen Raten und Wissen. Dient nur der Selbsteinschaetzung, nicht der Bewertung.
 const LEITNER_TREFFER = [0.35, 0.55, 0.72, 0.86, 0.95];
+// Heutiges Datum in Berlin als YYYY-MM-DD. Der Server schreibt "due" in Berlin-Zeit
+// (public_theory_answer_submit: to_char(... at time zone 'Europe/Berlin')), ymd(new Date())
+// liest dagegen die GERÄTE-Zeitzone - auf einem Gerät im Ausland oder mit falsch gestellter
+// Zone wurden Wiederholungen dadurch einen Tag zu früh oder zu spät fällig. Eine Minute
+// zwischengespeichert, weil lernStand() beim Sortieren für jede der ~1000 Fragen läuft und
+// Intl.DateTimeFormat nicht billig ist.
+let _berlinHeuteCache = { t: 0, v: "" };
+function berlinHeuteYmd() {
+    const now = Date.now();
+    if (!_berlinHeuteCache.v || now - _berlinHeuteCache.t > 60000) {
+        const d = new Date(now);
+        _berlinHeuteCache = { t: now, v: new Date(now + berlinOffsetMinutes(d) * 60000).toISOString().slice(0, 10) };
+    }
+    return _berlinHeuteCache.v;
+}
 function lernStand(q, progress) {
     const e = (progress && progress[q.id]) || null;
     const box = e && e.box ? Math.max(1, Math.min(5, e.box)) : 0; // 0 = nie beantwortet
-    const faellig = !e || !e.due || e.due <= ymd(new Date());
+    const faellig = !e || !e.due || e.due <= berlinHeuteYmd();
     // "gesehen" heißt beantwortet, nicht bloß vorhanden: der Merken-Stern legt schon einen
     // Eintrag {marked:true} an, ganz ohne Antwort. Mit !!e zählten solche Fragen fälschlich als
     // geübt - die Lernstand-Schätzung erschien dann schon nach 30 nur gemerkten Fragen, und die
@@ -5997,20 +6011,31 @@ async function adminFetchPendingTheoryResources() {
     }
     return withTheoryFileUrls(data || []);
 }
+// update()/delete() auf Zeilen, die die RLS dem Aufrufer nicht zugesteht, liefern KEINEN Fehler,
+// sondern treffen einfach 0 Zeilen. Ein App-Moderator darf z.B. laut RLS keine fremden
+// route_templates/schools ändern - die Oberfläche zeigte trotzdem "✓ Freigegeben", obwohl nichts
+// passiert war. Deshalb bei diesen Admin-Schreibwegen die getroffenen Zeilen per .select("id")
+// zurückholen und bei 0 Treffern einen Fehler werfen. Bewusst KEINE Erweiterung der RLS.
+function pruefeTreffer(data, was) {
+    if (!data || data.length === 0)
+        throw new Error(was + ": keine Berechtigung oder der Eintrag existiert nicht mehr.");
+}
 async function adminApproveTheoryResource(id) {
-    const { error } = await sb.from("theory_resources")
-        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id);
+    const { data, error } = await sb.from("theory_resources")
+        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Freigabe nicht gespeichert");
 }
 async function adminRejectTheoryResource(id) {
-    const { error } = await sb.from("theory_resources").delete().eq("id", id);
+    const { data, error } = await sb.from("theory_resources").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Ablehnen nicht gespeichert");
 }
 async function proposeRouteTemplate(uid, city, title, strecken, name) {
     const { error } = await sb.from("route_templates").insert({
@@ -6063,19 +6088,21 @@ async function adminFetchPendingRouteTemplates() {
     return data || [];
 }
 async function adminApproveRouteTemplate(id) {
-    const { error } = await sb.from("route_templates")
-        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id);
+    const { data, error } = await sb.from("route_templates")
+        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Freigabe nicht gespeichert");
 }
 async function adminRejectRouteTemplate(id) {
-    const { error } = await sb.from("route_templates").delete().eq("id", id);
+    const { data, error } = await sb.from("route_templates").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Ablehnen nicht gespeichert");
 }
 /* ════════ Fahrschulen (Mandanten) ════════ */
 const DEFAULT_SCHOOL = { name: "Fahrschule", subtitle: "Klasse B", color: "#2B7FFF", logo: "" };
@@ -6463,6 +6490,10 @@ async function fetchOwnSubscription(uid) {
 // DevTools/eigenem Bearer-Token subscription_last_paid beliebig oft selbst setzen, ganz ohne
 // echte PayPal-Zahlung. Die Funktion schreibt serverseitig nur dieses eine Feld, nur für den per
 // Token identifizierten Nutzer selbst, mit serverseitig berechnetem Datum.
+// Antworten der Netlify-Functions erst nach Prüfung als JSON lesen: bei 502/504 von Netlify
+// oder einem Timeout kommt HTML bzw. ein leerer Body, und resp.json() warf dann
+// "Unexpected token <" statt der eigentlichen Meldung. Gleiches Muster in adminFetchAllAccounts,
+// adminDeleteAccount und adminSetSubscription.
 async function markOwnPaymentDone(uid) {
     const { data: sess } = await sb.auth.getSession();
     const token = sess && sess.session && sess.session.access_token;
@@ -6472,9 +6503,9 @@ async function markOwnPaymentDone(uid) {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Speichern fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Speichern fehlgeschlagen (HTTP " + resp.status + ")");
     return data.subscription_last_paid;
 }
 // Dem Abo zustimmen: startet damit die 7-tägige kostenlose Probezeit
@@ -6589,19 +6620,21 @@ async function adminFetchSchools() {
     return (schools || []).map(sc => ({ ...sc, teachers: teacherCount[sc.id] || 0, students: studentCount[sc.id] || 0 }));
 }
 async function adminSaveSchool(sc) {
-    const { error } = await sb.from("schools")
-        .update({ name: sc.name, subtitle: sc.subtitle, color: sc.color }).eq("id", sc.id);
+    const { data, error } = await sb.from("schools")
+        .update({ name: sc.name, subtitle: sc.subtitle, color: sc.color }).eq("id", sc.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Fahrschule nicht gespeichert");
 }
 async function adminDeleteSchool(id) {
-    const { error } = await sb.from("schools").delete().eq("id", id);
+    const { data, error } = await sb.from("schools").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Fahrschule nicht gelöscht");
 }
 // Alle registrierten Konten laden (ruft die geschützte Netlify-Funktion auf, nur für den zentralen Admin)
 async function adminFetchAllAccounts() {
@@ -6612,9 +6645,9 @@ async function adminFetchAllAccounts() {
     const resp = await fetch("/.netlify/functions/admin-list-accounts", {
         headers: { Authorization: "Bearer " + token },
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Konnte Konten nicht laden");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Konnte Konten nicht laden (HTTP " + resp.status + ")");
     return data.accounts || [];
 }
 // Ein Konto vollständig löschen (Profil + echtes Anmelde-Konto), über die geschützte Netlify-Funktion
@@ -6628,9 +6661,9 @@ async function adminDeleteAccount(targetUid) {
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
         body: JSON.stringify({ targetUid }),
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Löschen fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Löschen fehlgeschlagen (HTTP " + resp.status + ")");
     return true;
 }
 // Abo-Status/Betrag eines Fahrlehrers setzen, oder eine Zahlung als heute erledigt markieren.
@@ -6644,17 +6677,18 @@ async function adminSetSubscription(targetUid, patch) {
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
         body: JSON.stringify({ targetUid, ...patch }),
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Speichern fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Speichern fehlgeschlagen (HTTP " + resp.status + ")");
     return data.profile;
 }
 async function adminSaveSchoolLogo(id, logo) {
-    const { error } = await sb.from("schools").update({ logo: logo || "" }).eq("id", id);
+    const { data, error } = await sb.from("schools").update({ logo: logo || "" }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Logo nicht gespeichert");
 }
 // Alle unterschriebenen Leistungen einer Fahrschule laden (über alle Fahrlehrer hinweg).
 // Die Sicherheitsprüfung läuft in der Datenbank-Funktion selbst (nur Fahrschul-Admin/zentraler Admin).
@@ -6808,7 +6842,8 @@ async function fetchSchoolAssignmentLog(schoolId, limit) {
 }
 /* ════════ E-Rechnung (XRechnung, UBL 2.1 nach EN 16931) ════════
    BETA: Die Erzeugung deckt die Pflichtfelder ab und ist rechnerisch in sich konsistent
-   (Positionssumme = Nettobetrag, Netto + Steuer = Brutto, ueber Rundungsfaelle geprueft).
+   (Positionssumme = Nettobetrag, Netto + Steuer + ggf. ausgewiesener Rundungsbetrag =
+   Brutto, ueber Rundungsfaelle geprueft).
    Eine formale Schematron-Pruefung ist im Browser nicht praktikabel - die erste erzeugte
    Datei gehoert einmal durch einen offiziellen Validator, bevor sie an Firmenkunden geht.
    Genau deshalb ist die Funktion in der Oberflaeche als Beta gekennzeichnet.
@@ -6828,16 +6863,42 @@ function buildXRechnung(o) {
   // dann auf die aktuelle Fahrschul-Einstellung zurückfallen, wie bei exportDatev()/exportRechnungen()/
   // invoiceSheet(), statt sie fälschlich als regelbesteuert (19% USt) zu behandeln.
   const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!kUntFallback;
+  // Pflichtangaben, ohne die jeder XRechnung-Validator die Datei ablehnt - lieber hier mit
+  // klarer Meldung abbrechen als eine ungueltige Datei ausliefern (der Aufrufer prueft das
+  // schon vorher mit Hinweis, wo man es eintraegt; das hier ist nur das Sicherheitsnetz).
+  //   BR-DE-1  Zahlungsweg (PaymentMeans) - bei Ueberweisung nur mit IBAN moeglich
+  //   BR-DE-6/7 Telefon und E-Mail des Verkaeufer-Kontakts
+  //   BT-49    elektronische Adresse des Kaeufers (in XRechnung 3.0 Pflicht)
+  if (!seller.iban) throw new Error("IBAN der Fahrschule fehlt (Rechnungsdaten).");
+  if (!seller.tel) throw new Error("Telefonnummer der Fahrschule fehlt (Standorte).");
+  if (!seller.email) throw new Error("E-Mail-Adresse der Fahrschule fehlt.");
+  if (!buyer.email) throw new Error("E-Mail-Adresse des Firmenkunden fehlt (Schülerdaten › Firmenkunde).");
   const satz = kUnt ? 0 : 19;
   const brutto = xrR2(inv.total);
-  // Netto aus der Bruttosumme ableiten, damit die Summe exakt zur gedruckten Rechnung passt.
+  // Netto aus der Bruttosumme ableiten, damit es exakt zur gedruckten Rechnung passt
+  // (dort ebenfalls round(brutto / 1.19)).
   const netto = kUnt ? brutto : xrR2(brutto / 1.19);
-  const steuer = xrR2(brutto - netto);
+  // Steuer nach Pruefregel BR-CO-17 aus dem Netto rechnen (round(netto * Satz)), NICHT als
+  // brutto - netto: bei rund jedem sechsten Betrag weichen beide um 1 Cent ab (z.B. 10,05 EUR:
+  // netto 8,45, brutto - netto = 1,60, aber 8,45 * 19 % = 1,61). Ein anderes Netto hilft dabei
+  // nie - fuer genau diese Betraege gibt es kein Netto n mit n + round(n * 19 %) = brutto
+  // (per Skript ueber alle Betraege bis 3.000 EUR geprueft). Den Cent weist die Datei deshalb
+  // offen als Rundungsbetrag (BT-114) aus, sodass der Zahlbetrag trotzdem exakt der
+  // gedruckten Rechnung entspricht.
+  // In ganzen Cent rechnen: xrR2(netto * 0.19) rundete bei exakten Halb-Cent-Faellen durch
+  // Gleitkomma-Fehler ab (z.B. 1,50 * 19 % = 0,285 ergab 0,28 statt 0,29 - bei 246 Betraegen
+  // bis 3.000 EUR), und genau das prueft BR-CO-17. Cent x Satz ist ganzzahlig, /100 liefert
+  // ein exakt darstellbares x,5 - Math.round rundet das korrekt kaufmaennisch auf.
+  const steuer = kUnt ? 0 : Math.round(Math.round(netto * 100) * satz / 100) / 100;
+  const rundung = xrR2(brutto - netto - steuer);
   // Positionsnetti einzeln runden und die Differenz auf die groesste Position legen -
   // sonst summieren sich Rundungsreste und die Pruefregel "Summe der Positionen =
   // Nettobetrag" schlaegt fehl.
   let pos = (inv.items || []).map((it, i) => ({ i: i + 1, label: it.label || ("Position " + (i + 1)),
     brutto: xrR2(it.amount), netto: kUnt ? xrR2(it.amount) : xrR2(xrR2(it.amount) / 1.19) }));
+  // Hinweis Abzuege (z.B. Empfehlungsbonus als negative Position): ein negativer Einzelpreis
+  // verstoesst gegen BR-27. Solche Positionen werden unten als Menge -1 mit positivem Preis
+  // geschrieben - der Positionsbetrag (Menge x Preis) bleibt dabei negativ und korrekt.
   // Eine Rechnung ohne Einzelpositionen wuerde die Pruefregel "Summe der Positionen =
   // Nettobetrag" verletzen (Summe waere 0). Deshalb eine Sammelposition ueber den Gesamtbetrag.
   if (pos.length === 0)
@@ -6897,11 +6958,10 @@ function buildXRechnung(o) {
   if (buyer.ustId) L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(buyer.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
   L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(buyer.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
   L.push('  </cac:Party></cac:AccountingCustomerParty>');
-  if (seller.iban) {
-    L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
-    L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
-    L.push('  </cac:PaymentMeans>');
-  }
+  // Immer ausgeben: die IBAN ist oben Pflicht (BR-DE-1), 58 = SEPA-Ueberweisung.
+  L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
+  L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
+  L.push('  </cac:PaymentMeans>');
   L.push(`  <cac:PaymentTerms><cbc:Note>Zahlbar bis ${xrEsc(faellig)}</cbc:Note></cac:PaymentTerms>`);
   L.push(`  <cac:TaxTotal><cbc:TaxAmount currencyID="EUR">${xrF2(steuer)}</cbc:TaxAmount>`);
   L.push('    <cac:TaxSubtotal>');
@@ -6914,22 +6974,24 @@ function buildXRechnung(o) {
   L.push('  <cac:LegalMonetaryTotal>');
   L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(netto)}</cbc:LineExtensionAmount>`);
   L.push(`    <cbc:TaxExclusiveAmount currencyID="EUR">${xrF2(netto)}</cbc:TaxExclusiveAmount>`);
-  L.push(`    <cbc:TaxInclusiveAmount currencyID="EUR">${xrF2(brutto)}</cbc:TaxInclusiveAmount>`);
+  L.push(`    <cbc:TaxInclusiveAmount currencyID="EUR">${xrF2(netto + steuer)}</cbc:TaxInclusiveAmount>`);
+  // BT-114 nur bei Bedarf (siehe steuer oben); die UBL-Reihenfolge verlangt es direkt vor PayableAmount.
+  if (rundung !== 0) L.push(`    <cbc:PayableRoundingAmount currencyID="EUR">${xrF2(rundung)}</cbc:PayableRoundingAmount>`);
   L.push(`    <cbc:PayableAmount currencyID="EUR">${xrF2(brutto)}</cbc:PayableAmount>`);
   L.push('  </cac:LegalMonetaryTotal>');
   pos.forEach(p => {
     L.push('  <cac:InvoiceLine>');
     L.push(`    <cbc:ID>${p.i}</cbc:ID>`);
-    L.push('    <cbc:InvoicedQuantity unitCode="C62">1</cbc:InvoicedQuantity>');
+    L.push(`    <cbc:InvoicedQuantity unitCode="C62">${p.netto < 0 ? "-1" : "1"}</cbc:InvoicedQuantity>`);
     L.push(`    <cbc:LineExtensionAmount currencyID="EUR">${xrF2(p.netto)}</cbc:LineExtensionAmount>`);
     L.push(`    <cac:Item><cbc:Name>${xrEsc(p.label)}</cbc:Name>`);
     L.push(`      <cac:ClassifiedTaxCategory><cbc:ID>${kat}</cbc:ID><cbc:Percent>${satz}</cbc:Percent><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:ClassifiedTaxCategory>`);
     L.push('    </cac:Item>');
-    L.push(`    <cac:Price><cbc:PriceAmount currencyID="EUR">${xrF2(p.netto)}</cbc:PriceAmount></cac:Price>`);
+    L.push(`    <cac:Price><cbc:PriceAmount currencyID="EUR">${xrF2(Math.abs(p.netto))}</cbc:PriceAmount></cac:Price>`);
     L.push('  </cac:InvoiceLine>');
   });
   L.push('</ubl:Invoice>');
-  return { xml: L.join("\n"), netto, steuer, brutto, positionen: pos };
+  return { xml: L.join("\n"), netto, steuer, brutto, rundung, positionen: pos };
 }
 // KI-Erklärung zu einer Theoriefrage. Läuft über eine eigene Netlify-Function, weil der
 // API-Schlüssel niemals in den Client gehört. Absicherung dort wie beim Buchungs-Chat über
@@ -7099,19 +7161,61 @@ async function withNetworkRetry(fn, tries) {
     }
     throw lastErr;
 }
+// Eine UUID aus dem Client für neue Zeilen. Hintergrund: withNetworkRetry wiederholt bei
+// "Load failed" - ging dabei aber nur die ANTWORT verloren, war der Insert auf dem Server längst
+// durch und die Wiederholung legte einen zweiten, identischen Termin/Prüfplatz/Interessenten an.
+// Mit fester id trifft die Wiederholung stattdessen auf den Primärschlüssel (siehe insertEinmal).
+// Die id-Spalten (appointments, exam_slots, interessenten, students) sind uuid mit
+// gen_random_uuid() als Vorgabe und nehmen eine mitgeschickte id an.
+function neueClientUuid() {
+    try {
+        if (window.crypto && window.crypto.randomUUID)
+            return window.crypto.randomUUID();
+        if (window.crypto && window.crypto.getRandomValues) {
+            const b = new Uint8Array(16);
+            window.crypto.getRandomValues(b);
+            b[6] = (b[6] & 0x0f) | 0x40; // Version 4
+            b[8] = (b[8] & 0x3f) | 0x80; // Variante RFC 4122
+            const h = Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
+            return h.slice(0, 8) + "-" + h.slice(8, 12) + "-" + h.slice(12, 16) + "-" + h.slice(16, 20) + "-" + h.slice(20);
+        }
+    }
+    catch (e) { }
+    return null;
+}
+// Insert, der bei Netzabbrüchen gefahrlos wiederholt werden darf. Meldet die Wiederholung
+// 23505 (Schlüssel schon vorhanden), ist das unsere eigene Zeile aus dem vorigen Versuch - die
+// id ist zufällig und nur hier bekannt -, also diese Zeile holen statt einen Fehler zu zeigen.
+// Ohne Krypto-Zufall (uralter Browser) gibt es keine feste id; dann lieber gar nicht
+// wiederholen als doppelt anlegen.
+async function insertEinmal(table, row, meldung) {
+    const id = neueClientUuid();
+    const zeile = id ? { ...row, id } : row;
+    return await withNetworkRetry(async () => {
+        const { data, error } = await sb.from(table).insert(zeile).select().single();
+        if (!error)
+            return data;
+        if (id && error.code === "23505") {
+            const { data: vorhanden, error: leseFehler } = await sb.from(table).select("*").eq("id", id).maybeSingle();
+            if (vorhanden)
+                return vorhanden;
+            // Bricht genau dieses Nachladen wieder am Netz ab, den Netzfehler werfen statt der
+            // 23505-Meldung: nur so wiederholt withNetworkRetry (Insert -> 23505 -> Nachladen).
+            // Sonst sah der Nutzer "duplicate key", obwohl der Eintrag gespeichert ist, und legte
+            // ihn womöglich von Hand ein zweites Mal an.
+            if (leseFehler && isTransientNetworkError(leseFehler))
+                throw new Error(leseFehler.message);
+        }
+        console.error(error);
+        throw new Error(error.message || meldung || "Speichern fehlgeschlagen");
+    }, id ? 3 : 1);
+}
 async function dbInsertAppt(uid, appt) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST" }; }
     const row = { owner: uid, student_id: appt.student_id || null, title: appt.title || "",
         start_at: appt.start_at, end_at: appt.end_at || null, status: appt.status || "confirmed", note: appt.note || "",
         art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null };
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("appointments").insert(row).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-        return data;
-    });
+    return await insertEinmal("appointments", row, "Termin konnte nicht gespeichert werden");
 }
 async function dbUpdateAppt(id, patch) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
@@ -7151,14 +7255,7 @@ async function fetchExamSlots(uid) {
 async function dbInsertExamSlot(uid, slot) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Prüfplätze werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit||null, ort: slot.ort||null, student_id: null, status: "frei" }; }
     const row = { owner: uid, art: slot.art, datum: slot.datum, zeit: slot.zeit || null, ort: slot.ort || null };
-    return await withNetworkRetry(async () => {
-        const { data, error } = await sb.from("exam_slots").insert(row).select().single();
-        if (error) {
-            console.error(error);
-            throw new Error(error.message);
-        }
-        return data;
-    });
+    return await insertEinmal("exam_slots", row, "Prüfplatz konnte nicht gespeichert werden");
 }
 async function dbUpdateExamSlot(id, patch) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
@@ -7303,17 +7400,25 @@ async function uploadStaffFile(schoolId, instructorUid, uploadedBy, file, catego
     return data;
 }
 async function deleteStaffFile(f) {
-    try {
-        await sb.storage.from("staff-files").remove([f.storage_path]);
+    // Reihenfolge bewusst: erst die Datei, dann die Zeile - und ein Storage-Fehler bricht ab.
+    // Vorher wurde der Fehler von remove() (kommt als {error}, nicht als Exception) übergangen
+    // und die Zeile trotzdem gelöscht: die Datei mit personenbezogenen Daten blieb dann im
+    // Bucket, ohne dass sie in der App noch auftaucht oder je wieder gelöscht werden kann.
+    // So bleibt bei einem Fehler die Zeile stehen und "Löschen" lässt sich einfach wiederholen
+    // (remove() auf eine schon entfernte Datei meldet keinen Fehler). Anders als deleteVideo():
+    // dort ist eine verwaiste Datei harmlos, hier geht es um Ausweise, Sehtests usw.
+    const { error: storageErr } = await sb.storage.from("staff-files").remove([f.storage_path]);
+    if (storageErr) {
+        console.error(storageErr);
+        throw new Error("Datei konnte nicht gelöscht werden: " + (storageErr.message || "Speicherfehler"));
     }
-    catch (e) {
-        console.error(e);
-    }
-    const { error } = await sb.from("staff_files").delete().eq("id", f.id);
+    const { data, error } = await sb.from("staff_files").delete().eq("id", f.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    if (!data || data.length === 0)
+        throw new Error("Eintrag konnte nicht gelöscht werden (keine Berechtigung oder schon entfernt).");
 }
 // Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
 async function staffFileSignedUrl(path) {
@@ -7365,17 +7470,19 @@ async function uploadStudentFile(studentId, ownerUid, file, category) {
     return data;
 }
 async function deleteStudentFile(f) {
-    try {
-        await sb.storage.from("student-files").remove([f.storage_path]);
+    // Gleiche Reihenfolge und Begründung wie deleteStaffFile().
+    const { error: storageErr } = await sb.storage.from("student-files").remove([f.storage_path]);
+    if (storageErr) {
+        console.error(storageErr);
+        throw new Error("Datei konnte nicht gelöscht werden: " + (storageErr.message || "Speicherfehler"));
     }
-    catch (e) {
-        console.error(e);
-    }
-    const { error } = await sb.from("student_files").delete().eq("id", f.id);
+    const { data, error } = await sb.from("student_files").delete().eq("id", f.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    if (!data || data.length === 0)
+        throw new Error("Eintrag konnte nicht gelöscht werden (keine Berechtigung oder schon entfernt).");
 }
 async function studentFileSignedUrl(path) {
     const { data, error } = await sb.storage.from("student-files").createSignedUrl(path, 3600);
@@ -7456,7 +7563,9 @@ async function publicVideos(code) {
     const { data, error } = await sbPublic.rpc("public_videos", { code });
     if (error) {
         console.error(error);
-        return [];
+        // Werfen statt [] - sonst zeigte VideoLibrary bei einem Netz-/Serverfehler "Es sind noch
+        // keine Videos hinterlegt." statt ihres eigenen Fehlerzweigs (catch -> list = null).
+        throw new Error(error.message || "Videos konnten nicht geladen werden.");
     }
     return data || [];
 }
@@ -7771,8 +7880,11 @@ async function fetchCalCode(schoolId) {
     return fresh;
 }
 // Fahrschul-Infos + Fahrzeuge über den Kalender-Code (öffentlich, für Link-Nutzer)
+// Alle cal_*-RPCs laufen über sbPublic (anonym): sie prüfen allein den Kalender-Code und sind
+// für anon freigegeben. Über sb schickte ein Gerät mit abgelaufener Sitzung ein totes Token mit
+// und bekam 401 - der geteilte Fahrzeugkalender blieb dann leer, obwohl der Code gültig war.
 async function calInfo(code) {
-    const { data, error } = await sb.rpc("cal_info", { p_code: code });
+    const { data, error } = await sbPublic.rpc("cal_info", { p_code: code });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -7781,7 +7893,7 @@ async function calInfo(code) {
 }
 // Buchungen eines Zeitraums über den Kalender-Code
 async function calBookings(code, von, bis) {
-    const { data, error } = await sb.rpc("cal_bookings", { p_code: code, von, bis });
+    const { data, error } = await sbPublic.rpc("cal_bookings", { p_code: code, von, bis });
     if (error) {
         console.error(error);
         throw new Error(error.message);
@@ -7790,7 +7902,7 @@ async function calBookings(code, von, bis) {
 }
 // Buchung anlegen (mit Überschneidungsprüfung in der Datenbank)
 async function calBook(code, vehicleId, teacherName, start, end, note) {
-    const { data, error } = await sb.rpc("cal_book", { p_code: code, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
+    const { data, error } = await sbPublic.rpc("cal_book", { p_code: code, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
     if (error) {
         throw new Error(error.message);
     }
@@ -7800,7 +7912,7 @@ async function calBook(code, vehicleId, teacherName, start, end, note) {
 // Transaktion, eigene Zeile per p_id ausgenommen) statt Löschen+Neuanlegen mit einem Zeitfenster
 // dazwischen, in dem das Fahrzeug scheinbar frei ist.
 async function calBookUpdate(code, id, vehicleId, teacherName, start, end, note) {
-    const { data, error } = await sb.rpc("cal_book_update", { p_code: code, p_id: id, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
+    const { data, error } = await sbPublic.rpc("cal_book_update", { p_code: code, p_id: id, p_vehicle_id: vehicleId, p_teacher_name: teacherName, p_start: start, p_end: end, p_note: note || null });
     if (error) {
         throw new Error(error.message);
     }
@@ -7808,7 +7920,7 @@ async function calBookUpdate(code, id, vehicleId, teacherName, start, end, note)
 }
 // Buchung löschen
 async function calDelete(code, id) {
-    const { error } = await sb.rpc("cal_delete", { p_code: code, p_id: id });
+    const { error } = await sbPublic.rpc("cal_delete", { p_code: code, p_id: id });
     if (error) {
         throw new Error(error.message);
     }
@@ -11340,7 +11452,12 @@ function App() {
     useEffect(() => {
         try {
             const seen = localStorage.getItem("v3_last_seen_version");
-            if (seen && seen !== APP_VERSION && !IS_DEMO()) {
+            // Nur automatisch öffnen, wenn der oberste CHANGELOG-Eintrag wirklich zu dieser Version
+            // gehört. Hinkt das CHANGELOG hinterher (z.B. oben noch 2.6.5 bei APP_VERSION 2.9.x),
+            // zeigte das Modal sonst nach JEDEM Update denselben alten Stand als "Aktuell" - dann
+            // lieber nur der kurze Update-Hinweis darunter (changelogWillShowRef bleibt false).
+            const changelogAktuell = CHANGELOG.length > 0 && CHANGELOG[0].v === APP_VERSION;
+            if (seen && seen !== APP_VERSION && changelogAktuell && !IS_DEMO()) {
                 changelogWillShowRef.current = true;
                 setShowChangelog(true);
             }
@@ -14660,6 +14777,34 @@ function App() {
                 showToast("Dieser Schüler ist nicht als Firmenkunde hinterlegt. Firmenname und Anschrift stehen unter Schülerdaten.");
                 return;
             }
+            // Weitere XRechnung-Pflichtangaben vorab prüfen und sagen, WO sie fehlen - sonst
+            // entstand eine Datei, die jeder Validator ablehnt (BR-DE-1 Zahlungsweg ohne IBAN,
+            // BR-DE-6/7 Telefon/E-Mail des Verkäufers, BT-49 E-Mail des Käufers).
+            if (!iv.iban) {
+                showToast("Für eine E-Rechnung braucht es deine IBAN (Zahlung per Überweisung). Bitte unter Einstellungen › Rechnungsdaten eintragen.");
+                return;
+            }
+            const ibanPruefung = validateIban(iv.iban);
+            if (!ibanPruefung.valid) {
+                showToast("Die IBAN in den Rechnungsdaten ist ungültig (" + ibanPruefung.reason + "). Bitte unter Einstellungen › Rechnungsdaten korrigieren.");
+                return;
+            }
+            // Telefon/E-Mail der Fahrschule stehen an den Standorten: zuerst der Standort des
+            // Schülers, sonst der erste Standort, der die Angabe hat. E-Mail notfalls die Login-
+            // Adresse (wie bisher).
+            const standorte = ((school && school.locations) || []).filter(Boolean);
+            const stuStandort = standorte.find(l => l.id === stu.location_id) || null;
+            const vkTel = (stuStandort && stuStandort.phone) || ((standorte.find(l => l.phone) || {}).phone) || "";
+            const vkMail = (stuStandort && stuStandort.email) || ((standorte.find(l => l.email) || {}).email)
+                || (session && session.user && session.user.email) || "";
+            if (!vkTel) {
+                showToast("Für eine E-Rechnung braucht es eine Telefonnummer der Fahrschule. Bitte unter Einstellungen › Standorte beim Standort eintragen.");
+                return;
+            }
+            if (!stu.firmaEmail) {
+                showToast("Für eine E-Rechnung braucht es die E-Mail-Adresse der Firma für den Rechnungsempfang. Bitte in den Schülerdaten unter Firmenkunde eintragen.");
+                return;
+            }
             // "PLZ Ort" aus einem Feld trennen - die App speichert beides zusammen.
             const teile = (t) => { const m = String(t || "").match(/^\s*(\d{4,5})\s+(.+)$/); return m ? { plz: m[1], ort: m[2].trim() } : { plz: "", ort: String(t || "").trim() }; };
             const vk = teile(iv.plzOrt);
@@ -14668,9 +14813,9 @@ function App() {
                 inv,
                 seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
                     plz: vk.plz, ort: vk.ort, ustId: iv.ustId || "", steuernummer: iv.steuernummer || "",
-                    iban: iv.iban || "", email: (session && session.user && session.user.email) || "" },
+                    iban: ibanPruefung.iban, tel: vkTel, email: vkMail },
                 buyer: { name: stu.firmaName, strasse: stu.firmaStrasse || "", plz: kd.plz, ort: kd.ort,
-                    ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "" },
+                    ustId: stu.firmaUstId || "", referenz: stu.firmaReferenz || "", email: String(stu.firmaEmail).trim() },
                 zahlungszielTage: zahlungszielTage,
                 kUntFallback: !!iv.kleinunternehmer,
             });
@@ -21338,6 +21483,12 @@ function App() {
                         React.createElement("label", null, "PLZ und Ort",
                         React.createElement("input", { type: "text", defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
                             onBlur: e => { if (e.target.value !== (active.firmaPlzOrt || "")) updateActive({ firmaPlzOrt: e.target.value }); } }))),
+                    // Pflicht für die XRechnung (BT-49, elektronische Adresse des Käufers) -
+                    // die Schüler-Daten haben sonst keine E-Mail-Adresse der Firma.
+                    React.createElement("div", { className: "field" },
+                        React.createElement("label", null, "E-Mail für Rechnungen (für E-Rechnung nötig)",
+                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
+                            onBlur: e => { if (e.target.value.trim() !== (active.firmaEmail || "")) updateActive({ firmaEmail: e.target.value.trim() }); } }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "USt-IdNr. (optional)",
                         React.createElement("input", { type: "text", defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
@@ -28649,7 +28800,8 @@ function App() {
                                 color: idx === 0 ? "var(--orange-deep)" : "var(--ink)" } },
                             "Version ",
                             entry.v),
-                        idx === 0 && React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#fff", background: "var(--orange)",
+                        // "Aktuell" nur, wenn der Eintrag tatsächlich die laufende Version beschreibt.
+                        idx === 0 && entry.v === APP_VERSION && React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#fff", background: "var(--orange)",
                                 borderRadius: 5, padding: "2px 7px", textTransform: "uppercase", letterSpacing: ".05em" } }, "Aktuell"),
                         React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", marginLeft: "auto" } }, entry.date)),
                     React.createElement("ul", { style: { margin: 0, paddingLeft: 18, fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6 } }, entry.changes.map((c, i) => React.createElement("li", { key: i, style: { marginBottom: 3 } }, c))))),
