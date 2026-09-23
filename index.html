@@ -11458,23 +11458,29 @@ function App() {
     // erhalten bleibt, bis sie abgeschlossen oder abgebrochen wird.
     const [pruefungssim, setPruefungssim] = useState(null); // null | {studentId,studentName,startedAt,step,draft,entries}
     const [pruefungssimTick, setPruefungssimTick] = useState(0); // erzwingt den Sekunden-Refresh der Laufzeit-Anzeige
+    // "Läuft" heißt: noch nicht abgeschlossen. Nach dem Speichern bleibt die Sitzung nur für den
+    // Zusammenfassungs-Bildschirm stehen - verlässt man ihn per Reiter statt über "Fertig", darf
+    // sie weder als roter Balken weiterlaufen noch eine neue Simulation blockieren.
+    const pruefungssimLaeuft = !!pruefungssim && pruefungssim.step !== "summary";
     useEffect(() => {
-        if (!pruefungssim)
+        if (!pruefungssimLaeuft)
             return;
         const t = setInterval(() => setPruefungssimTick(x => x + 1), 1000);
         return () => clearInterval(t);
-    }, [!!pruefungssim]);
+    }, [pruefungssimLaeuft]);
     // Schaltkompetenz-Pilot: gleiches "läuft weiter beim Navigieren"-Muster wie die
     // Prüfungssimulation, aber ohne Mehrschritt-Flow - ein fester Punktekatalog, jeder Punkt
     // einfach gut/schlecht getippt.
     const [schaltkompetenz, setSchaltkompetenz] = useState(null); // null | {studentId,studentName,startedAt,items,notiz}
     const [skTick, setSkTick] = useState(0);
+    // Wie pruefungssimLaeuft: ein abgeschlossener Test (finished) läuft nicht mehr.
+    const schaltkompetenzLaeuft = !!schaltkompetenz && !schaltkompetenz.finished;
     useEffect(() => {
-        if (!schaltkompetenz)
+        if (!schaltkompetenzLaeuft)
             return;
         const t = setInterval(() => setSkTick(x => x + 1), 1000);
         return () => clearInterval(t);
-    }, [!!schaltkompetenz]);
+    }, [schaltkompetenzLaeuft]);
     // Welcher gespeicherte Schaltkompetenz-Test gerade fürs PDF vorbereitet ist - unabhängig vom
     // laufenden Test, damit auch alte Tests aus dem Verlauf heraus gedruckt werden können.
     const [skPrintTarget, setSkPrintTarget] = useState(null); // null | {stu, sim}
@@ -15879,11 +15885,11 @@ function App() {
         // Dieselbe Absicherung wie bei der Streckenaufzeichnung: löscht man den Schüler während einer
         // laufenden Prüfungssimulation, sucht finishPruefungssim() ihn beim Abschließen in der neu
         // geladenen Liste vergeblich (und ein Undo würde ohnehin eine neue, andere ID vergeben).
-        if (pruefungssim && pruefungssim.studentId === s.id) {
+        if (pruefungssimLaeuft && pruefungssim.studentId === s.id) {
             showToast("Für " + dispName(s) + " läuft gerade eine Prüfungssimulation. Bitte zuerst abschließen oder abbrechen, bevor der Schüler gelöscht wird.");
             return;
         }
-        if (schaltkompetenz && schaltkompetenz.studentId === s.id) {
+        if (schaltkompetenzLaeuft && schaltkompetenz.studentId === s.id) {
             showToast("Für " + dispName(s) + " läuft gerade ein Schaltkompetenz-Test. Bitte zuerst abschließen oder abbrechen, bevor der Schüler gelöscht wird.");
             return;
         }
@@ -16273,7 +16279,8 @@ function App() {
     };
     // ── Prüfungssimulation (läuft wie die Streckenaufzeichnung weiter beim Navigieren) ──
     function startPruefungssim(studentId) {
-        if (pruefungssim) {
+        // Eine bereits abgeschlossene (gespeicherte) Sitzung wird unten einfach ersetzt.
+        if (pruefungssimLaeuft) {
             showToast("Es läuft bereits eine Prüfungssimulation. Bitte zuerst beenden.");
             return;
         }
@@ -16380,7 +16387,8 @@ function App() {
     }
     // ── Schaltkompetenz-Pilot (läuft wie die Prüfungssimulation weiter beim Navigieren) ──
     function startSchaltkompetenz(studentId) {
-        if (schaltkompetenz) {
+        // Ein bereits abgeschlossener (gespeicherter) Test wird unten einfach ersetzt.
+        if (schaltkompetenzLaeuft) {
             showToast("Es läuft bereits ein Schaltkompetenz-Test. Bitte zuerst abschließen.");
             return;
         }
@@ -18909,6 +18917,9 @@ function App() {
         }
         // step === "running": "Was ist passiert?"
         const elapsedSec = (Date.now() - p.startedAt) / 1000;
+        // Der Abschluss-Knopf hieß immer "Alles unauffällig" - auch wenn schon Fehler erfasst
+        // waren. Das war der einzige Weg zum Speichern und las sich wie "Fehler verwerfen".
+        const laufFehler = p.entries.filter(e => e.type === "fehler").length;
         return React.createElement("div", { className: "pad" },
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } },
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, p.studentName),
@@ -18932,8 +18943,10 @@ function App() {
                     onClick: finishPruefungssim },
                 React.createElement("span", { className: "home-iconchip", style: { background: "#E4F3E9", color: "var(--green)" } }, "✓"),
                 React.createElement("span", { style: { flex: 1 } },
-                    React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 15 } }, "Alles unauffällig"),
-                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, "Simulation ohne Auffälligkeit abschließen"))),
+                    React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 15 } }, laufFehler > 0 ? "Simulation abschließen" : "Alles unauffällig"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } }, laufFehler > 0
+                        ? "Mit " + (laufFehler === 1 ? "1 erfassten Fehler" : laufFehler + " erfassten Fehlern") + " speichern und auswerten"
+                        : "Simulation ohne Auffälligkeit abschließen"))),
             React.createElement("button", { className: "card", style: { width: "100%", textAlign: "left", padding: "14px 15px", marginBottom: 18, display: "flex", alignItems: "center", gap: 12 },
                     onClick: () => setPruefungssim(prev => prev && ({ ...prev, step: "freitext" })) },
                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--field-bg)", color: "var(--ink-2)" } }, "✎"),
@@ -19125,12 +19138,31 @@ function App() {
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 11px" } }, "Dein Fahrschul-Admin hat f\u00FCr Klasse " + vk + " eine ADK/Strecken-Vorlage hinterlegt. Du kannst sie als Ausgangspunkt \u00FCbernehmen und danach weiterhin f\u00FCr dich selbst anpassen."),
                 React.createElement("div", { style: { display: "flex", gap: 8 } },
                     React.createElement("button", { className: "btn btn-primary", style: { flex: 1, fontSize: 13, padding: "9px 12px" }, onClick: async () => {
+                            // Das Angebot erscheint auch, wenn man für diese Klasse schon eine eigene
+                            // Vorlage hat - ein Tipp ersetzte sie bisher ohne Rückfrage und ohne Weg zurück.
+                            const vorherTpl = tplRef.current;
+                            const vorherKlasse = vorherTpl && vorherTpl.byKlasse ? vorherTpl.byKlasse[vk] : undefined;
+                            if (vorherKlasse && !(await askConfirm({ title: "Eigene Vorlage ersetzen?", confirmLabel: "Ersetzen", danger: true,
+                                message: "Du hast f\u00FCr Klasse " + vk + " schon eine eigene ADK/Strecken-Vorlage. Sie wird durch die Vorlage deiner Fahrschule ersetzt und gilt f\u00FCr alle deine Sch\u00FCler dieser Klasse." })))
+                                return;
+                            const vorherSugg = adminTplSuggestion;
                             const next = { adk: deepCopy(suggestion.adk && suggestion.adk.length ? suggestion.adk : tplFor(vk).adk),
                                 strecken: deepCopy(suggestion.strecken || []),
                                 adkTitel: suggestion.adkTitel || tplFor(vk).adkTitel, streckenTitel: suggestion.streckenTitel || tplFor(vk).streckenTitel };
                             writeTplForKlasse(vk, next);
                             setAdminTplSuggestion(null);
-                            showFlash("✓ Vorlage übernommen");
+                            // Rückgängig stellt nur diese eine Klasse wieder her (gegen den aktuellen
+                            // Stand, damit andere Klassen-Änderungen erhalten bleiben).
+                            showUndo("Vorlage \u00FCbernommen", () => {
+                                const cur = tplRef.current || {};
+                                const byKlasse = { ...(cur.byKlasse || {}) };
+                                if (vorherKlasse)
+                                    byKlasse[vk] = vorherKlasse;
+                                else
+                                    delete byKlasse[vk];
+                                writeTemplate({ ...cur, byKlasse });
+                                setAdminTplSuggestion(vorherSugg);
+                            });
                         } }, "Vorlage \u00FCbernehmen"),
                     React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 13, padding: "9px 12px" }, onClick: () => setAdminTplSuggestion(null) }, "Nicht jetzt"))),
             React.createElement("div", { className: "seg", role: "tablist" }, [["adk", "ADK"], ["strecken", "Strecken"], ["beide", "Beide"], ["reife", "Reife"]].map(([k, l]) => React.createElement("button", { key: k, className: ueberTab === k ? "on" : "", onClick: () => setUeberTab(k) }, l))),
@@ -19816,6 +19848,17 @@ function App() {
         }
         return greet + "der offene Betrag ist leider immer noch nicht ausgeglichen. " + betragZeile + " Bitte melde dich zeitnah bei mir, damit wir das klären können." + ibanZeile;
     }
+    // Erinnerungen zur AKTUELLEN Schuld: nur die nach der letzten Zahlung. Vorher zählte jede je
+    // verschickte Erinnerung mit - wer vor Monaten zweimal erinnert wurde und bezahlt hatte, bekam
+    // für eine neue Rechnung sofort den schärfsten Text. Zahlt der Schüler (auch teilweise),
+    // beginnt die Staffel wieder freundlich.
+    function laufendeErinnerungen(stu) {
+        const letzteZahlung = (stu.payments || []).reduce((m, pm) => {
+            const d = pm && pm.date ? String(pm.date).slice(0, 10) : "";
+            return d > m ? d : m;
+        }, "");
+        return (stu.reminders || []).filter(r => r && r.date && String(r.date).slice(0, 10) > letzteZahlung);
+    }
     function sendReminder() {
         if (!active)
             return;
@@ -19834,7 +19877,7 @@ function App() {
             showToast("Für " + dispName(active) + " ist keine Telefonnummer hinterlegt.");
             return;
         }
-        const stage = (active.reminders || []).length + 1;
+        const stage = laufendeErinnerungen(active).length + 1;
         const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
         const text = reminderText(stage, active, open, lastInvoice);
         const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
@@ -19858,6 +19901,7 @@ function App() {
         const lessons = active.drivenLessons || [];
         const invoices = active.invoices || [];
         const reminders = active.reminders || [];
+        const naechsteStufe = laufendeErinnerungen(active).length + 1;
         const contracts = active.contracts || [];
         function addItem() {
             setItemForm({ label: "", amount: "", error: "" });
@@ -19971,7 +20015,7 @@ function App() {
                 open > 0.005 && React.createElement("button", { className: "btn btn-primary", style: { marginTop: 12, gap: 7 }, onClick: sendReminder },
                     React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "currentColor" },
                         React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z" })),
-                    reminders.length === 0 ? "Zahlungserinnerung senden" : (reminders.length + ". Erinnerung senden")),
+                    naechsteStufe === 1 ? "Zahlungserinnerung senden" : (naechsteStufe + ". Erinnerung senden")),
                 reminders.length > 0 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 8 } },
                     "Zuletzt erinnert am ",
                     new Date(reminders[reminders.length - 1].date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }),
@@ -28150,7 +28194,7 @@ function App() {
                                 border: "none", borderRadius: "var(--r-pill)", padding: "8px 14px", minHeight: 44, fontSize: 13 } }, "Stoppen"),
                         React.createElement("button", { onClick: async () => { if (await askConfirm({ message: "Aufzeichnung verwerfen?" }))
                                 stopRecording(false); }, "aria-label": "Verwerfen", style: { flexShrink: 0, background: "rgba(255,255,255,.2)", color: "#fff", border: "none", borderRadius: 10, padding: "8px 10px", minWidth: 44, minHeight: 44, fontSize: 15 } }, "\u00D7"))),
-                pruefungssim && view !== "pruefungssim" && React.createElement("div", { className: "rec-pill", style: { position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom,0px) + 88px)",
+                pruefungssimLaeuft && view !== "pruefungssim" && React.createElement("div", { className: "rec-pill", style: { position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom,0px) + 88px)",
                         zIndex: 95, display: "flex", justifyContent: "center", padding: "0 10px", pointerEvents: "none" } },
                     React.createElement("button", { onClick: () => setView("pruefungssim"), style: { pointerEvents: "auto", width: "100%", maxWidth: 520, display: "flex", alignItems: "center", gap: 10, textAlign: "left",
                             background: "#B3362A", color: "#fff", border: "none", borderRadius: 14, padding: "9px 12px", boxShadow: "0 6px 22px rgba(0,0,0,.3)" } },
@@ -28158,7 +28202,7 @@ function App() {
                         React.createElement("div", { style: { flex: 1, minWidth: 0, lineHeight: 1.2 } },
                             React.createElement("div", { style: { fontWeight: 800, fontSize: 13.5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "Pr\u00FCfungssimulation \u00B7 " + pruefungssim.studentName),
                             React.createElement("div", { style: { fontSize: 12, opacity: .9 } }, pruefungssimFmtZeit((Date.now() - pruefungssim.startedAt) / 1000) + " \u00B7 zur\u00FCck zur Simulation")))),
-                schaltkompetenz && view !== "schaltkompetenz" && React.createElement("div", { className: "rec-pill", style: { position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom,0px) + 88px)",
+                schaltkompetenzLaeuft && view !== "schaltkompetenz" && React.createElement("div", { className: "rec-pill", style: { position: "fixed", left: 0, right: 0, bottom: "calc(env(safe-area-inset-bottom,0px) + 88px)",
                         zIndex: 95, display: "flex", justifyContent: "center", padding: "0 10px", pointerEvents: "none" } },
                     React.createElement("button", { onClick: () => setView("schaltkompetenz"), style: { pointerEvents: "auto", width: "100%", maxWidth: 520, display: "flex", alignItems: "center", gap: 10, textAlign: "left",
                             background: "#B36B00", color: "#fff", border: "none", borderRadius: 14, padding: "9px 12px", boxShadow: "0 6px 22px rgba(0,0,0,.3)" } },
