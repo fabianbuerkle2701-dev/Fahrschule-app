@@ -44,14 +44,27 @@ function icsEscape(s) {
 }
 function foldLine(line) {
   // RFC 5545: Zeilen über 75 Oktett müssen umgebrochen werden (Fortsetzung mit einem Leerzeichen).
-  if (line.length <= 75) return line;
-  let out = line.slice(0, 75);
-  let rest = line.slice(75);
-  while (rest.length > 0) {
-    out += "\r\n " + rest.slice(0, 74);
-    rest = rest.slice(74);
+  // Gezählt wird in UTF-8-Bytes, nicht in Zeichen - vorher wurde nach Zeichen gefaltet, und eine
+  // Zeile mit vielen Umlauten ("Überlandfahrt", "Prüfungsfahrt" ...) war pro Stück trotzdem länger
+  // als 75 Byte. Getrennt wird nur zwischen ganzen Zeichen, nie mitten in einem Multibyte-Zeichen.
+  if (Buffer.byteLength(line, "utf8") <= 75) return line;
+  const teile = [];
+  let aktuell = "";
+  let bytes = 0;
+  let grenze = 75; // erste Zeile 75, jede Fortsetzung 74 (plus das führende Leerzeichen = 75)
+  for (const zeichen of line) {
+    const b = Buffer.byteLength(zeichen, "utf8");
+    if (bytes + b > grenze) {
+      teile.push(aktuell);
+      aktuell = "";
+      bytes = 0;
+      grenze = 74;
+    }
+    aktuell += zeichen;
+    bytes += b;
   }
-  return out;
+  teile.push(aktuell);
+  return teile.join("\r\n ");
 }
 
 exports.handler = async function (event) {

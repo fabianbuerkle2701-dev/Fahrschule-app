@@ -62,17 +62,28 @@ exports.handler = async function (event) {
       return { statusCode: 403, headers, body: JSON.stringify({ error: "Nur der zentrale App-Admin darf diese Liste sehen." }) };
     }
 
-    // Alle Auth-Konten holen (Supabase liefert Seiten zu je 50, wir holen bis zu 500)
+    // Alle Auth-Konten holen, seitenweise bis zur letzten (kürzeren) Seite. Vorher war bei 10
+    // Seiten (500 Konten) hart Schluss, und ein fehlgeschlagener Seitenabruf brach mit "break"
+    // stumm ab - die Liste war dann kommentarlos unvollständig, genau die Falschanzeige, die
+    // ladeAlleZeilen() oben für profiles/schools extra verhindert. Jetzt gleiche Haltung:
+    // lieber ein klarer Fehler als eine still gekappte Liste.
     let allUsers = [];
-    for (let page = 1; page <= 10; page++) {
-      const resp = await fetch(SUPABASE_URL + "/auth/v1/admin/users?page=" + page + "&per_page=50", {
+    const proSeite = 50;
+    let vollstaendig = false;
+    for (let page = 1; page <= 400; page++) {
+      const resp = await fetch(SUPABASE_URL + "/auth/v1/admin/users?page=" + page + "&per_page=" + proSeite, {
         headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
       });
-      if (!resp.ok) break;
+      if (!resp.ok) {
+        return { statusCode: 502, headers, body: JSON.stringify({ error: "Konten konnten nicht vollständig geladen werden (Seite " + page + ", HTTP " + resp.status + ")." }) };
+      }
       const data = await resp.json();
       const users = (data && data.users) || [];
       allUsers = allUsers.concat(users);
-      if (users.length < 50) break;
+      if (users.length < proSeite) { vollstaendig = true; break; }
+    }
+    if (!vollstaendig) {
+      return { statusCode: 502, headers, body: JSON.stringify({ error: "Mehr als " + allUsers.length + " Konten - Liste wäre unvollständig." }) };
     }
 
     // Profile dazu laden (Fahrschule, Admin-Status, Abo-Status)
