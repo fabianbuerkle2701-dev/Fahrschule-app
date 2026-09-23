@@ -8646,7 +8646,9 @@ function packageCreditUE(s) {
 // übernommen hat (dann gibt es kein Guthaben, das "knapp" werden könnte, im Unterschied zu 0,
 // was ein aufgebrauchtes Paket bedeutet). Zieht einfach alle gefahrenen UE vom Gesamt-Guthaben
 // ab, dieselbe Rechnung wie lessonBillables, nur ohne die einzelnen Stunden aufzuschlüsseln.
-function packageRemainingUE(s) {
+// stdPrice: Standardpreis der Fahrschule - nur für die Rückrechnung alter Rechnungen ohne
+// Deckungs-Schnappschuss nötig (rekonstruierteDeckungUE rechnet über Euro-Beträge).
+function packageRemainingUE(s, stdPrice) {
     const credit = packageCreditUE(s);
     if (credit <= 0)
         return null;
@@ -8654,15 +8656,63 @@ function packageRemainingUE(s) {
     // lessonBillables) statt naiv jede je gefahrene UE abzuziehen - sonst zeigt ein frisch
     // gekauftes Paket sofort "aufgebraucht", wenn der Schüler vorher schon (regulär abgerechnete)
     // Stunden gefahren ist, die mit diesem Paket gar nichts zu tun haben.
-    const usedUE = lessonBillables(s, 0).reduce((sum, b) => sum + b.coveredUE, 0);
+    const usedUE = lessonBillables(s, stdPrice || 0).reduce((sum, b) => sum + b.coveredUE, 0);
     return Math.max(0, credit - usedUE);
 }
 // Rechnet das Paket-Guthaben chronologisch gegen die gefahrenen Stunden auf: die frühesten
 // Stunden gelten zuerst als "im Paket enthalten", der Rest wird normal (ggf. mit eigenem
 // Stundenpreis) berechnet. Eine Fahrstunde kann teils gedeckt, teils berechnet sein.
+// Für abgerechnete Stunden OHNE invoicedCoveredUE-Schnappschuss die damals gedeckte UE aus der
+// Rechnung selbst zurückrechnen. Bis v2.10.0 wurde der Schnappschuss nur lokal gesetzt und nie
+// gespeichert (create_invoice kennt ihn nicht) - nach dem Neuladen galt eine teils paketgedeckte
+// Stunde als voll berechnet, das Guthaben blieb stehen und die NÄCHSTE Rechnung fiel um genau
+// diesen Anteil zu niedrig aus. Die Rechnung ist unveränderlich und verrät die Deckung: was die
+// Fahrstunden zum vollen Preis gekostet hätten, minus was für sie tatsächlich berechnet wurde
+// (Rechnungssumme ohne die mitberechneten Kostenposten). Verteilt wird chronologisch auf die
+// früheste Stunde zuerst - genau so hat lessonBillables beim Erstellen gedeckt (voll gedeckte
+// Stunden kamen gar nicht auf die Rechnung, gedeckt sein kann also nur der Anfang).
+// Nur mit Paket-Guthaben: ohne Paket kann nichts gedeckt sein, eine Preisabweichung darf dann
+// kein Phantom-Guthaben verbrauchen. Ergebnis: { lessonId: gedeckte UE }.
+function rekonstruierteDeckungUE(s, stdPrice) {
+    const out = {};
+    if (packageCreditUE(s) <= 0)
+        return out;
+    const invByNumber = {};
+    (s.invoices || []).forEach(inv => { if (inv && inv.number)
+        invByNumber[inv.number] = inv; });
+    const proRechnung = {};
+    (s.drivenLessons || []).forEach(l => {
+        if (!l.invoiced)
+            return;
+        (proRechnung[l.invoiced] = proRechnung[l.invoiced] || []).push(l);
+    });
+    Object.keys(proRechnung).forEach(nr => {
+        const ls = proRechnung[nr];
+        const inv = invByNumber[nr];
+        // Nur wenn KEINE Stunde dieser Rechnung einen Schnappschuss hat - sonst gilt der gespeicherte.
+        if (!inv || ls.some(l => l.invoicedCoveredUE != null))
+            return;
+        const kosten = (s.costItems || []).filter(it => it.invoiced === nr).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+        const berechnet = (Number(inv.total) || 0) - kosten;
+        const voll = ls.reduce((sum, l) => sum + ((Number(l.minutes) || 0) / 45) * lessonPricePerUE(l, stdPrice), 0);
+        let gedecktEur = Math.round((voll - berechnet) * 100) / 100;
+        if (!(gedecktEur > 0.005))
+            return;
+        ls.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).forEach(l => {
+            const ue = (Number(l.minutes) || 0) / 45, preis = lessonPricePerUE(l, stdPrice);
+            if (gedecktEur <= 0.005 || !(preis > 0))
+                return;
+            const c = Math.min(ue, gedecktEur / preis);
+            out[l.id] = c;
+            gedecktEur -= c * preis;
+        });
+    });
+    return out;
+}
 function lessonBillables(s, stdPrice) {
     const lessons = (s.drivenLessons || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     let creditUE = packageCreditUE(s);
+    const rekonstruiert = rekonstruierteDeckungUE(s, stdPrice);
     return lessons.map(l => {
         const ue = (Number(l.minutes) || 0) / 45;
         if (l.invoiced) {
@@ -8670,9 +8720,12 @@ function lessonBillables(s, stdPrice) {
             // liegt fest (invoicedCoveredUE-Schnappschuss aus confirmInvoice) und wird nicht neu
             // berechnet - sonst würde ein SPÄTER dazugekauftes Paket rückwirkend eine schon
             // bezahlte Stunde "abdecken" und das Guthaben fehlt dann bei den tatsächlich noch
-            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten vor diesem Fix), wird
-            // defensiv 0 angenommen statt eine bezahlte Stunde fälschlich als gedeckt zu zeigen.
-            const covered = Math.min(ue, Number(l.invoicedCoveredUE) || 0);
+            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten), wird er aus der
+            // Rechnung zurückgerechnet (rekonstruierteDeckungUE), höchstens aber so viel, wie an
+            // dieser Stelle noch Guthaben da ist; ist nichts rekonstruierbar, gilt 0.
+            const covered = l.invoicedCoveredUE != null
+                ? Math.min(ue, Number(l.invoicedCoveredUE) || 0)
+                : Math.min(ue, rekonstruiert[l.id] || 0, creditUE);
             creditUE = Math.max(0, creditUE - covered);
             const billableUE = ue - covered;
             const amount = Math.round(billableUE * lessonPricePerUE(l, stdPrice) * 100) / 100;
@@ -14296,10 +14349,10 @@ function App() {
     // geht (<=2 UE) oder schon aufgebraucht ist (0) - guter Moment, ein Anschlusspaket
     // anzubieten, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird.
     const paketKnapp = React.useMemo(() => {
-        return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s) }))
+        return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s, Number(pricePerHour) || 0) }))
             .filter(x => x.remaining != null && x.remaining <= 2)
             .sort((a, b) => a.remaining - b.remaining);
-    }, [students]);
+    }, [students, pricePerHour]);
     // Überfällige Rechnungen: dieselbe Berechnung wie in renderAbrechnungBody() ("Überfällig"),
     // hier zusätzlich auf App()-Ebene dupliziert statt von dort importiert (bewusst - andere
     // Render-Funktionen anzuzapfen ist genau der Fehler, der schon einmal den Fahrzeug-Kalender
@@ -19546,7 +19599,7 @@ function App() {
             return;
         }
         // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
-        // nur noch den lokalen Stand nachziehen, ohne einen weiteren Speichervorgang anzustoßen.
+        // den lokalen Stand nachziehen.
         // Die JETZT durch ein Paket gedeckte UE wird pro Stunde eingefroren (invoicedCoveredUE) -
         // ein später dazugekauftes Paket darf eine schon abgerechnete Stunde nicht rückwirkend
         // "abdecken" und ihr damit Guthaben entziehen, das eigentlich künftigen Stunden zusteht
@@ -19556,16 +19609,20 @@ function App() {
         // während der RPC-Laufzeit an diesem Schüler gemacht wurde (neue Fahrstunde, Zahlung,
         // paralleler Kollege bei geteiltem Schüler), hier stillschweigend wieder verworfen (gleiches
         // Muster wie draftLessonEntry() weiter oben).
-        updateStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
+        // Der Schnappschuss invoicedCoveredUE existiert nur hier im Client (create_invoice kennt ihn
+        // nicht) und MUSS deshalb anschließend gespeichert werden - bis v2.10.0 lebte er nur lokal,
+        // nach dem Neuladen war das Paketguthaben doppelt da und die nächste Rechnung zu niedrig
+        // (Audit F-H1). Gegen studentsRef rechnen, dann über writeStudent speichern: die übrigen
+        // Felder stimmen mit dem Serverstand überein (dieselben Marker, dieselbe Rechnung).
+        const cur = (studentsRef.current || []).find(s => s.id === active.id);
+        if (cur) {
             const coveredById = {};
-            lessonBillables(s, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
-            const drivenLessons = (s.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
-            const costItems = (s.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
-            const invoices = [...(s.invoices || []), inv];
-            return { ...s, drivenLessons, costItems, invoices };
-        }));
+            lessonBillables(cur, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
+            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
+            const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
+            const invoices = [...(cur.invoices || []), inv];
+            writeStudent({ ...cur, drivenLessons, costItems, invoices });
+        }
         setInvoiceDraft(null);
         setInvoicePreview(inv);
         doPrint("invoice");
