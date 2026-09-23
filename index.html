@@ -8707,7 +8707,9 @@ function downloadApptIcs(a, summary) {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    // Nicht sofort freigeben: iOS-Safari und die Capacitor-WebView holen die Datei erst nach dem
+    // click() asynchron ab - ein sofortiges revokeObjectURL() ließ den Download dort ins Leere laufen.
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 // ── Eigenes Toast/Bestätigen-System statt window.showToast()/window.confirm() ──
 // Modul-weite Registrierung: welche gemountete <ToastConfirmHost> gerade aktiv ist.
@@ -8826,8 +8828,17 @@ function ToastConfirmHost() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 confirmState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, confirmState.title),
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 18, whiteSpace: "pre-line" } }, confirmState.message),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: confirmState.danger ? { background: "#B32E22", color: "#fff", border: "none" } : null, onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"))),
+                // Bei "danger" steht die sichere Antwort oben und hat den Fokus: vorher war der rote
+                // Knopf der erste und damit (über den Fokus-Trap) fokussiert - ein Enter auf der
+                // Hardware-Tastatur löschte dann sofort. Nicht-zerstörerische Rückfragen behalten
+                // die gewohnte Reihenfolge (Bestätigen oben).
+                confirmState.danger
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("button", { className: "btn btn-ghost btn-block", autoFocus: true, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"),
+                        React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 8, background: "#B32E22", color: "#fff", border: "none" }, onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"))
+                    : React.createElement(React.Fragment, null,
+                        React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen")))),
         promptState && React.createElement("div", { onClick: () => resolvePrompt(null), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -9145,8 +9156,22 @@ function ampel(stu, adk, strecken, sonderfahrtenSoll) {
 const I = ({ children }) => React.createElement("svg", { width: "21", height: "21", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" }, children);
 // ── Fenster zum Bestätigen der Dauer einer vergangenen Fahrstunde ──
 function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip }) {
+    // Der Aufrufer setzt key = Termin-ID, damit jede Stunde der Warteschlange eine frische Instanz
+    // mit eigener Dauer bekommt. Vorher wurde dieselbe Instanz weiterverwendet und die Dauer erst
+    // per Effekt NACH dem Rendern zurückgesetzt - ein schneller zweiter Tipp bestätigte so die
+    // nächste Stunde noch mit der Dauer der vorherigen.
     const [minutes, setMinutes] = React.useState(plannedMinutes || 45);
-    React.useEffect(() => { setMinutes(plannedMinutes || 45); }, [appt && appt.id]);
+    // Doppeltipp-Sperre: die neue Stunde erscheint an exakt derselben Stelle wie die eben
+    // bestätigte. Tipps in den ersten 600 ms nach dem Erscheinen zählen deshalb nicht, und jede
+    // Instanz meldet höchstens einmal zurück.
+    const erschienenRef = React.useRef(Date.now());
+    const erledigtRef = React.useRef(false);
+    function einmal(fn) {
+        if (erledigtRef.current || Date.now() - erschienenRef.current < 600)
+            return;
+        erledigtRef.current = true;
+        fn();
+    }
     const quick = [45, 60, 75, 90, 105, 135];
     const ue = (Number(minutes) || 0) / 45;
     const dateLabel = appt ? new Date(appt.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "long" }) : "";
@@ -9188,8 +9213,8 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, onClick: () => { const m = parseInt(minutes, 10); if (isNaN(m) || m <= 0) {
                     showToast("Bitte eine gültige Dauer eingeben.");
                     return;
-                } onConfirm(m); } }, "Best\u00E4tigen"),
-            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: onSkip }, "Fand nicht statt")));
+                } einmal(() => onConfirm(m)); } }, "Best\u00E4tigen"),
+            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => einmal(onSkip) }, "Fand nicht statt")));
 }
 // ── Wischbare Zeile: nach links wischen zeigt Anruf + WhatsApp ──
 function SwipeRow({ children, tel, vorname, waText }) {
@@ -9199,6 +9224,7 @@ function SwipeRow({ children, tel, vorname, waText }) {
     const dragging = React.useRef(false);
     const decided = React.useRef(false); // ob die Richtung (horizontal/vertikal) feststeht
     const horizontal = React.useRef(false);
+    const startDx = React.useRef(0); // Position beim Aufsetzen des Fingers
     const ACTION_W = tel ? 140 : 0; // ohne Nummer kein Wischen
     function onStart(e) {
         if (!tel)
@@ -9206,6 +9232,7 @@ function SwipeRow({ children, tel, vorname, waText }) {
         const t = e.touches ? e.touches[0] : e;
         startX.current = t.clientX;
         startY.current = t.clientY;
+        startDx.current = dx;
         dragging.current = true;
         decided.current = false;
         horizontal.current = false;
@@ -9225,8 +9252,10 @@ function SwipeRow({ children, tel, vorname, waText }) {
         if (horizontal.current) {
             if (e.cancelable)
                 e.preventDefault();
-            // von der aktuellen Position weiterziehen, nur nach links, mit Begrenzung
-            const base = dx <= -ACTION_W ? -ACTION_W : 0;
+            // Von der Position beim Aufsetzen weiterziehen, nur nach links, mit Begrenzung. Vorher
+            // wurde die Basis aus dem LAUFENDEN dx abgeleitet: sobald das Ziehen die Aktionsbreite
+            // überschritt, sprang die Basis mitten in der Bewegung um 140px und die Zeile ruckte.
+            const base = startDx.current <= -ACTION_W ? -ACTION_W : 0;
             const next = Math.min(0, Math.max(-ACTION_W - 30, base + diffX));
             setDx(next);
         }
@@ -9253,7 +9282,10 @@ function SwipeRow({ children, tel, vorname, waText }) {
                     React.createElement("svg", { width: "20", height: "20", viewBox: "0 0 24 24", fill: "currentColor" },
                         React.createElement("path", { d: "M17.6 6.3A7.85 7.85 0 0 0 12 4a7.94 7.94 0 0 0-6.9 11.9L4 20l4.2-1.1A7.93 7.93 0 0 0 12 19.9 7.94 7.94 0 0 0 17.6 6.3zM12 18.5a6.6 6.6 0 0 1-3.4-.9l-.24-.15-2.5.65.67-2.43-.16-.25A6.59 6.59 0 1 1 12 18.5z" })),
                     React.createElement("span", { style: { fontSize: 11, fontWeight: 700 } }, "WhatsApp"))),
-            React.createElement("div", { style: { transform: "translateX(" + dx + "px)", transition: dragging.current ? "none" : "transform .22s ease", position: "relative", zIndex: 1 },
+            // touchAction pan-y: React hängt touchmove passiv an, preventDefault() oben ist dort
+            // wirkungslos - die Seite scrollte beim seitlichen Wischen mit. So übernimmt der
+            // Browser nur noch senkrechtes Scrollen, das Waagerechte bleibt bei dieser Zeile.
+            React.createElement("div", { style: { transform: "translateX(" + dx + "px)", transition: dragging.current ? "none" : "transform .22s ease", position: "relative", zIndex: 1, touchAction: "pan-y" },
                     onTouchStart: onStart, onTouchMove: onMove, onTouchEnd: onEnd,
                     onMouseDown: onStart, onMouseMove: onMove, onMouseUp: onEnd, onMouseLeave: onEnd }, children)));
 }
@@ -9261,6 +9293,23 @@ function SwipeRow({ children, tel, vorname, waText }) {
 function Help({ text }) {
     const [open, setOpen] = React.useState(false);
     const ref = React.useRef(null);
+    const tipRef = React.useRef(null);
+    const [shift, setShift] = React.useState(0);
+    // Die Blase ist über dem "?" zentriert. Sitzt das "?" nah am Bildschirmrand (z.B. direkt
+    // hinter einem Label links), ragte sie links aus dem Bild und der Anfang des Textes fehlte.
+    // Nach dem Einblenden messen und so weit einschieben, dass 8px Rand bleiben.
+    React.useLayoutEffect(() => {
+        if (!open || !tipRef.current) {
+            setShift(0);
+            return;
+        }
+        const r = tipRef.current.getBoundingClientRect();
+        const vw = document.documentElement.clientWidth || window.innerWidth;
+        if (r.left < 8)
+            setShift(8 - r.left);
+        else if (r.right > vw - 8)
+            setShift(vw - 8 - r.right);
+    }, [open]);
     // Schließt sich bei Tippen woanders, OHNE dabei den restlichen Bildschirm zu blockieren
     // (kein unsichtbares Vollbild-Overlay mehr, das sonst jeden weiteren Tap "schluckt").
     React.useEffect(() => {
@@ -9272,27 +9321,31 @@ function Help({ text }) {
         return () => document.removeEventListener("click", onDocClick);
     }, [open]);
     return React.createElement("span", { ref: ref, style: { position: "relative", display: "inline-flex", verticalAlign: "middle" } },
-        React.createElement("button", { type: "button", onClick: (e) => { e.stopPropagation(); e.preventDefault(); setOpen(o => !o); }, className: "icon-x", "aria-label": "Hilfe", style: { width: 18, height: 18, borderRadius: "50%", border: "none",
+        React.createElement("button", { type: "button", onClick: (e) => { e.stopPropagation(); e.preventDefault(); setOpen(o => !o); }, className: "icon-x", "aria-label": "Hilfe", "aria-expanded": open, style: { width: 18, height: 18, borderRadius: "50%", border: "none",
                 // var(--muted) ist als TEXTfarbe kalibriert (im Dark Mode hell genug zum Lesen auf
                 // dunklem Grund) - als Hintergrund mit weißer Schrift kippte der Kontrast im Dark Mode
                 // auf 2,6:1. Derselbe feste dunkle Ton wie beim Tooltip direkt darunter (#26201A)
                 // funktioniert in beiden Themes gleich gut (16:1).
                 background: "#26201A",
                 color: "#fff", fontSize: 12, fontWeight: 800, lineHeight: 1, display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 } }, "?"),
-        open && React.createElement("span", { style: { position: "absolute", bottom: "calc(100% + 6px)", left: "50%", transform: "translateX(-50%)",
+        open && React.createElement("span", { ref: tipRef, role: "tooltip", style: { position: "absolute", bottom: "calc(100% + 6px)", left: "50%", transform: "translateX(calc(-50% + " + shift + "px))",
                 zIndex: 131, background: "#26201A", color: "#fff", fontSize: 12.5, fontWeight: 500, lineHeight: 1.45,
-                padding: "9px 12px", borderRadius: 10, width: 220, boxShadow: "0 6px 24px rgba(0,0,0,.3)", textAlign: "left", whiteSpace: "normal" } }, text));
+                padding: "9px 12px", borderRadius: 10, width: 220, maxWidth: "calc(100vw - 16px)", boxShadow: "0 6px 24px rgba(0,0,0,.3)", textAlign: "left", whiteSpace: "normal" } }, text));
 }
 // ── Unterschriften-Pad ──
-function SignaturePad({ onSave, onClear, existing, label }) {
+// autoSave: jede fertig gezeichnete Linie wird sofort per onSave übernommen. Für die
+// Unterschriften-Modals (Nachweis, Vertrag), deren "PDF erstellen" sonst eine gezeichnete, aber
+// nicht per "Übernehmen" bestätigte Unterschrift stillschweigend wegließ. NICHT für Aufrufer, deren
+// onSave gleich einen Vorgang abschließt (Leistung) - dort bleibt "Übernehmen" der Auslöser.
+function SignaturePad({ onSave, onClear, existing, label, autoSave }) {
     const cvs = React.useRef(null);
     const drawing = React.useRef(false);
     const hasMoved = React.useRef(false);
     const [hasData, setHasData] = React.useState(!!existing);
     const [showCanvas, setShowCanvas] = React.useState(!existing);
-    // Canvas hat eine feste Zeichenpuffer-Breite (440x80), wird aber per CSS auf 100% der
-    // (variablen) Container-Breite skaliert dargestellt - ohne diese Umrechnung landet die
-    // Tinte an der falschen Stelle, sobald die angezeigte Breite von 440px abweicht.
+    // Der Zeichenpuffer wird beim Einblenden an die tatsächlich angezeigte Größe (mal
+    // Pixeldichte) angepasst, siehe Effekt unten. Die Umrechnung hier bleibt trotzdem nötig,
+    // weil sich die angezeigte Breite danach noch ändern kann (Drehen, Fenstergröße).
     function getPos(e) {
         const r = cvs.current.getBoundingClientRect();
         const src = e.touches ? e.touches[0] : e;
@@ -9305,8 +9358,11 @@ function SignaturePad({ onSave, onClear, existing, label }) {
         return; hasMoved.current = true; const p = getPos(e); const ctx = cvs.current.getContext("2d"); ctx.lineTo(p.x, p.y); ctx.stroke(); }
     // Nur eine Unterschrift mit tatsächlich gezeichneter Linie zählt - ein reines Antippen
     // ohne Bewegung (z.B. schneller Tap) darf keine leere Fläche als gültig markieren.
-    function end(e) { e.preventDefault(); drawing.current = false; if (hasMoved.current)
-        setHasData(true); }
+    function end(e) { e.preventDefault(); const warAmZeichnen = drawing.current; drawing.current = false; if (hasMoved.current) {
+        setHasData(true);
+        if (autoSave && warAmZeichnen)
+            onSave(cvs.current.toDataURL("image/png"));
+    } }
     function save() { const url = cvs.current.toDataURL("image/png"); onSave(url); setShowCanvas(false); }
     function clear() { const ctx = cvs.current.getContext("2d"); ctx.clearRect(0, 0, cvs.current.width, cvs.current.height); setHasData(false); if (onClear)
         onClear(); }
@@ -9314,10 +9370,18 @@ function SignaturePad({ onSave, onClear, existing, label }) {
     React.useEffect(() => {
         if (!showCanvas || !cvs.current)
             return;
+        // Vorher fester 440x80-Puffer, per CSS auf die Kartenbreite gestreckt: auf dem Handy
+        // (schmaler) wurde die Unterschrift gestaucht, auf dem Tablet (breiter) verzerrt, und auf
+        // Retina-Displays war sie unscharf. Jetzt Puffer = angezeigte Größe x Pixeldichte (auf 2
+        // begrenzt, damit das PNG in Vertrag/Kartei nicht unnötig groß wird).
+        const r = cvs.current.getBoundingClientRect();
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        cvs.current.width = Math.round((r.width || 440) * dpr);
+        cvs.current.height = Math.round((r.height || 80) * dpr);
         const ctx = cvs.current.getContext("2d");
         ctx.clearRect(0, 0, cvs.current.width, cvs.current.height);
         ctx.strokeStyle = "#000";
-        ctx.lineWidth = 2.5;
+        ctx.lineWidth = 2.5 * dpr;
         ctx.lineCap = "round";
         ctx.lineJoin = "round";
     }, [showCanvas]);
@@ -9329,7 +9393,7 @@ function SignaturePad({ onSave, onClear, existing, label }) {
                 React.createElement("button", { onClick: edit, style: { display: "block", width: "100%", padding: "6px", fontSize: 12.5, color: "var(--muted)", borderTop: "1px solid var(--line)" } }, "Neu zeichnen"))
             : React.createElement("div", { style: { border: "1.5px solid var(--line)", borderRadius: 11, overflow: "hidden", background: "#fff" } },
                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", textAlign: "center", padding: "4px", borderBottom: "1px solid var(--line)" } }, "Hier unterschreiben"),
-                React.createElement("canvas", { ref: cvs, width: 440, height: 80, style: { width: "100%", height: 80, touchAction: "none", display: "block", cursor: "crosshair" }, onMouseDown: start, onMouseMove: move, onMouseUp: end, onMouseLeave: end, onTouchStart: start, onTouchMove: move, onTouchEnd: end }),
+                React.createElement("canvas", { ref: cvs, style: { width: "100%", height: 80, touchAction: "none", display: "block", cursor: "crosshair" }, onMouseDown: start, onMouseMove: move, onMouseUp: end, onMouseLeave: end, onTouchStart: start, onTouchMove: move, onTouchEnd: end }),
                 React.createElement("div", { style: { display: "flex", borderTop: "1px solid var(--line)" } },
                     React.createElement("button", { onClick: clear, style: { flex: 1, padding: "7px", fontSize: 12.5, color: "var(--muted)", borderRight: "1px solid var(--line)" } }, "L\u00F6schen"),
                     React.createElement("button", { onClick: save, style: { flex: 1, padding: "7px", fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)" }, disabled: !hasData }, "\u00DCbernehmen"))));
@@ -10575,7 +10639,7 @@ function serviceKmLeft(v) {
 function Collapsible({ title, subtitle, children, defaultOpen }) {
     const [open, setOpen] = useState(!!defaultOpen);
     return React.createElement("div", { style: { marginBottom: 10, border: "1px solid var(--line)", borderRadius: 14, overflow: "hidden" } },
-        React.createElement("button", { onClick: () => setOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
+        React.createElement("button", { type: "button", "aria-expanded": open, onClick: () => setOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10,
                 padding: "14px 15px", background: open ? "var(--field-bg)" : "var(--card)", border: "none", textAlign: "left", cursor: "pointer" } },
             React.createElement("div", null,
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, title),
@@ -10873,7 +10937,10 @@ function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, o
                     React.createElement("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "currentColor" },
                         React.createElement("rect", { x: "5", y: "5", width: "14", height: "14", rx: "2" })),
                     "Stoppen & speichern"),
-            recActive && React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px" }, onClick: () => onStop(false) }, "Verwerfen"),
+            // Steht direkt neben "Stoppen & speichern" - ein Fehlgriff warf bisher die ganze
+            // Aufzeichnung ohne Rückfrage weg. Die rec-pill oben fragt schon immer nach, hier jetzt auch.
+            recActive && React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px" }, onClick: async () => { if (await askConfirm({ title: "Aufzeichnung verwerfen?", message: "Die bisher aufgezeichnete Strecke dieser Fahrstunde geht dabei verloren." }))
+                    onStop(false); } }, "Verwerfen"),
             React.createElement("button", { className: "btn " + (pinMode ? "btn-primary" : "btn-ghost"), style: { gap: 6, padding: "9px 12px" }, onClick: togglePin },
                 React.createElement("svg", { width: "14", height: "14", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                     React.createElement("path", { d: "M12 21s7-6.5 7-12a7 7 0 1 0-14 0c0 5.5 7 12 7 12z" }),
@@ -28251,7 +28318,7 @@ function App() {
             const appt = lessonPrompt.queue[lessonPrompt.idx];
             const stu = students.find(x => x.id === (appt._matchedStudentId || appt.student_id));
             const planned = appt.end_at ? Math.round((new Date(appt.end_at).getTime() - new Date(appt.start_at).getTime()) / 60000) : 45;
-            return React.createElement(LessonPromptModal, { appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m) => confirmPastLesson(appt, m), onSkip: () => skipPastLesson(appt) });
+            return React.createElement(LessonPromptModal, { key: appt.id, appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m) => confirmPastLesson(appt, m), onSkip: () => skipPastLesson(appt) });
         })(),
         // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
         // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
@@ -30041,14 +30108,14 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Unterschriften"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 } }, "Unterschreibe zuerst selbst, dann gib dem Sch\u00FCler das Handy zum Unterschreiben."),
-                React.createElement(SignaturePad, { label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); try {
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); try {
                         localStorage.setItem("v3_instr_sig_" + uid, url); // kontogebunden, nicht geräteweit (Signatur sonst über Konten hinweg sichtbar)
                     }
                     catch (e) { } }, onClear: () => { setInstrSig(null); try {
                         localStorage.removeItem("v3_instr_sig_" + uid);
                     }
                     catch (e) { } } }),
-                React.createElement(SignaturePad, { label: "Fahrschüler · " + (active ? dispName(active) : "–"), existing: stuSig, onSave: url => setStuSig(url), onClear: () => setStuSig(null) }),
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrschüler · " + (active ? dispName(active) : "–"), existing: stuSig, onSave: url => setStuSig(url), onClear: () => setStuSig(null) }),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => { setShowNachweisModal(false); doPrint("nachweis"); } }, "PDF erstellen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setShowNachweisModal(false) }, "Abbrechen"))),
         contractSignId && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex",
@@ -30058,14 +30125,14 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ausbildungsvertrag unterschreiben"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 } }, "Unterschreibe zuerst selbst, dann gib dem Sch\u00FCler das Handy zum Unterschreiben."),
-                React.createElement(SignaturePad, { label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); saveContractSignature("instrSignature", url); try {
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); saveContractSignature("instrSignature", url); try {
                         localStorage.setItem("v3_instr_sig_" + uid, url); // kontogebunden, nicht geräteweit (Signatur sonst über Konten hinweg sichtbar)
                     }
                     catch (e) { } }, onClear: () => { setInstrSig(null); try {
                         localStorage.removeItem("v3_instr_sig_" + uid);
                     }
                     catch (e) { } } }),
-                React.createElement(SignaturePad, { label: "Fahrsch\u00FCler \u00B7 " + (active ? dispName(active) : "\u2013"), existing: contractStuSig, onSave: url => { setContractStuSig(url); saveContractSignature("studentSignature", url); }, onClear: () => setContractStuSig(null) }),
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrsch\u00FCler \u00B7 " + (active ? dispName(active) : "\u2013"), existing: contractStuSig, onSave: url => { setContractStuSig(url); saveContractSignature("studentSignature", url); }, onClear: () => setContractStuSig(null) }),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: finishContractSign }, "PDF erstellen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setContractSignId(null) }, "Sp\u00E4ter"))),
         theoryForm && React.createElement("div", { onClick: () => !theoryForm.busy && setTheoryForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
