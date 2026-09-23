@@ -10750,10 +10750,12 @@ function rmapPinSvg(color) {
    ───────────────────────────────────────────────────────────── */
 // Leaflet erst bei Bedarf laden (spart Ladezeit für alle, die keine Karte öffnen)
 var _rmapLeafletLoading = false;
+var _rmapLeafletFehler = false; // letzter Ladeversuch ist gescheitert (onerror)
 function rmapEnsureLeaflet() {
     if (window.L || _rmapLeafletLoading)
         return;
     _rmapLeafletLoading = true;
+    _rmapLeafletFehler = false;
     // Dieselben SRI-Hashes wie zuvor bei den statisch geladenen Skripten (React/ReactDOM/
     // supabase-js) - Leaflet lief hier bislang ungeprueft, weil es dynamisch statt per <script>-Tag
     // im <head> geladen wird. crossOrigin ist Pflicht, sonst wertet der Browser integrity gar nicht erst aus.
@@ -10772,21 +10774,59 @@ function rmapEnsureLeaflet() {
     // weiteren Ladeversuch für den Rest der Session, alle Kartenkomponenten blieben endlos bei
     // "Karte wird geladen…" hängen. Bei Fehlschlag zurücksetzen, damit der nächste Aufruf (z.B.
     // beim Öffnen einer anderen Fahrstunde) es erneut versuchen kann.
-    script.onerror = function () { _rmapLeafletLoading = false; };
+    script.onerror = function () { _rmapLeafletLoading = false; _rmapLeafletFehler = true; };
     document.head.appendChild(script);
+}
+// Gemeinsames Warten auf Leaflet für die Kartenkomponenten. Vorher pollte jede Karte endlos
+// alle 200 ms und zeigte bei einem gescheiterten Laden (kein Netz, Adblocker) für immer
+// "Karte wird geladen…". Jetzt: Fehler oder 20 s ohne Ergebnis -> fehler=true, und nochmal()
+// startet einen neuen Versuch.
+function useLeafletBereit() {
+    const [ready, setReady] = useState(!!window.L);
+    const [fehler, setFehler] = useState(false);
+    const [versuch, setVersuch] = useState(0);
+    useEffect(() => {
+        if (window.L) {
+            setReady(true);
+            return;
+        }
+        setFehler(false);
+        rmapEnsureLeaflet();
+        const t0 = Date.now();
+        const t = setInterval(() => {
+            if (window.L) {
+                setReady(true);
+                clearInterval(t);
+            }
+            else if (_rmapLeafletFehler || Date.now() - t0 > 20000) {
+                setFehler(true);
+                clearInterval(t);
+            }
+        }, 200);
+        return () => clearInterval(t);
+    }, [versuch]);
+    return [ready, fehler, () => setVersuch(v => v + 1)];
+}
+// Anzeige anstelle der Karte, solange Leaflet fehlt: lädt noch / konnte nicht laden + erneut.
+function KarteLaedtHinweis({ fehler, nochmal, style }) {
+    return React.createElement("div", { role: fehler ? "alert" : "status", style: Object.assign({ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, textAlign: "center", color: "var(--muted)", fontSize: 13 }, style) },
+        fehler ? "Die Karte konnte nicht geladen werden. Bitte Verbindung prüfen." : "Karte wird geladen…",
+        fehler && React.createElement("button", { type: "button", className: "btn btn-ghost", style: { padding: "8px 14px", fontSize: 13 }, onClick: nochmal }, "Erneut versuchen"));
 }
 // Alle jemals gefahrenen Strecken eines Schuelers uebereinandergelegt – reine Anzeige
 // (kein Aufzeichnen, keine Stecknadeln), fuer Fahrlehrer UND Fahrschueler.
 function AllRoutesMap({ routes, color }) {
     const lineColor = color || "#FF9300";
     const elRef = useRef(null), mapRef = useRef(null), layerRef = useRef(null);
-    const [ready, setReady] = useState(!!window.L);
-    useEffect(() => {
-        if (window.L) { setReady(true); return; }
-        rmapEnsureLeaflet();
-        const t = setInterval(() => { if (window.L) { setReady(true); clearInterval(t); } }, 200);
-        return () => clearInterval(t);
-    }, []);
+    const [ready, ladeFehler, nochmal] = useLeafletBereit();
+    // Die Aufrufer bauen routes bei jedem Render neu (filter().map()). Als Effekt-Abhängigkeit
+    // hieß das: bei jedem Render der Elternansicht - während einer laufenden Aufzeichnung also
+    // sekündlich - clearLayers() + fitBounds(), jedes Zoomen/Verschieben sprang sofort zurück.
+    // Neu gezeichnet wird nur noch, wenn sich die Strecken tatsächlich ändern (Anzahl, Länge,
+    // Endpunkte).
+    const routesRef = useRef(routes);
+    routesRef.current = routes;
+    const routesSig = (routes || []).map(p => !p ? "0" : p.length + ":" + JSON.stringify(p[0]) + ":" + JSON.stringify(p[p.length - 1])).join("|");
     useEffect(() => {
         if (!ready || !elRef.current || mapRef.current)
             return;
@@ -10804,7 +10844,7 @@ function AllRoutesMap({ routes, color }) {
             return;
         layer.clearLayers();
         const alleBounds = [];
-        (routes || []).forEach(pts => {
+        (routesRef.current || []).forEach(pts => {
             if (!pts || pts.length < 2)
                 return;
             L.polyline(pts, { color: lineColor, weight: 5, opacity: .55, lineJoin: "round" }).addTo(layer);
@@ -10813,29 +10853,26 @@ function AllRoutesMap({ routes, color }) {
         if (alleBounds.length) {
             try { map.fitBounds(alleBounds, { padding: [24, 24], maxZoom: 15 }); } catch (_) { }
         }
-    }, [routes, ready, lineColor]);
+    }, [routesSig, ready, lineColor]);
     return React.createElement("div", { className: "rmap-wrap", style: { height: 260, position: "relative" } },
         React.createElement("div", { ref: elRef, style: { width: "100%", height: "100%" } }),
-        !ready && React.createElement("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, color: "var(--muted)" } }, "Karte lädt…"));
+        !ready && React.createElement(KarteLaedtHinweis, { fehler: ladeFehler, nochmal: nochmal, style: { position: "absolute", inset: 0 } }));
 }
 function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, otherRecording, onStart, onStop, onDeleteRoute, onSavePin, onDeletePin, color }) {
     const lineColor = color || "#FF9300";
     const elRef = useRef(null), mapRef = useRef(null), lineRef = useRef(null), liveRef = useRef(null);
     const pinLayerRef = useRef(null);
-    const [ready, setReady] = useState(!!window.L);
+    const [ready, ladeFehler, nochmal] = useLeafletBereit();
     const [pinMode, setPinMode] = useState(false);
+    // Kartenführung während der Aufzeichnung: verschiebt der Fahrlehrer die Karte von Hand, folgt
+    // sie der Position 15 s lang nicht mehr (siehe Live-Effekt unten).
+    const folgenPauseBisRef = useRef(0);
+    const herangeholtRef = useRef(false); // schon einmal auf die Live-Position gezoomt?
     const pinModeRef = useRef(false);
     const savePinRef = useRef(onSavePin);
     savePinRef.current = onSavePin;
     const pinsRef = useRef(pins);
     pinsRef.current = pins;
-    useEffect(() => { if (window.L) {
-        setReady(true);
-        return;
-    } rmapEnsureLeaflet(); const t = setInterval(() => { if (window.L) {
-        setReady(true);
-        clearInterval(t);
-    } }, 200); return () => clearInterval(t); }, []);
     // Karte aufbauen
     useEffect(() => {
         if (!ready || !elRef.current || mapRef.current)
@@ -10845,6 +10882,7 @@ function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, o
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
         pinLayerRef.current = L.layerGroup().addTo(map);
         mapRef.current = map;
+        map.on("dragstart", () => { folgenPauseBisRef.current = Date.now() + 15000; });
         map.on("click", async e => {
             if (!pinModeRef.current)
                 return;
@@ -10891,6 +10929,7 @@ function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, o
         if (!L || !map)
             return;
         if (!recActive) {
+            herangeholtRef.current = false;
             if (liveRef.current) {
                 try {
                     map.removeLayer(liveRef.current);
@@ -10905,9 +10944,18 @@ function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, o
             liveRef.current = L.polyline(pts, { color: lineColor, weight: 6, opacity: .9, lineJoin: "round" }).addTo(map);
         else
             liveRef.current.setLatLngs(pts);
-        if (pts.length) {
+        // Vorher setView(..., max(Zoom, 16)) bei JEDEM GPS-Punkt: Herauszoomen unter 16 wurde
+        // sofort zurückgenommen, Verschieben ebenso. Jetzt nur beim Start auf 16 heranholen,
+        // danach mit dem Zoom folgen, den der Fahrlehrer eingestellt hat - und nach einem
+        // Verschieben von Hand eine Weile gar nicht.
+        if (pts.length && Date.now() >= folgenPauseBisRef.current) {
             try {
-                map.setView(pts[pts.length - 1], Math.max(map.getZoom(), 16), { animate: true });
+                if (!herangeholtRef.current) {
+                    map.setView(pts[pts.length - 1], Math.max(map.getZoom(), 16), { animate: true });
+                    herangeholtRef.current = true;
+                }
+                else
+                    map.panTo(pts[pts.length - 1], { animate: true });
             }
             catch (_) { }
         }
@@ -10925,7 +10973,7 @@ function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, o
     }, [pins, ready]);
     function togglePin() { const v = !pinMode; setPinMode(v); pinModeRef.current = v; }
     if (!ready)
-        return React.createElement("div", { style: { padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1.5px solid var(--line)", borderRadius: 12 } }, "Karte wird geladen\u2026");
+        return React.createElement(KarteLaedtHinweis, { fehler: ladeFehler, nochmal: nochmal, style: { padding: "22px 12px", border: "1.5px solid var(--line)", borderRadius: 12 } });
     return React.createElement("div", null,
         React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 } },
             !recActive
