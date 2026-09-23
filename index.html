@@ -17757,8 +17757,13 @@ function App() {
         const h = new Date().getHours();
         const gruss = h < 11 ? "Guten Morgen" : (h < 18 ? "Guten Tag" : "Guten Abend");
         const vorname = (teacherName || "").trim().split(/\s+/)[0] || "";
-        const heute = (appts || []).filter(a => a.status !== "pending" && a.status !== "offered" && isToday(a.start_at))
+        // Urlaub ist ein Ganztags-Block und erschien hier als "Termin um 00:00" - raus aus Heute.
+        // Sonstige/private Termine bleiben in der Tagesliste (echte Tagesplanung), zählen aber
+        // weder als "Nächster Termin" (Karte mit Schüler, Fahrzeug, Treffpunkt) noch im Briefing.
+        const heute = (appts || []).filter(a => a.status !== "pending" && a.status !== "offered" && isToday(a.start_at) && !isUrlaub(a))
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
+        const istFahrTermin = a => !isUrlaub(a) && !isSonstige(a) && apptArt(a) !== "PRIVAT";
+        const heuteFahrten = heute.filter(istFahrTermin);
         const jetzt = new Date().toISOString();
         // Nächster Termin für die Hero-Karte: bevorzugt einer von HEUTE (unverändert), damit sich
         // an dem Fall nichts ändert - gibt es heute aber gar keinen mehr, zeigt die Karte trotzdem
@@ -17766,8 +17771,8 @@ function App() {
         // diesen Fallback blieb die ganze Hero-Karte (samt Illustration) unsichtbar, sobald an
         // einem Tag zufällig kein Termin anstand - das wirkte wie ein Darstellungsfehler, war aber
         // schlicht eine zu enge "nur heute"-Bedingung.
-        const naechster = heute.find(a => (a.end_at || a.start_at) >= jetzt) ||
-            (appts || []).filter(a => a.status !== "pending" && a.status !== "offered" && !isToday(a.start_at) && (a.end_at || a.start_at) >= jetzt)
+        const naechster = heuteFahrten.find(a => (a.end_at || a.start_at) >= jetzt) ||
+            (appts || []).filter(a => a.status !== "pending" && a.status !== "offered" && istFahrTermin(a) && !isToday(a.start_at) && (a.end_at || a.start_at) >= jetzt)
                 .sort((a, b) => a.start_at.localeCompare(b.start_at))[0];
         const naechsterStu = naechster && naechster.student_id ? students.find(x => x.id === naechster.student_id) : null;
         // Treffpunkt für die Hero-Karte (spec 5.4): Standortname des Schülers, falls einer
@@ -17789,7 +17794,10 @@ function App() {
         // zweimal auf derselben Seite gezeigt.
         const stats = [
             { key: "schueler", label: "Aktive Schüler", value: aktiveSchueler, icon: icUsers, onClick: () => setView("liste") },
-            { key: "offen", label: "Offene Rechnungen", value: offenAnzahl, icon: icWallet, accent: offenAnzahl > 0, onClick: () => { if (offenAnzahl > 0) {
+            // Gezählt werden Schüler mit offenem Betrag, nicht Rechnungen (ein Schüler mit drei
+            // offenen Rechnungen zählt einmal, offene Stunden ohne Rechnung zählen auch) - daher
+            // "Offene Beträge" statt "Offene Rechnungen".
+            { key: "offen", label: "Offene Beträge", value: offenAnzahl, icon: icWallet, accent: offenAnzahl > 0, onClick: () => { if (offenAnzahl > 0) {
                         openOffenePosten();
                     }
                     else if (active && active._isMine) {
@@ -17804,13 +17812,21 @@ function App() {
         const pendingList = (appts || []).filter(a => a.status === "pending" || a.status === "cancel_requested")
             .sort((a, b) => a.start_at.localeCompare(b.start_at))
             .map(a => ({ appt: a, stu: apptStudent(a) }));
+        // pendingCount enthält auch Storno-Anfragen (status cancel_requested) - die sind keine
+        // Terminvorschläge. Banner und Liste nennen sie deshalb getrennt.
+        const stornoAnzahl = pendingList.filter(x => x.appt.status === "cancel_requested").length;
+        const vorschlagAnzahl = pendingCount - stornoAnzahl;
+        const anfragenText = [
+            vorschlagAnzahl > 0 ? (vorschlagAnzahl === 1 ? "1 offener Terminvorschlag" : vorschlagAnzahl + " offene Terminvorschläge") : null,
+            stornoAnzahl > 0 ? (stornoAnzahl === 1 ? "1 Storno-Anfrage" : stornoAnzahl + " Storno-Anfragen") : null,
+        ].filter(Boolean).join(" · ");
         // Für "Diese Woche" weiter unten: einmal berechnet statt mehrfach verstreut.
         const stillCount = stillList.length - abbruchRisiko.length;
         const erinnerungOffen = erinnerungsKandidaten().filter(x => !x.erinnert).length;
         // Für das Tages-Briefing: nicht nur die Namen von heute, sondern je Schüler Ausbildungsstand,
         // Prüfreife und offener Betrag - sonst hat die KI kein Material für eine echte Einschätzung
         // zu den heutigen Terminen, nur eine Namensliste zum Nachplappern.
-        const heuteSchueler = heute.map(a => {
+        const heuteSchueler = heuteFahrten.map(a => {
             const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
             if (!stu)
                 return null;
@@ -17885,7 +17901,7 @@ function App() {
                         "!",
                         React.createElement("span", { "aria-hidden": "true", style: { whiteSpace: "nowrap" } }, " 👋")),
                     !briefing && React.createElement("button", { onClick: () => ladeBriefing(setBriefing, {
-                                heuteAnzahl: heute.length,
+                                heuteAnzahl: heuteFahrten.length,
                                 heuteSchueler,
                                 pendingAnzahl: pendingCount,
                                 abbruchAnzahl: abbruchRisiko.length,
@@ -17900,7 +17916,7 @@ function App() {
                     briefing && !briefing.busy && briefing.err && React.createElement("div", { style: { marginTop: 10 } },
                         React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 4 } }, briefing.err),
                         React.createElement("button", { onClick: () => ladeBriefing(setBriefing, {
-                                    heuteAnzahl: heute.length,
+                                    heuteAnzahl: heuteFahrten.length,
                                     heuteSchueler,
                                     pendingAnzahl: pendingCount,
                                     abbruchAnzahl: abbruchRisiko.length,
@@ -17966,7 +17982,7 @@ function App() {
                         React.createElement("line", { x1: "3", y1: "10", x2: "21", y2: "10" }))),
                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                     React.createElement("div", { style: { fontWeight: 700, fontSize: 14, color: "var(--ink)" } },
-                        pendingCount === 1 ? "1 offener Terminvorschlag" : pendingCount + " offene Terminvorschläge"),
+                        anfragenText),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)" } }, "Von deinen Schülern, warten auf Antwort")),
                 chev),
             // 2) Live-Aufzeichnung (spec 5.8: .card.tint, pulsierender Punkt, Eyebrow) - echter
@@ -18042,13 +18058,14 @@ function App() {
                 // ist der Schalter und nennt weiterhin die Gesamtzahl.
                 pendingList.length > 0 && React.createElement("div", { className: "card home-pending-list", style: { marginBottom: 12, overflow: "hidden" } },
                     React.createElement("button", { onClick: () => setHomePendingOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "15px 16px 6px", textAlign: "left" } },
-                        React.createElement("span", { className: "home-h3 home-v2-display", style: { fontSize: 16, flex: 1 } }, "Offene Terminvorschläge"),
+                        React.createElement("span", { className: "home-h3 home-v2-display", style: { fontSize: 16, flex: 1 } }, stornoAnzahl > 0 ? "Offene Anfragen" : "Offene Terminvorschläge"),
                         React.createElement("span", { style: { fontSize: 12.5, fontWeight: 800, color: "var(--orange-deep)" } }, pendingList.length),
                         React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: homePendingOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
                     React.createElement("div", { style: { padding: "4px 8px 8px" } }, (homePendingOpen ? pendingList : pendingList.slice(0, 3)).map(({ appt: a, stu }, i) => React.createElement("button", { key: a.id, className: "home-appt", onClick: () => setView("kalender") },
                         terminBild(a, stu),
                         React.createElement("span", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, stu ? dispName(stu) : (a.title || "Termin"))),
+                            React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, stu ? dispName(stu) : (a.title || "Termin")),
+                            a.status === "cancel_requested" && React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--red-ink)", fontWeight: 600 } }, "möchte absagen")),
                         React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0, textAlign: "right" } }, weekdayShort(a.start_at) + " " + fmtD(a.start_at) + " · " + hm(a.start_at))))),
                     pendingList.length > 3 && React.createElement("button", { onClick: () => setHomePendingOpen(o => !o),
                             style: { width: "100%", padding: "10px 16px 14px", textAlign: "center", fontSize: 13, fontWeight: 700, color: "var(--orange-deep)" } },
@@ -18131,14 +18148,17 @@ function App() {
                         React.createElement("button", { className: "btn btn-primary", style: { flex: 1, padding: "9px 12px", fontSize: 13 }, onClick: () => activateEnrollment(s) }, "\u2713 \u00DCbernehmen"),
                         React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px 12px", fontSize: 13, color: "var(--red)" }, onClick: () => rejectEnrollment(s) }, "Ablehnen")))),
                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Angemeldet \u00FCber deinen Buchungslink. Bitte pr\u00FCfen und \u00FCbernehmen oder ablehnen.")),
-            students.length > 3 && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
+            // Suche und Filter erst ab 4 Schülern - aber sichtbar lassen, solange eins davon aktiv
+            // ist. Sonst blieb nach dem Löschen/Archivieren auf 3 Schüler ein Filter unsichtbar
+            // eingeschaltet und die Liste leer, ohne Weg, ihn zurückzusetzen.
+            (students.length > 3 || search || listFilter !== "alle") && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
                 React.createElement("input", { value: search, onChange: e => setSearch(e.target.value), placeholder: "Sch\u00FCler suchen\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 12, padding: "11px 38px 11px 13px",
                         fontSize: 16, background: "var(--card)" } }),
                 search && React.createElement("button", { onClick: () => setSearch(""), "aria-label": "Suche l\u00F6schen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
                         fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "\u00D7")),
             // Filter-Pillen (spec 7). Die Status-Gruppen weiter unten bleiben erhalten - die Pillen
             // schr\u00E4nken nur ein, welche Sch\u00FCler \u00FCberhaupt in den Gruppen landen.
-            students.length > 3 && React.createElement("div", { className: "stud-seg", style: { marginBottom: 12 } },
+            (students.length > 3 || search || listFilter !== "alle") && React.createElement("div", { className: "stud-seg", style: { marginBottom: 12 } },
                 [["alle", "Alle"], ["aktiv", "Aktiv"], ["reif", "Pr\u00FCfungsreif"], ["offen", "Offener Betrag"]].map(([k, lbl]) => React.createElement("button", { key: k, className: "stud-seg-btn" + (listFilter === k ? " on" : ""), onClick: () => setListFilter(k) }, lbl))),
             students.length === 0 && React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 17, marginBottom: 6 } }, "Noch keine Sch\u00FCler"),
@@ -18170,10 +18190,14 @@ function App() {
             })(),
             filtered.filter(s => !s.archived && !s.pending).length === 0 && students.filter(s => !s.archived).length === 0 && students.length > 0 &&
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", textAlign: "center", marginTop: 8 } }, "Alle Sch\u00FCler sind archiviert."),
-            filtered.length === 0 && React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", textAlign: "center", marginTop: 20 } },
-                "Kein Sch\u00FCler gefunden f\u00FCr \u201E",
-                search,
-                "\"."),
+            // Nur wenn es überhaupt Schüler gibt (sonst steht oben schon "Noch keine Schüler") und
+            // eine Suche oder ein Filter die Liste leert - ohne Suchbegriff hieß es vorher
+            // "Kein Schüler gefunden für „"." mit leeren Anführungszeichen.
+            students.length > 0 && (q || listFilter !== "alle") && filtered.filter(s => !s.archived && !s.pending).length === 0 && React.createElement("div", { style: { textAlign: "center", marginTop: 20 } },
+                React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", marginBottom: 10 } },
+                    q ? "Kein Sch\u00FCler gefunden f\u00FCr \u201E" + search.trim() + "\u201C" + (listFilter !== "alle" ? " mit diesem Filter." : ".")
+                        : "Kein Sch\u00FCler passt zu diesem Filter."),
+                React.createElement("button", { className: "btn btn-ghost", onClick: () => { setSearch(""); setListFilter("alle"); } }, "Suche und Filter zur\u00FCcksetzen")),
             students.some(s => s.archived) && React.createElement("div", { style: { marginTop: 18 } },
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between" }, onClick: () => setShowArchived(!showArchived) },
                     React.createElement("span", null,
@@ -18708,7 +18732,10 @@ function App() {
                     ? sec.items.map((item, idx) => fzkStufeRow(sec, item, idx, sec.items))
                     : sec.items.map(item => {
                     const cnt = effCount(active, item);
-                    const done = (active.strecken && active.strecken[item.id]) || 0;
+                    // Auf die Soll-Anzahl begrenzen (wie beim Abschnitts-Zähler oben und in
+                    // calcBack): wurde die Anzahl nachträglich verringert, stand hier sonst "3/2".
+                    // Der gespeicherte Wert bleibt, falls die Anzahl wieder erhöht wird.
+                    const done = Math.min((active.strecken && active.strecken[item.id]) || 0, cnt);
                     const complete = done >= cnt;
                     const log = (active.streckenLog && active.streckenLog[item.id]) || [];
                     const lastEntry = log.length ? log[log.length - 1] : null;
@@ -19329,6 +19356,15 @@ function App() {
             return [l.thema, l.gut, l.schlecht, l.note, l.hinweis].some(v => (v || "").toLowerCase().includes(q));
         };
         const gefiltert = lessons.map((l, idx) => ({ l, idx })).filter(({ l }) => suchTreffer(l));
+        // "X. Fahrstunde" nach Datum statt nach Listenposition: neue Einträge landen vorn in der
+        // Liste, auch wenn sie nachträglich für einen früheren Tag erfasst werden - die Nummer
+        // stimmte dann nicht mehr mit der tatsächlichen Reihenfolge der Fahrten überein. Bei
+        // gleichem Datum gilt die Erfassungsreihenfolge (weiter hinten = früher erfasst), Einträge
+        // ohne Datum zählen ans Ende.
+        const nrNachDatum = {};
+        lessons.map((l, idx) => ({ l, idx }))
+            .sort((a, b) => String(a.l.date || "9999").localeCompare(String(b.l.date || "9999")) || b.idx - a.idx)
+            .forEach((x, i) => { nrNachDatum[x.l.id] = i + 1; });
         return React.createElement("div", { className: "pad" },
             studentHeader(),
             schwaechen.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, borderLeft: "3px solid var(--amber)" } },
@@ -19351,14 +19387,16 @@ function App() {
                         " ",
                         lessons.length === 1 ? "Eintrag" : "Einträge")),
                 React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Stunde")),
-            lessons.length > 3 && React.createElement("div", { className: "field", style: { margin: "0 0 12px" } },
+            // Sichtbar lassen, solange ein Suchbegriff aktiv ist - sonst blieb nach dem Löschen auf
+            // 3 Einträge eine unsichtbare Suche stehen und die Liste leer.
+            (lessons.length > 3 || tagebuchSuche) && React.createElement("div", { className: "field", style: { margin: "0 0 12px" } },
                 React.createElement("input", { type: "search", value: tagebuchSuche, placeholder: "Fahrtenbuch durchsuchen (Thema, Notizen)…", "aria-label": "Fahrtenbuch durchsuchen",
                     onChange: e => setTagebuchSuche(e.target.value) })),
             lessons.length === 0 && React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 16, marginBottom: 6 } }, "Noch keine Fahrstunden"),
                 React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lege für jede Fahrstunde einen Eintrag mit Datum und Bewertung an."),
                 React.createElement("button", { className: "btn btn-primary", onClick: addLesson }, "+ Erste Stunde eintragen")),
-            lessons.length > 0 && gefiltert.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 16px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Fahrstunde passt zu \"" + tagebuchSuche + "\"."),
+            lessons.length > 0 && gefiltert.length === 0 && React.createElement("div", { className: "card", style: { padding: "18px 16px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Keine Fahrstunde passt zu \u201E" + tagebuchSuche.trim() + "\u201C."),
             gefiltert.map(({ l, idx }) => {
                 const avg = lessonAvg(l);
                 const avgSmiley = avg == null ? null : (avg >= 2.5 ? SMILEYS[0] : avg >= 1.75 ? SMILEYS[1] : SMILEYS[2]);
@@ -19372,7 +19410,7 @@ function App() {
                         React.createElement("div", { style: { width: 42, height: 42, minWidth: 42, borderRadius: 11, background: "var(--field-bg)",
                                 display: "flex", alignItems: "center", justifyContent: "center", fontSize: 22 } }, avgSmiley ? avgSmiley.emoji : "📝"),
                         React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, lineHeight: 1.15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, l.thema ? l.thema : (lessons.length - idx) + ". Fahrstunde"),
+                            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, lineHeight: 1.15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, l.thema ? l.thema : (nrNachDatum[l.id] || (lessons.length - idx)) + ". Fahrstunde"),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
                                 l.date ? ("Fahrt am " + new Date(l.date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })) : "kein Datum",
                                 lroute ? " · 🗺 " + rmapFmtDist(lroute.dist || 0) : "",
@@ -19885,6 +19923,35 @@ function App() {
         updateActive({ reminders });
         window.open(url, "_blank");
     }
+    // Einen Schüler per ID gegen den AKTUELLEN Stand ändern und speichern (wie writeStudent, aber
+    // funktional über patchStudentNow). Für Handler mit await dazwischen (Rückfrage, Rückgängig):
+    // {...active, ...} aus dem Render-Schnappschuss hätte inzwischen eingetroffene Änderungen am
+    // Schüler still wieder zurückgedreht. fn liefert den neuen Datensatz oder null (= nichts tun).
+    function schuelerAendernUndSpeichern(sid, fn) {
+        const patched = patchStudentNow(sid, cur => {
+            const next = fn(cur);
+            if (!next)
+                return null;
+            markDirtyKeys(cur.id, cur, next);
+            return next;
+        });
+        if (!patched)
+            return null;
+        if (uid)
+            planSave("cache", () => { saveCache(uid, studentsRef.current); }, 500);
+        scheduleSave(patched);
+        return patched;
+    }
+    // Rückgängig legt genau das gelöschte Element wieder an seine alte Stelle - nicht die ganze
+    // Liste von vorher, sonst gingen zwischendurch hinzugekommene Einträge wieder verloren.
+    function wiederEinfuegen(list, el, idx) {
+        const arr = list || [];
+        if (arr.indexOf(el) >= 0 || (el && el.id && arr.some(x => x && x.id === el.id)))
+            return arr;
+        const next = arr.slice();
+        next.splice(Math.min(Math.max(idx, 0), next.length), 0, el);
+        return next;
+    }
     function kostenSection() {
         const price = Number(pricePerHour) || 0; // Preis pro UE
         const mins = lessonMinutes(active);
@@ -19921,17 +19988,32 @@ function App() {
             if (!(await askConfirm({ title: "Posten löschen?",
                 message: (ziel ? (ziel.label || "Dieser Posten") + " (" + eurFmt(Number(ziel.amount) || 0) + ")" : "Dieser Posten") + " wird aus den Kosten entfernt." })))
                 return;
-            const vorherItems = items, vorherPackages = active.packages;
+            if (!ziel)
+                return;
+            const sid = active.id;
             // Ein aus einem Paket übernommener Posten hat eine zugehörige packages-Zeile (siehe
             // "Oder ein Paket übernehmen" unten) - ohne sie mit zu entfernen, bliebe das
             // Paket-Guthaben (includedUE) verwaist stehen, obwohl der Rechnungsposten gelöscht
             // wurde, und packageRemainingUE()/das Paket-Knapp-Cockpit rechnen dauerhaft mit einem
             // zu hohen Rest.
-            updateActive({
-                costItems: ziel && ziel.id ? items.filter(it => it.id !== ziel.id) : items.filter((_, i) => i !== idx),
-                packages: ziel && ziel.id ? (active.packages || []).filter(p => p.costItemId !== ziel.id) : active.packages,
+            // Ohne id (Altbestand) über die Objekt-Referenz treffen statt über den Index.
+            const trifft = it => ziel.id ? (it && it.id === ziel.id) : it === ziel;
+            let entferntePakete = [];
+            const patched = schuelerAendernUndSpeichern(sid, cur => {
+                const alt = cur.costItems || [];
+                if (!alt.some(trifft))
+                    return null;
+                entferntePakete = ziel.id ? (cur.packages || []).filter(p => p.costItemId === ziel.id) : [];
+                return { ...cur, costItems: alt.filter(it => !trifft(it)),
+                    packages: entferntePakete.length ? (cur.packages || []).filter(p => p.costItemId !== ziel.id) : cur.packages };
             });
-            showUndo("Posten gelöscht", () => updateActive({ costItems: vorherItems, packages: vorherPackages }));
+            if (!patched) {
+                showToast("Der Eintrag hat sich inzwischen geändert (z. B. auf einem anderen Gerät). Bitte die Liste prüfen und erneut löschen.");
+                return;
+            }
+            showUndo("Posten gelöscht", () => schuelerAendernUndSpeichern(sid, cur => ({ ...cur,
+                costItems: wiederEinfuegen(cur.costItems, ziel, idx),
+                packages: entferntePakete.length ? entferntePakete.reduce((acc, pk) => wiederEinfuegen(acc, pk, acc.length), cur.packages || []) : cur.packages })));
         }
         // Beleg-Foto → Kostenposition: liest ein Foto einer Quittung/eines Kassenbons aus und
         // öffnet damit vorbefüllt genau dasselbe "Posten hinzufügen"-Formular wie addItem() -
@@ -19982,9 +20064,16 @@ function App() {
             if (!(await askConfirm({ title: "Fahrstunde löschen?",
                 message: l ? (fmtDLong(l.date) + " · " + (l.ue || 1) + " UE" + (l.art ? " · " + l.art : "")) + " wird aus dem Fahrtenbuch entfernt." : "Die Fahrstunde wird aus dem Fahrtenbuch entfernt." })))
                 return;
-            const vorher = lessons;
-            updateActive({ drivenLessons: lessons.filter(l => l.id !== id) });
-            showUndo("Fahrstunde gelöscht", () => updateActive({ drivenLessons: vorher }));
+            if (!l)
+                return;
+            const sid = active.id, pos = lessons.indexOf(l);
+            const patched = schuelerAendernUndSpeichern(sid, cur => (cur.drivenLessons || []).some(x => x.id === id)
+                ? { ...cur, drivenLessons: cur.drivenLessons.filter(x => x.id !== id) } : null);
+            if (!patched) {
+                showToast("Der Eintrag hat sich inzwischen geändert (z. B. auf einem anderen Gerät). Bitte die Liste prüfen und erneut löschen.");
+                return;
+            }
+            showUndo("Fahrstunde gelöscht", () => schuelerAendernUndSpeichern(sid, cur => ({ ...cur, drivenLessons: wiederEinfuegen(cur.drivenLessons, l, pos) })));
         }
         function addPayment() {
             setPaymentForm({ amount: "", date: ymd(new Date()), method: "Bar", error: "" });
@@ -19995,9 +20084,19 @@ function App() {
                 message: (p ? eurFmt(Number(p.amount) || 0) + " vom " + fmtDLong(p.date) + (p.receiptNumber ? " (Beleg " + p.receiptNumber + ")" : "") : "Diese Zahlung")
                     + " wird entfernt. Der offene Betrag des Schülers steigt entsprechend." })))
                 return;
-            const vorher = pays;
-            updateActive({ payments: pays.filter((_, i) => i !== idx) });
-            showUndo("Zahlung gelöscht", () => updateActive({ payments: vorher }));
+            if (!p)
+                return;
+            const sid = active.id;
+            // Über die id treffen (alte Zahlungen ohne id über die Objekt-Referenz) - der Index
+            // kann nach der Rückfrage auf eine andere Zahlung zeigen.
+            const trifft = x => p.id ? (x && x.id === p.id) : x === p;
+            const patched = schuelerAendernUndSpeichern(sid, cur => (cur.payments || []).some(trifft)
+                ? { ...cur, payments: cur.payments.filter(x => !trifft(x)) } : null);
+            if (!patched) {
+                showToast("Der Eintrag hat sich inzwischen geändert (z. B. auf einem anderen Gerät). Bitte die Liste prüfen und erneut löschen.");
+                return;
+            }
+            showUndo("Zahlung gelöscht", () => schuelerAendernUndSpeichern(sid, cur => ({ ...cur, payments: wiederEinfuegen(cur.payments, p, idx) })));
         }
         return React.createElement("div", { style: { marginTop: 8 } },
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Kosten"),
@@ -20547,7 +20646,15 @@ function App() {
                             React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700 } }, stu ? dispName(stu) : (a.title || "Termin")),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, hm(a.start_at) + " Uhr · " + mins + " Min geplant")),
                         React.createElement("button", { className: "btn btn-primary", style: { padding: "8px 12px", fontSize: 12.5 }, onClick: () => confirmPastLesson(a, mins) }, "✓ " + mins + " Min"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 10px", fontSize: 12.5, color: "var(--muted)" }, onClick: () => skipPastLesson(a) }, "Nicht gefahren"));
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 10px", fontSize: 12.5, color: "var(--muted)" }, onClick: () => {
+                            // Blendet den Termin dauerhaft aus der Bestätigungsliste aus - ein
+                            // Fehltipp soll sich zurücknehmen lassen (nur diese eine Termin-ID).
+                            const sid = a._matchedStudentId || a.student_id;
+                            skipPastLesson(a);
+                            if (sid)
+                                showUndo("Als nicht gefahren markiert", () => schuelerAendernUndSpeichern(sid, cur => (cur.dismissedAppts || []).indexOf(a.id) >= 0
+                                    ? { ...cur, dismissedAppts: cur.dismissedAppts.filter(x => x !== a.id) } : null));
+                        } }, "Nicht gefahren"));
                 })),
             paymentsToday.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 10 } }, "Zahlungen heute"),
