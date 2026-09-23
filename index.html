@@ -3364,7 +3364,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.29";
+const APP_VERSION = "2.9.30";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -5649,9 +5649,14 @@ async function fetchInteressenten(uid) {
     const { data, error } = await sb.from("interessenten").select("*").eq("owner", uid).order("follow_up_am", { ascending: true, nullsFirst: false });
     if (error) {
         console.error(error);
-        return { list: [], missing: true };
+        // Nur "Tabelle gibt es nicht" heißt wirklich "noch nicht eingerichtet" (42P01 von
+        // Postgres, PGRST205 von PostgREST). Vorher galt JEDER Fehler als missing - ein kurzer
+        // Netzabbruch zeigte dann "Noch nicht eingerichtet" statt der vorhandenen Interessenten,
+        // ohne Hinweis und ohne Wiederholen-Möglichkeit.
+        const fehlt = error.code === "42P01" || error.code === "PGRST205" || /does not exist|could not find the table/i.test(error.message || "");
+        return { list: [], missing: fehlt, error: fehlt ? null : (error.message || "Unbekannter Fehler") };
     }
-    return { list: data || [], missing: false };
+    return { list: data || [], missing: false, error: null };
 }
 async function dbInsertInteressent(uid, row) {
     return await withNetworkRetry(async () => {
@@ -11046,6 +11051,9 @@ function App() {
     // Doppeltap-Schutz für convertInteressentToStudent() - ein Ref wirkt sofort, ohne auf das
     // Re-Render von interessentForm.busy zu warten (siehe apptSavingRef für dasselbe Muster).
     const interessentConvertBusyRef = useRef(false);
+    // Gleicher Riegel für saveInteressentForm(): busy im State greift erst nach dem Re-Render,
+    // ein schneller Doppeltipp auf "Anlegen" konnte denselben Interessenten zweimal einfügen.
+    const interessentSaveBusyRef = useRef(false);
     // Doppeltap-Schutz für createStudentFromImport() - ohne diesen Riegel konnte ein zweiter Tipp
     // auf "Schüler anlegen" denselben gescannten Antrag zweimal als Schüler übernehmen.
     const studentImportBusyRef = useRef(false);
@@ -11575,6 +11583,10 @@ function App() {
     // zeigt dann nur einen Hinweis statt Daten, die App läuft ansonsten unverändert weiter.
     const [interessenten, setInteressenten] = useState([]);
     const [interessentenMissing, setInteressentenMissing] = useState(false);
+    // Ladefehler getrennt von "missing" - gleiche Lehre wie examSlotsErr/vouchersErr weiter
+    // unten: ein fehlgeschlagener Abruf darf nicht aussehen wie "nichts da".
+    const [interessentenErr, setInteressentenErr] = useState(null);
+    const [interessentenVersuch, setInteressentenVersuch] = useState(0); // erhöhen = neu laden
     useEffect(() => {
         if (!uid)
             return;
@@ -11582,13 +11594,18 @@ function App() {
         // eintreffende Antwort für den vorherigen Nutzer (z.B. nach Kontowechsel auf
         // demselben Gerät) die Interessentenliste des jetzt eingeloggten Kontos überschreibt.
         let cancelled = false;
-        fetchInteressenten(uid).then(({ list, missing }) => {
+        setInteressentenErr(null);
+        fetchInteressenten(uid).then(({ list, missing, error }) => {
             if (cancelled) return;
+            if (error) {
+                setInteressentenErr(error);
+                return;
+            }
             setInteressenten(list);
             setInteressentenMissing(missing);
-        });
+        }).catch(e => { if (!cancelled) setInteressentenErr(fehlerText(e)); });
         return () => { cancelled = true; };
-    }, [uid]);
+    }, [uid, interessentenVersuch]);
     // Prüfplatz-Kontingente, siehe renderExamSlotsSection(). Eigener useEffect statt Teil der
     // großen Promise.all-Ladekette (wie interessenten) - unabhängige, sekundäre Datenquelle.
     const [examSlots, setExamSlots] = useState([]);
@@ -13580,6 +13597,9 @@ function App() {
             showToast("Bitte mindestens einen Namen eingeben.");
             return;
         }
+        if (interessentSaveBusyRef.current)
+            return;
+        interessentSaveBusyRef.current = true;
         setInteressentForm({ ...f, busy: true });
         const payload = { vorname: f.vorname || "", name: f.name || "", tel: f.tel || "", klasse: f.klasse || "",
             notiz: f.notiz || "", status: f.status || "offen", follow_up_am: f.follow_up_am || null };
@@ -13597,6 +13617,9 @@ function App() {
         catch (e) {
             setInteressentForm({ ...f, busy: false });
             showToast("Konnte nicht gespeichert werden:\n" + (e.message || e), "error");
+        }
+        finally {
+            interessentSaveBusyRef.current = false;
         }
     }
     async function removeInteressent(it) {
@@ -19561,6 +19584,13 @@ function App() {
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 15, marginBottom: 8 } }, "Noch nicht eingerichtet"),
                     React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, margin: 0 } },
                         "Diese Funktion braucht eine kleine, einmalige Datenbank-Ergänzung (Datei sql/2026-08-19_interessenten.sql). Alles andere in der App funktioniert davon unabhängig weiter.")));
+        }
+        if (interessentenErr) {
+            return React.createElement("div", { className: "pad readable-shell" },
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, margin: "4px 2px 2px" } }, "Interessenten"),
+                React.createElement("div", { role: "alert", className: "card", style: { padding: "14px", marginTop: 14, fontSize: 13.5, color: "var(--red-ink)", background: "var(--red-soft)", border: "1px solid var(--red)", whiteSpace: "pre-line" } },
+                    "Interessenten konnten nicht geladen werden.\n" + interessentenErr),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 }, onClick: () => setInteressentenVersuch(n => n + 1) }, "Erneut versuchen"));
         }
         const todayStr = ymd(new Date());
         const sorted = interessenten.slice().sort((a, b) => {
