@@ -3364,7 +3364,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.27";
+const APP_VERSION = "2.9.28";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -5855,7 +5855,11 @@ function lernStand(q, progress) {
     const e = (progress && progress[q.id]) || null;
     const box = e && e.box ? Math.max(1, Math.min(5, e.box)) : 0; // 0 = nie beantwortet
     const faellig = !e || !e.due || e.due <= ymd(new Date());
-    return { box, faellig, gesehen: !!e, treffer: box ? LEITNER_TREFFER[box - 1] : 0.30 };
+    // "gesehen" heißt beantwortet, nicht bloß vorhanden: der Merken-Stern legt schon einen
+    // Eintrag {marked:true} an, ganz ohne Antwort. Mit !!e zählten solche Fragen fälschlich als
+    // geübt - die Lernstand-Schätzung erschien dann schon nach 30 nur gemerkten Fragen, und die
+    // "zur Wiederholung fällig"-Zahl war zu hoch. Gleiche Regel wie theoryAnsweredCount().
+    return { box, faellig, gesehen: !!(e && (e.correct != null || e.box)), treffer: box ? LEITNER_TREFFER[box - 1] : 0.30 };
 }
 /* Reihenfolge beim Ueben. Zuerst was faellig ist und am wenigsten sitzt, dann Neues, dann der
    Rest. Innerhalb einer Gruppe zaehlen die Fehlerpunkte: eine 5-Punkte-Frage kostet in der
@@ -31734,7 +31738,16 @@ function TheoryPractice({ code }) {
         const isCorrect = correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
         const nextAnswers = [...examAnswers, { id: q.id, points: q.points, correct: isCorrect }];
         setExamAnswers(nextAnswers);
-        setProgress(prev => ({ ...prev, [q.id]: { ...(prev[q.id] || {}), correct: isCorrect } }));
+        // Fach lokal genauso fortschreiben wie in checkAnswer() - der Server (derselbe
+        // public_theory_answer_submit-Aufruf unten) tut es ohnehin. Vorher wurde hier nur
+        // correct gesetzt, Box und Fälligkeit blieben veraltet: wer nach der Probeprüfung ohne
+        // Neuladen weiterübte, bekam die gerade falsch beantworteten Fragen nicht vorgezogen.
+        setProgress(prev => {
+            const alt = prev[q.id] || {};
+            const box = isCorrect ? Math.min((alt.box || 1) + 1, 5) : 1;
+            const faellig = new Date(Date.now() + LEITNER_INTERVALL[box - 1] * 86400000);
+            return { ...prev, [q.id]: { ...alt, correct: isCorrect, box, due: ymd(faellig) } };
+        });
         if (loggedIn)
             publicTheorySubmitAnswer(code, loggedInName, loggedInPin, q.id, isCorrect);
         if (qIndex + 1 < queue.length) {
@@ -31742,15 +31755,32 @@ function TheoryPractice({ code }) {
             setSelected([]);
             return;
         }
-        const errorPoints = nextAnswers.filter(a => !a.correct).reduce((s, a) => s + a.points, 0);
+        const errorPoints = nextAnswers.filter(a => !a.correct).reduce((s, a) => s + (Number(a.points) || 0), 0);
         const richtig = nextAnswers.filter(a => a.correct).length;
         const R = pruefungsRegeln(myErsterwerb);
-        const result = { total: nextAnswers.length, errorPoints, passed: errorPoints <= R.maxFehler, richtig,
-            art: R.label, grenze: R.maxFehler };
+        // Sonderregel der echten Prüfung: zwei falsch beantwortete 5-Punkte-Fragen bedeuten
+        // "nicht bestanden", auch wenn die Fehlerpunkte (genau 10) noch unter der Grenze liegen.
+        // pruefungsSchaetzung() kannte die Regel längst und warnt im Lernstand davor - nur die
+        // eigentliche Auswertung prüfte bisher allein errorPoints <= maxFehler und zeigte in genau
+        // diesem Fall "Bestanden" an. Wie dort nur beim Ersterwerb (bei der Erweiterung liegt die
+        // Grenze bei 6, zwei Fünfer sind dort ohnehin schon rechnerisch durchgefallen).
+        const falscheFuenfer = nextAnswers.filter(a => !a.correct && Number(a.points) === 5).length;
+        const durchZweiFuenfer = myErsterwerb !== false && falscheFuenfer >= 2;
+        const result = { total: nextAnswers.length, errorPoints, passed: errorPoints <= R.maxFehler && !durchZweiFuenfer, richtig,
+            art: R.label, grenze: R.maxFehler, durchZweiFuenfer };
         setExamResult(result);
         if (loggedIn) {
-            publicTheoryExamSubmit(code, loggedInName, loggedInPin, result);
-            setExamHistory(h => [...(Array.isArray(h) ? h.filter(e => e && typeof e === "object") : []), { date: new Date().toISOString(), ...result }]);
+            const eintrag = { date: new Date().toISOString(), ...result };
+            setExamHistory(h => [...(Array.isArray(h) ? h.filter(e => e && typeof e === "object") : []), eintrag]);
+            // Vorher fire-and-forget: schlug das Speichern fehl, stand das Ergebnis trotzdem in
+            // der Liste und verschwand beim nächsten Laden kommentarlos. Jetzt wird es in dem
+            // Fall wieder herausgenommen und auf dem Ergebnis-Bildschirm ein Hinweis gezeigt.
+            publicTheoryExamSubmit(code, loggedInName, loggedInPin, result).then(r => {
+                if (r === "ok")
+                    return;
+                setExamHistory(h => (Array.isArray(h) ? h.filter(e => e !== eintrag) : h));
+                setExamResult(cur => cur === result ? { ...cur, nichtGespeichert: true } : cur);
+            });
         }
         setScreen("pruefung_ergebnis");
     }
@@ -31859,7 +31889,11 @@ function TheoryPractice({ code }) {
             React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center", marginBottom: 14, background: r.passed ? "var(--sage-bg)" : "var(--danger-bg)", border: "1.5px solid " + (r.passed ? "var(--sage-deep)" : "var(--danger)") } },
                 React.createElement("div", { style: { fontSize: 30, marginBottom: 8 } }, r.passed ? "🎉" : "📚"),
                 React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 18, marginBottom: 6, color: r.passed ? "var(--sage-deep)" : "var(--danger)" } }, r.passed ? "Bestanden" : "Nicht bestanden"),
-                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)" } }, r.richtig + " / " + r.total + " richtig · " + r.errorPoints + " Fehlerpunkte (max. " + (r.grenze != null ? r.grenze : PRUEFUNG_MAX_FEHLERPUNKTE) + " zum Bestehen" + (r.art ? ", " + r.art : "") + ")")),
+                React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)" } }, r.richtig + " / " + r.total + " richtig · " + r.errorPoints + " Fehlerpunkte (max. " + (r.grenze != null ? r.grenze : PRUEFUNG_MAX_FEHLERPUNKTE) + " zum Bestehen" + (r.art ? ", " + r.art : "") + ")"),
+                r.durchZweiFuenfer && !r.passed && r.errorPoints <= (r.grenze != null ? r.grenze : PRUEFUNG_MAX_FEHLERPUNKTE) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8, lineHeight: 1.45 } },
+                    "Zwei falsch beantwortete 5-Punkte-Fragen bedeuten auch in der echten Prüfung „nicht bestanden“ – selbst wenn die Fehlerpunkte noch unter der Grenze liegen.")),
+            r.nichtGespeichert && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.45 } },
+                "Dieses Ergebnis konnte nicht in deinem Fahrschüler-Konto gespeichert werden und taucht deshalb nicht im Verlauf auf. Bitte prüfe deine Verbindung."),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_intro") }, "Neue Probeprüfung"),
             examHistory.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_verlauf") }, "Alle Ergebnisse ansehen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setScreen("themen") }, "Zurück zu den Themen"));
