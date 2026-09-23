@@ -10987,11 +10987,20 @@ function App() {
         // in der temporalen Todeszone - "Cannot access 'uid' before initialization". Im Callback
         // selbst ist der Zugriff unproblematisch, der laeuft erst nach dem Render.
     }, [recSession]);
-    useEffect(() => () => { recActiveRef.current = false; if (recWatchRef.current != null) {
+    useEffect(() => () => { recHardwareStop(); }, []);
+    // GPS-Watcher (Browser + nativ) und Wake-Lock sofort freigeben, ohne etwas zu speichern. Für das
+    // Unmounten und für Abmelden/Kontowechsel: vorher lief eine Aufzeichnung dabei einfach weiter,
+    // schrieb ihren Puffer neu und Konto B sah den Schülernamen von Konto A (Audit C-M7).
+    // function-Deklaration (gehoben) statt const, damit sie auch aus Effekten oberhalb der frühen
+    // Returns sicher aufrufbar ist - stopRecording() ist dort nicht erreichbar (TDZ).
+    function recHardwareStop() {
+    recActiveRef.current = false;
+    if (recWatchRef.current != null) {
         try {
             navigator.geolocation.clearWatch(recWatchRef.current);
         }
         catch (_) { }
+        recWatchRef.current = null;
     }
     // Nativer Hintergrund-GPS-Watcher fehlte hier bisher (nur stopRecording() räumte ihn auf) -
     // unmountet die App-Komponente während einer aktiven nativen Aufzeichnung (z.B. weil die
@@ -11014,7 +11023,8 @@ function App() {
         }
         catch (_) { }
         recWakeLockRef.current = null;
-    } }, []);
+    }
+    }
     const [bookingCode, setBookingCode] = useState(null);
     const [adminSchools, setAdminSchools] = useState(null); // null=nicht geladen
     const [adminAccounts, setAdminAccounts] = useState(null); // null=nicht geladen, {busy,error,list}
@@ -11504,18 +11514,18 @@ function App() {
         localStorage.setItem("v3_teacher_name", teacherName);
     }
     catch (e) { } }, [teacherName]);
-    const workHoursTimer = useRef(null);
     const [workHoursOpen, setWorkHoursOpen] = useState(false);
     function writeWorkHours(next) {
         setWorkHours(next);
-        if (workHoursTimer.current)
-            clearTimeout(workHoursTimer.current);
-        workHoursTimer.current = setTimeout(() => {
+        // Aufschub über planSave (statt eigenem Timer), damit auch das beim Verlassen der Seite
+        // und vor dem Abmelden noch gespeichert wird (siehe pendingSavesRef).
+        planSave("workHours", () => {
             if (!uid)
-                return;
-            saveWorkHoursToProfile(uid, next).catch(e => {
+                return true;
+            return saveWorkHoursToProfile(uid, next).then(() => true, e => {
                 console.error("Arbeitszeiten speichern fehlgeschlagen:", e);
                 setWorkHoursError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler") + ". Bitte erneut versuchen.");
+                return false;
             });
         }, 500);
     }
@@ -11587,15 +11597,78 @@ function App() {
     // die Speicheranzeige wird damit gleichzeitig zum Wiederholen-Knopf (Designprüfung 2026-09-14).
     const [saveError, setSaveError] = useState(null);
     const [syncing, setSyncing] = useState(false);
-    const saveTimers = useRef({});
-    // Debounce-Timer für den lokalen localStorage-Cache (saveCache) - siehe writeStudent() weiter
-    // unten. Ein einziger Timer statt pro Schüler wie bei saveTimers, weil saveCache() ohnehin
-    // immer den GESAMTEN Schülerstand als ein JSON-Blob schreibt, nicht pro Schüler einzeln.
-    const cacheSaveTimerRef = useRef(null);
-    // IDs von Schülern mit gerade laufendem (angestoßenem, aber noch nicht abgeschlossenem)
-    // Speichervorgang - verhindert, dass ein Hintergrund-Neuladen der Schülerliste eine eigene,
-    // noch nicht bestätigte Änderung durch den älteren Serverstand ersetzt.
-    const studentWritesRef = useRef(new Set());
+    // Alle noch per Timer aufgeschobenen Speichervorgänge (Schüler, lokaler Cache, Fahrschule,
+    // Vorlage, Arbeitszeiten, Texte): Schlüssel -> {timer, run}. run() bricht den Timer ab und
+    // speichert sofort. Gebraucht, um beim Verlassen der Seite alles wegzuschreiben - iOS beendet
+    // eine Seite im Hintergrund oft, bevor ein 500-ms-Timer noch läuft, die letzte Änderung war
+    // dann weg (Audit C-M9) - und vor dem Abmelden, danach fehlt die Berechtigung (Audit I-M12).
+    const pendingSavesRef = useRef(new Map());
+    // Anzahl angestoßener, noch nicht abgeschlossener Speichervorgänge je Schüler-ID. Zähler statt
+    // Set: liefen zwei Speichervorgänge desselben Schülers überlappend, entfernte das Ende des
+    // ersten die ID, während das zweite noch lief - ein Hintergrund-Neuladen ersetzte die eigene,
+    // noch nicht bestätigte Änderung dann durch den älteren Serverstand (Audit C-N10).
+    const studentWritesRef = useRef(new Map());
+    // Zeitpunkt der letzten lokalen Änderung je Schüler-ID - ein Neuladen, das VOR dieser Änderung
+    // gestartet wurde, darf den Schüler nicht mit seinem (älteren) Serverstand überschreiben.
+    const studentTouchedRef = useRef(new Map());
+    function studentWriteDelta(id, d) {
+        const m = studentWritesRef.current;
+        const n = (m.get(id) || 0) + d;
+        if (n > 0)
+            m.set(id, n);
+        else
+            m.delete(id);
+    }
+    function planSave(key, fn, ms) {
+        const m = pendingSavesRef.current;
+        const prev = m.get(key);
+        if (prev)
+            clearTimeout(prev.timer);
+        const entry = { timer: null, run: null };
+        entry.run = () => {
+            if (m.get(key) !== entry)
+                return undefined;
+            clearTimeout(entry.timer);
+            m.delete(key);
+            return fn();
+        };
+        entry.timer = setTimeout(entry.run, ms || 500);
+        m.set(key, entry);
+    }
+    function hasPendingSave(key) {
+        return pendingSavesRef.current.has(key);
+    }
+    // Führt alle aufgeschobenen Speichervorgänge SOFORT aus (synchron angestoßen, damit auch ein
+    // pagehide sie noch startet). Liefert false, wenn einer davon einen Fehler gemeldet hat.
+    function flushPendingSaves() {
+        const runs = Array.from(pendingSavesRef.current.values()).map(e => e.run);
+        const results = runs.map(run => {
+            try {
+                return Promise.resolve(run()).catch(() => false);
+            }
+            catch (e) {
+                return Promise.resolve(false);
+            }
+        });
+        return Promise.all(results).then(r => r.every(x => x !== false));
+    }
+    // Beim Abmelden/Kontowechsel: aufgeschobene Speichervorgänge des alten Kontos verwerfen, statt
+    // sie danach (ohne Berechtigung bzw. in den gerade gelöschten Cache) noch laufen zu lassen.
+    function dropPendingSaves() {
+        pendingSavesRef.current.forEach(e => clearTimeout(e.timer));
+        pendingSavesRef.current.clear();
+    }
+    useEffect(() => {
+        const onHidden = () => { if (document.visibilityState === "hidden")
+            flushPendingSaves(); };
+        const onPageHide = () => { flushPendingSaves(); };
+        document.addEventListener("visibilitychange", onHidden);
+        window.addEventListener("pagehide", onPageHide);
+        return () => {
+            document.removeEventListener("visibilitychange", onHidden);
+            window.removeEventListener("pagehide", onPageHide);
+        };
+    }, []);
     // Pro Schüler-ID die seit dem letzten erfolgreichen Speichern lokal geänderten Top-Level-Felder
     // (z.B. "items", "schaltkompetenzTests") - siehe dbUpdate: bei geteilten Schülern wird damit vor
     // dem Schreiben nur genau dieser Ausschnitt auf den frisch geladenen Serverstand gemergt, statt
@@ -11665,7 +11738,11 @@ function App() {
         if (!uid)
             return;
         setExamSlotsErr(null);
-        fetchExamSlots(uid).then(d => { setExamSlots(d); setExamSlotsErr(null); }).catch(e => setExamSlotsErr(fehlerText(e)));
+        let cancelled = false; // späte Antwort für ein abgemeldetes Konto verwerfen (C-M8)
+        fetchExamSlots(uid).then(d => { if (cancelled)
+            return; setExamSlots(d); setExamSlotsErr(null); }).catch(e => { if (!cancelled)
+            setExamSlotsErr(fehlerText(e)); });
+        return () => { cancelled = true; };
     }, [uid]);
     // Gutscheine der eigenen Fahrschule laden.
     useEffect(() => {
@@ -12143,8 +12220,12 @@ function App() {
     useEffect(() => {
         if (!uid)
             return;
-        fetchWorkHours(uid).then(h => { setWorkHours(h || {}); setWorkHoursError(""); })
-            .catch(e => { console.error(e); setWorkHoursError(e.message || "Unbekannter Fehler"); });
+        let cancelled = false; // späte Antwort für ein abgemeldetes Konto verwerfen (C-M8)
+        fetchWorkHours(uid).then(h => { if (cancelled)
+            return; setWorkHours(h || {}); setWorkHoursError(""); })
+            .catch(e => { console.error(e); if (!cancelled)
+            setWorkHoursError(e.message || "Unbekannter Fehler"); });
+        return () => { cancelled = true; };
     }, [uid]);
     // Eigener Abo-Status (nur relevant, falls der zentrale Admin dieses Konto zahlungspflichtig gemacht hat)
     const [mySubscription, setMySubscription] = useState(null); // null solange nicht geladen
@@ -12155,9 +12236,13 @@ function App() {
         // Bei einem Ladefehler bewusst so tun, als gäbe es kein aktives Abo (subscription_active:false),
         // damit die App niemals dauerhaft hängen bleibt oder jemanden fälschlich aussperrt, nur weil
         // die Abo-Prüfung selbst gerade nicht erreichbar war.
-        fetchOwnSubscription(uid).then(s => setMySubscription(s || { subscription_active: false }))
-            .catch(e => { console.error("Abo-Status konnte nicht geladen werden:", e); setMySubscription({ subscription_active: false }); });
+        let cancelled = false; // späte Antwort für ein abgemeldetes Konto verwerfen (C-M8)
+        fetchOwnSubscription(uid).then(s => { if (!cancelled)
+            setMySubscription(s || { subscription_active: false }); })
+            .catch(e => { console.error("Abo-Status konnte nicht geladen werden:", e); if (!cancelled)
+            setMySubscription({ subscription_active: false }); });
         fetchAppSettings().then(s => setPaypalLink((s && s.paypal_link) || "")).catch(() => setPaypalLink(""));
+        return () => { cancelled = true; };
     }, [uid]);
     // Wenn die App wieder in den Vordergrund kommt: Abo-Status neu laden - ohne diesen Refresh
     // blieb eine bereits offene Sitzung bis zu einem manuellen Reload/Re-Login auf dem beim Login
@@ -12172,12 +12257,15 @@ function App() {
                 const now = Date.now();
                 if (now - lastRefresh < 600) return;
                 lastRefresh = now;
-                fetchOwnSubscription(uid).then(s => setMySubscription(s || { subscription_active: false })).catch(() => { });
+                fetchOwnSubscription(uid).then(s => { if (!cancelled)
+                    setMySubscription(s || { subscription_active: false }); }).catch(() => { });
             }
         }
+        let cancelled = false;
         document.addEventListener("visibilitychange", refresh);
         window.addEventListener("focus", refresh);
         return () => {
+            cancelled = true;
             document.removeEventListener("visibilitychange", refresh);
             window.removeEventListener("focus", refresh);
         };
@@ -12190,16 +12278,13 @@ function App() {
             return;
         fetchBookingMessage(uid).then(setBookingMessage).catch(() => setBookingMessage(""));
     }, [uid]);
-    const bookingMsgTimer = useRef(null);
     function writeBookingMessage(text) {
         setBookingMessage(text);
-        if (bookingMsgTimer.current)
-            clearTimeout(bookingMsgTimer.current);
-        bookingMsgTimer.current = setTimeout(() => {
+        planSave("bookingMsg", () => {
             if (!uid)
-                return;
-            saveBookingMessage(uid, text).then(() => setBookingMessageError(""))
-                .catch(e => { console.error("Buchungsnachricht speichern fehlgeschlagen:", e); setBookingMessageError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); });
+                return true;
+            return saveBookingMessage(uid, text).then(() => { setBookingMessageError(""); return true; })
+                .catch(e => { console.error("Buchungsnachricht speichern fehlgeschlagen:", e); setBookingMessageError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); return false; });
         }, 500);
     }
     // Erinnerungen an die Fahrstunden von morgen (Liste zum Durchtippen).
@@ -12210,16 +12295,13 @@ function App() {
             return;
         fetchReminderMessage(uid).then(setReminderMessage).catch(() => setReminderMessage(""));
     }, [uid]);
-    const reminderMsgTimer = useRef(null);
     function writeReminderMessage(text) {
         setReminderMessage(text);
-        if (reminderMsgTimer.current)
-            clearTimeout(reminderMsgTimer.current);
-        reminderMsgTimer.current = setTimeout(() => {
+        planSave("reminderMsg", () => {
             if (!uid)
-                return;
-            saveReminderMessage(uid, text).then(() => setReminderMessageError(""))
-                .catch(e => { console.error("Erinnerungstext speichern fehlgeschlagen:", e); setReminderMessageError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); });
+                return true;
+            return saveReminderMessage(uid, text).then(() => { setReminderMessageError(""); return true; })
+                .catch(e => { console.error("Erinnerungstext speichern fehlgeschlagen:", e); setReminderMessageError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); return false; });
         }, 500);
     }
     // Erinnerung verschicken: WhatsApp öffnen und den Termin als erinnert merken.
@@ -12253,16 +12335,19 @@ function App() {
             return;
         fetchReviewSettings(uid).then(setReviewSettings).catch(() => setReviewSettings({ url: "", message: "" }));
     }, [uid]);
-    const reviewTimer = useRef(null);
+    // Noch nicht gespeicherte Teiländerungen sammeln: vorher wurde nur der Patch des LETZTEN
+    // Aufrufs gespeichert - wer binnen 500 ms Link und Text änderte, verlor den Link.
+    const reviewPendingRef = useRef(null);
     function writeReviewSettings(patch) {
         setReviewSettings(prev => ({ ...(prev || { url: "", message: "" }), ...patch }));
-        if (reviewTimer.current)
-            clearTimeout(reviewTimer.current);
-        reviewTimer.current = setTimeout(() => {
-            if (!uid)
-                return;
-            saveReviewSettings(uid, patch).then(() => setReviewSettingsError(""))
-                .catch(e => { console.error("Bewertungs-Einstellungen speichern fehlgeschlagen:", e); setReviewSettingsError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); });
+        reviewPendingRef.current = { ...(reviewPendingRef.current || {}), ...patch };
+        planSave("review", () => {
+            const p = reviewPendingRef.current;
+            reviewPendingRef.current = null;
+            if (!uid || !p)
+                return true;
+            return saveReviewSettings(uid, p).then(() => { setReviewSettingsError(""); return true; })
+                .catch(e => { console.error("Bewertungs-Einstellungen speichern fehlgeschlagen:", e); setReviewSettingsError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler")); return false; });
         }, 500);
     }
     // Limit-Änderungen zusätzlich in der Datenbank speichern (für die Buchungsseite).
@@ -12352,8 +12437,45 @@ function App() {
             // zwischengespeicherte Fahrlehrer-Unterschrift des vorherigen Kontos kurz sichtbar
             // bleiben, bevor der kontogebundene Ladevorgang unten sie fürs neue Konto ersetzt.
             setInstrSig(null);
+            // Weitere kontogebundene Zustände (Audit C-M8): ohne Reset behielt Konto B nach dem
+            // Wechsel im selben Tab z.B. Moderator-/Admin-Oberfläche, Kalender-Feed-Link, Abo-Status,
+            // Profil, Arbeitszeiten, Interessenten und Prüfplätze von Konto A - schlug bei B ein
+            // Abruf fehl (.catch(() => {})), blieb A's Stand einfach stehen.
+            setIsSchoolAdmin(false);
+            setIsModerator(false);
+            setPracticeLogEnabled(false);
+            setCalendarFeedToken(null);
+            setAdminTplSuggestion(null);
+            setCalShare(null);
+            setMySubscription(null);
+            setProfileData(null);
+            setProfileComplete(true);
+            setWorkHours(null);
+            setInteressenten([]);
+            setInteressentenMissing(false);
+            setInteressentenErr(null);
+            setExamSlots([]);
+            setActiveId(null);
+            setStudentFiles(null);
+            setStaffInstructor(null);
+            setStaffFiles(null);
+            setMyStaffFiles(null);
+            setVideos(null);
+            // Aufgeschobene Speichervorgänge von A nicht mehr laufen lassen (sonst schriebe z.B.
+            // der Cache-Timer A's Schülerkartei nach dem Löschen wieder in den localStorage).
+            dropPendingSaves();
+            // Laufende Aufzeichnung hart beenden (C-M7) und die Wiederherstellungs-Prüfung für das
+            // nächste Konto wieder scharf schalten (C-N15) - sonst sah Konto B einen eigenen,
+            // liegen gebliebenen Aufzeichnungs-Puffer nie.
+            recHardwareStop();
+            recPtsRef.current = [];
+            setRecSession(null);
+            setRecRestore(null);
+            recRestoreCheckedRef.current = false;
             return;
         }
+        // Antworten, die erst nach Abmelden/Kontowechsel eintreffen, verwerfen (Audit C-M8).
+        let cancelled = false;
         const cached = loadCache(uid);
         if (cached && cached.length) {
             updateStudents(cached);
@@ -12394,14 +12516,21 @@ function App() {
         // Zuerst Fahrschule holen, damit die Vorlage (V3 vs. BVF) richtig gewählt wird
         let myRights = false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
         fetchMySchool(uid).then(schoolData => {
+            if (cancelled)
+                return null;
             const sc = schoolData || { ...DEFAULT_SCHOOL };
             putSchool(sc);
             saveSchoolCache(uid, sc);
             applySchoolColor(sc.color);
-            fetchIsModerator(uid).then(setIsModerator).catch(() => { });
-            fetchPracticeLogEnabled(uid).then(setPracticeLogEnabled).catch(() => { });
-            fetchCalendarFeedToken(uid).then(setCalendarFeedToken).catch(() => { });
+            fetchIsModerator(uid).then(v => { if (!cancelled)
+                setIsModerator(v); }).catch(() => { });
+            fetchPracticeLogEnabled(uid).then(v => { if (!cancelled)
+                setPracticeLogEnabled(v); }).catch(() => { });
+            fetchCalendarFeedToken(uid).then(v => { if (!cancelled)
+                setCalendarFeedToken(v); }).catch(() => { });
             fetchMyRights(uid).then(r => {
+                if (cancelled)
+                    return;
                 setIsSchoolAdmin(r);
                 // Einmalige Übernahme alter, lokal gespeicherter Preise in die Fahrschule (nur Admin).
                 // Kontogebunden (wie v3_bday_shown_+uid), nicht geräteweit lesen: sonst könnte auf
@@ -12436,12 +12565,16 @@ function App() {
             // Termine getrennt abfangen: ein Fehler dort soll weder Schüler noch Vorlage blockieren,
             // und statt eines leeren Kalenders bleibt der bisherige Stand (Cache) mit Hinweis.
             const apptsP = fetchAppointments(uid).catch(e => {
-                showToast("Termine konnten nicht geladen werden:\n" + fehlerText(e), "error");
+                if (!cancelled)
+                    showToast("Termine konnten nicht geladen werden:\n" + fehlerText(e), "error");
                 return null;
             });
             return Promise.all([fetchStudents(uid), fetchTemplate(uid, sc.name), apptsP, fetchBookingCode(uid), fetchMyRights(uid).catch(() => false)])
                 .then(res => [...res, sc]); // Fahrschule selbst mit durchreichen, ohne auf State-Timing angewiesen zu sein
-        }).then(([list, tplData, apptData, code, rights, sc]) => {
+        }).then(res => {
+            if (!res || cancelled)
+                return;
+            const [list, tplData, apptData, code, rights, sc] = res;
             myRights = rights;
             setSyncing(false);
             updateStudents(list || []);
@@ -12463,7 +12596,7 @@ function App() {
             // selbst Fahrschul-Admin ist, damit niemals eigene Arbeit überschrieben wird.
             try {
                 if (sc && sc.id && !myRights) {
-                    fetchSchoolAdminTemplate(sc.id, uid).then(sugg => { if (sugg)
+                    fetchSchoolAdminTemplate(sc.id, uid).then(sugg => { if (sugg && !cancelled)
                         setAdminTplSuggestion(sugg); }).catch(() => { });
                 }
             }
@@ -12477,6 +12610,8 @@ function App() {
             }
             catch (e) { }
         }).catch(err => {
+            if (cancelled)
+                return;
             setSyncing(false);
             setLoadErr(String(err && err.message ? err.message : err));
             if (!cached)
@@ -12484,6 +12619,7 @@ function App() {
             if (!cachedTpl)
                 putTpl({ adk: deepCopy(DEFAULT_ADK), strecken: deepCopy(DEFAULT_STRECKEN) });
         });
+        return () => { cancelled = true; };
     }, [uid]);
     // Wenn die App wieder in den Vordergrund kommt: Termine neu laden,
     // damit neue Schüler-Vorschläge auftauchen (ersetzt echtes Push).
@@ -12491,6 +12627,7 @@ function App() {
         if (!uid)
             return;
         let lastRefresh = 0;
+        let cancelled = false; // Antwort nach Abmelden/Kontowechsel verwerfen
         function refresh() {
             // Kein Neuladen, solange ein Termin gerade angelegt, geändert oder gelöscht wird.
             // Sonst käme ein eben gelöschter Termin für einen Moment zurück in die Liste.
@@ -12505,13 +12642,16 @@ function App() {
                 // Scheitert das Neuladen, bleibt der bisherige Kalender stehen (fetchAppointments
                 // wirft jetzt statt [] zu liefern) - nur ein kurzer Hinweis, kein Fehlerfenster,
                 // weil das beim Wechsel in die App bei schwachem Netz öfter passiert.
-                fetchAppointments(uid).then(list => applyFetchedAppts(list))
-                    .catch(() => showFlash("Termine konnten nicht aktualisiert werden (Verbindung?)"));
+                fetchAppointments(uid).then(list => { if (!cancelled)
+                    applyFetchedAppts(list); })
+                    .catch(() => { if (!cancelled)
+                    showFlash("Termine konnten nicht aktualisiert werden (Verbindung?)"); });
             }
         }
         document.addEventListener("visibilitychange", refresh);
         window.addEventListener("focus", refresh);
         return () => {
+            cancelled = true;
             document.removeEventListener("visibilitychange", refresh);
             window.removeEventListener("focus", refresh);
         };
@@ -12526,34 +12666,43 @@ function App() {
         if (!uid)
             return;
         let lastRefresh = 0;
+        // Nach Abmelden/Kontowechsel darf eine noch laufende Antwort weder die Schülerliste noch
+        // den (gerade gelöschten) Cache des alten Kontos wieder beschreiben (Audit C-M8).
+        let cancelled = false;
         function refresh() {
             if (document.visibilityState !== "visible")
                 return;
             const now = Date.now();
             if (now - lastRefresh < 600) return; // visibilitychange + focus feuern beide
             lastRefresh = now;
+            const startedAt = now;
             fetchStudents(uid).then(list => {
-                const busy = studentWritesRef.current;
-                updateStudents(prev => {
-                    const byId = new Map((list || []).map(s => [s.id, s]));
-                    // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
-                    // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
-                    // nicht gerade speichernder Schüler serverseitig nicht mehr auf (gelöscht
-                    // oder die Freigabe wurde entzogen), gehört er entfernt statt stehen zu bleiben.
+                if (cancelled)
+                    return;
+                const writes = studentWritesRef.current, touched = studentTouchedRef.current;
+                // "Beschäftigt" = Speichern läuft/wartet noch ODER lokal geändert, nachdem dieses
+                // Neuladen gestartet wurde - dann ist die Serverantwort für ihn schon veraltet.
+                const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
+                const byId = new Map((list || []).map(s => [s.id, s]));
+                // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
+                // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
+                // nicht gerade speichernder Schüler serverseitig nicht mehr auf (gelöscht
+                // oder die Freigabe wurde entzogen), gehört er entfernt statt stehen zu bleiben.
+                const arr = updateStudents(prev => {
                     const merged = (prev || [])
-                        .filter(s => busy.has(s.id) || byId.has(s.id))
-                        .map(s => busy.has(s.id) ? s : byId.get(s.id));
+                        .filter(s => busy(s.id) || byId.has(s.id))
+                        .map(s => busy(s.id) ? s : byId.get(s.id));
                     const knownIds = new Set(merged.map(s => s.id));
                     const added = (list || []).filter(s => !knownIds.has(s.id));
-                    const arr = [...merged, ...added];
-                    saveCache(uid, arr);
-                    return arr;
+                    return [...merged, ...added];
                 });
+                saveCache(uid, arr);
             }).catch(() => { });
         }
         document.addEventListener("visibilitychange", refresh);
         window.addEventListener("focus", refresh);
         return () => {
+            cancelled = true;
             document.removeEventListener("visibilitychange", refresh);
             window.removeEventListener("focus", refresh);
         };
@@ -12654,7 +12803,6 @@ function App() {
     useEffect(() => { if (school && school.color)
         applySchoolColor(school.color); }, [school, theme]);
     // Save school (debounced)
-    const schoolTimer = useRef(null);
     // Akzeptiert wie React-State-Setter entweder ein fertiges Objekt ODER eine Updater-Funktion
     // (prev => nächsterZustand) - Letzteres für Aufrufer, die erst NACH einem await (z.B. einem
     // Bestätigungsdialog, der beliebig lange offen bleiben kann) schreiben und dabei zwingend
@@ -12663,7 +12811,8 @@ function App() {
     // zwischenzeitliche Änderungen (z.B. an anderen Preisfeldern) stillschweigend zu verwerfen.
     // Bestehende Aufrufer mit einem fertigen Objekt sind davon unberührt (kein Funktionstyp).
     // Laufender Speichervorgang (Promise). Der nächste wartet darauf, damit er mit dem frischen
-    // updated_at des vorigen losgeht - siehe runSchoolSave.
+    // updated_at des vorigen losgeht - siehe runSchoolSave. Der Aufschub-Timer selbst läuft über
+    // planSave("school") (siehe pendingSavesRef).
     const schoolSaveChainRef = useRef(Promise.resolve());
     const writeSchool = useCallback((nextOrFn) => {
         // Synchron gegen schoolRef rechnen statt im setSchool-Updater (siehe studentsRef oben) -
@@ -12682,11 +12831,9 @@ function App() {
             saveSchoolCache(uid, next);
         applySchoolColor(next.color);
         setSaved(false);
-        if (schoolTimer.current)
-            clearTimeout(schoolTimer.current);
-        schoolTimer.current = setTimeout(() => {
-            schoolTimer.current = null;
+        planSave("school", () => {
             schoolSaveChainRef.current = schoolSaveChainRef.current.then(runSchoolSave, runSchoolSave);
+            return schoolSaveChainRef.current;
         }, 500);
     }, [uid]);
     // Gespeichert wird der Stand ZUM ZEITPUNKT DES SPEICHERNS aus schoolRef, nicht das beim Tippen
@@ -12696,7 +12843,7 @@ function App() {
     async function runSchoolSave() {
         const cur = schoolRef.current;
         if (!cur)
-            return;
+            return true;
         try {
             const saved = await saveSchool(cur);
             // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die
@@ -12708,8 +12855,9 @@ function App() {
                     saveSchoolCache(uid, synced);
             }
             // Nur "gespeichert" melden, wenn nicht schon die nächste Änderung wartet.
-            if (!schoolTimer.current)
+            if (!hasPendingSave("school"))
                 setSaved(true);
+            return true;
         }
         catch (e) {
             if (e.isConflict) {
@@ -12720,6 +12868,7 @@ function App() {
             else {
                 showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
             }
+            return false;
         }
     }
     // Wiederherstellung nach einem fehlgeschlagenen Einladungscode-Beitritt bei der Registrierung
@@ -12766,18 +12915,15 @@ function App() {
         }
     }
     // Save template (debounced)
-    const tplTimer = useRef(null);
     const tplSaveChainRef = useRef(Promise.resolve());
     const writeTemplate = useCallback((next) => {
         putTpl(next);
         if (uid)
             saveTplCache(uid, next);
         setSaved(false);
-        if (tplTimer.current)
-            clearTimeout(tplTimer.current);
-        tplTimer.current = setTimeout(() => {
-            tplTimer.current = null;
+        planSave("tpl", () => {
             tplSaveChainRef.current = tplSaveChainRef.current.then(runTplSave, runTplSave);
+            return tplSaveChainRef.current;
         }, 500);
     }, [uid]);
     // Wie runSchoolSave: gespeichert wird der AKTUELLE Stand aus tplRef (mit dem updated_at des
@@ -12786,15 +12932,16 @@ function App() {
     async function runTplSave() {
         const cur = tplRef.current;
         if (!cur || !uid)
-            return;
+            return true;
         try {
             const saved = await saveTemplate(uid, cur);
             // Lokalen Stand mit dem frischen updated_at synchronisieren, sonst würde die nächste
             // Änderung in derselben Sitzung fälschlich als Konflikt mit sich selbst erkannt.
             if (saved && saved.updated_at)
                 putTpl(t => t ? { ...t, updated_at: saved.updated_at } : t);
-            if (!tplTimer.current)
+            if (!hasPendingSave("tpl"))
                 setSaved(true);
+            return true;
         }
         catch (e) {
             if (e.isConflict) {
@@ -12806,6 +12953,7 @@ function App() {
             else {
                 showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
             }
+            return false;
         }
     }
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
@@ -13079,17 +13227,20 @@ function App() {
     // Debounced per-student cloud update
     const scheduleSave = useCallback((stu) => {
         setSaved(false);
-        const t = saveTimers.current;
-        if (t[stu.id])
-            clearTimeout(t[stu.id]);
-        studentWritesRef.current.add(stu.id);
-        t[stu.id] = setTimeout(async () => {
+        const key = "stu:" + stu.id;
+        // Nur zählen, wenn nicht schon ein aufgeschobener Vorgang für diesen Schüler wartet - der
+        // wird gleich ersetzt und läuft nie, sein Zähler geht auf den neuen über.
+        if (!hasPendingSave(key))
+            studentWriteDelta(stu.id, 1);
+        studentTouchedRef.current.set(stu.id, Date.now());
+        planSave(key, async () => {
             const dirty = dirtyKeysRef.current[stu.id];
             delete dirtyKeysRef.current[stu.id];
             try {
                 await dbUpdate(stu, dirty ? Array.from(dirty) : null);
                 setSaved(true);
                 setSaveError(null);
+                return true;
             }
             catch (e) {
                 // Die geänderten Felder wurden zwei Zeilen vorher aus der Dirty-Liste gelöscht -
@@ -13102,9 +13253,10 @@ function App() {
                 }
                 setSaveError(stu.id);
                 showToast("Änderungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
+                return false;
             }
             finally {
-                studentWritesRef.current.delete(stu.id);
+                studentWriteDelta(stu.id, -1);
             }
         }, 500);
     }, []);
@@ -13135,11 +13287,8 @@ function App() {
             // P4, 22.9.2026). Ein einziger Timer statt einer pro Schüler wie bei scheduleSave, da
             // saveCache() ohnehin immer den GESAMTEN Stand schreibt - mehrere schnelle Änderungen
             // an verschiedenen Schülern sollen trotzdem nur einen Schreibvorgang auslösen.
-            if (uid) {
-                if (cacheSaveTimerRef.current)
-                    clearTimeout(cacheSaveTimerRef.current);
-                cacheSaveTimerRef.current = setTimeout(() => saveCache(uid, arr), 500);
-            }
+            if (uid)
+                planSave("cache", () => { saveCache(uid, studentsRef.current || arr); }, 500);
             return arr;
         });
         scheduleSave(next);
@@ -13609,8 +13758,12 @@ function App() {
        noch gar nicht initialisiert. */
     useEffect(() => {
         const stu = (students || []).find(x => x.id === activeId);
+        // writeStudent statt updateActive: updateActive ist eine const unterhalb der frühen
+        // Returns - lief dieser Effekt nach einem Render, der früh zurückkehrte (Profil lädt,
+        // Abo gesperrt), war sie noch nicht initialisiert -> TDZ-Absturz (Audit C-M4).
+        // notizErledigt ist eine function-Deklaration und damit auch dort schon verfügbar.
         if (stu && notizErledigt(stu))
-            updateActive({ lastNote: "", lastNoteAt: null });
+            writeStudent({ ...stu, lastNote: "", lastNoteAt: null });
     }, [activeId, students]);
 
     if (session === undefined)
@@ -24591,15 +24744,41 @@ function App() {
         }
         function closeScreen() { setSettingsScreen(null); }
         async function doSignOut() {
-            if (await askConfirm({ message: "Wirklich abmelden? Du musst dich danach neu anmelden.", confirmLabel: "Abmelden", danger: false })) {
-                if (deviceToken)
-                    await removeDeviceToken(uid, deviceToken);
-                await revokeWidgetToken(uid);
-                // Vor dem signOut, solange uid noch feststeht: sonst bliebe die komplette
-                // Schuelerkartei im Klartext auf dem Geraet zurueck (siehe clearAccountCaches).
-                clearAccountCaches(uid);
-                await sb.auth.signOut();
+            // Vorher prüfen, was noch nicht sicher in der Cloud liegt (Audit I-M12): Nach dem
+            // Abmelden fehlt die Berechtigung zum Speichern, und clearAccountCaches() löscht den
+            // lokalen Zwischenspeicher - eine laufende Aufzeichnung oder eine eben getippte, noch
+            // aufgeschobene Änderung war damit bisher kommentarlos weg.
+            const hinweise = [];
+            if (recSession)
+                hinweise.push("Die laufende Streckenaufzeichnung wird beendet und gespeichert.");
+            if (pendingSavesRef.current.size > 0 || saveError)
+                hinweise.push("Noch nicht gespeicherte Änderungen werden vorher gespeichert.");
+            if (!await askConfirm({ message: "Wirklich abmelden? Du musst dich danach neu anmelden." + (hinweise.length ? "\n\n" + hinweise.join("\n") : ""), confirmLabel: "Abmelden", danger: false }))
+                return;
+            if (recSession)
+                stopRecording(true); // schreibt die Strecke in den Schüler (aufgeschoben, s.u.)
+            // Früher fehlgeschlagenes Speichern noch einmal versuchen (lebt sonst nur im Cache).
+            if (saveError) {
+                const stu = (studentsRef.current || []).find(x => x.id === saveError);
+                if (stu)
+                    scheduleSave(stu);
             }
+            let alles = await flushPendingSaves();
+            // Bereits laufende Speichervorgänge (Timer schon abgelaufen) ebenfalls abwarten.
+            await Promise.all([schoolSaveChainRef.current, tplSaveChainRef.current]).catch(() => { });
+            for (let i = 0; i < 50 && studentWritesRef.current.size > 0; i++)
+                await new Promise(r => setTimeout(r, 100));
+            if (studentWritesRef.current.size > 0)
+                alles = false;
+            if (!alles && !await askConfirm({ title: "Nicht alles gespeichert", message: "Einige Änderungen konnten nicht gespeichert werden und gehen beim Abmelden verloren. Trotzdem abmelden?", confirmLabel: "Trotzdem abmelden", danger: true }))
+                return;
+            if (deviceToken)
+                await removeDeviceToken(uid, deviceToken);
+            await revokeWidgetToken(uid);
+            // Vor dem signOut, solange uid noch feststeht: sonst bliebe die komplette
+            // Schuelerkartei im Klartext auf dem Geraet zurueck (siehe clearAccountCaches).
+            clearAccountCaches(uid);
+            await sb.auth.signOut();
         }
         const nativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
         // ── Live-Status je Zeile: echte aktuelle Werte statt nur ein Titel ──
