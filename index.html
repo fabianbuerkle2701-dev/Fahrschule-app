@@ -8834,6 +8834,62 @@ function parseKontoauszug(text) {
     });
     return treffer;
 }
+/* ════════ DATEV-Buchungsstapel: welche Buchungen ein Monat ergibt ════════ */
+// Bewusst als reine Funktion ohne App-Zustand (per node prüfbar). k = { debitor, erloes19,
+// erloesFrei, geldkonto, kasse, gutschein, kUntFallback }, nameOf(s) liefert den Schülernamen.
+// Rechnungen: JEDE Rechnung wird in ihrem Monat gebucht, auch eine später stornierte - sie war
+// in jenem Monat ein echter Umsatz, und ein erneuter Export des Monats darf ihre Belegnummer
+// nicht verlieren. Die Stornorechnung (negativer Betrag, Datum = Tag der Stornierung) wird als
+// Gegenbuchung mit Haben-Kennzeichen im Monat der Stornierung gebucht. Vorher fielen beide
+// heraus: der Umsatz eines schon exportierten Monats wurde nie zurückgenommen (Audit F-H3).
+// Zahlungen: Bar landet auf der Kasse, eingelöste Gutscheine auf dem Gutschein-Konto, alles
+// andere auf der Bank - vorher liefen auch Bargeld und Gutscheine über die Bank, der Kontostand
+// laut Buchhaltung stimmte dann nie mit dem Kontoauszug überein (F-M4). Was nicht exportiert
+// werden kann (kein Datum, Betrag nicht positiv), wird gezählt statt still verworfen (F-N12).
+function datevZahlungsart(method) {
+    const m = String(method || "").trim();
+    if (/^gutschein/i.test(m))
+        return "gutschein";
+    if (/^bar(\b|zahlung|geld)/i.test(m))
+        return "kasse";
+    return "bank";
+}
+function datevBuchungsliste(stuList, jahr, monat, k, nameOf) {
+    const isoOk = iso => /^\d{4}-\d{2}-\d{2}$/.test(String(iso || ""));
+    const inMonat = iso => isoOk(iso) && Number(iso.slice(0, 4)) === jahr && Number(iso.slice(5, 7)) === monat;
+    const out = { buchungen: [], brauchtFrei: false, brauchtGutschein: false, ohneDatum: 0, ungueltig: 0 };
+    (stuList || []).forEach(s => {
+        const name = nameOf(s);
+        (s.invoices || []).forEach(inv => {
+            if (!isoOk(inv.date)) { out.ohneDatum++; return; }
+            if (!inMonat(inv.date)) return;
+            const brutto = Math.round((Number(inv.total) || 0) * 100) / 100;
+            if (Math.abs(brutto) <= 0.005) return;
+            const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : k.kUntFallback;
+            if (kUnt) out.brauchtFrei = true;
+            out.buchungen.push({ umsatz: Math.abs(brutto), sh: brutto > 0 ? "S" : "H", konto: k.debitor,
+                gegenkonto: kUnt ? k.erloesFrei : k.erloes19, bu: "",
+                datum: inv.date, beleg1: inv.number || "",
+                text: (inv.stornoOf ? "Storno " + inv.stornoOf + " " : "Rechnung ") + name });
+        });
+        (s.payments || []).forEach(p => {
+            if (!isoOk(p.date)) { out.ohneDatum++; return; }
+            if (!inMonat(p.date)) return;
+            const betrag = Math.round((Number(p.amount) || 0) * 100) / 100;
+            if (!(betrag > 0)) { out.ungueltig++; return; }
+            const art = datevZahlungsart(p.method);
+            if (art === "gutschein") out.brauchtGutschein = true;
+            const inv = (s.invoices || []).find(x => x.id === p.invoiceId);
+            out.buchungen.push({ umsatz: betrag, sh: "S",
+                konto: art === "kasse" ? k.kasse : art === "gutschein" ? k.gutschein : k.geldkonto,
+                gegenkonto: k.debitor, bu: "",
+                datum: p.date, beleg1: (inv && inv.number) || "",
+                text: (art === "gutschein" ? "Gutschein " : "Zahlung ") + name });
+        });
+    });
+    out.buchungen.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+    return out;
+}
 // Was tatsächlich auf einer Rechnung steht und noch nicht bezahlt ist. Bewusst direkt gerechnet
 // und NICHT als "offener Gesamtbetrag minus nicht berechnet": sonst rutschen Positionen, die per
 // "nicht berechnen" aus der Lückenliste genommen wurden, rechnerisch in diesen Topf und würden
@@ -11887,8 +11943,8 @@ function App() {
         // erloes_frei bewusst OHNE Vorbelegung: fuer steuerfreie Umsaetze nach Paragraf 19 UStG
         // gibt es je nach Beratung unterschiedliche Konten. Ein falsch geratenes Konto erzeugt
         // still falsche Buchungen - deshalb verweigert der Export lieber und benennt das Feld.
-        SKR03: { erloes_19: "8400", geldkonto: "1200" },
-        SKR04: { erloes_19: "4400", geldkonto: "1800" },
+        SKR03: { erloes_19: "8400", geldkonto: "1200", kasse: "1000" },
+        SKR04: { erloes_19: "4400", geldkonto: "1800", kasse: "1600" },
     };
     const datev = (school && school.datev_settings) || {};
     function datevWert(key) {
@@ -14208,6 +14264,11 @@ function App() {
         const amount = parseBetrag(f.amount);
         if (isNaN(amount) || amount <= 0) {
             setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag über 0 € eingeben." });
+            return;
+        }
+        // Ohne Datum fällt die Zahlung aus jedem DATEV-Monat und jeder Monatsauswertung heraus.
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(f.date || ""))) {
+            setPaymentForm({ ...f, error: "Bitte ein Datum für die Zahlung angeben." });
             return;
         }
         const stu = students.find(s => s.id === activeId) || active;
@@ -26503,10 +26564,12 @@ function App() {
                                     feld("erloes_19", "Erl\u00F6skonto 19 % USt", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "4400 (SKR04)" : "8400 (SKR03)") + ".", datevWert("erloes_19")),
                                     feld("erloes_frei", "Erl\u00F6skonto ohne USt (\u00A719 UStG)", "Bewusst nicht vorbelegt \u2013 das Konto h\u00E4ngt von eurer Beratung ab. Nur n\u00F6tig, wenn du Kleinunternehmer bist.", "vom Steuerberater"),
                                     feld("geldkonto", "Geldkonto (Bank)", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "1800 (SKR04)" : "1200 (SKR03)") + ".", datevWert("geldkonto")),
+                                    feld("kasse", "Kasse (Barzahlungen)", "Zahlungen mit der Zahlungsart \u201EBar\u201C. Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "1600 (SKR04)" : "1000 (SKR03)") + ".", datevWert("kasse")),
+                                    feld("gutschein_konto", "Konto f\u00FCr eingel\u00F6ste Gutscheine", "Bewusst nicht vorbelegt \u2013 h\u00E4ngt davon ab, ob eure Gutscheine Einzweck- oder Mehrzweck-Gutscheine sind. Nur n\u00F6tig, wenn du Gutscheine einl\u00F6st.", "vom Steuerberater"),
                                     feld("debitor_start", "Debitoren-Sammelkonto", "Alle Rechnungen laufen \u00FCber dieses eine Konto, der Sch\u00FClername steht im Buchungstext. Vorbelegt: 10000.", "10000"),
                                     feld("sachkontenlaenge", "Sachkontenl\u00E4nge", "Standard: 4.", "4")),
                                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
-                                    "Den Export selbst findest du unter Auswertung neben dem CSV-Export. Gebucht wird: Rechnung = Debitor an Erl\u00F6se, Zahlung = Geldkonto an Debitor. Stornierte Rechnungen bleiben au\u00DFen vor."));
+                                    "Den Export selbst findest du unter Auswertung neben dem CSV-Export. Gebucht wird: Rechnung = Debitor an Erl\u00F6se, Zahlung = Bank, Kasse oder Gutschein-Konto an Debitor. Eine Stornorechnung wird im Monat der Stornierung als Gegenbuchung (Haben) exportiert, die urspr\u00FCngliche Rechnung bleibt in ihrem Monat stehen."));
                         })()),
                     settingsScreen === "rechnungsdaten" && React.createElement(SettingsScreen, { title: "Rechnungsdaten", onBack: closeScreen },
                         (() => {
@@ -26739,48 +26802,24 @@ function App() {
             const debitor = datevWert("debitor_start");
             const skl = Number(datevWert("sachkontenlaenge")) || 4;
             const kUntFallback = !!(school && school.invoice_settings && school.invoice_settings.kleinunternehmer);
-
-            const inMonat = iso => {
-                if (!iso) return false;
-                const d = new Date(iso + "T12:00:00");
-                return d.getFullYear() === jahr && (d.getMonth() + 1) === monat;
-            };
-            const buchungen = [];
-            let brauchtFrei = false;
-            students.filter(s => s._isMine).forEach(s => {
-                (s.invoices || []).forEach(inv => {
-                    if (!inMonat(inv.date)) return;
-                    // Stornierte Rechnungen und Stornorechnungen bleiben aussen vor - dieselbe
-                    // Abgrenzung wie in der Abrechnung und im bestehenden CSV-Export.
-                    if (inv.cancelledBy || inv.stornoOf) return;
-                    const brutto = Number(inv.total) || 0;
-                    if (!(brutto > 0)) return;
-                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
-                    if (kUnt) brauchtFrei = true;
-                    buchungen.push({ umsatz: brutto, sh: "S", konto: debitor,
-                        gegenkonto: kUnt ? erloesFrei : erloes19, bu: "",
-                        datum: inv.date, beleg1: inv.number || "",
-                        text: "Rechnung " + dispName(s) });
-                });
-                (s.payments || []).forEach(p => {
-                    if (!inMonat(p.date)) return;
-                    const betrag = Number(p.amount) || 0;
-                    if (!(betrag > 0)) return;
-                    const inv = (s.invoices || []).find(x => x.id === p.invoiceId);
-                    buchungen.push({ umsatz: betrag, sh: "S", konto: geldkonto, gegenkonto: debitor, bu: "",
-                        datum: p.date, beleg1: (inv && inv.number) || "",
-                        text: "Zahlung " + dispName(s) });
-                });
-            });
+            const gutscheinKonto = String(datev.gutschein_konto || "").trim();
+            const liste = datevBuchungsliste(students.filter(s => s._isMine), jahr, monat,
+                { debitor, erloes19, erloesFrei, geldkonto, kasse: datevWert("kasse"), gutschein: gutscheinKonto, kUntFallback }, dispName);
+            const buchungen = liste.buchungen;
             if (buchungen.length === 0) {
                 showToast("In diesem Monat gibt es keine Rechnungen oder Zahlungen zum Exportieren.");
                 return;
             }
-            if (brauchtFrei && !erloesFrei) {
+            if (liste.brauchtFrei && !erloesFrei) {
                 showToast("Im Zeitraum liegen Rechnungen ohne Umsatzsteuer (\u00A719 UStG). Bitte erst das Erl\u00F6skonto daf\u00FCr in den Einstellungen (DATEV) eintragen - es wird bewusst nicht geraten.");
                 return;
             }
-            buchungen.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+            // Gleiche Haltung wie beim Konto für §19: ob Einzweck- oder Mehrzweck-Gutschein, klärt
+            // der Steuerberater - ein geratenes Konto würde still falsch buchen.
+            if (liste.brauchtGutschein && !gutscheinKonto) {
+                showToast("Im Zeitraum wurden Gutscheine eingel\u00F6st. Bitte erst das Gutschein-Konto in den Einstellungen (DATEV) eintragen - es wird bewusst nicht geraten.");
+                return;
+            }
 
             const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
             const betrag = n => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2).replace(".", ",");
@@ -26813,7 +26852,12 @@ function App() {
             a.click();
             document.body.removeChild(a);
             setTimeout(() => URL.revokeObjectURL(url), 2000);
-            showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen.");
+            const nichtExportiert = [];
+            if (liste.ohneDatum > 0) nichtExportiert.push(liste.ohneDatum + " ohne g\u00FCltiges Datum");
+            if (liste.ungueltig > 0) nichtExportiert.push(liste.ungueltig + " Zahlung(en) mit Betrag 0 oder kleiner");
+            showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen."
+                + (nichtExportiert.length ? "\nNicht exportiert (bitte beim Sch\u00FCler korrigieren): " + nichtExportiert.join(", ") + "." : ""),
+                nichtExportiert.length ? "error" : undefined);
         }
         catch (e) {
             showToast("Export fehlgeschlagen: " + (e.message || "unbekannt"), "error");
