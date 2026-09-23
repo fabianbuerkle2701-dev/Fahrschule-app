@@ -5384,6 +5384,29 @@ const CHANGELOG = [
 ];
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
+// Muss VOR createClient() gelesen werden: supabase-js wertet den Link aus der "Passwort
+// zurücksetzen"-Mail (#access_token=…&type=recovery) beim Start selbst aus, räumt den Hash danach
+// weg und feuert PASSWORD_RECOVERY - und zwar schon während bootWithOptionalDemo() auf
+// getSession() wartet, also bevor App() überhaupt einen Listener hat. Ohne diese Momentaufnahme
+// landete man über den Link einfach eingeloggt in der App, ohne je ein neues Passwort zu setzen.
+const PW_RECOVERY_AUS_URL = /(^#|&)type=recovery(&|$)/.test(window.location.hash || "");
+// Abgelaufener oder schon benutzter Link: Supabase leitet mit #error_code=otp_expired zurück.
+// Die Meldung wird der Anmeldemaske mitgegeben, der Hash entfernt, damit sie nach einem Neuladen
+// nicht erneut erscheint.
+const AUTH_LINK_FEHLER = (() => {
+    try {
+        const h = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+        if (!h.get("error_code") && !h.get("error"))
+            return "";
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+        return h.get("error_code") === "otp_expired"
+            ? "Der Link aus der E-Mail ist abgelaufen oder wurde schon benutzt. Zum Zurücksetzen des Passworts einfach unten über „Passwort vergessen?“ einen neuen anfordern."
+            : "Der Link konnte nicht verwendet werden. Bitte fordere einen neuen an.";
+    }
+    catch (e) {
+        return "";
+    }
+})();
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON, {
     auth: { persistSession: true, autoRefreshToken: true, storageKey: "v3-auth" }
 });
@@ -9554,7 +9577,7 @@ function Splash({ text }) {
 // Zeigt beim ersten Login einen Pflicht-Bildschirm, der Name, Adresse, Telefon und Geburtsdatum
 // abfragt, bevor die normale App-Oberfläche zugänglich wird. Wird nur angezeigt, solange
 // mindestens eines dieser Felder noch fehlt.
-function ProfileGate({ initial, onSave }) {
+function ProfileGate({ initial, onSave, onLogout }) {
     const [vals, setVals] = useState({
         display_name: (initial && initial.display_name) || "",
         street: (initial && initial.street) || "",
@@ -9580,12 +9603,17 @@ function ProfileGate({ initial, onSave }) {
             await onSave(vals);
         }
         catch (e) {
-            setErr(e.message || "Speichern fehlgeschlagen");
+            // fehlerText statt e.message: sonst stand hier wörtlich "Failed to fetch" o.ä.
+            setErr(fehlerText(e));
             setBusy(false);
         }
     }
+    // <form> statt loser Felder: Enter im letzten Feld speichert (vorher tat Enter hier nichts),
+    // und der Browser kann Adresse/Telefon per Autofill eintragen.
     return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 } },
-        React.createElement("div", { className: "card", style: { padding: "26px 22px", maxWidth: 420, width: "100%" } },
+        React.createElement("form", { className: "card", noValidate: true, onSubmit: ev => { ev.preventDefault(); if (!busy)
+                submit(); }, onChange: () => { if (err)
+                setErr(""); }, style: { padding: "26px 22px", maxWidth: 420, width: "100%" } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6, textAlign: "center" } }, "Deine Angaben"),
             React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, marginBottom: 18, textAlign: "center" } }, "Bevor es losgeht, brauchen wir noch ein paar Angaben zu dir."),
             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
@@ -9612,13 +9640,37 @@ function ProfileGate({ initial, onSave }) {
                 React.createElement("label", null, "Geburtsdatum",
                 React.createElement("input", { type: "date", max: today, value: vals.birthdate, onChange: e => setVals(v => ({ ...v, birthdate: e.target.value })) })),
                 vals.birthdate && !birthdateValid && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", marginTop: 5 } }, "Geburtsdatum darf nicht in der Zukunft liegen.")),
-            err && React.createElement("div", { style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, err),
-            React.createElement("button", { className: "btn btn-primary btn-block", disabled: busy || !complete, onClick: submit }, busy ? "Speichert…" : "Weiter")));
+            err && React.createElement("div", { role: "alert", style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12, whiteSpace: "pre-line" } }, err),
+            React.createElement("button", { type: "submit", className: "btn btn-primary btn-block", disabled: busy || !complete }, busy ? "Speichert…" : "Weiter"),
+            onLogout && React.createElement("button", { type: "button", className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: busy, onClick: onLogout }, "Abmelden")),
+        // Eigener Dialog-Host: das Gate steht vor dem Host am Ende von App() (früher Return),
+        // ohne ihn fiele die Abmelde-Rückfrage auf den nativen Browser-Dialog zurück.
+        React.createElement(ToastConfirmHost, null));
+}
+// Wandelt den zentral hinterlegten PayPal-Empfänger (Admin-Feld, Freitext) in ein Ziel um.
+// Erlaubt sind laut Platzhalter "paypal.me/name" UND eine E-Mail-Adresse - vorher wurde beides
+// blind an "https://paypal.me/" gehängt: aus "name@mail.de" wurde ein toter Link, aus
+// "www.paypal.me/name" ein doppelter Pfad. Rückgabe: { href } | { email } | null.
+function paypalZiel(roh) {
+    const v = String(roh || "").trim();
+    if (!v)
+        return null;
+    if (/^https?:\/\//i.test(v))
+        return { href: v };
+    if (/^[^\s@\/]+@[^\s@\/]+\.[^\s@\/]+$/.test(v))
+        return { email: v };
+    const ohneWww = v.replace(/^www\./i, "");
+    if (/^paypal\.(me|com)\//i.test(ohneWww))
+        return { href: "https://" + (/^paypal\.com/i.test(ohneWww) ? "www." : "") + ohneWww };
+    // Nur ein Name ("deinname" oder "@deinname") -> paypal.me-Link
+    const name = v.replace(/^@/, "");
+    return /^[A-Za-z0-9._-]+$/.test(name) ? { href: "https://paypal.me/" + name } : null;
 }
 // Zeigt entweder die Zustimmungs-Ansicht (7 Tage kostenlos testen) oder den Sperr-Bildschirm
 // nach abgelaufener Probezeit. Ersetzt in beiden Fällen die normale App-Oberfläche komplett,
 // die eigenen Daten (Schüler, Termine usw.) bleiben davon unberührt und sind sofort wieder da.
-function SubscriptionGate({ kind, sub, paypalLink, onAccept, onPaid }) {
+function SubscriptionGate({ kind, sub, paypalLink, onAccept, onPaid, onLogout }) {
+    const pp = paypalZiel(paypalLink);
     const amount = sub && sub.subscription_amount != null ? Number(sub.subscription_amount).toFixed(2).replace(".", ",") + " €" : null;
     return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 } },
         React.createElement("div", { className: "card", style: { padding: "28px 22px", textAlign: "center", maxWidth: 400 } },
@@ -9640,9 +9692,13 @@ function SubscriptionGate({ kind, sub, paypalLink, onAccept, onPaid }) {
                     amount ? ", der Monatsbeitrag beträgt " + amount : "",
                     ". Bitte zahle, um weiter auf deine Daten zugreifen zu k\u00F6nnen."),
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 18 } }, "Deine Sch\u00FCler- und Termindaten sind nicht verloren, sie sind sofort wieder da, sobald bezahlt wurde."),
-                paypalLink && React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 10 } }, "Jetzt mit PayPal bezahlen"),
+                pp && pp.href && React.createElement("a", { href: pp.href, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 10 } }, "Jetzt mit PayPal bezahlen"),
+                pp && pp.email && React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, fontSize: 13, lineHeight: 1.5, textAlign: "left" } },
+                    "Bitte den Betrag in der PayPal-App über „Geld senden“ an ", React.createElement("b", { style: { wordBreak: "break-all" } }, pp.email), " schicken."),
+                paypalLink !== null && !pp && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => { if (await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich abgeschickt wurde." }))
-                        onPaid(); } }, "Ich habe bezahlt"))),
+                        onPaid(); } }, "Ich habe bezahlt")),
+            onLogout && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8, color: "var(--muted)" }, onClick: onLogout }, "Abmelden")),
         // Das Gate wird über einen frühen Return von App() gerendert - der Dialog-Host am Ende von
         // App() ist dann noch gar nicht im Baum. Ohne eigenen Host löste askConfirm() oben still
         // mit "true" auf: "Zahlung als erledigt markieren?" erschien nie, onPaid() lief sofort.
@@ -9670,13 +9726,94 @@ function AuthScene({ klein } = {}) {
         React.createElement("div", { className: "auth-blob auth-blob-a", style: { position: "absolute", top: -150, right: -120, width: 380, height: 380, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,147,0,.24),transparent 70%)" } }),
         React.createElement("div", { className: "auth-blob auth-blob-b", style: { position: "absolute", bottom: -180, left: -150, width: 440, height: 440, borderRadius: "50%", background: "radial-gradient(circle,rgba(255,147,0,.13),transparent 70%)" } }));
 }
+// Mindestlänge für NEUE Passwörter (Registrierung, Zurücksetzen, Ändern). Beim Anmelden wird sie
+// bewusst nicht geprüft - ältere Konten haben evtl. noch ein 6-stelliges Passwort.
+const PASSWORT_MIN = 8;
+// Formular "Neues Passwort": zwei Felder, Mindestlänge, sb.auth.updateUser(). Eigene Komponente auf
+// oberster Ebene, damit dieselbe Maske sowohl nach dem Link aus "Passwort vergessen?"
+// (PasswortNeuGate) als auch später in den Einstellungen ("Passwort ändern") benutzt werden kann.
+// Setzt eine bestehende Sitzung voraus - updateUser ändert das Passwort des angemeldeten Kontos.
+function PasswortAendernFormular({ onFertig, onAbbrechen, abbrechenLabel }) {
+    const [pw, setPw] = useState("");
+    const [pw2, setPw2] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [err, setErr] = useState("");
+    const [fertig, setFertig] = useState(false);
+    // Synchrone Sperre wie in Auth(): busy wirkt erst nach dem Re-Render, ein doppeltes Enter
+    // hätte sonst zwei updateUser-Aufrufe gestartet.
+    const busyRef = useRef(false);
+    async function speichern() {
+        if (busyRef.current)
+            return;
+        if (pw.length < PASSWORT_MIN) {
+            setErr("Das Passwort muss mindestens " + PASSWORT_MIN + " Zeichen haben.");
+            return;
+        }
+        if (pw !== pw2) {
+            setErr("Die beiden Passwörter stimmen nicht überein.");
+            return;
+        }
+        busyRef.current = true;
+        setBusy(true);
+        setErr("");
+        try {
+            const { error } = await sb.auth.updateUser({ password: pw });
+            if (error)
+                throw error;
+            setFertig(true);
+        }
+        catch (e) {
+            const m = String((e && e.message) || e || "");
+            if (/different from the old|same.*password/i.test(m))
+                setErr("Das neue Passwort muss sich vom bisherigen unterscheiden.");
+            else if (/Password should be|weak.?password|characters/i.test(m))
+                setErr("Das Passwort ist zu kurz oder zu einfach. Bitte mindestens " + PASSWORT_MIN + " Zeichen verwenden.");
+            else if (/reauthenticat/i.test(m))
+                setErr("Aus Sicherheitsgründen bitte einmal ab- und wieder anmelden, dann erneut versuchen.");
+            else
+                setErr(fehlerText(e));
+        }
+        busyRef.current = false;
+        setBusy(false);
+    }
+    if (fertig)
+        return React.createElement("div", { role: "status" },
+            React.createElement("div", { style: { background: "var(--green-soft)", color: "var(--green-ink)", borderRadius: 10, padding: "11px 12px", fontSize: 13.5, lineHeight: 1.5, marginBottom: 14 } }, "Passwort geändert. Ab jetzt meldest du dich mit dem neuen Passwort an."),
+            onFertig && React.createElement("button", { type: "button", className: "btn btn-primary btn-block", onClick: onFertig }, "Weiter"));
+    const tippe = (setter) => (ev) => { setter(ev.target.value); if (err)
+        setErr(""); };
+    return React.createElement("form", { noValidate: true, onSubmit: ev => { ev.preventDefault(); speichern(); } },
+        React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+            React.createElement("label", null, "Neues Passwort",
+                React.createElement("input", { type: "password", name: "new-password", autoComplete: "new-password", autoFocus: true, value: pw, onChange: tippe(setPw) })),
+            React.createElement("div", { style: { fontSize: 12, color: pw && pw.length < PASSWORT_MIN ? "var(--red)" : "var(--muted)", marginTop: 5 } }, "Mindestens " + PASSWORT_MIN + " Zeichen.")),
+        React.createElement("div", { className: "field", style: { marginBottom: 16 } },
+            React.createElement("label", null, "Neues Passwort bestätigen",
+                React.createElement("input", { type: "password", name: "new-password-confirm", autoComplete: "new-password", value: pw2, onChange: tippe(setPw2) })),
+            pw2 && pw2 !== pw && React.createElement("div", { style: { fontSize: 12, color: "var(--red)", marginTop: 5 } }, "Stimmt noch nicht mit dem Passwort überein.")),
+        err && React.createElement("div", { role: "alert", style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, err),
+        React.createElement("button", { type: "submit", className: "btn btn-primary btn-block", disabled: busy }, busy ? "Speichert…" : "Passwort speichern"),
+        onAbbrechen && React.createElement("button", { type: "button", className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: busy, onClick: onAbbrechen }, abbrechenLabel || "Abbrechen"));
+}
+// Vollbild nach dem Link aus der "Passwort vergessen?"-Mail. Supabase hat an dieser Stelle schon
+// eine Sitzung aufgebaut (der Link IST die Anmeldung) - ohne diese Maske landete man direkt in der
+// App und hatte danach weiterhin kein Passwort, das man kennt.
+function PasswortNeuGate({ email, onFertig }) {
+    return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 } },
+        React.createElement("div", { className: "card", style: { padding: "26px 22px", maxWidth: 420, width: "100%" } },
+            React.createElement("h1", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6, textAlign: "center" } }, "Neues Passwort festlegen"),
+            React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, marginBottom: 18, textAlign: "center" } },
+                email ? React.createElement(React.Fragment, null, "Für ", React.createElement("b", null, email), ". ") : null,
+                "Danach meldest du dich mit diesem Passwort an."),
+            React.createElement(PasswortAendernFormular, { onFertig: onFertig, onAbbrechen: onFertig, abbrechenLabel: "Später" })));
+}
 function Auth() {
     const [mode, setMode] = useState("login"); // login | register
     const [email, setEmail] = useState("");
     const [pw, setPw] = useState("");
     const [pw2, setPw2] = useState(""); // Passwort-Wiederholung, nur bei der Registrierung
     const [busy, setBusy] = useState(false);
-    const [err, setErr] = useState("");
+    const [err, setErr] = useState(AUTH_LINK_FEHLER);
     const [info, setInfo] = useState("");
     const [newSchoolName, setNewSchoolName] = useState(""); // falls neue angelegt wird
     const [joinMode, setJoinMode] = useState("invite"); // "new" | "invite" ("list" entfernt aus Datenschutzgründen)
@@ -9697,11 +9834,14 @@ function Auth() {
             setErr("Bitte E-Mail und Passwort eingeben.");
             return;
         }
-        if (pw.length < 6) {
-            setErr("Das Passwort muss mindestens 6 Zeichen haben.");
-            return;
-        }
         if (mode === "register") {
+            // Mindestlänge nur bei der Registrierung prüfen: bestehende Konten dürfen noch ein
+            // kürzeres Passwort aus der Zeit vor dieser Regel haben und müssen sich weiter
+            // anmelden können.
+            if (pw.length < PASSWORT_MIN) {
+                setErr("Das Passwort muss mindestens " + PASSWORT_MIN + " Zeichen haben.");
+                return;
+            }
             if (pw !== pw2) {
                 setErr("Die beiden Passwörter stimmen nicht überein.");
                 return;
@@ -9718,6 +9858,20 @@ function Auth() {
         setBusy(true);
         submitBusyRef.current = true;
         try {
+            if (mode === "register" && joinMode === "invite") {
+                // Den Code VOR dem Anlegen des Kontos prüfen: vorher lief signUp() zuerst durch,
+                // und ein Tippfehler im Code fiel erst beim Beitritt auf - da war das Konto schon
+                // angelegt, die Anmeldemaske weg und die Fehlermeldung ein Toast ohne Host, also
+                // unsichtbar. Fehlt die Prüf-Funktion auf dem Server (noch nicht eingespielt),
+                // geht es wie früher weiter; der Beitritt unten prüft ohnehin noch einmal.
+                const { data: gueltig, error: ce } = await sb.rpc("invite_code_gueltig", { p_code: inviteCode.trim() });
+                if (!ce && gueltig === false) {
+                    setErr("Diesen Einladungscode gibt es nicht. Bitte prüfe ihn oder frag deinen Fahrschul-Admin nach dem aktuellen Code.");
+                    setBusy(false);
+                    submitBusyRef.current = false;
+                    return;
+                }
+            }
             if (mode === "register") {
                 const { data, error } = await sb.auth.signUp({ email: e, password: pw });
                 if (error) {
@@ -9772,20 +9926,63 @@ function Auth() {
             }
         }
         catch (x) {
-            setErr("Etwas ist schiefgelaufen. Bitte erneut versuchen.");
+            setErr(uebersetze((x && x.message) || String(x || "")));
         }
         setBusy(false);
         submitBusyRef.current = false;
     }
+    // "Passwort vergessen?": schickt den Rücksetz-Link. Die Bestätigung ist bewusst immer gleich,
+    // egal ob es die Adresse gibt - sonst ließe sich über diese Maske abfragen, wer ein Konto hat.
+    const resetBusyRef = useRef(false);
+    async function passwortVergessen() {
+        if (resetBusyRef.current)
+            return;
+        setErr("");
+        setInfo("");
+        const e = email.trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) {
+            setErr("Gib oben deine E-Mail-Adresse ein, dann schicken wir dir einen Link zum Zurücksetzen.");
+            return;
+        }
+        resetBusyRef.current = true;
+        setBusy(true);
+        try {
+            const { error } = await sb.auth.resetPasswordForEmail(e, { redirectTo: window.location.origin + window.location.pathname });
+            // Nur Fehler melden, die nichts über die Adresse verraten (kein Netz, zu viele Versuche).
+            if (error && /rate limit|Failed to fetch|NetworkError|Load failed|timeout/i.test(error.message || ""))
+                setErr(uebersetze(error.message));
+            else
+                setInfo("Falls für " + e + " ein Konto besteht, ist jetzt ein Link zum Zurücksetzen unterwegs. Schau auch im Spam-Ordner nach.");
+        }
+        catch (x) {
+            setErr(uebersetze((x && x.message) || String(x || "")));
+        }
+        resetBusyRef.current = false;
+        setBusy(false);
+    }
+    // Übersetzt die englischen Rohmeldungen von Supabase Auth. Vorher fiel alles Unbekannte
+    // wörtlich durch ("Email not confirmed", "Failed to fetch") - der Rest geht an fehlerText().
     function uebersetze(m) {
         if (/Invalid login/i.test(m))
             return "E-Mail oder Passwort stimmt nicht.";
         if (/already registered|already exists/i.test(m))
             return "Diese E-Mail ist bereits registriert. Bitte anmelden.";
-        if (/rate limit/i.test(m))
+        if (/rate limit|too many/i.test(m))
             return "Zu viele Versuche. Bitte kurz warten.";
-        return m;
+        if (/Email not confirmed/i.test(m))
+            return "Bitte bestätige zuerst deine E-Mail-Adresse über den Link in der Bestätigungsmail.";
+        if (/Password should be|password.*(short|characters)|weak.?password/i.test(m))
+            return "Das Passwort ist zu kurz oder zu einfach. Bitte mindestens " + PASSWORT_MIN + " Zeichen verwenden.";
+        if (/invalid.*email|email.*invalid|unable to validate email/i.test(m))
+            return "Diese E-Mail-Adresse sieht nicht gültig aus.";
+        if (/signups? not allowed|signup.*disabled/i.test(m))
+            return "Neue Registrierungen sind gerade nicht möglich.";
+        return fehlerText(m);
     }
+    // Leert eine stehende Meldung, sobald wieder getippt wird - sonst blieb z.B. "Passwort stimmt
+    // nicht" rot stehen, während man es schon korrigiert.
+    const tippe = (setter) => (ev) => { setter(ev.target.value); if (err)
+        setErr(""); };
     // Dunkles Glas statt heller Karte: die ganze Anmeldung ist jetzt EIN schwebendes Panel über der
     // vollflächigen Nacht-Fahrbahn-Szene, kein heller Kasten mehr, der den unteren Bildschirmteil hart
     // von der Szene abschneidet. Farben durchgängig für dunklen Untergrund neu abgestimmt (Labels/
@@ -9813,39 +10010,46 @@ function Auth() {
                     React.createElement("div", { className: "auth-road", "aria-hidden": "true" })),
                 React.createElement("div", { className: "auth-tabs", style: { position: "relative", display: "flex", gap: 4, background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.1)", borderRadius: 13, padding: 4, marginBottom: 20 } },
                     React.createElement("div", { className: "auth-tab-pill", style: { transform: mode === "register" ? "translateX(100%)" : "translateX(0%)" } }),
-                    [["login", "Anmelden"], ["register", "Registrieren"]].map(([k, l]) => React.createElement("button", { key: k, onClick: () => { setMode(k); setErr(""); setInfo(""); }, style: { flex: 1, position: "relative", zIndex: 1, borderRadius: 10, padding: "10px 6px", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, transition: "color .18s",
+                    [["login", "Anmelden"], ["register", "Registrieren"]].map(([k, l]) => React.createElement("button", { key: k, type: "button", onClick: () => { setMode(k); setErr(""); setInfo(""); }, style: { flex: 1, position: "relative", zIndex: 1, borderRadius: 10, padding: "10px 6px", fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, transition: "color .18s",
                             color: mode === k ? "#181512" : "rgba(255,255,255,.6)" } }, l))),
+                // Echtes <form>: Enter löst in JEDEM Feld und in beiden Modi die Anmeldung bzw.
+                // Registrierung aus (vorher nur in einzelnen Feldern per onKeyDown, im
+                // Registriermodus im E-Mail-/Passwortfeld gar nicht), und Passwortmanager erkennen
+                // die Maske als Anmeldeformular und bieten Speichern/Ausfüllen an.
+                React.createElement("form", { noValidate: true, onSubmit: ev => { ev.preventDefault(); submit(); } },
                 React.createElement("div", { style: { marginBottom: 12 } },
-                    React.createElement("label", { style: lbl }, "E-Mail"),
-                    React.createElement("input", { className: "auth-field", type: "email", inputMode: "email", autoComplete: "email", value: email, onChange: e => setEmail(e.target.value), onKeyDown: e => { if (e.key === "Enter" && mode === "login")
-                            submit(); }, style: inp })),
+                    React.createElement("label", { htmlFor: "auth-email", style: lbl }, "E-Mail"),
+                    React.createElement("input", { id: "auth-email", name: "email", className: "auth-field", type: "email", inputMode: "email", autoComplete: mode === "register" ? "email" : "username", value: email, onChange: tippe(setEmail), style: inp })),
                 React.createElement("div", { style: { marginBottom: mode === "register" ? 12 : 18 } },
-                    React.createElement("label", { style: lbl }, "Passwort"),
-                    React.createElement("input", { className: "auth-field", type: "password", autoComplete: mode === "register" ? "new-password" : "current-password", value: pw, onChange: e => setPw(e.target.value), onKeyDown: e => { if (e.key === "Enter" && mode === "login")
-                            submit(); }, style: inp })),
+                    React.createElement("label", { htmlFor: "auth-pw", style: lbl }, "Passwort"),
+                    React.createElement("input", { id: "auth-pw", name: "password", className: "auth-field", type: "password", autoComplete: mode === "register" ? "new-password" : "current-password", value: pw, onChange: tippe(setPw), style: inp }),
+                    mode === "register" && React.createElement("div", { style: { fontSize: 12, color: pw && pw.length < PASSWORT_MIN ? "#FFB2A2" : "rgba(255,255,255,.5)", marginTop: 5 } }, "Mindestens " + PASSWORT_MIN + " Zeichen.")),
                 mode === "register" && React.createElement("div", { className: "auth-reveal", style: { marginBottom: 12 } },
-                    React.createElement("label", { style: lbl }, "Passwort bestätigen"),
-                    React.createElement("input", { className: "auth-field", type: "password", autoComplete: "new-password", value: pw2, onChange: e => setPw2(e.target.value), onKeyDown: e => { if (e.key === "Enter")
-                            submit(); }, style: { ...inp, border: "1.5px solid " + (pw2 && pw2 !== pw ? "#FF8A75" : "rgba(255,255,255,.16)") } }),
+                    React.createElement("label", { htmlFor: "auth-pw2", style: lbl }, "Passwort bestätigen"),
+                    React.createElement("input", { id: "auth-pw2", name: "password-confirm", className: "auth-field", type: "password", autoComplete: "new-password", value: pw2, onChange: tippe(setPw2), style: { ...inp, border: "1.5px solid " + (pw2 && pw2 !== pw ? "#FF8A75" : "rgba(255,255,255,.16)") } }),
                     pw2 && pw2 !== pw && React.createElement("div", { style: { fontSize: 12, color: "#FFB2A2", marginTop: 5 } }, "Stimmt noch nicht mit dem Passwort überein.")),
                 mode === "register" && React.createElement("div", { className: "auth-reveal", style: { marginBottom: 18, animationDelay: "40ms" } },
-                    React.createElement("label", { style: lbl }, "Deine Fahrschule"),
+                    React.createElement("label", { htmlFor: "auth-schule", style: lbl }, "Deine Fahrschule"),
                     React.createElement("div", { className: "auth-joinmode", style: { marginBottom: 9 } },
-                        React.createElement("button", { className: joinMode === "invite" ? "on" : "", onClick: () => { setJoinMode("invite"); setErr(""); } }, "Einladungscode"),
-                        React.createElement("button", { className: joinMode === "new" ? "on" : "", onClick: () => { setJoinMode("new"); setErr(""); } }, "Neu gründen")),
+                        React.createElement("button", { type: "button", className: joinMode === "invite" ? "on" : "", "aria-pressed": joinMode === "invite", onClick: () => { setJoinMode("invite"); setErr(""); } }, "Einladungscode"),
+                        React.createElement("button", { type: "button", className: joinMode === "new" ? "on" : "", "aria-pressed": joinMode === "new", onClick: () => { setJoinMode("new"); setErr(""); } }, "Neu gründen")),
                     joinMode === "invite" &&
-                        React.createElement("input", { className: "auth-field", type: "text", value: inviteCode, onChange: e => setInviteCode(e.target.value), placeholder: "Einladungscode von deinem Fahrschul-Admin", autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text", style: inp }),
+                        React.createElement("input", { id: "auth-schule", className: "auth-field", type: "text", value: inviteCode, onChange: tippe(setInviteCode), placeholder: "Einladungscode von deinem Fahrschul-Admin", autoComplete: "off", autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text", style: inp }),
                     joinMode === "new" &&
-                        React.createElement("input", { className: "auth-field", type: "text", value: newSchoolName, onChange: e => setNewSchoolName(e.target.value), placeholder: "Name deiner Fahrschule", style: inp }),
+                        React.createElement("input", { id: "auth-schule", className: "auth-field", type: "text", value: newSchoolName, onChange: tippe(setNewSchoolName), placeholder: "Name deiner Fahrschule", autoComplete: "organization", style: inp }),
                     React.createElement("p", { style: { fontSize: 11.5, color: "rgba(255,255,255,.5)", marginTop: 7, lineHeight: 1.5 } }, joinMode === "invite" ? "Frag deinen Fahrschul-Admin nach dem Einladungscode." :
                         "Gründet deine Fahrschule gerade erst hier eine neue, dann bist du automatisch ihr Admin.")),
-                err && React.createElement("div", { key: "err-" + err, className: "auth-banner", style: { background: "rgba(255,90,90,.15)", border: "1px solid rgba(255,120,120,.3)", color: "#FFC2B8", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, err),
-                info && React.createElement("div", { key: "info-" + info, className: "auth-banner", style: { background: "rgba(70,200,130,.15)", border: "1px solid rgba(110,220,150,.3)", color: "#9CEFBE", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, info),
-                React.createElement("button", { className: "auth-submit", disabled: busy, onClick: submit, style: { width: "100%", border: "none", borderRadius: 13, padding: "14px", cursor: "pointer",
+                err && React.createElement("div", { key: "err-" + err, role: "alert", className: "auth-banner", style: { background: "rgba(255,90,90,.15)", border: "1px solid rgba(255,120,120,.3)", color: "#FFC2B8", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12, whiteSpace: "pre-line" } }, err),
+                info && React.createElement("div", { key: "info-" + info, role: "status", className: "auth-banner", style: { background: "rgba(70,200,130,.15)", border: "1px solid rgba(110,220,150,.3)", color: "#9CEFBE", borderRadius: 10, padding: "9px 11px", fontSize: 13, marginBottom: 12 } }, info),
+                React.createElement("button", { type: "submit", className: "auth-submit", disabled: busy, style: { width: "100%", border: "none", borderRadius: 13, padding: "14px", cursor: "pointer",
                         fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, letterSpacing: ".01em",
                         background: busy ? "#C9A36B" : "linear-gradient(180deg,#FFA51F,#FF9300)", color: "#181512",
-                        boxShadow: busy ? "none" : "0 10px 26px rgba(255,147,0,.4)" } }, busy ? "Bitte warten…" : (mode === "register" ? "Konto erstellen" : "Anmelden")),
-                React.createElement("p", { style: { fontSize: 11.5, color: "rgba(255,255,255,.45)", textAlign: "center", marginTop: 13, lineHeight: 1.5 } }, "Du bleibst angemeldet, bis du dich abmeldest."),
+                        boxShadow: busy ? "none" : "0 10px 26px rgba(255,147,0,.4)" } }, busy ? "Bitte warten…" : (mode === "register" ? "Konto erstellen" : "Anmelden"))),
+                // Vorher gab es keinen Weg zurück ins Konto, wenn das Passwort vergessen war - nur
+                // eine Mail an den Betreiber. Mindestens 44px hoch, damit der Daumen es trifft.
+                mode === "login" && React.createElement("button", { type: "button", disabled: busy, onClick: passwortVergessen, style: { display: "block", margin: "8px auto 0", minHeight: 44, padding: "0 12px", background: "none", border: "none", cursor: "pointer",
+                        fontSize: 13.5, fontWeight: 600, color: "rgba(255,255,255,.82)", textDecoration: "underline", textUnderlineOffset: 3 } }, "Passwort vergessen?"),
+                React.createElement("p", { style: { fontSize: 11.5, color: "rgba(255,255,255,.45)", textAlign: "center", marginTop: mode === "login" ? 4 : 13, lineHeight: 1.5 } }, "Du bleibst angemeldet, bis du dich abmeldest."),
                 // Vorher hatte diese Seite - der erste Bildschirm, den ein anonymer Besucher sieht -
                 // weder Footer noch einen Impressum-Link (DSGVO-Audit-Fund, § 5 DDG).
                 // Pflichtlinks: waren 11px in rgba(255,255,255,.35) - ein Link darf nicht blasser sein als
@@ -11516,10 +11720,20 @@ function App() {
                 set.add(k);
         });
     }
+    // true, solange nach dem Link aus "Passwort vergessen?" noch kein neues Passwort gesetzt ist.
+    // Startwert aus der URL (siehe PW_RECOVERY_AUS_URL): das PASSWORD_RECOVERY-Ereignis selbst
+    // feuert meist schon vor diesem Listener; der Listener fängt nur den seltenen späten Fall.
+    const [pwRecovery, setPwRecovery] = useState(PW_RECOVERY_AUS_URL);
     // Auth bootstrap + listener
     useEffect(() => {
         sb.auth.getSession().then(({ data }) => setSession(data.session || null)).catch(() => setSession(null));
-        const { data: sub } = sb.auth.onAuthStateChange((_e, s) => setSession(s || null));
+        const { data: sub } = sb.auth.onAuthStateChange((ev, s) => {
+            if (ev === "PASSWORD_RECOVERY")
+                setPwRecovery(true);
+            else if (ev === "SIGNED_OUT")
+                setPwRecovery(false);
+            setSession(s || null);
+        });
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
@@ -13447,11 +13661,31 @@ function App() {
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (session === null)
         return React.createElement(Auth, null);
+    if (pwRecovery)
+        return React.createElement(PasswortNeuGate, { email: session.user && session.user.email, onFertig: () => setPwRecovery(false) });
+    // Abmelden aus ProfileGate/SubscriptionGate: vorher saß man dort fest - wer sich mit dem
+    // falschen Konto angemeldet hatte oder die Probezeit nicht bezahlen wollte, kam ohne
+    // Löschen der Website-Daten nicht mehr zur Anmeldemaske. Gleicher Aufräumpfad wie doSignOut()
+    // in den Einstellungen (Geräte-Token, Widget-Token, lokale Kartei).
+    async function gateAbmelden() {
+        if (!(await askConfirm({ message: "Abmelden? Du kannst dich danach mit einem anderen Konto anmelden.", confirmLabel: "Abmelden", danger: false })))
+            return;
+        try {
+            if (deviceToken)
+                await removeDeviceToken(uid, deviceToken);
+            await revokeWidgetToken(uid);
+        }
+        catch (e) {
+            console.error(e);
+        }
+        clearAccountCaches(uid);
+        await sb.auth.signOut();
+    }
     // Persönliche Angaben müssen vollständig sein, bevor es weitergeht (einmalig beim ersten Login).
     if (profileData === null)
-        return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
+        return React.createElement(Splash, { text: "Lädt…" });
     if (!profileComplete)
-        return React.createElement(ProfileGate, { initial: profileData, onSave: async (vals) => {
+        return React.createElement(ProfileGate, { initial: profileData, onLogout: gateAbmelden, onSave: async (vals) => {
                 await saveProfileData(uid, vals);
                 setProfileData(vals);
                 setProfileComplete(true);
@@ -13493,7 +13727,7 @@ function App() {
     if (gate === "loading")
         return React.createElement(Splash, { text: "L\u00E4dt\u2026" });
     if (gate === "not_accepted")
-        return React.createElement(SubscriptionGate, { kind: "accept", sub: mySubscription, onAccept: async () => {
+        return React.createElement(SubscriptionGate, { kind: "accept", sub: mySubscription, onLogout: gateAbmelden, onAccept: async () => {
                 try {
                     const now = await acceptSubscription(uid);
                     setMySubscription(s => ({ ...s, subscription_accepted_at: now }));
@@ -13503,7 +13737,7 @@ function App() {
                 }
             } });
     if (gate === "locked")
-        return React.createElement(SubscriptionGate, { kind: "locked", sub: mySubscription, paypalLink: paypalLink, onPaid: async () => {
+        return React.createElement(SubscriptionGate, { kind: "locked", sub: mySubscription, paypalLink: paypalLink, onLogout: gateAbmelden, onPaid: async () => {
                 try {
                     const d = await markOwnPaymentDone(uid);
                     setMySubscription(s => ({ ...s, subscription_last_paid: d }));
@@ -35814,31 +36048,31 @@ function SchuelerLogin({ onDone }) {
                         "Termine, Ausbildungsstand und Theorie \u2013 alles an einem Ort."),
                     codeOpen
                         ? React.createElement("div", { key: "code-feld", style: Object.assign({ marginBottom: 13 }, s_()) },
-                            React.createElement("label", { style: lbl }, "Fahrschul-Code"),
-                            React.createElement("input", { className: "auth-field", type: "text", value: code, autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text",
+                            React.createElement("label", { htmlFor: "sl-code", style: lbl }, "Fahrschul-Code"),
+                            React.createElement("input", { id: "sl-code", className: "auth-field", type: "text", value: code, autoCapitalize: "none", autoCorrect: "off", spellCheck: false, inputMode: "text",
                                 onChange: e => { setCode(e.target.value); setErr(""); }, placeholder: "z.B. ab12cd34", style: inp }))
                         : React.createElement("div", { key: "code-chip", className: "auth-chip", style: Object.assign({ marginBottom: 13 }, s_()) },
                             React.createElement("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } },
                                 "Fahrschule: ",
                                 React.createElement("strong", null, code)),
-                            React.createElement("button", { onClick: () => setCodeOpen(true) }, "ändern")),
+                            React.createElement("button", { type: "button", "aria-label": "Fahrschul-Code ändern", onClick: () => setCodeOpen(true) }, "ändern")),
                     React.createElement("div", { className: "auth-row", style: Object.assign({ marginBottom: 13 }, s_()) },
                         React.createElement("div", null,
-                            React.createElement("label", { style: lbl }, "Vorname"),
-                            React.createElement("input", { className: "auth-field", type: "text", value: vorname, autoCapitalize: "words", autoComplete: "given-name",
+                            React.createElement("label", { htmlFor: "sl-vorname", style: lbl }, "Vorname"),
+                            React.createElement("input", { id: "sl-vorname", className: "auth-field", type: "text", value: vorname, autoCapitalize: "words", autoComplete: "given-name",
                                 onChange: e => { setVorname(e.target.value); setErr(""); }, placeholder: "Anna", style: inp })),
                         React.createElement("div", null,
-                            React.createElement("label", { style: lbl }, "Nachname"),
-                            React.createElement("input", { className: "auth-field", type: "text", value: nachname, autoCapitalize: "words", autoComplete: "family-name",
+                            React.createElement("label", { htmlFor: "sl-nachname", style: lbl }, "Nachname"),
+                            React.createElement("input", { id: "sl-nachname", className: "auth-field", type: "text", value: nachname, autoCapitalize: "words", autoComplete: "family-name",
                                 onChange: e => { setNachname(e.target.value); setErr(""); }, placeholder: "Müller", style: inp }))),
                     React.createElement("div", { style: Object.assign({ marginBottom: 16 }, s_()) },
-                        React.createElement("label", { style: lbl }, "Dein PIN"),
-                        React.createElement("input", { className: "auth-field", type: "password", value: pin, inputMode: "numeric", autoComplete: "current-password",
+                        React.createElement("label", { htmlFor: "sl-pin", style: lbl }, "Dein PIN"),
+                        React.createElement("input", { id: "sl-pin", className: "auth-field", type: "password", value: pin, inputMode: "numeric", autoComplete: "current-password",
                             onChange: e => { setPin(e.target.value); setErr(""); },
                             onKeyDown: e => { if (e.key === "Enter" && !busy)
                                     doLogin(); }, placeholder: "••••", style: inp }))),
                 // key am Fehler: eine neue Meldung soll erneut einlaufen, auch wenn schon eine stand.
-                err && React.createElement("div", { key: "err-" + err, className: "auth-banner", style: { background: "rgba(255,90,90,.15)", border: "1px solid rgba(255,120,120,.3)", color: "#FFC2B8", borderRadius: 10, padding: "9px 11px", fontSize: 12.5, lineHeight: 1.5, marginBottom: 13, whiteSpace: "pre-line" } }, err),
+                err && React.createElement("div", { key: "err-" + err, role: "alert", className: "auth-banner", style: { background: "rgba(255,90,90,.15)", border: "1px solid rgba(255,120,120,.3)", color: "#FFC2B8", borderRadius: 10, padding: "9px 11px", fontSize: 12.5, lineHeight: 1.5, marginBottom: 13, whiteSpace: "pre-line" } }, err),
                 React.createElement("button", { className: "auth-submit", disabled: busy, onClick: doLogin, style: { width: "100%", border: "none", borderRadius: 13, padding: "14px", cursor: "pointer",
                         fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, color: "#1c1305",
                         background: "linear-gradient(135deg,#FFA92B,#FF8A00)", boxShadow: "0 10px 26px rgba(255,147,0,.36)",
