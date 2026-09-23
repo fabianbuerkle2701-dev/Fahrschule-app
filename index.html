@@ -7364,17 +7364,25 @@ async function uploadStaffFile(schoolId, instructorUid, uploadedBy, file, catego
     return data;
 }
 async function deleteStaffFile(f) {
-    try {
-        await sb.storage.from("staff-files").remove([f.storage_path]);
+    // Reihenfolge bewusst: erst die Datei, dann die Zeile - und ein Storage-Fehler bricht ab.
+    // Vorher wurde der Fehler von remove() (kommt als {error}, nicht als Exception) übergangen
+    // und die Zeile trotzdem gelöscht: die Datei mit personenbezogenen Daten blieb dann im
+    // Bucket, ohne dass sie in der App noch auftaucht oder je wieder gelöscht werden kann.
+    // So bleibt bei einem Fehler die Zeile stehen und "Löschen" lässt sich einfach wiederholen
+    // (remove() auf eine schon entfernte Datei meldet keinen Fehler). Anders als deleteVideo():
+    // dort ist eine verwaiste Datei harmlos, hier geht es um Ausweise, Sehtests usw.
+    const { error: storageErr } = await sb.storage.from("staff-files").remove([f.storage_path]);
+    if (storageErr) {
+        console.error(storageErr);
+        throw new Error("Datei konnte nicht gelöscht werden: " + (storageErr.message || "Speicherfehler"));
     }
-    catch (e) {
-        console.error(e);
-    }
-    const { error } = await sb.from("staff_files").delete().eq("id", f.id);
+    const { data, error } = await sb.from("staff_files").delete().eq("id", f.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    if (!data || data.length === 0)
+        throw new Error("Eintrag konnte nicht gelöscht werden (keine Berechtigung oder schon entfernt).");
 }
 // Zeitlich begrenzter Link (5 Minuten), da der Bucket privat ist
 async function staffFileSignedUrl(path) {
@@ -7423,17 +7431,19 @@ async function uploadStudentFile(studentId, ownerUid, file, category) {
     return data;
 }
 async function deleteStudentFile(f) {
-    try {
-        await sb.storage.from("student-files").remove([f.storage_path]);
+    // Gleiche Reihenfolge und Begründung wie deleteStaffFile().
+    const { error: storageErr } = await sb.storage.from("student-files").remove([f.storage_path]);
+    if (storageErr) {
+        console.error(storageErr);
+        throw new Error("Datei konnte nicht gelöscht werden: " + (storageErr.message || "Speicherfehler"));
     }
-    catch (e) {
-        console.error(e);
-    }
-    const { error } = await sb.from("student_files").delete().eq("id", f.id);
+    const { data, error } = await sb.from("student_files").delete().eq("id", f.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    if (!data || data.length === 0)
+        throw new Error("Eintrag konnte nicht gelöscht werden (keine Berechtigung oder schon entfernt).");
 }
 async function studentFileSignedUrl(path) {
     const { data, error } = await sb.storage.from("student-files").createSignedUrl(path, 3600);
