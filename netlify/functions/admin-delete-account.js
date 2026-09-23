@@ -28,7 +28,10 @@
 // Auth-Delete entfernt (siehe Schritt 3/5 unten, mit Begründung) - schlägt die Datei-Löschung
 // trotzdem fehl, ist das Konto bereits sauber weg, es bleiben nur Aufräum-Reste im Server-Log.
 
-const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
+// Die einzelnen Schritte (Vorab-Prüfung, Pfade sammeln, Konto löschen, Dateien löschen) liegen
+// seit Audit 2026-09 in lib/konto-loeschen.js, weil delete-own-account.js (Nutzer löscht sein
+// eigenes Konto) exakt dieselben braucht - Reihenfolge und Begründungen unten gelten für beide.
+const { SUPABASE_URL, pruefeBlocker, sammleDateipfade, loescheAuthKonto, loescheDateien } = require("./lib/konto-loeschen");
 // Nur der zentrale App-Admin darf diese Funktion nutzen (dieselbe feste ID wie im Rest der App).
 const ADMIN_UID = "96530a9f-28ae-4ac6-9cfa-26de392ecf05";
 
@@ -55,12 +58,6 @@ exports.handler = async function (event) {
   if (!requesterToken) return { statusCode: 401, headers, body: JSON.stringify({ error: "Nicht angemeldet" }) };
   if (!targetUid) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Ziel-ID angegeben" }) };
 
-  const sbFetch = (path, init) =>
-    fetch(SUPABASE_URL + "/rest/v1/" + path, {
-      ...(init || {}),
-      headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey, ...((init && init.headers) || {}) },
-    });
-
   try {
     // 1) Prüfen, wer die Anfrage stellt: den Anfragenden per Token identifizieren
     const whoResp = await fetch(SUPABASE_URL + "/auth/v1/user", {
@@ -81,27 +78,9 @@ exports.handler = async function (event) {
     // löst zusätzlich den Rechnungs-Schutz-Trigger aus, sobald ein Schüler dieses Kontos eine
     // Rechnung hat, UND es dürfen keine an Kollegen mitfreigegebenen Schüler stillschweigend
     // mitgerissen werden.
-    const uid = encodeURIComponent(targetUid);
-    const [studentsResp, examResp, reflResp, theoryResp, voucherResp, delLogResp] = await Promise.all([
-      sbFetch("students?owner=eq." + uid + "&select=id,name,data,shared_with"),
-      sbFetch("exam_slots?owner=eq." + uid + "&select=id&limit=1"),
-      sbFetch("lesson_reflections?owner=eq." + uid + "&select=id&limit=1"),
-      sbFetch("theory_attendance?owner=eq." + uid + "&select=id&limit=1"),
-      sbFetch("vouchers?created_by=eq." + uid + "&select=id&limit=1"),
-      sbFetch("deletion_log?deleted_by=eq." + uid + "&select=id&limit=1"),
-    ]);
-    for (const [name, r] of [["Schüler", studentsResp], ["Prüfungstermine", examResp], ["Fahrstunden-Reflexionen", reflResp], ["Theorie-Anwesenheiten", theoryResp], ["Gutscheine", voucherResp], ["Löschprotokoll", delLogResp]]) {
-      if (!r.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: "Vorab-Prüfung fehlgeschlagen (" + name + "): " + r.status }) };
-    }
-    const students = (await studentsResp.json()) || [];
-    const withInvoices = students.filter((s) => Array.isArray(s.data && s.data.invoices) && s.data.invoices.length > 0);
-    const shared = students.filter((s) => Array.isArray(s.shared_with) && s.shared_with.length > 0);
-    const otherRefs = [];
-    if ((await examResp.json()).length) otherRefs.push("Prüfungstermine");
-    if ((await reflResp.json()).length) otherRefs.push("Fahrstunden-Reflexionen");
-    if ((await theoryResp.json()).length) otherRefs.push("Theorie-Anwesenheiten");
-    if ((await voucherResp.json()).length) otherRefs.push("Gutscheine");
-    if ((await delLogResp.json()).length) otherRefs.push("Einträge im Löschprotokoll");
+    const pruefung = await pruefeBlocker(serviceKey, targetUid);
+    if (pruefung.fehler) return { statusCode: 502, headers, body: JSON.stringify({ error: pruefung.fehler }) };
+    const { students, withInvoices, shared, otherRefs } = pruefung;
 
     const blockers = [];
     if (withInvoices.length) blockers.push(withInvoices.length + " Schüler mit Rechnungen (Aufbewahrungspflicht) - zuerst entscheiden, was mit diesen Konten geschehen soll");
@@ -125,33 +104,21 @@ exports.handler = async function (event) {
     // weg - ein neuer, subtilerer Halb-Zustand als der urspruengliche Fund. Erst loeschen, WENN das
     // Konto wirklich weg ist, macht den ungünstigen Fall stattdessen zu bloss verwaisten Dateien
     // ohne noch aktives Konto - deutlich harmloser und im Log nachvollziehbar (siehe Schritt 6).
-    const [studentFilesResp, staffFilesResp, videosResp] = await Promise.all([
-      sbFetch("student_files?owner=eq." + uid + "&select=storage_path"),
-      sbFetch("staff_files?instructor_uid=eq." + uid + "&select=storage_path"),
-      sbFetch("videos?owner=eq." + uid + "&select=storage_path"),
-    ]);
-    if (!studentFilesResp.ok || !staffFilesResp.ok || !videosResp.ok) {
+    const buckets = await sammleDateipfade(serviceKey, targetUid);
+    if (!buckets) {
       return { statusCode: 502, headers, body: JSON.stringify({ error: "Dateiliste konnte nicht geladen werden - Löschung abgebrochen." }) };
     }
-    const buckets = [
-      ["student-files", ((await studentFilesResp.json()) || []).map((r) => r.storage_path)],
-      ["staff-files", ((await staffFilesResp.json()) || []).map((r) => r.storage_path)],
-      ["videos", ((await videosResp.json()) || []).map((r) => r.storage_path)],
-    ];
 
     // 4) Das eigentliche Anmelde-Konto bei Supabase löschen. Kaskadiert per FK-Constraints Profil,
     // Schüler, Termine, Vorlagen, Kalender-Feeds, Gerätetoken, Interessenten, Widget-Tokens und die
     // *_files-/videos-Zeilen in EINER Transaktion - kein separater Profil-Löschschritt mehr nötig
     // (siehe Kommentar oben). Solange dieser Schritt scheitert, wurde noch NICHTS Destruktives
     // angefasst - nur gelesen -, die Operation ist also gefahrlos wiederholbar.
-    const delResp = await fetch(SUPABASE_URL + "/auth/v1/admin/users/" + uid, {
-      method: "DELETE",
-      headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey },
-    });
-    if (!delResp.ok) {
-      const errData = await delResp.json().catch(() => ({}));
-      console.error("admin-delete-account: auth-Löschung fehlgeschlagen", delResp.status, errData);
-      return { statusCode: 502, headers, body: JSON.stringify({ error: "Konto konnte nicht gelöscht werden: " + (errData.msg || errData.error || delResp.status) }) };
+    const del = await loescheAuthKonto(serviceKey, targetUid);
+    if (!del.ok) {
+      const errData = del.errData || {};
+      console.error("admin-delete-account: auth-Löschung fehlgeschlagen", del.status, errData);
+      return { statusCode: 502, headers, body: JSON.stringify({ error: "Konto konnte nicht gelöscht werden: " + (errData.msg || errData.error || del.status) }) };
     }
 
     // 5) Erst jetzt, wo das Konto nachweislich weg ist, die Dateien in den Storage-Buckets aktiv
@@ -159,22 +126,7 @@ exports.handler = async function (event) {
     // sauber vollständig gelöscht, es bleiben nur verwaiste, nicht mehr adressierbare Dateileichen
     // zurück (dieselbe Restlücke wie beim ursprünglichen Audit-Fund, aber ohne ein noch aktives
     // Konto mit lautlos kaputten Dokumenten).
-    let filesDeleted = 0;
-    const speicherFehler = [];
-    for (const [bucket, paths] of buckets) {
-      if (!paths.length) continue;
-      try {
-        const rmResp = await fetch(SUPABASE_URL + "/storage/v1/object/" + bucket, {
-          method: "DELETE",
-          headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey, "Content-Type": "application/json" },
-          body: JSON.stringify({ prefixes: paths }),
-        });
-        if (!rmResp.ok) { speicherFehler.push(bucket + " (" + paths.length + " Dateien, HTTP " + rmResp.status + ")"); continue; }
-        filesDeleted += paths.length;
-      } catch (e) {
-        speicherFehler.push(bucket + " (" + paths.length + " Dateien, " + (e.message || "Netzwerkfehler") + ")");
-      }
-    }
+    const { filesDeleted, speicherFehler } = await loescheDateien(serviceKey, buckets);
     if (speicherFehler.length) {
       // Das Konto ist zu diesem Zeitpunkt bereits unwiderruflich gelöscht - das hier ist bewusst
       // KEIN Abbruch mehr, sondern nur noch eine Aufräum-Warnung mit konkreten Pfaden im Log, damit
