@@ -21,7 +21,9 @@ const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 const ARTEN = ["ÜST", "ÜL", "AB", "NF"];
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -173,6 +175,7 @@ Sprich den Fahrlehrer direkt an, sachlich und knapp. Er entscheidet, welche Term
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
       // Wie beim Kalenderassistenten: das Einpassen mehrerer Pflichtfahrten in begrenzte Fenster
@@ -220,6 +223,7 @@ Sprich den Fahrlehrer direkt an, sachlich und knapp. Er entscheidet, welche Term
       termine,
     }) };
   } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
   }
 };

@@ -36,3 +36,35 @@ REVOKE EXECUTE ON FUNCTION public.voucher_redeem FROM anon;
 REVOKE EXECUTE ON FUNCTION public._owner_by_code FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public._verify_student_login FROM anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.prevent_delete_students_with_invoices FROM anon, authenticated;
+
+-- Audit 2026-09 (Server & DB): REVOKE FROM anon allein reicht nicht, solange PUBLIC das Recht
+-- noch hat (anon erbt von PUBLIC) - genau das war bei den folgenden Funktionen der Fall.
+-- Live angewandt per Migration audit_2026_09_schueler_login_pin_reset_rechte bzw.
+-- audit_2026_09_buchungslink_pruefungen.
+REVOKE ALL ON FUNCTION public.student_data_delete(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.student_data_delete(uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.admin_school_teachers(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.admin_school_teachers(uuid) TO authenticated;
+REVOKE ALL ON FUNCTION public.create_and_assign_school(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.create_and_assign_school(text) TO authenticated;
+REVOKE ALL ON FUNCTION public.delete_school_location(uuid, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.delete_school_location(uuid, text) TO authenticated;
+REVOKE ALL ON FUNCTION public.join_school_by_code(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.join_school_by_code(text) TO authenticated;
+REVOKE ALL ON FUNCTION public.my_school_id() FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.my_school_id() TO authenticated;
+REVOKE ALL ON FUNCTION public._can_review_theory_resource(uuid) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public._can_review_theory_resource(uuid) TO authenticated;
+-- Trigger-Funktionen: EXECUTE wird nur beim CREATE TRIGGER geprüft, nicht beim Auslösen.
+REVOKE ALL ON FUNCTION public._guard_profile_privilege_flags() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._hash_student_pins() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.notify_appointment_push() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.set_updated_at() FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public._guard_student_owner_share() FROM PUBLIC, anon, authenticated;
+-- Seit v2.9.32 unbenutzt und ein Umweg um die Prüfungen von public_book_or_propose_appointment.
+REVOKE ALL ON FUNCTION public.public_propose_appointment(text, timestamp with time zone, timestamp with time zone, text, text, text) FROM PUBLIC, anon, authenticated;
+-- Neue Funktionen (Audit 2026-09): nur intern bzw. nur angemeldet.
+REVOKE ALL ON FUNCTION public._student_pin_matches(text, text) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.teacher_reset_student_pin(uuid, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.teacher_reset_student_pin(uuid, text) TO authenticated;

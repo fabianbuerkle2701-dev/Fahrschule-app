@@ -11,7 +11,9 @@ const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 // echten, angemeldeten Sitzung gehört. Kein Geheimnis, genau wie in index.html.
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -116,6 +118,7 @@ Wichtig: Wenn mehrere Positionen auf dem Beleg stehen, nimm für "label" eine ku
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -146,6 +149,7 @@ Wichtig: Wenn mehrere Positionen auf dem Beleg stehen, nimm für "label" eine ku
 
     return { statusCode: 200, headers, body: JSON.stringify({ receipt: parsed }) };
   } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
   }
 };

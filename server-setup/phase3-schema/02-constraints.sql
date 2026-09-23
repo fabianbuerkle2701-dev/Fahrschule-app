@@ -61,6 +61,9 @@ ALTER TABLE ONLY public.templates ADD CONSTRAINT templates_owner_fkey FOREIGN KE
 ALTER TABLE ONLY public.theory_attendance ADD CONSTRAINT theory_attendance_appt_id_fkey FOREIGN KEY (appt_id) REFERENCES appointments(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.theory_attendance ADD CONSTRAINT theory_attendance_owner_fkey FOREIGN KEY (owner) REFERENCES auth.users(id);
 ALTER TABLE ONLY public.theory_attendance ADD CONSTRAINT theory_attendance_student_id_fkey FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE;
+-- ON DELETE CASCADE: eigene KI-Fragen verschwinden mit dem Konto, statt plattformweit zu werden (Audit 2026-09, L-H2).
+ALTER TABLE ONLY public.theory_questions ADD CONSTRAINT theory_questions_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id) ON DELETE CASCADE;
+CREATE INDEX IF NOT EXISTS theory_questions_created_by_idx ON public.theory_questions (created_by) WHERE created_by IS NOT NULL;
 ALTER TABLE ONLY public.theory_resources ADD CONSTRAINT theory_resources_proposed_by_fkey FOREIGN KEY (proposed_by) REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.videos ADD CONSTRAINT videos_owner_fkey FOREIGN KEY (owner) REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.videos ADD CONSTRAINT videos_school_id_fkey FOREIGN KEY (school_id) REFERENCES schools(id) ON DELETE CASCADE;

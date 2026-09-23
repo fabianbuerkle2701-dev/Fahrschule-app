@@ -142,6 +142,7 @@ CREATE OR REPLACE FUNCTION public._open_invoiced_amount(v_data jsonb)
  RETURNS numeric
  LANGUAGE sql
  IMMUTABLE
+ SET search_path TO 'public'
 AS $function$
   select coalesce(sum(
     greatest(0, round(
@@ -892,7 +893,21 @@ CREATE OR REPLACE FUNCTION public.profile_email_by_id(p_id uuid)
  STABLE SECURITY DEFINER
  SET search_path TO 'public'
 AS $function$
-  select email from public.profiles where id = p_id
+  -- Audit 2026-09 (G-M10): vorher lieferte die Funktion JEDEM eingeloggten Nutzer die E-Mail zu
+  -- jeder beliebigen Profil-ID (schulübergreifende Enumeration). Jetzt nur für "verbundene"
+  -- Profile: man selbst, dieselbe Fahrschule, oder über eine Schüler-Freigabe (shared_with) in
+  -- einer der beiden Richtungen - genau die Fälle, in denen die App (SharedName) sie anzeigt.
+  select p.email from public.profiles p
+  where p.id = p_id
+    and auth.uid() is not null
+    and (
+      p.id = auth.uid()
+      or (p.school_id is not null
+          and p.school_id = (select me.school_id from public.profiles me where me.id = auth.uid()))
+      or exists (select 1 from public.students s
+                 where (s.owner = auth.uid() and p_id = any(s.shared_with))
+                    or (s.owner = p_id and auth.uid() = any(s.shared_with)))
+    )
 $function$;
 
 CREATE OR REPLACE FUNCTION public.profile_id_by_email(p_email text)
@@ -906,7 +921,19 @@ AS $function$
   limit 1
 $function$;
 
-CREATE OR REPLACE FUNCTION public.public_book_or_propose_appointment(code text, p_start timestamp with time zone, p_end timestamp with time zone, p_name text, p_note text, p_pin text DEFAULT NULL::text)
+-- K-H1: ohne PIN wurden weder Ende>Start noch eine Höchstdauer noch die Arbeitszeit geprüft -
+-- EINE anonyme Anfrage mit 30 Tagen Dauer sperrte per Überschneidungsprüfung den ganzen Kalender;
+-- 40 anonyme Anfragen lösten TOOMANY für ALLE PIN-losen Anfragen des Tages aus.
+-- K-M5: Tages-/Wochenlimit des FAHRLEHRERS (profiles.day_limit/week_limit, Minuten) galt nur in
+-- der Anzeige - eine Sofortbuchung ging trotzdem durch. Jetzt: Limit erreicht -> normale Anfrage.
+-- K-M6: Sofortbuchung auch 2 Minuten vor Beginn möglich. Jetzt erst ab 2 Stunden Vorlauf, sonst
+-- normale Anfrage, die der Fahrlehrer bewusst bestätigt.
+-- Zeitzone: date_trunc('day'/'week', timestamptz) rechnet in der Sitzungszeitzone (UTC) - Termine
+-- zwischen 0 und 2 Uhr deutscher Zeit fielen in den Vortag. Jetzt Europe/Berlin.
+-- Neue Fehlercodes (Client v2.9.33 zeigt unbekannte Codes als "nicht verfügbar"):
+--   INVALID_TIME (kein Start / Ende nicht nach Start), TOOLONG (> 240 Minuten),
+--   OUTSIDE_HOURS (außerhalb der Arbeitszeit - der Client prüft das vorab schon selbst).
+CREATE OR REPLACE FUNCTION public.public_book_or_propose_appointment(code text, p_start timestamp with time zone, p_end timestamp with time zone, p_name text, p_note text, p_pin text DEFAULT NULL::text, p_art text DEFAULT NULL::text)
  RETURNS jsonb
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -915,41 +942,84 @@ AS $function$
 declare
   v_owner uuid; v_id uuid; v_end timestamptz; v_conflicts int; v_minutes int;
   v_day_limit int; v_week_limit int; v_work_hours jsonb;
+  v_teacher_day_limit int; v_teacher_week_limit int;
   v_row students%rowtype; v_eff text; v_ok boolean := false;
   v_day_start timestamptz; v_week_start timestamptz; v_used int;
   v_dow int; v_daykey text; v_day jsonb;
   v_start_local text; v_end_local text;
   v_within_hours boolean := true; v_instant boolean := false;
-  v_name text; v_offen int;
+  v_name text; v_offen int; v_offen_name int;
+  v_tz constant text := 'Europe/Berlin';
 begin
-  select p.id, coalesce(p.student_day_limit,0), coalesce(p.student_week_limit,0), p.work_hours
-    into v_owner, v_day_limit, v_week_limit, v_work_hours
+  if p_art is not null and p_art not in ('ÜL','AB','NF') then
+    raise exception 'INVALID_ART';
+  end if;
+
+  select p.id, coalesce(p.student_day_limit,0), coalesce(p.student_week_limit,0), p.work_hours,
+         coalesce(p.day_limit,0), coalesce(p.week_limit,0)
+    into v_owner, v_day_limit, v_week_limit, v_work_hours, v_teacher_day_limit, v_teacher_week_limit
   from profiles p where p.booking_code = lower(btrim(code));
   if v_owner is null then raise exception 'Ungültiger Code'; end if;
 
   v_name := left(regexp_replace(btrim(coalesce(p_name, '')), '\s+', ' ', 'g'), 80);
   if length(v_name) < 2 then raise exception 'NONAME'; end if;
 
+  if p_start is null then raise exception 'INVALID_TIME'; end if;
+  v_end := coalesce(p_end, p_start + interval '45 minutes');
+  if v_end <= p_start then raise exception 'INVALID_TIME'; end if;
+  -- Höchstens 240 Minuten - dieselbe Grenze wie die Bis-Auswahl im Buchungsformular (3 FS = 135
+  -- Min); alles darüber ist kein Fahrstundenwunsch, sondern blockiert nur den Kalender.
+  if v_end - p_start > interval '240 minutes' then raise exception 'TOOLONG'; end if;
+  v_minutes := greatest(1, round(extract(epoch from (v_end - p_start)) / 60));
+
   perform pg_advisory_xact_lock(hashtext('book_appt:' || v_owner::text));
 
   if p_start < now() then raise exception 'NOPAST'; end if;
 
-  v_end := coalesce(p_end, p_start + interval '45 minutes');
-  v_minutes := greatest(1, round(extract(epoch from (v_end - p_start)) / 60));
+  -- Arbeitszeit gilt jetzt für JEDE Anfrage (vorher nur für die Sofortbuchung). Gleiche Regeln
+  -- wie withinWorkHours() im Client: Sonntag immer gesperrt, kein Eintrag/keine Zeiten =
+  -- ganztägig, blocked = Tag gesperrt, sonst nur innerhalb von/bis. Termine über Mitternacht
+  -- liegen nie innerhalb einer Tages-Arbeitszeit.
+  v_dow := extract(dow from p_start at time zone v_tz)::int;
+  v_daykey := (array['so','mo','di','mi','do','fr','sa'])[v_dow + 1];
+  if v_daykey = 'so' then
+    v_within_hours := false;
+  elsif (v_end at time zone v_tz)::date <> (p_start at time zone v_tz)::date then
+    v_within_hours := false;
+  elsif v_work_hours is not null and jsonb_typeof(v_work_hours) = 'object' then
+    v_day := v_work_hours -> v_daykey;
+    if v_day is not null and v_day <> 'null'::jsonb then
+      if coalesce((v_day->>'blocked')::boolean, false) then
+        v_within_hours := false;
+      elsif v_day->>'von' is not null and v_day->>'bis' is not null then
+        v_start_local := to_char(p_start at time zone v_tz, 'HH24:MI');
+        v_end_local := to_char(v_end at time zone v_tz, 'HH24:MI');
+        if v_start_local < (v_day->>'von') or v_end_local > (v_day->>'bis') then
+          v_within_hours := false;
+        end if;
+      end if;
+    end if;
+  end if;
+  if not v_within_hours then raise exception 'OUTSIDE_HOURS'; end if;
 
   select count(*) into v_conflicts from appointments a
   where a.owner = v_owner and a.start_at < v_end
     and coalesce(a.end_at, a.start_at + interval '45 minutes') > p_start;
   if v_conflicts > 0 then raise exception 'OVERLAP'; end if;
 
-  select count(*) into v_offen from appointments a
+  select count(*), count(*) filter (where lower(trim(a.title)) = lower(v_name))
+    into v_offen, v_offen_name
+  from appointments a
   where a.owner = v_owner and a.student_id is null and a.status = 'pending'
-    and a.created_at >= date_trunc('day', now());
+    and a.created_at >= (date_trunc('day', now() at time zone v_tz) at time zone v_tz);
 
+  -- Gleichnamige Schüler: der Schüler, dessen PIN passt, zuerst (J-Nebenbefund) - sonst hing es
+  -- vom Zufall ab, welcher der beiden sich anmelden kann.
   select * into v_row from students s
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = lower(v_name)
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
 
   if found then
@@ -959,16 +1029,13 @@ begin
     end if;
   end if;
 
-  -- Nur fuer tatsaechlich verifizierte Aufrufer geprueft (v_ok = korrekte PIN bestaetigt) -
-  -- sonst waere das ein Orakel, das ohne PIN verraet, ob ein Name existiert und eine offene
-  -- Rechnung hat. Der echte Kontoinhaber sieht die Meldung weiterhin unveraendert.
   if v_ok and coalesce(v_row.data->>'guthabenModus', 'aus') = 'deckung'
      and _open_invoiced_amount(v_row.data) > 0.005 then
     raise exception 'UNPAID';
   end if;
 
   if v_day_limit > 0 then
-    v_day_start := date_trunc('day', p_start);
+    v_day_start := date_trunc('day', p_start at time zone v_tz) at time zone v_tz;
     select coalesce(sum(extract(epoch from (coalesce(a.end_at, a.start_at + interval '45 minutes') - a.start_at)) / 60), 0)
       into v_used from appointments a
     where a.owner = v_owner
@@ -979,7 +1046,7 @@ begin
   end if;
 
   if v_week_limit > 0 then
-    v_week_start := date_trunc('week', p_start);
+    v_week_start := date_trunc('week', p_start at time zone v_tz) at time zone v_tz;
     select coalesce(sum(extract(epoch from (coalesce(a.end_at, a.start_at + interval '45 minutes') - a.start_at)) / 60), 0)
       into v_used from appointments a
     where a.owner = v_owner
@@ -989,30 +1056,29 @@ begin
     if v_used + v_minutes > v_week_limit then raise exception 'WEEKLIMIT'; end if;
   end if;
 
-  if v_work_hours is not null and jsonb_typeof(v_work_hours) = 'object' then
-    v_dow := extract(dow from p_start at time zone 'Europe/Berlin')::int;
-    v_daykey := (array['so','mo','di','mi','do','fr','sa'])[v_dow + 1];
-    if v_daykey = 'so' then
-      v_within_hours := false;
-    else
-      v_day := v_work_hours -> v_daykey;
-      if v_day is not null and v_day <> 'null'::jsonb then
-        if coalesce((v_day->>'blocked')::boolean, false) then
-          v_within_hours := false;
-        elsif v_day->>'von' is not null and v_day->>'bis' is not null then
-          v_start_local := to_char(p_start at time zone 'Europe/Berlin', 'HH24:MI');
-          v_end_local := to_char(v_end at time zone 'Europe/Berlin', 'HH24:MI');
-          if v_start_local < (v_day->>'von') or v_end_local > (v_day->>'bis') then
-            v_within_hours := false;
-          end if;
-        end if;
-      end if;
-    end if;
-  end if;
-
   v_instant := v_ok and v_row.id is not null
     and coalesce((v_row.data->>'instantBookOptIn')::boolean, false)
-    and v_within_hours;
+    and p_art is null
+    and p_start >= now() + interval '2 hours';
+
+  -- Fahrlehrer-Limit in Minuten, gezählt wie in der Anzeige des Buchungslinks: alles außer
+  -- offenen Anfragen. Ist es erreicht, wird aus der Sofortbuchung eine normale Anfrage.
+  if v_instant and v_teacher_day_limit > 0 then
+    v_day_start := date_trunc('day', p_start at time zone v_tz) at time zone v_tz;
+    select coalesce(sum(extract(epoch from (coalesce(a.end_at, a.start_at + interval '45 minutes') - a.start_at)) / 60), 0)
+      into v_used from appointments a
+    where a.owner = v_owner and a.status <> 'pending'
+      and a.start_at >= v_day_start and a.start_at < v_day_start + interval '1 day';
+    if v_used + v_minutes > v_teacher_day_limit then v_instant := false; end if;
+  end if;
+  if v_instant and v_teacher_week_limit > 0 then
+    v_week_start := date_trunc('week', p_start at time zone v_tz) at time zone v_tz;
+    select coalesce(sum(extract(epoch from (coalesce(a.end_at, a.start_at + interval '45 minutes') - a.start_at)) / 60), 0)
+      into v_used from appointments a
+    where a.owner = v_owner and a.status <> 'pending'
+      and a.start_at >= v_week_start and a.start_at < v_week_start + interval '7 days';
+    if v_used + v_minutes > v_teacher_week_limit then v_instant := false; end if;
+  end if;
 
   if v_instant then
     insert into appointments(owner, student_id, title, start_at, end_at, status, note, art)
@@ -1021,10 +1087,14 @@ begin
     return jsonb_build_object('id', v_id, 'status', 'confirmed');
   end if;
 
-  if v_offen >= 40 then raise exception 'TOOMANY'; end if;
+  -- Anfrage-Sperre pro Absender (Name) statt schulweit: 10 offene Anfragen pro Name und Tag.
+  -- Die schulweite Obergrenze bleibt nur als Schutz gegen Massenanfragen OHNE PIN - per PIN
+  -- angemeldete Schüler kann ein Fremder damit nicht mehr aussperren.
+  if v_offen_name >= 10 then raise exception 'TOOMANY'; end if;
+  if not v_ok and v_offen >= 40 then raise exception 'TOOMANY'; end if;
 
-  insert into appointments(owner, student_id, title, start_at, end_at, status, note)
-  values (v_owner, null, v_name, p_start, v_end, 'pending', left(coalesce(p_note,''), 500))
+  insert into appointments(owner, student_id, title, start_at, end_at, status, note, art)
+  values (v_owner, null, v_name, p_start, v_end, 'pending', left(coalesce(p_note,''), 500), coalesce(p_art, 'ÜST'))
   returning id into v_id;
   return jsonb_build_object('id', v_id, 'status', 'pending');
 end;
@@ -1045,7 +1115,7 @@ AS $function$
     coalesce(p.student_week_limit, 0) as student_week_limit
   from profiles p
   join schools s on s.id = p.school_id
-  where p.booking_code = code;
+  where p.id = _owner_by_code(code);
 $function$;
 
 -- Fund 23.9.2026: verglich den Code bisher direkt (case-sensitiv, ohne Trim) statt ueber die
@@ -1064,7 +1134,6 @@ AS $function$
   where a.owner = _owner_by_code(code)
     and a.start_at >= von
     and a.start_at < bis
-    and a.status in ('confirmed','pending')
   order by a.start_at;
 $function$;
 
@@ -1089,7 +1158,7 @@ $function$;
 -- explain-theory-question, morning-briefing...), damit intensive Nutzung EINES Features
 -- nicht das Tageslimit der ANDEREN fuer denselben Buchungscode mit aufbraucht - vorher
 -- teilten sich alle Aufrufer denselben (booking_code, day)-Zaehler.
-CREATE OR REPLACE FUNCTION public.public_chat_rate_limit(code text, max_per_day integer DEFAULT 40, p_feature text DEFAULT 'default')
+CREATE OR REPLACE FUNCTION public.public_chat_rate_limit(code text, max_per_day integer DEFAULT 40, p_feature text DEFAULT 'default'::text)
  RETURNS boolean
  LANGUAGE plpgsql
  SECURITY DEFINER
@@ -1100,6 +1169,12 @@ declare
   v_count int;
   v_code text;
 begin
+  -- Audit 2026-09 (L-M4): p_feature war frei wählbar - jede anonyme Anfrage mit neuem Namen legte
+  -- eine neue Zeile in public_chat_usage an (Tabelle wird nie aufgeräumt). Nur die Zähler, die
+  -- die Netlify-Functions wirklich benutzen.
+  if p_feature is null or p_feature !~ '^(booking-chat|booking-chat-ip[0-9]{1,2}|morning-briefing|explain-theory-question)$' then
+    return false;
+  end if;
   v_owner := _owner_by_code(code);
   if v_owner is null then
     return false;
@@ -1144,6 +1219,10 @@ begin
 end;
 $function$;
 
+-- Audit 2026-09 (J-Nebenbefund): alle Schüler-RPCs sortieren gleichnamige Schüler jetzt nach
+-- "PIN passt" (_student_pin_matches) vor dem limit 1 - vorher entschied der Zufall, welcher von
+-- zwei gleichnamigen Schülern sich anmelden konnte. Siehe Migration
+-- audit_2026_09_schueler_login_pin_reset_rechte.
 CREATE OR REPLACE FUNCTION public.public_claim_appointment_offer(code text, p_name text, p_pin text, p_id uuid)
  RETURNS text
  LANGUAGE plpgsql
@@ -1165,6 +1244,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1307,6 +1387,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then
     raise exception 'error';
@@ -1361,6 +1442,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
 
   if found then
@@ -1528,6 +1610,7 @@ begin
   from students s
   where s.owner = v_owner
     and lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))) = lower(btrim(p_name))
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1571,6 +1654,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1616,6 +1700,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1683,6 +1768,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1738,6 +1824,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then
     return '[]'::jsonb;
@@ -1789,6 +1876,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return; end if;
   v_eff   := coalesce(nullif(v_row.data->>'pinCustom',''), v_row.data->>'pin');
@@ -1874,6 +1962,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return null; end if;
 
@@ -1922,6 +2011,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -1963,6 +2053,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -2002,6 +2093,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_old) desc, s.created_at
   limit 1;
   if not found then return false; end if;
 
@@ -2043,6 +2135,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -2058,6 +2151,70 @@ begin
   where id = v_row.id;
 
   return 'ok';
+end;
+$function$;
+
+-- Fehlte bisher in dieser Datei (live seit Sept. 2026); mit der Audit-2026-09-Ergänzung übernommen.
+CREATE OR REPLACE FUNCTION public.public_student_sonderfahrten_status(code text, p_name text, p_pin text)
+ RETURNS TABLE(art_code text, art_key text, label text, soll numeric, driven_ue numeric, scheduled_ue numeric, total_ue numeric, laenge_ok boolean)
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  v_owner uuid; v_row students%rowtype; v_eff text; v_klasse text;
+  v_school uuid; v_soll_school jsonb; v_default jsonb := '{"ueberland":5,"autobahn":4,"daemmerung":3}'::jsonb;
+  v_soll jsonb; v_lessons jsonb; v_name_norm text;
+begin
+  v_owner := _owner_by_code(code);
+  if v_owner is null then return; end if;
+
+  v_name_norm := regexp_replace(lower(btrim(coalesce(p_name,''))), '\s+', ' ', 'g');
+
+  select * into v_row from students s
+  where s.owner = v_owner
+    and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
+      = v_name_norm
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
+  limit 1;
+  if not found then return; end if;
+
+  v_eff := coalesce(nullif(v_row.data->>'pinCustom',''), v_row.data->>'pin');
+  if not _verify_student_login(v_owner, p_name, v_eff, p_pin) then return; end if;
+
+  v_klasse := coalesce(nullif(v_row.data->>'klasse',''), 'B');
+  select p.school_id into v_school from profiles p where p.id = v_owner;
+  if v_school is not null then
+    select sc.sonderfahrten_soll into v_soll_school from schools sc where sc.id = v_school;
+  end if;
+  v_soll := (case when v_klasse = 'B' then v_default else '{}'::jsonb end)
+            || coalesce(v_soll_school -> v_klasse, '{}'::jsonb);
+
+  v_lessons := coalesce(v_row.data->'drivenLessons', '[]'::jsonb);
+
+  return query
+  select t.code, t.key, t.label,
+         coalesce((v_soll->>t.key)::numeric, 0) as soll,
+         round(coalesce(dl.driven_min, 0) / 45, 2) as driven_ue,
+         round(coalesce(sc.sched_min, 0) / 45, 2) as scheduled_ue,
+         round((coalesce(dl.driven_min,0) + coalesce(sc.sched_min,0)) / 45, 2) as total_ue,
+         (coalesce(dl.has_long, false) or coalesce(sc.has_long, false)) as laenge_ok
+  from (values ('ÜL','ueberland','Überland'), ('AB','autobahn','Autobahn'), ('NF','daemmerung','Dämmerung/Dunkelheit'))
+    as t(code, key, label)
+  left join lateral (
+    select sum((l->>'minutes')::numeric) as driven_min,
+           bool_or((l->>'minutes')::numeric >= 90) as has_long
+    from jsonb_array_elements(v_lessons) l
+    where l->>'art' = t.code
+  ) dl on true
+  left join lateral (
+    select sum(extract(epoch from (coalesce(ap.end_at, ap.start_at + interval '45 minutes') - ap.start_at)) / 60) as sched_min,
+           bool_or(extract(epoch from (coalesce(ap.end_at, ap.start_at + interval '45 minutes') - ap.start_at)) / 60 >= 90) as has_long
+    from appointments ap
+    where ap.owner = v_owner and ap.art = t.code and ap.start_at > now()
+      and ((ap.student_id::text = v_row.id::text and ap.status in ('pending','confirmed'))
+           or (ap.student_id is null and ap.status = 'pending' and lower(trim(ap.title)) = v_name_norm))
+  ) sc on true;
 end;
 $function$;
 
@@ -2083,6 +2240,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -2146,6 +2304,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then
     raise exception 'error';
@@ -2196,6 +2355,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return '[]'::jsonb; end if;
 
@@ -2238,6 +2398,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -2291,6 +2452,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return 'error'; end if;
 
@@ -2336,6 +2498,7 @@ begin
   where s.owner = v_owner
     and regexp_replace(lower(btrim(coalesce(s.data->>'vorname','') || ' ' || coalesce(s.data->>'name',''))), '\s+', ' ', 'g')
       = regexp_replace(lower(btrim(p_name)), '\s+', ' ', 'g')
+  order by _student_pin_matches(coalesce(nullif(s.data->>'pinCustom',''), s.data->>'pin'), p_pin) desc, s.created_at
   limit 1;
   if not found then return null; end if;
 
@@ -2356,10 +2519,14 @@ CREATE OR REPLACE FUNCTION public.public_theory_questions(code text, p_klasse te
 AS $function$
 declare
   v_owner uuid;
+  v_school uuid;
 begin
   v_owner := _owner_by_code(code);
   if v_owner is null then return '[]'::jsonb; end if;
+  select p.school_id into v_school from profiles p where p.id = v_owner;
 
+  -- Eigene KI-Fragen (created_by) nur für die eigene Fahrschule ausliefern, nicht plattformweit
+  -- (Audit 2026-09, L-H2). created_by NULL = redaktioneller Plattform-Bestand.
   return coalesce((
     select jsonb_agg(jsonb_build_object(
       'id', q.id, 'topic_key', q.topic_key, 'klasse', q.klasse, 'points', q.points,
@@ -2370,6 +2537,10 @@ begin
     from theory_questions q
     where q.active = true
       and (q.klasse = 'ALL' or p_klasse is null or q.klasse = p_klasse)
+      and (q.created_by is null
+           or q.created_by = v_owner
+           or (v_school is not null and exists (
+                 select 1 from profiles cp where cp.id = q.created_by and cp.school_id = v_school)))
   ), '[]'::jsonb);
 end;
 $function$;
@@ -2389,17 +2560,20 @@ begin
 
   select p.school_id into v_school from profiles p where p.id = v_owner;
 
+  -- split_part-Filter: nur Dateien aus dem eigenen Ordner des Besitzers (Audit 2026-09, L-H1).
   if v_school is not null then
     return query
       select v.id, v.title, v.category, v.storage_path, v.created_at
       from videos v
       where v.school_id = v_school
+        and split_part(v.storage_path, '/', 1) = v.owner::text
       order by v.category, v.created_at desc;
   else
     return query
       select v.id, v.title, v.category, v.storage_path, v.created_at
       from videos v
       where v.owner = v_owner
+        and split_part(v.storage_path, '/', 1) = v.owner::text
       order by v.category, v.created_at desc;
   end if;
 end;
@@ -2711,6 +2885,12 @@ declare
     'dismissedAppts','termin','terminLabel','klasse','location_id'];
   f text; v_neu jsonb;
 begin
+  -- Audit 2026-09 (L-M5): ohne Anmeldung ist auth.uid() NULL - die Besitzprüfung unten ergab
+  -- dann NULL statt false und ließ den Aufruf durch; gestoppt hat ihn nur zufällig das NOT NULL
+  -- von deletion_log.deleted_by (nach dem Löschen, das dadurch mit zurückgerollt wurde).
+  if auth.uid() is null then
+    raise exception 'Nicht angemeldet';
+  end if;
   if _ist_demo() then
     raise exception 'Im Demo-Modus ist das Loeschen deaktiviert.';
   end if;
@@ -2844,3 +3024,97 @@ begin
 end;
 $function$;
 
+-- Audit 2026-09 (L-H3): Die UPDATE-Policy auf students lässt Besitzer UND Mitfreigegebene schreiben - auch die
+-- Spalten owner/shared_with. Ein Kollege mit Mitfreigabe konnte per PATCH {owner: ich,
+-- shared_with: []} den Schüler an sich reißen, der Besitzer verlor ihn samt Zugriff.
+-- Absichtlich SECURITY INVOKER: current_user ist dann die Rolle des Aufrufers. Die Schul-Admin-
+-- RPCs school_assign_student/school_share_student laufen SECURITY DEFINER (current_user =
+-- Funktionsbesitzer) und dürfen weiter umhängen/freigeben, ebenso service_role.
+CREATE OR REPLACE FUNCTION public._guard_student_owner_share()
+ RETURNS trigger
+ LANGUAGE plpgsql
+ SET search_path TO 'public'
+AS $function$
+begin
+  if (new.owner is distinct from old.owner or new.shared_with is distinct from old.shared_with)
+     and current_user in ('authenticated', 'anon')
+     and auth.uid() is distinct from old.owner then
+    raise exception 'Nur der Besitzer darf Besitzer und Freigaben eines Schülers ändern.'
+      using errcode = '42501';
+  end if;
+  return new;
+end;
+$function$;
+REVOKE ALL ON FUNCTION public._guard_student_owner_share() FROM PUBLIC, anon, authenticated;
+
+DROP TRIGGER IF EXISTS trg_guard_student_owner_share ON public.students;
+CREATE TRIGGER trg_guard_student_owner_share BEFORE UPDATE ON public.students
+  FOR EACH ROW EXECUTE FUNCTION public._guard_student_owner_share();
+
+-- Reiner Vergleich "passt dieser PIN zu diesem gespeicherten PIN" OHNE Fehlversuchszählung.
+-- Wird nur zum Sortieren gleichnamiger Schüler benutzt (siehe Schüler-Login unten und Migration
+-- audit_2026_09_schueler_login_pin_reset_rechte): die eigentliche Anmeldung läuft weiterhin
+-- ausschließlich über _verify_student_login() mit Sperre nach Fehlversuchen.
+CREATE OR REPLACE FUNCTION public._student_pin_matches(stored_pin text, input_pin text)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE
+ SET search_path TO 'public', 'extensions'
+AS $function$
+  select case
+    when stored_pin is null or stored_pin = '' or input_pin is null or input_pin = '' then false
+    when stored_pin ~ '^\$2[aby]\$' then crypt(input_pin, stored_pin) = stored_pin
+    else stored_pin = input_pin
+  end;
+$function$;
+REVOKE ALL ON FUNCTION public._student_pin_matches(text, text) FROM PUBLIC, anon, authenticated;
+
+-- Audit 2026-09 (G-H1): Setzte der Fahrlehrer einen neuen PIN, blieb er wirkungslos, sobald der Schüler einen
+-- eigenen hatte (Login nimmt coalesce(pinCustom, pin); students_teacher_update schreibt
+-- pinCustom immer auf den Serverstand zurück) - ein vergessener PIN hieß dauerhaft ausgesperrt.
+CREATE OR REPLACE FUNCTION public.teacher_reset_student_pin(p_student_id uuid, p_pin text)
+ RETURNS boolean
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+declare
+  v_row students%rowtype;
+  v_pin text;
+  v_name text;
+begin
+  if auth.uid() is null then
+    raise exception 'Nicht angemeldet';
+  end if;
+  if _ist_demo() then
+    raise exception 'Im Demo-Modus ist das deaktiviert.';
+  end if;
+  v_pin := btrim(coalesce(p_pin, ''));
+  -- Dieselbe Regel wie das PIN-Feld in den Schülerdaten ("4 bis 8 Ziffern").
+  if v_pin !~ '^[0-9]{4,8}$' then
+    raise exception 'Der PIN muss aus 4 bis 8 Ziffern bestehen.';
+  end if;
+  select * into v_row from students where id = p_student_id for update;
+  if v_row.id is null then
+    raise exception 'Schueler nicht gefunden';
+  end if;
+  if v_row.owner <> auth.uid() and not (auth.uid() = any(coalesce(v_row.shared_with, '{}'::uuid[]))) then
+    raise exception 'Kein Zugriff auf diesen Schueler';
+  end if;
+  -- pinCustom MUSS weg: der Login nimmt coalesce(pinCustom, pin) - solange der selbst gewählte
+  -- PIN des Schülers steht, bliebe der neue Start-PIN wirkungslos. Klartext ist hier unkritisch,
+  -- trg_hash_student_pins hasht data.pin vor dem Speichern.
+  update students
+     set data = (data - 'pinCustom') || jsonb_build_object('pin', v_pin, 'pinChanged', false),
+         updated_at = now()
+   where id = p_student_id;
+  -- Wer seinen PIN vergessen hat, hat oft schon Fehlversuche gesammelt - die Sperre gilt dem
+  -- alten PIN und wird mit dem neuen aufgehoben (Schlüssel wie in _verify_student_login).
+  v_name := regexp_replace(lower(btrim(coalesce(v_row.data->>'vorname','') || ' ' || coalesce(v_row.data->>'name',''))), '\s+', ' ', 'g');
+  delete from student_login_throttle where throttle_key = v_row.owner::text || '|' || v_name;
+  return true;
+end;
+$function$;
+
+REVOKE ALL ON FUNCTION public.teacher_reset_student_pin(uuid, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.teacher_reset_student_pin(uuid, text) TO authenticated;

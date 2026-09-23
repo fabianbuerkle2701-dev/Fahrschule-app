@@ -13,7 +13,9 @@
 const SUPABASE_URL = "https://oavuftlfnknucxuortar.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9hdnVmdGxmbmtudWN4dW9ydGFyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEzMDQ2NDQsImV4cCI6MjA5Njg4MDY0NH0.5ZoBdQLnJw23dMZ4IKmAauycVcPoVPIZdmNamZ8MEv8";
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
@@ -57,10 +59,15 @@ exports.handler = async function (event) {
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
 
+  // Mit dem Service-Role-Key, sobald er als Netlify-Umgebungsvariable da ist: public_chat_rate_limit
+  // soll nach diesem Deploy für anon gesperrt werden (sonst kann jeder per curl das Tageslimit
+  // einer Schule aufbrauchen, Audit 2026-09 L-M4, siehe server-setup/post-deploy-audit-2026-09.sql).
+  // Ohne Variable bleibt es beim Anon-Key - dann funktioniert alles wie bisher.
+  const rpcKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
   async function rpc(name, params) {
     const resp = await fetch(SUPABASE_URL + "/rest/v1/rpc/" + name, {
       method: "POST",
-      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      headers: { apikey: rpcKey, Authorization: "Bearer " + rpcKey, "Content-Type": "application/json" },
       body: JSON.stringify(params),
     });
     if (!resp.ok) return null;
@@ -267,6 +274,7 @@ ${datenText}`;
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -284,16 +292,21 @@ ${datenText}`;
       // nicht nötig.
       body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 450, thinking: { type: "disabled" }, system, messages: [{ role: "user", content: "Schreib den Text." }] }),
     });
-    const data = await resp.json();
+    // Anonym erreichbar: der rohe Anthropic-Fehlertext gehört ins Server-Log, nicht zum
+    // Aufrufer (Audit 2026-09, L-N7). Kein JSON = kein Absturz.
+    const data = await resp.json().catch(() => null);
     if (!resp.ok) {
-      const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
-      return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };
+      console.error("morning-briefing: Anthropic-Fehler", resp.status, (data && data.error && data.error.message) || "(kein JSON-Fehlertext)");
+      return { statusCode: 502, headers, body: JSON.stringify({ error: "Der Text konnte gerade nicht erstellt werden. Bitte später noch einmal versuchen." }) };
     }
     let text = "";
-    if (Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
+    if (data && Array.isArray(data.content)) text = data.content.map((c) => (c && c.type === "text" ? c.text : "")).join("").trim();
     if (!text) return { statusCode: 502, headers, body: JSON.stringify({ error: "Leere Antwort erhalten" }) };
     return { statusCode: 200, headers, body: JSON.stringify({ text }) };
   } catch (e) {
-    return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
+    // e.message bleibt intern (bei Netzwerkfehlern stehen darin Host- und DNS-Angaben).
+    console.error("morning-briefing: unerwarteter Fehler", e);
+    return { statusCode: 500, headers, body: JSON.stringify({ error: "Der Text konnte gerade nicht erstellt werden. Bitte später noch einmal versuchen." }) };
   }
 };

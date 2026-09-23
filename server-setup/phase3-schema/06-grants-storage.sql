@@ -40,17 +40,37 @@ CREATE POLICY staff_files_storage_select ON storage.objects AS PERMISSIVE FOR SE
     profiles owner
   WHERE ((me.id = auth.uid()) AND (me.school_admin = true) AND ((owner.id)::text = (storage.foldername(objects.name))[1]) AND (owner.school_id = me.school_id)))) OR (auth.uid() = '96530a9f-28ae-4ac6-9cfa-26de392ecf05'::uuid)));
 
-CREATE POLICY student_files_storage_delete ON storage.objects AS PERMISSIVE FOR DELETE TO public
-  USING ((bucket_id = 'student-files'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text));
+-- Audit 2026-09 (F-M9): Pfad ist "<hochladende uid>/<student_id>/<datei>". Hochladen nur in den
+-- eigenen Ordner, Lesen/Löschen aber über den Schüler im zweiten Pfadteil (Besitzer oder
+-- mitfreigegeben) - dieselbe Bedingung wie die student_files-Tabellen-Policies.
+CREATE POLICY student_files_storage_delete ON storage.objects AS PERMISSIVE FOR DELETE TO authenticated
+  USING (bucket_id = 'student-files' AND EXISTS (
+    SELECT 1 FROM public.students s
+    WHERE s.id::text = (storage.foldername(objects.name))[2]
+      AND (s.owner = auth.uid() OR auth.uid() = ANY (s.shared_with))
+  ));
 
-CREATE POLICY student_files_storage_insert ON storage.objects AS PERMISSIVE FOR INSERT TO public
-  WITH CHECK ((bucket_id = 'student-files'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text));
+CREATE POLICY student_files_storage_insert ON storage.objects AS PERMISSIVE FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'student-files'
+    AND (storage.foldername(name))[1] = (auth.uid())::text
+    AND EXISTS (
+      SELECT 1 FROM public.students s
+      WHERE s.id::text = (storage.foldername(objects.name))[2]
+        AND (s.owner = auth.uid() OR auth.uid() = ANY (s.shared_with))
+    ));
 
-CREATE POLICY student_files_storage_select ON storage.objects AS PERMISSIVE FOR SELECT TO public
-  USING ((bucket_id = 'student-files'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text));
+CREATE POLICY student_files_storage_select ON storage.objects AS PERMISSIVE FOR SELECT TO authenticated
+  USING (bucket_id = 'student-files' AND EXISTS (
+    SELECT 1 FROM public.students s
+    WHERE s.id::text = (storage.foldername(objects.name))[2]
+      AND (s.owner = auth.uid() OR auth.uid() = ANY (s.shared_with))
+  ));
 
-CREATE POLICY theory_files_storage_insert ON storage.objects AS PERMISSIVE FOR INSERT TO authenticated
-  WITH CHECK (bucket_id = 'theory-files'::text);
+-- Wie auf Cloud (live): nur in den eigenen Ordner hochladen. Zusammen mit
+-- theory_resources_insert_own (file_path im eigenen Ordner) kann niemand eine fremde Datei an
+-- einen eigenen Beitrag hängen (Audit 2026-09, L-H1).
+CREATE POLICY theory_files_storage_insert ON storage.objects AS PERMISSIVE FOR INSERT TO public
+  WITH CHECK ((bucket_id = 'theory-files'::text) AND ((storage.foldername(name))[1] = (auth.uid())::text));
 
 -- Audit-Fund S2: die urspruengliche Policy liess nur den eigenen Ordner zu, obwohl
 -- theory_resources_select (Tabellen-RLS) freigegebene Beitraege (status='approved') bereits

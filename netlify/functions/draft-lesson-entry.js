@@ -20,7 +20,9 @@ const LESSON_FIELDS = [
   { id: "bedien", label: "Fahrzeugbedienung" },
 ];
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
@@ -131,6 +133,7 @@ Wichtig zu "ratings": Bewerte NUR Bereiche (verkehr=Verkehrsbeobachtung, positio
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -161,6 +164,7 @@ Wichtig zu "ratings": Bewerte NUR Bereiche (verkehr=Verkehrsbeobachtung, positio
 
     return { statusCode: 200, headers, body: JSON.stringify({ draft: parsed }) };
   } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
   }
 };

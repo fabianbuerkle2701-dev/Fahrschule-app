@@ -129,9 +129,21 @@ ALTER TABLE public.student_files ENABLE ROW LEVEL SECURITY;
 CREATE POLICY demo_ro_no_delete ON public.student_files AS RESTRICTIVE FOR DELETE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
 CREATE POLICY demo_ro_no_insert ON public.student_files AS RESTRICTIVE FOR INSERT TO authenticated WITH CHECK ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
 CREATE POLICY demo_ro_no_update ON public.student_files AS RESTRICTIVE FOR UPDATE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid)) WITH CHECK ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
-CREATE POLICY "eigene schuelerdateien anlegen" ON public.student_files AS PERMISSIVE FOR INSERT TO public WITH CHECK ((owner = auth.uid()));
-CREATE POLICY "eigene schuelerdateien lesen" ON public.student_files AS PERMISSIVE FOR SELECT TO public USING ((owner = auth.uid()));
-CREATE POLICY "eigene schuelerdateien loeschen" ON public.student_files AS PERMISSIVE FOR DELETE TO public USING ((owner = auth.uid()));
+-- Audit 2026-09 (F-M9): Sichtbarkeit hängt an students.owner/shared_with statt am Hochladenden -
+-- sonst sehen mitfreigegebene Kollegen und ein neuer Besitzer (school_assign_student) die
+-- Dokumente nicht, der alte Besitzer behält dagegen Zugriff.
+CREATE POLICY "schuelerdateien anlegen" ON public.student_files AS PERMISSIVE FOR INSERT TO authenticated
+  WITH CHECK (
+    owner = (SELECT auth.uid())
+    AND EXISTS (SELECT 1 FROM students s WHERE s.id = student_files.student_id
+                AND (s.owner = (SELECT auth.uid()) OR (SELECT auth.uid()) = ANY (s.shared_with)))
+  );
+CREATE POLICY "schuelerdateien lesen" ON public.student_files AS PERMISSIVE FOR SELECT TO authenticated
+  USING (EXISTS (SELECT 1 FROM students s WHERE s.id = student_files.student_id
+                 AND (s.owner = (SELECT auth.uid()) OR (SELECT auth.uid()) = ANY (s.shared_with))));
+CREATE POLICY "schuelerdateien loeschen" ON public.student_files AS PERMISSIVE FOR DELETE TO authenticated
+  USING (EXISTS (SELECT 1 FROM students s WHERE s.id = student_files.student_id
+                 AND (s.owner = (SELECT auth.uid()) OR (SELECT auth.uid()) = ANY (s.shared_with))));
 
 ALTER TABLE public.student_login_throttle ENABLE ROW LEVEL SECURITY;
 
@@ -161,17 +173,51 @@ CREATE POLICY "theory_attendance eigene sehen" ON public.theory_attendance AS PE
 CREATE POLICY "theory_attendance loeschen" ON public.theory_attendance AS PERMISSIVE FOR DELETE TO public USING ((owner = ( SELECT auth.uid() AS uid)));
 
 ALTER TABLE public.theory_questions ENABLE ROW LEVEL SECURITY;
-CREATE POLICY theory_questions_insert_sample_only ON public.theory_questions AS PERMISSIVE FOR INSERT TO authenticated WITH CHECK ((is_sample = true));
-CREATE POLICY theory_questions_select_authenticated ON public.theory_questions AS PERMISSIVE FOR SELECT TO authenticated USING ((active = true));
+-- Audit 2026-09 (L-H2): vorher landete jede per REST angelegte Frage (auch quelle='vkbl' oder mit
+-- fremder image_url) plattformweit bei allen Schülern aller Fahrschulen. Jetzt: nur eigene
+-- Übungsfragen, sichtbar für die eigene Fahrschule (public_theory_questions filtert genauso).
+CREATE POLICY theory_questions_insert_sample_only ON public.theory_questions AS PERMISSIVE FOR INSERT TO authenticated
+  WITH CHECK (
+    is_sample = true
+    AND created_by = (SELECT auth.uid())
+    AND quelle IS NULL AND amtl_nr IS NULL AND image_url IS NULL
+  );
+CREATE POLICY theory_questions_select_authenticated ON public.theory_questions AS PERMISSIVE FOR SELECT TO authenticated
+  USING (
+    active = true
+    AND (
+      created_by IS NULL
+      OR created_by = (SELECT auth.uid())
+      OR EXISTS (SELECT 1 FROM profiles p
+                 WHERE p.id = theory_questions.created_by
+                   AND p.school_id IS NOT NULL
+                   AND p.school_id = (SELECT me.school_id FROM profiles me WHERE me.id = (SELECT auth.uid())))
+    )
+  );
 
 ALTER TABLE public.theory_resources ENABLE ROW LEVEL SECURITY;
 CREATE POLICY demo_ro_no_delete ON public.theory_resources AS RESTRICTIVE FOR DELETE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
 CREATE POLICY demo_ro_no_insert ON public.theory_resources AS RESTRICTIVE FOR INSERT TO authenticated WITH CHECK ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
 CREATE POLICY demo_ro_no_update ON public.theory_resources AS RESTRICTIVE FOR UPDATE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid)) WITH CHECK ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
 CREATE POLICY theory_resources_delete ON public.theory_resources AS PERMISSIVE FOR DELETE TO authenticated USING (((proposed_by = ( SELECT auth.uid() AS uid)) OR (auth.uid() = '96530a9f-28ae-4ac6-9cfa-26de392ecf05'::uuid) OR _can_review_theory_resource(proposed_by)));
-CREATE POLICY theory_resources_insert_own ON public.theory_resources AS PERMISSIVE FOR INSERT TO authenticated WITH CHECK ((proposed_by = ( SELECT auth.uid() AS uid)));
+-- Audit 2026-09 (L-H1): status war frei wählbar (Selbstfreischaltung per 'approved'), file_path
+-- durfte auf fremde Dateien zeigen (theory_files_storage_select gibt sie dann frei).
+CREATE POLICY theory_resources_insert_own ON public.theory_resources AS PERMISSIVE FOR INSERT TO authenticated
+  WITH CHECK (
+    proposed_by = (SELECT auth.uid())
+    AND status = 'pending'
+    AND (file_path IS NULL OR split_part(file_path, '/', 1) = (SELECT auth.uid())::text)
+  );
 CREATE POLICY theory_resources_select ON public.theory_resources AS PERMISSIVE FOR SELECT TO authenticated USING (((status = 'approved'::text) OR (proposed_by = ( SELECT auth.uid() AS uid)) OR ((status = 'pending'::text) AND _can_review_theory_resource(proposed_by))));
-CREATE POLICY theory_resources_update_admin ON public.theory_resources AS PERMISSIVE FOR UPDATE TO authenticated USING (_can_review_theory_resource(proposed_by)) WITH CHECK (_can_review_theory_resource(proposed_by));
+-- Audit 2026-09 (Gegenprüfung L-H1): jeder kann per create_and_assign_school Schul-Admin werden und
+-- damit den eigenen Beitrag prüfen - ohne diese Bedingung ließ sich file_path per UPDATE nachträglich
+-- auf eine fremde Datei umbiegen. Migration audit_2026_09_gegenpruefung_pfade.
+CREATE POLICY theory_resources_update_admin ON public.theory_resources AS PERMISSIVE FOR UPDATE TO authenticated
+  USING (_can_review_theory_resource(proposed_by))
+  WITH CHECK (
+    _can_review_theory_resource(proposed_by)
+    AND (file_path IS NULL OR split_part(file_path, '/', 1) = proposed_by::text)
+  );
 
 ALTER TABLE public.videos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY demo_ro_no_delete ON public.videos AS RESTRICTIVE FOR DELETE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
@@ -180,7 +226,18 @@ CREATE POLICY demo_ro_no_update ON public.videos AS RESTRICTIVE FOR UPDATE TO au
 CREATE POLICY videos_delete ON public.videos AS PERMISSIVE FOR DELETE TO public USING (((owner = ( SELECT auth.uid() AS uid)) OR ((school_id IS NOT NULL) AND (school_id = ( SELECT profiles.school_id
    FROM profiles
   WHERE (profiles.id = ( SELECT auth.uid() AS uid)))))));
-CREATE POLICY videos_insert ON public.videos AS PERMISSIVE FOR INSERT TO public WITH CHECK ((owner = ( SELECT auth.uid() AS uid)));
+-- Audit 2026-09 (L-H1): storage_path muss im eigenen Ordner liegen und school_id die eigene Schule
+-- sein - sonst ließ sich per fremdem Pfad eine fremde Videodatei lesen/löschen (videos_storage_*
+-- prüfen nur, ob eine eigene videos-Zeile auf den Pfad zeigt) bzw. in fremde Bibliotheken schieben.
+CREATE POLICY videos_insert ON public.videos AS PERMISSIVE FOR INSERT TO public
+  WITH CHECK (
+    owner = (SELECT auth.uid())
+    AND split_part(storage_path, '/', 1) = (SELECT auth.uid())::text
+    -- Keine Punkt-Segmente: "<uid>/../<fremde uid>/datei" bestünde sonst die Ordnerprüfung, und
+    -- fetch() in public-video-url normalisiert den Pfad auf die fremde Datei (Gegenprüfung).
+    AND storage_path !~ '(^|/)\.{1,2}(/|$)'
+    AND (school_id IS NULL OR school_id = (SELECT profiles.school_id FROM profiles WHERE profiles.id = (SELECT auth.uid())))
+  );
 CREATE POLICY videos_select ON public.videos AS PERMISSIVE FOR SELECT TO public USING (((owner = ( SELECT auth.uid() AS uid)) OR ((school_id IS NOT NULL) AND (school_id = ( SELECT profiles.school_id
    FROM profiles
   WHERE (profiles.id = ( SELECT auth.uid() AS uid)))))));

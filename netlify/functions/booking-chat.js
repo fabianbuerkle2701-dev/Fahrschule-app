@@ -29,7 +29,9 @@ const FEHLER_ALLGEMEIN = "Der Assistent ist gerade nicht erreichbar. Bitte versu
 const FEHLER_AUSLASTUNG = "Gerade sind sehr viele Anfragen unterwegs. Bitte versuch es in einer Minute noch einmal.";
 const FEHLER_TAGESLIMIT = "Für heute sind schon viele Fragen gestellt worden. Bitte versuch es morgen wieder oder nutze das Anmeldeformular.";
 
-exports.handler = async function (event) {
+const { kiSignal, istKiTimeout, kiTimeoutAntwort } = require("./lib/ki-timeout");
+
+exports.handler = async function (event, context) {
   const headers = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type",
@@ -72,10 +74,15 @@ exports.handler = async function (event) {
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!message) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Nachricht übergeben" }) };
 
+  // Mit dem Service-Role-Key, sobald er als Netlify-Umgebungsvariable da ist: public_chat_rate_limit
+  // soll nach diesem Deploy für anon gesperrt werden (sonst kann jeder per curl das Tageslimit
+  // einer Schule aufbrauchen, Audit 2026-09 L-M4, siehe server-setup/post-deploy-audit-2026-09.sql).
+  // Ohne Variable bleibt es beim Anon-Key - dann funktioniert alles wie bisher.
+  const rpcKey = process.env.SUPABASE_SERVICE_ROLE_KEY || SUPABASE_ANON_KEY;
   async function rpc(name, params) {
     const resp = await fetch(SUPABASE_URL + "/rest/v1/rpc/" + name, {
       method: "POST",
-      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      headers: { apikey: rpcKey, Authorization: "Bearer " + rpcKey, "Content-Type": "application/json" },
       body: JSON.stringify(params),
     });
     if (!resp.ok) return null;
@@ -184,6 +191,7 @@ Regeln, unbedingt einhalten:
 
   try {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      signal: kiSignal(context),
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -213,6 +221,7 @@ Regeln, unbedingt einhalten:
     }
     return { statusCode: 200, headers, body: JSON.stringify({ reply: text }) };
   } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
     // Auch e.message bleibt intern: bei Netzwerkfehlern stehen darin Host- und DNS-Angaben.
     console.error("booking-chat: unerwarteter Fehler", e);
     return { statusCode: 500, headers, body: JSON.stringify({ error: FEHLER_ALLGEMEIN }) };
