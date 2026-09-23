@@ -273,7 +273,10 @@ CREATE TABLE public.theory_questions (
   created_at timestamp with time zone DEFAULT now() NOT NULL,
   amtl_nr text,
   quelle text,
-  answer_stem text
+  answer_stem text,
+  -- Audit 2026-09 (L-H2): wer die Frage angelegt hat; NULL = redaktioneller Plattform-Bestand.
+  -- Default auth.uid(), damit der Client die Spalte nicht selbst mitschicken muss.
+  created_by uuid DEFAULT auth.uid()
 );
 CREATE TABLE public.theory_resources (
   id uuid DEFAULT gen_random_uuid() NOT NULL,
