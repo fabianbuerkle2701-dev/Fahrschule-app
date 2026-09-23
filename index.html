@@ -5994,20 +5994,31 @@ async function adminFetchPendingTheoryResources() {
     }
     return withTheoryFileUrls(data || []);
 }
+// update()/delete() auf Zeilen, die die RLS dem Aufrufer nicht zugesteht, liefern KEINEN Fehler,
+// sondern treffen einfach 0 Zeilen. Ein App-Moderator darf z.B. laut RLS keine fremden
+// route_templates/schools ändern - die Oberfläche zeigte trotzdem "✓ Freigegeben", obwohl nichts
+// passiert war. Deshalb bei diesen Admin-Schreibwegen die getroffenen Zeilen per .select("id")
+// zurückholen und bei 0 Treffern einen Fehler werfen. Bewusst KEINE Erweiterung der RLS.
+function pruefeTreffer(data, was) {
+    if (!data || data.length === 0)
+        throw new Error(was + ": keine Berechtigung oder der Eintrag existiert nicht mehr.");
+}
 async function adminApproveTheoryResource(id) {
-    const { error } = await sb.from("theory_resources")
-        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id);
+    const { data, error } = await sb.from("theory_resources")
+        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Freigabe nicht gespeichert");
 }
 async function adminRejectTheoryResource(id) {
-    const { error } = await sb.from("theory_resources").delete().eq("id", id);
+    const { data, error } = await sb.from("theory_resources").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Ablehnen nicht gespeichert");
 }
 async function proposeRouteTemplate(uid, city, title, strecken, name) {
     const { error } = await sb.from("route_templates").insert({
@@ -6060,19 +6071,21 @@ async function adminFetchPendingRouteTemplates() {
     return data || [];
 }
 async function adminApproveRouteTemplate(id) {
-    const { error } = await sb.from("route_templates")
-        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id);
+    const { data, error } = await sb.from("route_templates")
+        .update({ status: "approved", reviewed_at: new Date().toISOString() }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Freigabe nicht gespeichert");
 }
 async function adminRejectRouteTemplate(id) {
-    const { error } = await sb.from("route_templates").delete().eq("id", id);
+    const { data, error } = await sb.from("route_templates").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Ablehnen nicht gespeichert");
 }
 /* ════════ Fahrschulen (Mandanten) ════════ */
 const DEFAULT_SCHOOL = { name: "Fahrschule", subtitle: "Klasse B", color: "#2B7FFF", logo: "" };
@@ -6460,6 +6473,10 @@ async function fetchOwnSubscription(uid) {
 // DevTools/eigenem Bearer-Token subscription_last_paid beliebig oft selbst setzen, ganz ohne
 // echte PayPal-Zahlung. Die Funktion schreibt serverseitig nur dieses eine Feld, nur für den per
 // Token identifizierten Nutzer selbst, mit serverseitig berechnetem Datum.
+// Antworten der Netlify-Functions erst nach Prüfung als JSON lesen: bei 502/504 von Netlify
+// oder einem Timeout kommt HTML bzw. ein leerer Body, und resp.json() warf dann
+// "Unexpected token <" statt der eigentlichen Meldung. Gleiches Muster in adminFetchAllAccounts,
+// adminDeleteAccount und adminSetSubscription.
 async function markOwnPaymentDone(uid) {
     const { data: sess } = await sb.auth.getSession();
     const token = sess && sess.session && sess.session.access_token;
@@ -6469,9 +6486,9 @@ async function markOwnPaymentDone(uid) {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Speichern fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Speichern fehlgeschlagen (HTTP " + resp.status + ")");
     return data.subscription_last_paid;
 }
 // Dem Abo zustimmen: startet damit die 7-tägige kostenlose Probezeit
@@ -6586,19 +6603,21 @@ async function adminFetchSchools() {
     return (schools || []).map(sc => ({ ...sc, teachers: teacherCount[sc.id] || 0, students: studentCount[sc.id] || 0 }));
 }
 async function adminSaveSchool(sc) {
-    const { error } = await sb.from("schools")
-        .update({ name: sc.name, subtitle: sc.subtitle, color: sc.color }).eq("id", sc.id);
+    const { data, error } = await sb.from("schools")
+        .update({ name: sc.name, subtitle: sc.subtitle, color: sc.color }).eq("id", sc.id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Fahrschule nicht gespeichert");
 }
 async function adminDeleteSchool(id) {
-    const { error } = await sb.from("schools").delete().eq("id", id);
+    const { data, error } = await sb.from("schools").delete().eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Fahrschule nicht gelöscht");
 }
 // Alle registrierten Konten laden (ruft die geschützte Netlify-Funktion auf, nur für den zentralen Admin)
 async function adminFetchAllAccounts() {
@@ -6609,9 +6628,9 @@ async function adminFetchAllAccounts() {
     const resp = await fetch("/.netlify/functions/admin-list-accounts", {
         headers: { Authorization: "Bearer " + token },
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Konnte Konten nicht laden");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Konnte Konten nicht laden (HTTP " + resp.status + ")");
     return data.accounts || [];
 }
 // Ein Konto vollständig löschen (Profil + echtes Anmelde-Konto), über die geschützte Netlify-Funktion
@@ -6625,9 +6644,9 @@ async function adminDeleteAccount(targetUid) {
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
         body: JSON.stringify({ targetUid }),
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Löschen fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Löschen fehlgeschlagen (HTTP " + resp.status + ")");
     return true;
 }
 // Abo-Status/Betrag eines Fahrlehrers setzen, oder eine Zahlung als heute erledigt markieren.
@@ -6641,17 +6660,18 @@ async function adminSetSubscription(targetUid, patch) {
         headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
         body: JSON.stringify({ targetUid, ...patch }),
     });
-    const data = await resp.json();
-    if (!resp.ok)
-        throw new Error(data.error || "Speichern fehlgeschlagen");
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data)
+        throw new Error((data && data.error) || "Speichern fehlgeschlagen (HTTP " + resp.status + ")");
     return data.profile;
 }
 async function adminSaveSchoolLogo(id, logo) {
-    const { error } = await sb.from("schools").update({ logo: logo || "" }).eq("id", id);
+    const { data, error } = await sb.from("schools").update({ logo: logo || "" }).eq("id", id).select("id");
     if (error) {
         console.error(error);
         throw new Error(error.message);
     }
+    pruefeTreffer(data, "Logo nicht gespeichert");
 }
 // Alle unterschriebenen Leistungen einer Fahrschule laden (über alle Fahrlehrer hinweg).
 // Die Sicherheitsprüfung läuft in der Datenbank-Funktion selbst (nur Fahrschul-Admin/zentraler Admin).
