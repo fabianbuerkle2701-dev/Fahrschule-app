@@ -209,7 +209,15 @@ CREATE POLICY theory_resources_insert_own ON public.theory_resources AS PERMISSI
     AND (file_path IS NULL OR split_part(file_path, '/', 1) = (SELECT auth.uid())::text)
   );
 CREATE POLICY theory_resources_select ON public.theory_resources AS PERMISSIVE FOR SELECT TO authenticated USING (((status = 'approved'::text) OR (proposed_by = ( SELECT auth.uid() AS uid)) OR ((status = 'pending'::text) AND _can_review_theory_resource(proposed_by))));
-CREATE POLICY theory_resources_update_admin ON public.theory_resources AS PERMISSIVE FOR UPDATE TO authenticated USING (_can_review_theory_resource(proposed_by)) WITH CHECK (_can_review_theory_resource(proposed_by));
+-- Audit 2026-09 (Gegenprüfung L-H1): jeder kann per create_and_assign_school Schul-Admin werden und
+-- damit den eigenen Beitrag prüfen - ohne diese Bedingung ließ sich file_path per UPDATE nachträglich
+-- auf eine fremde Datei umbiegen. Migration audit_2026_09_gegenpruefung_pfade.
+CREATE POLICY theory_resources_update_admin ON public.theory_resources AS PERMISSIVE FOR UPDATE TO authenticated
+  USING (_can_review_theory_resource(proposed_by))
+  WITH CHECK (
+    _can_review_theory_resource(proposed_by)
+    AND (file_path IS NULL OR split_part(file_path, '/', 1) = proposed_by::text)
+  );
 
 ALTER TABLE public.videos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY demo_ro_no_delete ON public.videos AS RESTRICTIVE FOR DELETE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));
@@ -225,6 +233,9 @@ CREATE POLICY videos_insert ON public.videos AS PERMISSIVE FOR INSERT TO public
   WITH CHECK (
     owner = (SELECT auth.uid())
     AND split_part(storage_path, '/', 1) = (SELECT auth.uid())::text
+    -- Keine Punkt-Segmente: "<uid>/../<fremde uid>/datei" bestünde sonst die Ordnerprüfung, und
+    -- fetch() in public-video-url normalisiert den Pfad auf die fremde Datei (Gegenprüfung).
+    AND storage_path !~ '(^|/)\.{1,2}(/|$)'
     AND (school_id IS NULL OR school_id = (SELECT profiles.school_id FROM profiles WHERE profiles.id = (SELECT auth.uid())))
   );
 CREATE POLICY videos_select ON public.videos AS PERMISSIVE FOR SELECT TO public USING (((owner = ( SELECT auth.uid() AS uid)) OR ((school_id IS NOT NULL) AND (school_id = ( SELECT profiles.school_id

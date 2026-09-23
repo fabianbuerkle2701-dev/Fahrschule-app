@@ -74,7 +74,11 @@ exports.handler = async function (event) {
     if (!ownerResp.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: "Video konnte nicht geprüft werden." }) };
     const ownerRows = await ownerResp.json().catch(() => []);
     const row = Array.isArray(ownerRows) ? ownerRows[0] : null;
-    if (!row || !row.owner || row.storage_path !== video.storage_path || !video.storage_path.startsWith(row.owner + "/")) {
+    // Punkt- und Leersegmente zusätzlich ablehnen: fetch() normalisiert "<besitzer>/../<fremd>/x"
+    // vor dem Senden zu "<fremd>/x" - der startsWith-Vergleich allein würde das durchlassen.
+    const segmente = video.storage_path.split("/");
+    const pfadSauber = !segmente.some((s) => s === "" || s === "." || s === "..");
+    if (!row || !row.owner || row.storage_path !== video.storage_path || !pfadSauber || !video.storage_path.startsWith(row.owner + "/")) {
       console.error("public-video-url: Pfad liegt nicht im Ordner des Besitzers", videoId);
       return { statusCode: 404, headers, body: JSON.stringify({ error: "Video nicht gefunden." }) };
     }
