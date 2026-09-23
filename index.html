@@ -3365,7 +3365,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.9.23";
+const APP_VERSION = "2.9.24";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -21176,10 +21176,13 @@ function App() {
     }
     // Warteliste (Task #68): passende Kandidaten für einen frei gewordenen Termin - gleiche
     // Klasse, Wochentag/Zeitfenster passt zur eingetragenen Wunschliste, kein Terminkonflikt.
-    function waitlistCandidates(freedAppt) {
+    // studentsOverride: optionaler, gerade frisch nachgeladener Stand (siehe maybeOfferWaitlist) -
+    // ohne ihn wird die aktuelle Komponenten-Variable students verwendet, wie bisher.
+    function waitlistCandidates(freedAppt, studentsOverride) {
+        const liste = studentsOverride || students;
         if (!freedAppt || !freedAppt.student_id)
             return [];
-        const freedStudent = students.find(x => x.id === freedAppt.student_id);
+        const freedStudent = liste.find(x => x.id === freedAppt.student_id);
         const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
         const d = new Date(freedAppt.start_at);
         // berlinParts() statt .getDay()/.getHours()/.getMinutes() direkt - der Termin ist in
@@ -21196,7 +21199,7 @@ function App() {
         // Schüler laut eigener Angabe gar nicht verfügbar ist.
         const freedEndParts = berlinParts(freedEnd);
         const hhmmEnd = String(freedEndParts.hour).padStart(2, "0") + ":" + String(freedEndParts.minute).padStart(2, "0");
-        return (students || []).filter(s => {
+        return (liste || []).filter(s => {
             if (s.archived || s.id === freedAppt.student_id)
                 return false;
             const wl = s.wunschliste;
@@ -21222,16 +21225,34 @@ function App() {
         const [next, ...rest] = queue;
         maybeOfferWaitlist(next, rest);
     }
-    function maybeOfferWaitlist(freedAppt, queue) {
+    async function maybeOfferWaitlist(freedAppt, queue) {
         if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id) {
             offerNextInQueue(queue);
             return;
         }
-        const candidates = waitlistCandidates(freedAppt);
+        // Vor dem Abgleich frisch nachladen statt mit dem beim Login geladenen (ggf. längst
+        // veralteten) students-Stand zu arbeiten: hat ein Schüler seine Wunschliste erst NACH
+        // dem letzten Laden über den Buchungslink gesetzt oder geändert, wäre er sonst trotz
+        // echtem Treffer nie als Kandidat erschienen, ohne dass irgendwo ein Fehler sichtbar
+        // wurde (Fabian meldete am 23.9.2026 eine leere Warteliste trotz vorhandenem passenden
+        // Eintrag - students wird sonst nur einmal beim Anmelden geladen, siehe fetchStudents()).
+        // Schlägt das Nachladen fehl, mit dem lokalen Stand weitermachen statt das Angebot ganz
+        // zu unterdrücken.
+        let aktuelleSchueler = students;
+        if (uid) {
+            try {
+                aktuelleSchueler = await fetchStudents(uid);
+                setStudents(aktuelleSchueler);
+            }
+            catch (e) {
+                console.error("Schüler für Warteliste-Abgleich konnten nicht aktualisiert werden:", e);
+            }
+        }
+        const candidates = waitlistCandidates(freedAppt, aktuelleSchueler);
         // Der Schueler, dessen Termin ausgefallen ist, braucht selbst einen Ersatz. Frueher
         // erschien das Sheet nur, wenn ANDERE Schueler passten - fiel der Termin ohne passende
         // Kandidaten aus, passierte gar nichts und er war einfach raus.
-        const betroffen = (students || []).find(x => x.id === freedAppt.student_id) || null;
+        const betroffen = (aktuelleSchueler || []).find(x => x.id === freedAppt.student_id) || null;
         if (candidates.length || betroffen)
             setWaitlistOffer({ appt: freedAppt, candidates, betroffen, queue: queue || [] });
         else
