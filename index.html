@@ -8289,8 +8289,26 @@ function eurFmt(n) {
 // deutsches Dezimalkomma ("55,50") komplett ablehnt - der Browser liefert dann einen leeren
 // value, und Number()/parseFloat() machen daraus stumm 0, obwohl überall sonst (eurFmt) mit
 // Komma angezeigt wird. Beim Tippen daher sofort Komma zu Punkt normalisieren.
+// Mit Komma getippt ist das deutsche Format eindeutig: Punkte sind dann Tausendertrenner und
+// fliegen raus ("1.200,50" -> "1200.50"). Vorher wurde nur das erste Komma ersetzt, aus
+// "1.200,50" wurde "1.200.50" und parseFloat las 1,20 € (Audit C-H3).
 function normDecimal(v) {
-    return String(v).replace(",", ".");
+    const t = String(v);
+    const i = t.indexOf(",");
+    if (i < 0)
+        return t;
+    return (t.slice(0, i).replace(/\./g, "") + "." + t.slice(i + 1).replace(/[.,]/g, ""));
+}
+// Betrag aus einem Eingabefeld lesen (deutsches Format erlaubt). Nur Punkte in Dreiergruppen
+// ("1.000", "12.500") sind Tausendertrenner - "1.000" als Gutschein wurde sonst 1 €. Alles, was
+// keine saubere Zahl ist ("5a", "1.2.3"), liefert NaN statt eines halb gelesenen Werts.
+function parseBetrag(v) {
+    let t = normDecimal(String(v == null ? "" : v).replace(/[\s€]/g, ""));
+    if (/^-?\d{1,3}(\.\d{3})+$/.test(t))
+        t = t.replace(/\./g, "");
+    if (!/^-?(\d+\.?\d*|\.\d+)$/.test(t))
+        return NaN;
+    return Number(t);
 }
 // UE-Logik: 1 UE = 45 Minuten. Gefahrene Fahrstunden mit Dauer ergeben die UE.
 function lessonMinutes(s) {
@@ -11102,6 +11120,9 @@ function App() {
     // Gleicher Riegel für saveInteressentForm(): busy im State greift erst nach dem Re-Render,
     // ein schneller Doppeltipp auf "Anlegen" konnte denselben Interessenten zweimal einfügen.
     const interessentSaveBusyRef = useRef(false);
+    // Doppeltipp-Sperre für "Neuer Schüler" - ohne sie legte ein zweiter Tap während des
+    // Speicherns einen zweiten, leeren Schüler an (Audit C-N11).
+    const addStudentBusyRef = useRef(false);
     // Doppeltap-Schutz für createStudentFromImport() - ohne diesen Riegel konnte ein zweiter Tipp
     // auf "Schüler anlegen" denselben gescannten Antrag zweimal als Schüler übernehmen.
     const studentImportBusyRef = useRef(false);
@@ -13541,8 +13562,9 @@ function App() {
             setItemForm({ ...f, error: "Bitte eine Bezeichnung eingeben." });
             return;
         }
-        const amount = parseFloat((f.amount || "").replace(",", "."));
-        if (isNaN(amount)) {
+        const amount = parseBetrag(f.amount);
+        // Negativ ist erlaubt (Gutschrift/Rabatt als Posten), 0 nicht - das wäre ein leerer Posten.
+        if (isNaN(amount) || amount === 0) {
             setItemForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
             return;
         }
@@ -13558,9 +13580,9 @@ function App() {
         const f = paymentForm;
         if (!f)
             return;
-        const amount = parseFloat((f.amount || "").replace(",", "."));
-        if (isNaN(amount)) {
-            setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
+        const amount = parseBetrag(f.amount);
+        if (isNaN(amount) || amount <= 0) {
+            setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag über 0 € eingeben." });
             return;
         }
         const stu = students.find(s => s.id === activeId) || active;
@@ -13848,9 +13870,21 @@ function App() {
     };
     // Add a new student (cloud insert, optimistic)
     async function addStudent() {
+        if (addStudentBusyRef.current)
+            return;
+        addStudentBusyRef.current = true;
         const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
         const draft = { ...newStudent(), klasse: guessedKlasse, location_id: validMyLocationId || "" };
-        const created = await dbInsert(uid, draft);
+        let created = null;
+        try {
+            created = await dbInsert(uid, draft);
+        }
+        catch (e) {
+            created = null;
+        }
+        finally {
+            addStudentBusyRef.current = false;
+        }
         if (!created) {
             showToast("Konnte nicht speichern. Internetverbindung prüfen.", "error");
             return;
@@ -14661,7 +14695,7 @@ function App() {
     async function gutscheinAnlegen() {
         const f = voucherForm;
         if (!f || f.busy) return;
-        const betrag = Number(String(f.betrag || "").replace(",", "."));
+        const betrag = parseBetrag(f.betrag);
         if (!(betrag > 0)) { setVoucherForm({ ...f, error: "Bitte einen Betrag über 0 € angeben." }); return; }
         if (!school || !school.id) { showToast("Keine Fahrschule zugeordnet."); return; }
         setVoucherForm({ ...f, busy: true, error: "" });
@@ -16137,7 +16171,7 @@ function App() {
                 return;
         }
         setUrlaubForm({ ...f, busy: true, error: "" });
-        let created = 0;
+        let created = 0, failed = 0;
         for (const s of slots) {
             // Doppelte/überlappende Urlaubsblöcke vermeiden - anhand des Zeitfensters, nicht nur des Tages
             const schon = (appts || []).some(a => isUrlaub(a) && overlaps(new Date(s.startISO).getTime(), new Date(s.endISO).getTime(), new Date(a.start_at).getTime(), new Date(a.end_at || a.start_at).getTime()));
@@ -16147,6 +16181,15 @@ function App() {
                 status: "confirmed", note: URLAUB_MARK, art: "" });
             if (c)
                 created++;
+            else
+                failed++;
+        }
+        // Fehlgeschlagene Tage NICHT als "war bereits eingetragen" melden (Audit C-N13) - Fenster
+        // offen lassen, damit man es erneut versuchen kann (schon angelegte Tage werden dann
+        // übersprungen).
+        if (failed > 0) {
+            setUrlaubForm({ ...f, busy: false, error: failed + (failed === 1 ? " Tag konnte" : " Tage konnten") + " nicht gespeichert werden. Bitte erneut versuchen." });
+            return;
         }
         setUrlaubForm(null);
         if (created === 0)
