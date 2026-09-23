@@ -1048,6 +1048,11 @@ AS $function$
   where p.booking_code = code;
 $function$;
 
+-- Fund 23.9.2026: verglich den Code bisher direkt (case-sensitiv, ohne Trim) statt ueber die
+-- dafuer vorgesehene _owner_by_code() zu gehen, die Gross-/Kleinschreibung und Leerzeichen bewusst
+-- toleriert (iPhone-Autocapitalize). Jede andere Buchungslink-Funktion nutzte das schon - diese
+-- eine wich ab und lieferte bei abweichender Schreibweise kommentarlos 0 Zeilen statt eines
+-- Fehlers, was auf der Buchungsseite wie "nichts belegt" aussah.
 CREATE OR REPLACE FUNCTION public.public_busy_times(code text, von timestamp with time zone, bis timestamp with time zone)
  RETURNS TABLE(start_at timestamp with time zone, end_at timestamp with time zone, status text)
  LANGUAGE sql
@@ -1056,8 +1061,7 @@ CREATE OR REPLACE FUNCTION public.public_busy_times(code text, von timestamp wit
 AS $function$
   select a.start_at, a.end_at, a.status
   from appointments a
-  join profiles p on p.id = a.owner
-  where p.booking_code = code
+  where a.owner = _owner_by_code(code)
     and a.start_at >= von
     and a.start_at < bis
     and a.status in ('confirmed','pending')
