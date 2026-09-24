@@ -991,7 +991,7 @@ begin
     if v_day is not null and v_day <> 'null'::jsonb then
       if coalesce((v_day->>'blocked')::boolean, false) then
         v_within_hours := false;
-      elsif v_day->>'von' is not null and v_day->>'bis' is not null then
+      elsif nullif(v_day->>'von','') is not null and nullif(v_day->>'bis','') is not null then
         v_start_local := to_char(p_start at time zone v_tz, 'HH24:MI');
         v_end_local := to_char(v_end at time zone v_tz, 'HH24:MI');
         if v_start_local < (v_day->>'von') or v_end_local > (v_day->>'bis') then
