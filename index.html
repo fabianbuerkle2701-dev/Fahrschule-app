@@ -15617,6 +15617,13 @@ function App() {
     // Save template (debounced)
     const tplSaveChainRef = useRef(Promise.resolve());
     const writeTemplate = useCallback((next) => {
+        // Wie writeSchool (Audit A2-M3): ein Objekt aus dem letzten Render bzw. von vor einem Dialog
+        // kann noch das updated_at von VOR dem letzten Speichern tragen - dann das neuere aus tplRef
+        // nehmen, sonst meldete runTplSave einen Konflikt mit sich selbst, lud neu, und die gerade
+        // übernommene/zurückgesetzte Vorlage war weg (Abschluss-Audit).
+        const cur = tplRef.current;
+        if (next && cur && cur.updated_at && (!next.updated_at || next.updated_at < cur.updated_at))
+            next = { ...next, updated_at: cur.updated_at };
         putTpl(next);
         if (uid)
             saveTplCache(uid, next);
@@ -15659,12 +15666,14 @@ function App() {
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
     // gespeicherte ADK, wird die Standard-ADK angezeigt (V3 die gewohnte Karte, sonst BVF),
     // damit die Karte nie leer ist. Sobald etwas bearbeitet wird, wird sie für die Klasse gespeichert.
-    function tplFor(klasse) {
-        return withFahrzeugkunde(tplForRaw(klasse));
+    // quelle optional: Vorlagen-Stand, aus dem gelesen wird (Standard: tpl dieses Renderns).
+    function tplFor(klasse, quelle) {
+        return withFahrzeugkunde(tplForRaw(klasse, quelle));
     }
-    function tplForRaw(klasse) {
+    function tplForRaw(klasse, quelle) {
+        const t = quelle === undefined ? tpl : quelle;
         const k = klasse || DEFAULT_KLASSE;
-        const stored = (tpl && tpl.byKlasse && tpl.byKlasse[k]) || null;
+        const stored = (t && t.byKlasse && t.byKlasse[k]) || null;
         if (stored && Array.isArray(stored.adk) && stored.adk.length)
             return stored;
         const isV3 = !!(school && (school.name || "").trim().toLowerCase() === "fahrschule v3");
@@ -15674,7 +15683,7 @@ function App() {
         // diagrammkarte für Klasse BE (Anhänger-Themen) statt der Klasse-B-Karte. Die Strecken
         // werden weiterhin von der Standardklasse (B) übernommen, bis eigene angelegt werden.
         if (k === "BE") {
-            const basis = tplForRaw(DEFAULT_KLASSE);
+            const basis = tplForRaw(DEFAULT_KLASSE, t);
             return { adk: deepCopy(BE_ADK), strecken: deepCopy(basis.strecken || []),
                 adkTitel: "", streckenTitel: basis.streckenTitel || "" };
         }
@@ -15684,20 +15693,24 @@ function App() {
         // Punkt-IDs identisch sind. Erst wer eine Klasse im Vorlagen-Editor bearbeitet,
         // legt damit eine eigene Vorlage für genau diese Klasse an.
         if (k !== DEFAULT_KLASSE)
-            return tplForRaw(DEFAULT_KLASSE);
+            return tplForRaw(DEFAULT_KLASSE, t);
         return { adk: deepCopy(isV3 ? DEFAULT_ADK : BVF_ADK),
             strecken: isV3 ? deepCopy(DEFAULT_STRECKEN) : [],
             adkTitel: "", streckenTitel: "" };
     }
     // Vorlage für eine bestimmte Klasse aktualisieren (Rest bleibt unverändert)
     function writeTplForKlasse(klasse, patch) {
+        // Gegen den AKTUELLEN Stand (tplRef) rechnen, nicht gegen das tpl des Renderns: Aufrufer nach
+        // await askConfirm (Stadtvorlage, Admin-Vorlage übernehmen, Zurücksetzen) hielten sonst
+        // eine Vorlage von vor dem Dialog samt altem updated_at in der Hand (Abschluss-Audit).
+        const tpl = tplRef.current;
         const k = klasse || DEFAULT_KLASSE;
         const hasOwn = !!(tpl && tpl.byKlasse && tpl.byKlasse[k]);
         // Erste Änderung an einer Klasse ohne eigene Vorlage: Der geerbte Stand (Klasse B)
         // wird als unabhängige tiefe Kopie übernommen. Spätere Änderungen an B und an
         // dieser Klasse beeinflussen sich dadurch nie gegenseitig (keine geteilten
         // Array-Referenzen zwischen den Klassen-Vorlagen).
-        const cur = hasOwn ? tplFor(k) : deepCopy(tplFor(k));
+        const cur = hasOwn ? tplFor(k, tpl) : deepCopy(tplFor(k, tpl));
         writeTemplate({ ...tpl, byKlasse: { ...((tpl && tpl.byKlasse) || {}), [k]: { ...cur, ...patch } } });
     }
     // Stadt-Streckenvorlagen: Dialog öffnen (lädt bestätigte Vorlagen der Stadt + eigene Vorschläge)
