@@ -6996,7 +6996,7 @@ function buildXRechnung(o) {
       groesste.netto = xrR2(groesste.netto + diff);
     }
   }
-  const faellig = (() => {
+  const faellig = inv.faellig || (() => {
     const d = new Date(inv.date + "T12:00:00");
     d.setDate(d.getDate() + (zahlungszielTage || 14));
     return d.toISOString().slice(0, 10);
@@ -7515,9 +7515,10 @@ async function staffFileSignedUrl(path) {
     return data && data.signedUrl;
 }
 /* ════════ Dokumente je Schüler (Sehtest, Erste-Hilfe, Passfoto, ...) ════════
-   Gleiches Muster wie staff_files oben, nur mit student_id statt instructor_uid und
-   owner statt school-weiter Admin-Sichtbarkeit - ein Dokument gehört demselben Fahrlehrer
-   wie der Schüler selbst (owner = auth.uid()), keine geteilte Sichtbarkeit nötig. */
+   Gleiches Muster wie staff_files oben, nur mit student_id statt instructor_uid. Sichtbar ist
+   ein Dokument für alle, die den SCHÜLER sehen (Besitzer + shared_with) - die RLS prüft seit
+   dem Audit (F-M9) über students, nicht mehr über den Hochlader; owner und der erste Pfadteil
+   bleiben der Hochlader (auth.uid()), der zweite Pfadteil ist die Schüler-ID. */
 const STUDENT_FILE_CATEGORIES = [
     { id: "sehtest", label: "Sehtest" },
     { id: "erstehilfe", label: "Erste-Hilfe-Kurs" },
@@ -8646,7 +8647,9 @@ function packageCreditUE(s) {
 // übernommen hat (dann gibt es kein Guthaben, das "knapp" werden könnte, im Unterschied zu 0,
 // was ein aufgebrauchtes Paket bedeutet). Zieht einfach alle gefahrenen UE vom Gesamt-Guthaben
 // ab, dieselbe Rechnung wie lessonBillables, nur ohne die einzelnen Stunden aufzuschlüsseln.
-function packageRemainingUE(s) {
+// stdPrice: Standardpreis der Fahrschule - nur für die Rückrechnung alter Rechnungen ohne
+// Deckungs-Schnappschuss nötig (rekonstruierteDeckungUE rechnet über Euro-Beträge).
+function packageRemainingUE(s, stdPrice) {
     const credit = packageCreditUE(s);
     if (credit <= 0)
         return null;
@@ -8654,15 +8657,75 @@ function packageRemainingUE(s) {
     // lessonBillables) statt naiv jede je gefahrene UE abzuziehen - sonst zeigt ein frisch
     // gekauftes Paket sofort "aufgebraucht", wenn der Schüler vorher schon (regulär abgerechnete)
     // Stunden gefahren ist, die mit diesem Paket gar nichts zu tun haben.
-    const usedUE = lessonBillables(s, 0).reduce((sum, b) => sum + b.coveredUE, 0);
+    const usedUE = lessonBillables(s, stdPrice || 0).reduce((sum, b) => sum + b.coveredUE, 0);
     return Math.max(0, credit - usedUE);
 }
 // Rechnet das Paket-Guthaben chronologisch gegen die gefahrenen Stunden auf: die frühesten
 // Stunden gelten zuerst als "im Paket enthalten", der Rest wird normal (ggf. mit eigenem
 // Stundenpreis) berechnet. Eine Fahrstunde kann teils gedeckt, teils berechnet sein.
+// Für abgerechnete Stunden OHNE invoicedCoveredUE-Schnappschuss die damals gedeckte UE aus der
+// Rechnung selbst zurückrechnen. Bis v2.10.0 wurde der Schnappschuss nur lokal gesetzt und nie
+// gespeichert (create_invoice kennt ihn nicht) - nach dem Neuladen galt eine teils paketgedeckte
+// Stunde als voll berechnet, das Guthaben blieb stehen und die NÄCHSTE Rechnung fiel um genau
+// diesen Anteil zu niedrig aus. Die Rechnung ist unveränderlich und verrät die Deckung: was die
+// Fahrstunden zum vollen Preis gekostet hätten, minus was für sie tatsächlich berechnet wurde
+// (Rechnungssumme ohne die mitberechneten Kostenposten). Verteilt wird chronologisch auf die
+// früheste Stunde zuerst - genau so hat lessonBillables beim Erstellen gedeckt (voll gedeckte
+// Stunden kamen gar nicht auf die Rechnung, gedeckt sein kann also nur der Anfang).
+// Nur mit Paket-Guthaben: ohne Paket kann nichts gedeckt sein, eine Preisabweichung darf dann
+// kein Phantom-Guthaben verbrauchen. Ergebnis: { lessonId: gedeckte UE }.
+function rekonstruierteDeckungUE(s, stdPrice) {
+    const out = {};
+    if (packageCreditUE(s) <= 0)
+        return out;
+    const invByNumber = {};
+    (s.invoices || []).forEach(inv => { if (inv && inv.number)
+        invByNumber[inv.number] = inv; });
+    const proRechnung = {};
+    (s.drivenLessons || []).forEach(l => {
+        if (!l.invoiced)
+            return;
+        (proRechnung[l.invoiced] = proRechnung[l.invoiced] || []).push(l);
+    });
+    Object.keys(proRechnung).forEach(nr => {
+        const ls = proRechnung[nr];
+        const inv = invByNumber[nr];
+        // Nur wenn KEINE Stunde dieser Rechnung einen Schnappschuss hat - sonst gilt der gespeicherte.
+        if (!inv || ls.some(l => l.invoicedCoveredUE != null))
+            return;
+        const kosten = (s.costItems || []).filter(it => it.invoiced === nr).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+        const berechnet = (Number(inv.total) || 0) - kosten;
+        // Nur Pakete, die es am Rechnungstag schon gab (Pakete ohne Datum zählen mangels Wissen
+        // mit). Sonst würde bei einer Rechnung VOR dem Paketkauf jede Preisabweichung - etwa eine
+        // seither erhöhte Standardpreis-Stunde ohne eigenen Preis - als "gedeckt" gelesen und dem
+        // später gekauften Paket Guthaben entziehen; die nächste Rechnung fiele dann zu hoch aus.
+        const guthabenDamals = (s.packages || []).filter(p => !p.date || !inv.date || String(p.date) <= String(inv.date))
+            .reduce((sum, p) => sum + (Number(p.includedUE) || 0), 0);
+        if (!(guthabenDamals > 0))
+            return;
+        const voll = ls.reduce((sum, l) => sum + ((Number(l.minutes) || 0) / 45) * lessonPricePerUE(l, stdPrice), 0);
+        let gedecktEur = Math.round((voll - berechnet) * 100) / 100;
+        // Jede Position wurde einzeln auf Cent gerundet - Abweichungen bis zu einem halben Cent je
+        // Stunde sind Rundung, keine Deckung.
+        if (!(gedecktEur > 0.005 * (ls.length + 1)))
+            return;
+        let restUE = guthabenDamals;
+        ls.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).forEach(l => {
+            const ue = (Number(l.minutes) || 0) / 45, preis = lessonPricePerUE(l, stdPrice);
+            if (gedecktEur <= 0.005 || restUE <= 0 || !(preis > 0))
+                return;
+            const c = Math.min(ue, gedecktEur / preis, restUE);
+            out[l.id] = c;
+            gedecktEur -= c * preis;
+            restUE -= c;
+        });
+    });
+    return out;
+}
 function lessonBillables(s, stdPrice) {
     const lessons = (s.drivenLessons || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     let creditUE = packageCreditUE(s);
+    const rekonstruiert = rekonstruierteDeckungUE(s, stdPrice);
     return lessons.map(l => {
         const ue = (Number(l.minutes) || 0) / 45;
         if (l.invoiced) {
@@ -8670,9 +8733,12 @@ function lessonBillables(s, stdPrice) {
             // liegt fest (invoicedCoveredUE-Schnappschuss aus confirmInvoice) und wird nicht neu
             // berechnet - sonst würde ein SPÄTER dazugekauftes Paket rückwirkend eine schon
             // bezahlte Stunde "abdecken" und das Guthaben fehlt dann bei den tatsächlich noch
-            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten vor diesem Fix), wird
-            // defensiv 0 angenommen statt eine bezahlte Stunde fälschlich als gedeckt zu zeigen.
-            const covered = Math.min(ue, Number(l.invoicedCoveredUE) || 0);
+            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten), wird er aus der
+            // Rechnung zurückgerechnet (rekonstruierteDeckungUE), höchstens aber so viel, wie an
+            // dieser Stelle noch Guthaben da ist; ist nichts rekonstruierbar, gilt 0.
+            const covered = l.invoicedCoveredUE != null
+                ? Math.min(ue, Number(l.invoicedCoveredUE) || 0)
+                : Math.min(ue, rekonstruiert[l.id] || 0, creditUE);
             creditUE = Math.max(0, creditUE - covered);
             const billableUE = ue - covered;
             const amount = Math.round(billableUE * lessonPricePerUE(l, stdPrice) * 100) / 100;
@@ -8781,6 +8847,62 @@ function parseKontoauszug(text) {
     });
     return treffer;
 }
+/* ════════ DATEV-Buchungsstapel: welche Buchungen ein Monat ergibt ════════ */
+// Bewusst als reine Funktion ohne App-Zustand (per node prüfbar). k = { debitor, erloes19,
+// erloesFrei, geldkonto, kasse, gutschein, kUntFallback }, nameOf(s) liefert den Schülernamen.
+// Rechnungen: JEDE Rechnung wird in ihrem Monat gebucht, auch eine später stornierte - sie war
+// in jenem Monat ein echter Umsatz, und ein erneuter Export des Monats darf ihre Belegnummer
+// nicht verlieren. Die Stornorechnung (negativer Betrag, Datum = Tag der Stornierung) wird als
+// Gegenbuchung mit Haben-Kennzeichen im Monat der Stornierung gebucht. Vorher fielen beide
+// heraus: der Umsatz eines schon exportierten Monats wurde nie zurückgenommen (Audit F-H3).
+// Zahlungen: Bar landet auf der Kasse, eingelöste Gutscheine auf dem Gutschein-Konto, alles
+// andere auf der Bank - vorher liefen auch Bargeld und Gutscheine über die Bank, der Kontostand
+// laut Buchhaltung stimmte dann nie mit dem Kontoauszug überein (F-M4). Was nicht exportiert
+// werden kann (kein Datum, Betrag nicht positiv), wird gezählt statt still verworfen (F-N12).
+function datevZahlungsart(method) {
+    const m = String(method || "").trim();
+    if (/^gutschein/i.test(m))
+        return "gutschein";
+    if (/^bar(\b|zahlung|geld)/i.test(m))
+        return "kasse";
+    return "bank";
+}
+function datevBuchungsliste(stuList, jahr, monat, k, nameOf) {
+    const isoOk = iso => /^\d{4}-\d{2}-\d{2}$/.test(String(iso || ""));
+    const inMonat = iso => isoOk(iso) && Number(iso.slice(0, 4)) === jahr && Number(iso.slice(5, 7)) === monat;
+    const out = { buchungen: [], brauchtFrei: false, brauchtGutschein: false, ohneDatum: 0, ungueltig: 0 };
+    (stuList || []).forEach(s => {
+        const name = nameOf(s);
+        (s.invoices || []).forEach(inv => {
+            if (!isoOk(inv.date)) { out.ohneDatum++; return; }
+            if (!inMonat(inv.date)) return;
+            const brutto = Math.round((Number(inv.total) || 0) * 100) / 100;
+            if (Math.abs(brutto) <= 0.005) return;
+            const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : k.kUntFallback;
+            if (kUnt) out.brauchtFrei = true;
+            out.buchungen.push({ umsatz: Math.abs(brutto), sh: brutto > 0 ? "S" : "H", konto: k.debitor,
+                gegenkonto: kUnt ? k.erloesFrei : k.erloes19, bu: "",
+                datum: inv.date, beleg1: inv.number || "",
+                text: (inv.stornoOf ? "Storno " + inv.stornoOf + " " : "Rechnung ") + name });
+        });
+        (s.payments || []).forEach(p => {
+            if (!isoOk(p.date)) { out.ohneDatum++; return; }
+            if (!inMonat(p.date)) return;
+            const betrag = Math.round((Number(p.amount) || 0) * 100) / 100;
+            if (!(betrag > 0)) { out.ungueltig++; return; }
+            const art = datevZahlungsart(p.method);
+            if (art === "gutschein") out.brauchtGutschein = true;
+            const inv = (s.invoices || []).find(x => x.id === p.invoiceId);
+            out.buchungen.push({ umsatz: betrag, sh: "S",
+                konto: art === "kasse" ? k.kasse : art === "gutschein" ? k.gutschein : k.geldkonto,
+                gegenkonto: k.debitor, bu: "",
+                datum: p.date, beleg1: (inv && inv.number) || "",
+                text: (art === "gutschein" ? "Gutschein " : "Zahlung ") + name });
+        });
+    });
+    out.buchungen.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+    return out;
+}
 // Was tatsächlich auf einer Rechnung steht und noch nicht bezahlt ist. Bewusst direkt gerechnet
 // und NICHT als "offener Gesamtbetrag minus nicht berechnet": sonst rutschen Positionen, die per
 // "nicht berechnen" aus der Lückenliste genommen wurden, rechnerisch in diesen Topf und würden
@@ -8810,6 +8932,51 @@ function sumCharges(s, pricePerUE) {
 }
 function sumPayments(s) {
     return (s.payments || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+}
+// Leistungszeitraum einer Rechnung (§14 Abs. 4 Nr. 6 UStG) als { von, bis } oder null. Neue
+// Rechnungen tragen ihn an den Fahrstunden-Positionen (von/bis, siehe confirmInvoice) - die
+// Positionen speichert create_invoice unverändert und atomar mit. Ältere Rechnungen: Datum der
+// Einzelposition (altes Format "Fahrstunde (90 Min · 2,00 UE)") oder, falls auch das fehlt, die
+// Fahrstunden, die noch auf diese Rechnungsnummer zeigen. Eine Stornorechnung übernimmt den
+// Zeitraum der stornierten Rechnung.
+function rechnungsLeistungszeitraum(s, inv) {
+    if (!inv)
+        return null;
+    const quelle = inv.stornoOf ? ((s && s.invoices) || []).find(x => x.number === inv.stornoOf) : inv;
+    if (!quelle)
+        return null;
+    const daten = [];
+    const iso = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+    (quelle.items || []).forEach(it => [it.von, it.bis, it.date].forEach(d => { if (iso(d))
+        daten.push(d); }));
+    if (daten.length === 0)
+        ((s && s.drivenLessons) || []).forEach(l => { if (l.invoiced === quelle.number && iso(l.date))
+            daten.push(l.date); });
+    if (daten.length === 0)
+        return null;
+    daten.sort();
+    return { von: daten[0], bis: daten[daten.length - 1] };
+}
+// Fälligkeit einer Rechnung als YYYY-MM-DD. Seit v2.10.x beim Anlegen festgeschrieben (faellig),
+// damit ein späteres Ändern des Zahlungsziels in den Einstellungen nicht rückwirkend alte
+// Rechnungen überfällig macht oder Mahnstufen springen lässt (Audit F-N17). Ältere Rechnungen
+// ohne das Feld rechnen wie bisher: Rechnungsdatum + aktuelles Zahlungsziel.
+function rechnungFaellig(inv, zahlungszielTage) {
+    if (inv && /^\d{4}-\d{2}-\d{2}$/.test(String(inv.faellig || "")))
+        return inv.faellig;
+    if (!inv || !/^\d{4}-\d{2}-\d{2}/.test(String(inv.date || "")))
+        return null;
+    const d = new Date(String(inv.date).slice(0, 10) + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + (Number(zahlungszielTage) || 0));
+    return d.toISOString().slice(0, 10);
+}
+// Ganze Tage über die Fälligkeit hinaus (<= 0: noch nicht überfällig), null ohne Datum.
+// Gleiche Zählung wie früher "Tage seit Rechnungsdatum minus Zahlungsziel".
+function tageUeberfaellig(inv, zahlungszielTage, heuteMs) {
+    const f = rechnungFaellig(inv, zahlungszielTage);
+    if (!f)
+        return null;
+    return Math.floor((heuteMs - new Date(f).getTime()) / 86400000);
 }
 // Auf eine bestimmte Rechnung verbuchte Zahlungen. Zahlungen ohne invoiceId sind
 // Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
@@ -11293,6 +11460,8 @@ function App() {
     const apptWritesRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
+    // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
+    const lueckenOfferRef = useRef(new Set());
     // Aktueller Stand von students/school/tpl/appts als Ref - Grundlage für jedes "erst berechnen,
     // dann setzen und speichern". Das frühere Muster "let x = null; setStudents(prev => { x = ...;
     // return x; }); if (!x) return;" hat nur beim ersten Aufruf funktioniert: React 18.2 führt den
@@ -11627,6 +11796,17 @@ function App() {
             setStudentTab("profil");
         }
     }, [activeId]);
+    // Schüler in einem bestimmten Reiter öffnen. Ist er schon aktiv, feuert der Effekt oben nicht
+    // (gleiche activeId) - der Reiter-Wunsch bliebe im Ref hängen und würde beim nächsten,
+    // unabhängigen Schülerwechsel verbraucht (Audit F-N13). Dann direkt umschalten.
+    function oeffneSchuelerReiter(id, tab) {
+        if (id === activeId)
+            setStudentTab(tab);
+        else
+            pendingStudentTabRef.current = tab;
+        setActiveId(id);
+        setView("daten");
+    }
     // Freitext-Filter für ADK/Strecken: vor allem bei Strecken wichtig, weil viele Schulen dort
     // 15-20+ individuell benannte Punkte anlegen (Streckennamen, Sonderfahrten, Technische Fragen…),
     // bei denen ein Kürzel wie beim ADK-Streifen (erstes Wort) nicht mehr unterscheidbar wäre
@@ -11840,8 +12020,8 @@ function App() {
         // erloes_frei bewusst OHNE Vorbelegung: fuer steuerfreie Umsaetze nach Paragraf 19 UStG
         // gibt es je nach Beratung unterschiedliche Konten. Ein falsch geratenes Konto erzeugt
         // still falsche Buchungen - deshalb verweigert der Export lieber und benennt das Feld.
-        SKR03: { erloes_19: "8400", geldkonto: "1200" },
-        SKR04: { erloes_19: "4400", geldkonto: "1800" },
+        SKR03: { erloes_19: "8400", geldkonto: "1200", kasse: "1000" },
+        SKR04: { erloes_19: "4400", geldkonto: "1800", kasse: "1600" },
     };
     const datev = (school && school.datev_settings) || {};
     function datevWert(key) {
@@ -12336,7 +12516,10 @@ function App() {
     }, [school && school.id]);
 
 
-    const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
+    const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort, busy}
+    // Sperre gegen Doppeltipp/Enter beim Speichern eines Prüfplatzes - der State allein reicht nicht,
+    // weil der zweite Tipp noch vor dem nächsten Render kommt (Audit F-N14: zwei gleiche Prüfplätze).
+    const examSlotSavingRef = useRef(false);
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
     // Unterrichtsnachweis des gerade geoeffneten Schuelers: null = noch nicht geladen,
     // "error" = Laden fehlgeschlagen, sonst die Anwesenheitszeilen. Wird beim Oeffnen der
@@ -14165,7 +14348,14 @@ function App() {
             setPaymentForm({ ...f, error: "Bitte einen gültigen Betrag über 0 € eingeben." });
             return;
         }
-        const stu = students.find(s => s.id === activeId) || active;
+        // Ohne Datum fällt die Zahlung aus jedem DATEV-Monat und jeder Monatsauswertung heraus.
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(String(f.date || ""))) {
+            setPaymentForm({ ...f, error: "Bitte ein Datum für die Zahlung angeben." });
+            return;
+        }
+        // Aktueller Stand (studentsRef) statt des Render-Stands: der Dialog kann lange offen sein,
+        // eine zwischenzeitliche Änderung am Schüler würde sonst mit writeStudent überschrieben.
+        const stu = (studentsRef.current || []).find(s => s.id === activeId) || active;
         if (!stu)
             return;
         // id, damit printReceipt() später die richtige Zahlung wiederfindet, auch wenn sich
@@ -14304,10 +14494,10 @@ function App() {
     // geht (<=2 UE) oder schon aufgebraucht ist (0) - guter Moment, ein Anschlusspaket
     // anzubieten, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird.
     const paketKnapp = React.useMemo(() => {
-        return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s) }))
+        return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s, Number(pricePerHour) || 0) }))
             .filter(x => x.remaining != null && x.remaining <= 2)
             .sort((a, b) => a.remaining - b.remaining);
-    }, [students]);
+    }, [students, pricePerHour]);
     // Überfällige Rechnungen: dieselbe Berechnung wie in renderAbrechnungBody() ("Überfällig"),
     // hier zusätzlich auf App()-Ebene dupliziert statt von dort importiert (bewusst - andere
     // Render-Funktionen anzuzapfen ist genau der Fehler, der schon einmal den Fahrzeug-Kalender
@@ -14322,11 +14512,8 @@ function App() {
         (students || []).filter(s => s._isMine).forEach(s => (s.invoices || []).forEach(inv => {
             if (invoiceStatus(s, inv) === "bezahlt" || inv.cancelledBy || inv.stornoOf)
                 return;
-            const d = inv.date ? new Date(inv.date).getTime() : null;
-            if (!d)
-                return;
-            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
-            if (tage <= 0)
+            const tage = tageUeberfaellig(inv, ZAHLUNGSZIEL_TAGE, heuteMs);
+            if (tage == null || tage <= 0)
                 return;
             rows.push({ inv, stu: s, tage, offen: invoiceOpen(s, inv), stufe: mahnstufe(tage) });
         }));
@@ -19582,13 +19769,19 @@ function App() {
                 return; // vollständig im Paket enthalten, nichts zu berechnen
             const k = String(einzel);
             if (!byPrice[k])
-                byPrice[k] = { einzel, ids: [], anzahl: 0 };
+                byPrice[k] = { einzel, ids: [], anzahl: 0, daten: [] };
             byPrice[k].ids.push(l.id);
             byPrice[k].anzahl += 1;
+            if (/^\d{4}-\d{2}-\d{2}$/.test(l.date || ""))
+                byPrice[k].daten.push(l.date);
         });
         Object.keys(byPrice).forEach(k => {
             const g = byPrice[k];
+            g.daten.sort();
+            // von/bis: erster und letzter Tag dieser Stunden - Grundlage für den Leistungszeitraum
+            // auf der Rechnung (siehe rechnungsLeistungszeitraum).
             rows.push({ key: "lessons:" + k, kind: "lessongroup", ids: g.ids,
+                von: g.daten[0] || "", bis: g.daten[g.daten.length - 1] || "",
                 label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
                 date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
         });
@@ -19632,7 +19825,9 @@ function App() {
             return;
         }
         const chosenCostIds = costRows.map(r => r.id);
-        const items = chosen.map(r => ({ label: r.label, amount: r.amount, date: r.date || "" }));
+        const items = chosen.map(r => r.kind === "lessongroup" && r.von
+            ? { label: r.label, amount: r.amount, date: r.date || "", von: r.von, bis: r.bis || r.von }
+            : { label: r.label, amount: r.amount, date: r.date || "" });
         let inv;
         try {
             inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIds, d.note || "");
@@ -19642,8 +19837,13 @@ function App() {
             showToast("Rechnung konnte nicht erstellt werden:\n" + fehlerText(e), "error");
             return;
         }
+        // Fälligkeit mit dem HEUTIGEN Zahlungsziel festschreiben (F-N17). create_invoice kennt das
+        // Feld nicht; es kommt mit dem Speichern unten an die Rechnung.
+        const faellig = rechnungFaellig(inv, zahlungszielTage);
+        if (faellig)
+            inv = { ...inv, faellig };
         // Server hat Nummer, Rechnung und die markierten Posten bereits atomar gespeichert - hier
-        // nur noch den lokalen Stand nachziehen, ohne einen weiteren Speichervorgang anzustoßen.
+        // den lokalen Stand nachziehen.
         // Die JETZT durch ein Paket gedeckte UE wird pro Stunde eingefroren (invoicedCoveredUE) -
         // ein später dazugekauftes Paket darf eine schon abgerechnete Stunde nicht rückwirkend
         // "abdecken" und ihr damit Guthaben entziehen, das eigentlich künftigen Stunden zusteht
@@ -19653,16 +19853,22 @@ function App() {
         // während der RPC-Laufzeit an diesem Schüler gemacht wurde (neue Fahrstunde, Zahlung,
         // paralleler Kollege bei geteiltem Schüler), hier stillschweigend wieder verworfen (gleiches
         // Muster wie draftLessonEntry() weiter oben).
-        updateStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
+        // Der Schnappschuss invoicedCoveredUE existiert nur hier im Client (create_invoice kennt ihn
+        // nicht) und MUSS deshalb anschließend gespeichert werden - bis v2.10.0 lebte er nur lokal,
+        // nach dem Neuladen war das Paketguthaben doppelt da und die nächste Rechnung zu niedrig
+        // (Audit F-H1). Gegen studentsRef rechnen, dann über writeStudent speichern: die übrigen
+        // Felder stimmen mit dem Serverstand überein (dieselben Marker, dieselbe Rechnung).
+        const cur = (studentsRef.current || []).find(s => s.id === active.id);
+        if (cur) {
             const coveredById = {};
-            lessonBillables(s, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
-            const drivenLessons = (s.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
-            const costItems = (s.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
-            const invoices = [...(s.invoices || []), inv];
-            return { ...s, drivenLessons, costItems, invoices };
-        }));
+            lessonBillables(cur, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
+            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
+            const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
+            const invoices = [...(cur.invoices || []), inv];
+            // Beim Storno vorgemerkte Zahlungen (siehe cancelInvoice) gehören jetzt zu dieser Rechnung.
+            const payments = (cur.payments || []).map(pay => (pay.umbuchenVon && !pay.invoiceId) ? (() => { const { umbuchenVon, ...rest } = pay; return { ...rest, invoiceId: inv.id, umgebuchtVon: umbuchenVon }; })() : pay);
+            writeStudent({ ...cur, drivenLessons, costItems, invoices, payments });
+        }
         setInvoiceDraft(null);
         setInvoicePreview(inv);
         doPrint("invoice");
@@ -19685,6 +19891,21 @@ function App() {
         });
         if (reason === null)
             return;
+        // Schon eingegangene Zahlungen hingen bisher an der stornierten Rechnung fest: die
+        // Ersatzrechnung galt als offen, wurde überfällig und gemahnt, obwohl der Schüler längst
+        // bezahlt hatte (Audit F-H2). Deshalb fragen, ob sie auf die Ersatzrechnung wandern sollen
+        // (Standard: ja). Die Ersatzrechnung gibt es in diesem Moment noch nicht - die Zahlungen
+        // werden bis dahin als "umbuchenVon" vorgemerkt und von confirmInvoice() der nächsten
+        // Rechnung dieses Schülers zugeordnet.
+        const bezahlt = invoicePaid(active, inv.id);
+        let umbuchen = false;
+        if (bezahlt > 0.005) {
+            umbuchen = await askConfirm({
+                title: "Zahlungen übernehmen?",
+                message: "Auf " + inv.number + " sind schon " + eurFmt(bezahlt) + " eingegangen. Sollen diese Zahlungen der nächsten Rechnung (Ersatzrechnung) gutgeschrieben werden?\n\nBei \u201ENein\u201C bleiben sie bei der stornierten Rechnung, etwa wenn du das Geld zurückzahlst.",
+                confirmLabel: "Ja, gutschreiben", cancelLabel: "Nein", danger: false,
+            });
+        }
         let storno;
         try {
             storno = await dbCancelInvoice(active.id, school.id, inv.id, reason);
@@ -19697,14 +19918,21 @@ function App() {
         // eingefangene "active" - der Prompt-Dialog kann durch Tippzeit beliebig lange offen
         // bleiben, ein größeres Zeitfenster für zwischenzeitliche Änderungen als bei confirmInvoice()
         // (gleicher Bug, gleicher Fix - siehe dortiger Kommentar).
-        updateStudents(prev => (prev || []).map(s => {
-            if (s.id !== active.id)
-                return s;
-            const drivenLessons = (s.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
-            const costItems = (s.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
-            const invoices = (s.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
-            return { ...s, drivenLessons, costItems, invoices };
-        }));
+        const cur = (studentsRef.current || []).find(s => s.id === active.id);
+        if (cur) {
+            const drivenLessons = (cur.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
+            const costItems = (cur.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
+            const invoices = (cur.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
+            const next = { ...cur, drivenLessons, costItems, invoices };
+            if (umbuchen) {
+                next.payments = (cur.payments || []).map(pay => pay.invoiceId === inv.id ? (() => { const { invoiceId, ...rest } = pay; return { ...rest, umbuchenVon: inv.number }; })() : pay);
+                // Die Vormerkung muss gespeichert werden (übersteht sonst kein Neuladen).
+                writeStudent(next);
+                showToast(eurFmt(bezahlt) + " werden der nächsten Rechnung für " + dispName(cur) + " gutgeschrieben.");
+            }
+            else
+                updateStudents(prev => (prev || []).map(s => s.id === cur.id ? next : s));
+        }
         setInvoicePreview(storno);
         doPrint("invoice");
     }
@@ -20259,7 +20487,10 @@ function App() {
                         React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
                             p.date ? new Date(p.date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : "",
                             p.method ? " \u00B7 " + p.method : "",
-                            p.receiptNumber ? " \u00B7 " + p.receiptNumber : "")),
+                            p.receiptNumber ? " \u00B7 " + p.receiptNumber : "",
+                            // Nach einem Storno vorgemerkt (siehe cancelInvoice), damit sichtbar ist,
+                            // warum die Zahlung gerade keiner Rechnung zugeordnet ist.
+                            (p.umbuchenVon && !p.invoiceId) ? " \u00B7 aus " + p.umbuchenVon + ", f\u00FCr die n\u00E4chste Rechnung" : "")),
                     React.createElement("button", { onClick: () => printReceipt(pays.indexOf(p)), "aria-label": "Beleg drucken", title: "Beleg drucken", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", display: "inline-flex" } },
                         React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M6 9V2h12v7" }),
@@ -20774,7 +21005,13 @@ function App() {
                 upcoming.push({ stu: s, exam: e });
         }));
         upcoming.sort((a, b) => a.exam.date.localeCompare(b.exam.date));
-        const hasFuturePraxis = (s) => (s.exams || []).some(e => e.art === "praxis" && e.date >= todayStr && !e.passed);
+        // Auch ein zugeteilter Praxis-Prüfplatz zählt als "angemeldet" - assignExamSlot() setzt
+        // weder exams noch licenseSteps, der Schüler stand sonst trotz Platz weiter unter "Bereit,
+        // nicht angemeldet" (Audit F-N16).
+        const hatPraxisPlatz = new Set((examSlots || [])
+            .filter(x => x.art === "praxis" && x.status === "vergeben" && x.student_id && x.datum && x.datum >= todayStr)
+            .map(x => x.student_id));
+        const hasFuturePraxis = (s) => hatPraxisPlatz.has(s.id) || (s.exams || []).some(e => e.art === "praxis" && e.date >= todayStr && !e.passed);
         const readyNotRegistered = own.filter(s => {
             const vk = s.klasse || DEFAULT_KLASSE;
             const a = ampel(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
@@ -20800,16 +21037,8 @@ function App() {
     function renderPruefungsplanungBody() {
         const { upcoming, readyNotRegistered, nurSonderfahrtenOffen } = examPlanning();
         function goTo(id) {
-            // Ist der Schüler schon activeId, ändert setActiveId(id) den State nicht (React-Bailout),
-            // der Tab-Wechsel-Effekt an [activeId] feuert dann nicht - der Ref-Wert bliebe stehen und
-            // würde erst beim nächsten, unabhängigen Schülerwechsel woanders fälschlich verbraucht.
-            // Direkt umschalten statt den Ref zu setzen, wenn sich activeId gar nicht ändert.
-            if (id === activeId)
-                setStudentTab("antrag");
-            else
-                pendingStudentTabRef.current = "antrag";
-            setActiveId(id);
-            setView("daten");
+            // Gleicher Bailout-Schutz wie überall, siehe oeffneSchuelerReiter.
+            oeffneSchuelerReiter(id, "antrag");
         }
         return React.createElement(React.Fragment, null,
             (upcoming.length > 0 || readyNotRegistered.length > 0) && React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 16 } },
@@ -20883,8 +21112,10 @@ function App() {
     }
     async function addExamSlotSubmit() {
         const f = examSlotForm;
-        if (!f || !f.datum)
+        if (!f || !f.datum || examSlotSavingRef.current)
             return;
+        examSlotSavingRef.current = true;
+        setExamSlotForm(prev => prev && ({ ...prev, busy: true }));
         try {
             const created = await dbInsertExamSlot(uid, { art: f.art, datum: f.datum, zeit: f.zeit, ort: f.ort });
             setExamSlots(prev => [...prev, created].sort((a, b) => a.datum.localeCompare(b.datum)));
@@ -20892,7 +21123,11 @@ function App() {
             showToast("Prüfplatz erfasst.");
         }
         catch (e) {
+            setExamSlotForm(prev => prev && ({ ...prev, busy: false }));
             showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            examSlotSavingRef.current = false;
         }
     }
     async function assignExamSlot(slot, student) {
@@ -21087,11 +21322,8 @@ function App() {
             const stu = mine.find(x => x.id === inv.studentId);
             if (!stu || invoiceStatus(stu, inv) === "bezahlt" || inv.cancelledBy || inv.stornoOf)
                 return null;
-            const d = inv.date ? new Date(inv.date).getTime() : null;
-            if (!d)
-                return null;
-            const tage = Math.floor((heuteMs - d) / 86400000) - ZAHLUNGSZIEL_TAGE;
-            if (tage <= 0)
+            const tage = tageUeberfaellig(inv, ZAHLUNGSZIEL_TAGE, heuteMs);
+            if (tage == null || tage <= 0)
                 return null;
             return { inv, stu, tage, offen: invoiceOpen(stu, inv), stufe: mahnstufe(tage) };
         }).filter(Boolean).sort((a, b) => b.tage - a.tage);
@@ -21183,7 +21415,7 @@ function App() {
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Offene Forderungen"),
             openList.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Aktuell keine offenen Beträge. ✓")
-                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } }, openList.slice(0, 12).map(x => React.createElement("button", { key: x.s.id, onClick: () => { setActiveId(x.s.id); setView("daten"); pendingStudentTabRef.current = "fahrten"; }, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } }, openList.slice(0, 12).map(x => React.createElement("button", { key: x.s.id, onClick: () => oeffneSchuelerReiter(x.s.id, "fahrten"), style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%", textAlign: "left", borderBottom: "1px solid var(--line)", background: "none", border: "none" } },
                     React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, dispName(x.s)),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, color: "var(--orange-deep)" } }, eurFmt(x.open))))),
             openList.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 20 }, onClick: openOffenePosten }, "Offene Posten der ganzen Fahrschule ansehen"),
@@ -21236,11 +21468,23 @@ function App() {
         const steps = active.licenseSteps || {};
         const doneCount = LICENSE_STEPS.filter(st => licenseStepDone(active, st.key)).length;
         const pct = Math.round((doneCount / LICENSE_STEPS.length) * 100);
-        function toggleStep(key) {
+        async function toggleStep(key) {
             if (key === "theorie_bestanden") {
                 // active.theorie ist selbst schon das Datum (siehe LICENSE_STEPS-Kommentar) - Toggle
                 // setzt/löscht direkt dieses eine geteilte Feld statt eines eigenen steps-Eintrags.
-                updateActive({ theorie: active.theorie ? "" : ymd(new Date()) });
+                // Anders als bei den übrigen Schritten bleibt das Datum beim Abhaken also NICHT
+                // erhalten - deshalb vorher fragen, sonst ist ein echtes Prüfungsdatum durch einen
+                // Fehltipp weg (Audit F-N15).
+                if (active.theorie) {
+                    const datum = /^\d{4}-\d{2}-\d{2}$/.test(active.theorie) ? new Date(active.theorie + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : active.theorie;
+                    if (!(await askConfirm({ title: "Theorie wieder offen?", message: "Die Theorieprüfung ist als bestanden am " + datum + " eingetragen. Wirklich zurücksetzen? Das Datum wird dabei gelöscht." })))
+                        return;
+                    const cur = (studentsRef.current || []).find(s => s.id === active.id);
+                    if (cur)
+                        writeStudent({ ...cur, theorie: "" });
+                    return;
+                }
+                updateActive({ theorie: ymd(new Date()) });
                 return;
             }
             const cur = steps[key] || {};
@@ -21327,8 +21571,17 @@ function App() {
         function patchExam(id, patch) {
             updateActive({ exams: (active.exams || []).map(e => e.id === id ? { ...e, ...patch } : e) });
         }
-        function removeExam(id) {
-            updateActive({ exams: (active.exams || []).filter(e => e.id !== id) });
+        // Mit Rückfrage (Audit F-N15): ein Versuch ist Grundlage der Erfolgsquote, ein
+        // versehentlich getroffenes × war bisher sofort und ohne Rückweg weg.
+        async function removeExam(ex) {
+            const wann = ex.date ? " vom " + new Date(ex.date + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : "";
+            if (!(await askConfirm({ title: "Versuch löschen?", message: (ex.art === "theorie" ? "Theorie" : "Praxis") + "-Versuch" + wann + " wirklich löschen? Er zählt dann nicht mehr zur Erfolgsquote." })))
+                return;
+            // Nach dem Dialog gegen den AKTUELLEN Stand rechnen, nicht gegen das beim Klick
+            // eingefangene active.
+            const cur = (studentsRef.current || []).find(s => s.id === active.id);
+            if (cur)
+                writeStudent({ ...cur, exams: (cur.exams || []).filter(e => e.id !== ex.id) });
         }
         return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 3 } },
@@ -21350,7 +21603,7 @@ function App() {
                         React.createElement("input", { type: "checkbox", checked: !!e.passed, onChange: () => patchExam(e.id, { passed: !e.passed }) }),
                         React.createElement("span", { style: e.passed ? { color: "var(--green)", fontWeight: 600 } : null }, "bestanden")),
                     React.createElement("span", { style: { flex: 1 } }),
-                    React.createElement("button", { className: "icon-x", onClick: () => removeExam(e.id), "aria-label": "Versuch entfernen",
+                    React.createElement("button", { className: "icon-x", onClick: () => removeExam(e), "aria-label": "Versuch entfernen",
                         style: { color: "var(--red)", fontSize: 17, lineHeight: 1, padding: "2px 6px" } }, "×"))),
             React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
                 React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => addExam("theorie") }, "+ Theorie"),
@@ -22644,7 +22897,13 @@ function App() {
             .sort((a, b) => a.from.localeCompare(b.from));
         let cursor = vonHHMM;
         for (const b of busy) {
-            if (b.from > cursor && toMin(b.from) - toMin(cursor) >= minMinutes)
+            // Die Lücke endet am nächsten Termin, aber spätestens bei "bis" - vorher zählte ein
+            // Termin weit nach Feierabend als Ende und das Fenster ragte über "bis" hinaus
+            // (16:30-17:15 bei bis 17:00, Audit F-M6).
+            if (cursor >= bisHHMM)
+                break;
+            const ende = b.from < bisHHMM ? b.from : bisHHMM;
+            if (ende > cursor && toMin(ende) - toMin(cursor) >= minMinutes)
                 return { from: cursor, to: fromMin(toMin(cursor) + minMinutes) };
             if (b.to > cursor)
                 cursor = b.to;
@@ -22671,8 +22930,12 @@ function App() {
         const out = [];
         let cursor = wh.von;
         for (const b of busy) {
-            if (b.from > cursor && toMin(b.from) - toMin(cursor) >= minMinutes)
-                out.push({ from: cursor, to: b.from });
+            // Wie in findFreeWindow: eine Lücke endet spätestens mit der Arbeitszeit.
+            if (cursor >= wh.bis)
+                break;
+            const ende = b.from < wh.bis ? b.from : wh.bis;
+            if (ende > cursor && toMin(ende) - toMin(cursor) >= minMinutes)
+                out.push({ from: cursor, to: ende });
             if (b.to > cursor)
                 cursor = b.to;
         }
@@ -22709,6 +22972,15 @@ function App() {
                     return;
                 const von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
                 const bis = s.wunschliste.bis < dayBis ? s.wunschliste.bis : dayBis;
+                // Warteliste-Angebote tragen keine student_id (jeder passende Schüler sieht sie) -
+                // die Prüfung oben greift für sie also nie. Liegt an diesem Tag schon ein Angebot
+                // für seine Klasse in seinem Wunschfenster, ist er versorgt; sonst rückte nach
+                // jedem "Anbieten" das nächste Fenster für denselben Schüler nach (Audit F-M7).
+                const klasse = s.klasse || DEFAULT_KLASSE;
+                const schonAngeboten = (appts || []).some(a => a.status === "offered" && ymd(a.start_at) === dateKey
+                    && (a.offer_klasse || DEFAULT_KLASSE) === klasse && hm(a.start_at) < bis && (a.end_at ? hm(a.end_at) : hm(a.start_at)) > von);
+                if (schonAngeboten)
+                    return;
                 if (toMin(bis) - toMin(von) < 45)
                     return;
                 const slot = findFreeWindow(dateKey, von, bis, 45);
@@ -22721,6 +22993,12 @@ function App() {
     // Ein gefundenes Fenster als Warteliste-Angebot anlegen - exakt dasselbe Prinzip wie
     // createWaitlistOffer, nur ohne vorher einen bestehenden Termin gelöscht zu haben.
     async function offerLueckenSlot(f) {
+        // Doppeltipp-Sperre: bis die Antwort da ist, steht das neue Angebot noch nicht in appts,
+        // ein zweiter Tipp hätte dasselbe Fenster ein zweites Mal angeboten.
+        const sperre = f.dateKey + " " + f.from;
+        if (lueckenOfferRef.current.has(sperre))
+            return;
+        lueckenOfferRef.current.add(sperre);
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: combineDT(f.dateKey, f.from), end_at: combineDT(f.dateKey, f.to), art: "ÜST",
@@ -22731,6 +23009,9 @@ function App() {
         }
         catch (e) {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
+        }
+        finally {
+            lueckenOfferRef.current.delete(sperre);
         }
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
@@ -25062,6 +25343,10 @@ function App() {
             const total = Number(hit.inv.total) || 0;
             const basis = { key: i, ...t, studentId: hit.stu.id, studentName: dispName(hit.stu),
                 invoiceId: hit.inv.id, offen: offen, total: total };
+            // Stornierte Rechnungen und Stornorechnungen sind nicht mehr zahlbar. Vorher wurde auf
+            // sie als "ok" gebucht - die Ersatzrechnung blieb dann offen und wurde gemahnt (F-H2).
+            if (hit.inv.cancelledBy || hit.inv.stornoOf)
+                return { ...basis, status: "storniert", ersatzHinweis: hit.inv.cancelledBy ? ("storniert durch " + hit.inv.cancelledBy) : ("Stornorechnung zu " + hit.inv.stornoOf) };
             if (offen <= 0.005)
                 return { ...basis, status: "bezahlt" };
             // Betrag nur dann vorbelegen, wenn er eindeutig ist: entweder genau einer gefunden,
@@ -25088,6 +25373,10 @@ function App() {
         // anderen Kontoauszug-Zeile). Ist sie inzwischen voll bezahlt, wird nicht noch einmal
         // gebucht - sonst stand die Rechnung am Ende doppelt als bezahlt da.
         const rechnung = (stu.invoices || []).find(iv => iv.id === v.invoiceId);
+        if (rechnung && (rechnung.cancelledBy || rechnung.stornoOf)) {
+            showToast("Rechnung " + rechnung.number + " ist storniert \u2013 bitte die Zahlung beim Schüler der Ersatzrechnung zuordnen.");
+            return;
+        }
         if (rechnung && invoiceOpen(stu, rechnung) <= 0.005) {
             showToast("Diese Rechnung ist bereits vollständig bezahlt – keine zweite Buchung.");
             setZahlungsImport(z => z ? { ...z, vorschlaege: (z.vorschlaege || []).map(x => x.key === v.key ? { ...x, status: "bezahlt" } : x) } : z);
@@ -26591,10 +26880,12 @@ function App() {
                                     feld("erloes_19", "Erl\u00F6skonto 19 % USt", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "4400 (SKR04)" : "8400 (SKR03)") + ".", datevWert("erloes_19")),
                                     feld("erloes_frei", "Erl\u00F6skonto ohne USt (\u00A719 UStG)", "Bewusst nicht vorbelegt \u2013 das Konto h\u00E4ngt von eurer Beratung ab. Nur n\u00F6tig, wenn du Kleinunternehmer bist.", "vom Steuerberater"),
                                     feld("geldkonto", "Geldkonto (Bank)", "Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "1800 (SKR04)" : "1200 (SKR03)") + ".", datevWert("geldkonto")),
+                                    feld("kasse", "Kasse (Barzahlungen)", "Zahlungen mit der Zahlungsart \u201EBar\u201C. Vorbelegt: " + (((datev.kontenrahmen || "SKR03") === "SKR04") ? "1600 (SKR04)" : "1000 (SKR03)") + ".", datevWert("kasse")),
+                                    feld("gutschein_konto", "Konto f\u00FCr eingel\u00F6ste Gutscheine", "Bewusst nicht vorbelegt \u2013 h\u00E4ngt davon ab, ob eure Gutscheine Einzweck- oder Mehrzweck-Gutscheine sind. Nur n\u00F6tig, wenn du Gutscheine einl\u00F6st.", "vom Steuerberater"),
                                     feld("debitor_start", "Debitoren-Sammelkonto", "Alle Rechnungen laufen \u00FCber dieses eine Konto, der Sch\u00FClername steht im Buchungstext. Vorbelegt: 10000.", "10000"),
                                     feld("sachkontenlaenge", "Sachkontenl\u00E4nge", "Standard: 4.", "4")),
                                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 2px 0" } },
-                                    "Den Export selbst findest du unter Auswertung neben dem CSV-Export. Gebucht wird: Rechnung = Debitor an Erl\u00F6se, Zahlung = Geldkonto an Debitor. Stornierte Rechnungen bleiben au\u00DFen vor."));
+                                    "Den Export selbst findest du unter Auswertung neben dem CSV-Export. Gebucht wird: Rechnung = Debitor an Erl\u00F6se, Zahlung = Bank, Kasse oder Gutschein-Konto an Debitor. Eine Stornorechnung wird im Monat der Stornierung als Gegenbuchung (Haben) exportiert, die urspr\u00FCngliche Rechnung bleibt in ihrem Monat stehen."));
                         })()),
                     settingsScreen === "rechnungsdaten" && React.createElement(SettingsScreen, { title: "Rechnungsdaten", onBack: closeScreen },
                         (() => {
@@ -26827,48 +27118,24 @@ function App() {
             const debitor = datevWert("debitor_start");
             const skl = Number(datevWert("sachkontenlaenge")) || 4;
             const kUntFallback = !!(school && school.invoice_settings && school.invoice_settings.kleinunternehmer);
-
-            const inMonat = iso => {
-                if (!iso) return false;
-                const d = new Date(iso + "T12:00:00");
-                return d.getFullYear() === jahr && (d.getMonth() + 1) === monat;
-            };
-            const buchungen = [];
-            let brauchtFrei = false;
-            students.filter(s => s._isMine).forEach(s => {
-                (s.invoices || []).forEach(inv => {
-                    if (!inMonat(inv.date)) return;
-                    // Stornierte Rechnungen und Stornorechnungen bleiben aussen vor - dieselbe
-                    // Abgrenzung wie in der Abrechnung und im bestehenden CSV-Export.
-                    if (inv.cancelledBy || inv.stornoOf) return;
-                    const brutto = Number(inv.total) || 0;
-                    if (!(brutto > 0)) return;
-                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
-                    if (kUnt) brauchtFrei = true;
-                    buchungen.push({ umsatz: brutto, sh: "S", konto: debitor,
-                        gegenkonto: kUnt ? erloesFrei : erloes19, bu: "",
-                        datum: inv.date, beleg1: inv.number || "",
-                        text: "Rechnung " + dispName(s) });
-                });
-                (s.payments || []).forEach(p => {
-                    if (!inMonat(p.date)) return;
-                    const betrag = Number(p.amount) || 0;
-                    if (!(betrag > 0)) return;
-                    const inv = (s.invoices || []).find(x => x.id === p.invoiceId);
-                    buchungen.push({ umsatz: betrag, sh: "S", konto: geldkonto, gegenkonto: debitor, bu: "",
-                        datum: p.date, beleg1: (inv && inv.number) || "",
-                        text: "Zahlung " + dispName(s) });
-                });
-            });
+            const gutscheinKonto = String(datev.gutschein_konto || "").trim();
+            const liste = datevBuchungsliste(students.filter(s => s._isMine), jahr, monat,
+                { debitor, erloes19, erloesFrei, geldkonto, kasse: datevWert("kasse"), gutschein: gutscheinKonto, kUntFallback }, dispName);
+            const buchungen = liste.buchungen;
             if (buchungen.length === 0) {
                 showToast("In diesem Monat gibt es keine Rechnungen oder Zahlungen zum Exportieren.");
                 return;
             }
-            if (brauchtFrei && !erloesFrei) {
+            if (liste.brauchtFrei && !erloesFrei) {
                 showToast("Im Zeitraum liegen Rechnungen ohne Umsatzsteuer (\u00A719 UStG). Bitte erst das Erl\u00F6skonto daf\u00FCr in den Einstellungen (DATEV) eintragen - es wird bewusst nicht geraten.");
                 return;
             }
-            buchungen.sort((a, b) => (a.datum || "").localeCompare(b.datum || ""));
+            // Gleiche Haltung wie beim Konto für §19: ob Einzweck- oder Mehrzweck-Gutschein, klärt
+            // der Steuerberater - ein geratenes Konto würde still falsch buchen.
+            if (liste.brauchtGutschein && !gutscheinKonto) {
+                showToast("Im Zeitraum wurden Gutscheine eingel\u00F6st. Bitte erst das Gutschein-Konto in den Einstellungen (DATEV) eintragen - es wird bewusst nicht geraten.");
+                return;
+            }
 
             const q = v => '"' + String(v == null ? "" : v).replace(/"/g, '""') + '"';
             const betrag = n => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2).replace(".", ",");
@@ -26901,7 +27168,12 @@ function App() {
             a.click();
             document.body.removeChild(a);
             setTimeout(() => URL.revokeObjectURL(url), 2000);
-            showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen.");
+            const nichtExportiert = [];
+            if (liste.ohneDatum > 0) nichtExportiert.push(liste.ohneDatum + " ohne g\u00FCltiges Datum");
+            if (liste.ungueltig > 0) nichtExportiert.push(liste.ungueltig + " Zahlung(en) mit Betrag 0 oder kleiner");
+            showToast(buchungen.length + " Buchungss\u00E4tze exportiert. Bitte vom Steuerberater pr\u00FCfen lassen."
+                + (nichtExportiert.length ? "\nNicht exportiert (bitte beim Sch\u00FCler korrigieren): " + nichtExportiert.join(", ") + "." : ""),
+                nichtExportiert.length ? "error" : undefined);
         }
         catch (e) {
             showToast("Export fehlgeschlagen: " + (e.message || "unbekannt"), "error");
@@ -27861,6 +28133,14 @@ function App() {
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
+        // Pflichtangabe Zeitpunkt/Zeitraum der Leistung (§14 Abs. 4 Nr. 6 UStG, Audit F-M11). Ohne
+        // datierte Fahrstunden (nur Grundbetrag o.ä.) gilt der übliche Satz "Leistungsdatum
+        // entspricht dem Rechnungsdatum".
+        const deDatum = d => new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" });
+        const zeitraum = rechnungsLeistungszeitraum(active, inv);
+        const leistungText = zeitraum
+            ? (zeitraum.von === zeitraum.bis ? "Leistungsdatum: " + deDatum(zeitraum.von) : "Leistungszeitraum: " + deDatum(zeitraum.von) + " \u2013 " + deDatum(zeitraum.bis))
+            : "Leistungsdatum entspricht dem Rechnungsdatum";
         return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10.5pt", lineHeight: 1.5 } },
             React.createElement("div", { className: "ps-inv-head" },
                 React.createElement("div", null,
@@ -27883,6 +28163,10 @@ function App() {
                     React.createElement("div", { style: { fontSize: "9.5pt", color: "#444", marginTop: 4 } },
                         "Datum: ",
                         inv.date ? new Date(inv.date).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : ""),
+                    React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, leistungText),
+                    // Nur bei festgeschriebener Fälligkeit (neue Rechnungen) - für ältere wäre ein aus
+                    // dem heutigen Zahlungsziel errechnetes Datum nicht das, was damals vereinbart war.
+                    inv.faellig && !inv.stornoOf && !inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, "Zahlbar bis: " + deDatum(inv.faellig)),
                     inv.stornoOf && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert Rechnung " + inv.stornoOf),
                     inv.cancelledBy && React.createElement("div", { style: { fontSize: "9.5pt", color: "#B3362A", marginTop: 4 } }, "Storniert durch " + inv.cancelledBy))),
             React.createElement("div", { style: { marginBottom: 18 } },
@@ -27927,7 +28211,9 @@ function App() {
             // g\u00FCltig ist (z.B. keine kaputte IBAN in den Einstellungen) - fehlt eine dieser
             // Voraussetzungen, blendet sich der Block einfach aus, wie das Wetter-Pill auch.
             (() => {
-                if (!iv.iban || inv.stornoOf)
+                // Auch nicht auf der stornierten Originalrechnung (F-M5): wer sie nachdruckt und den
+                // Code scannt, zahlt eine Rechnung, die es nicht mehr gibt.
+                if (!iv.iban || inv.stornoOf || inv.cancelledBy)
                     return null;
                 const offen = invoiceOpen(active, inv);
                 if (offen <= 0.005)
@@ -29011,7 +29297,7 @@ function App() {
                     React.createElement("label", null, "Ort (optional)",
                     React.createElement("input", { type: "text", value: examSlotForm.ort, placeholder: "z.B. Prüfstelle Musterstadt", onChange: e => setExamSlotForm({ ...examSlotForm, ort: e.target.value }), onKeyDown: e => { if (e.key === "Enter")
                                 addExamSlotSubmit(); } }))),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: !examSlotForm.datum, onClick: addExamSlotSubmit }, "Speichern"),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: !examSlotForm.datum || !!examSlotForm.busy, onClick: addExamSlotSubmit }, examSlotForm.busy ? "Speichert\u2026" : "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setExamSlotForm(null) }, "Abbrechen"))),
         examSlotAssign && React.createElement("div", { onClick: () => setExamSlotAssign(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "85dvh", overflowY: "auto" } },
@@ -29743,10 +30029,12 @@ function App() {
                         const farbe = v.status === "gebucht" ? "var(--sage-deep)"
                             : v.status === "ok" ? "var(--sage-deep)"
                                 : v.status === "ki_vorschlag" ? "var(--sky-deep)"
-                                    : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)" : "var(--amber)";
+                                    : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)"
+                                        : v.status === "storniert" ? "var(--red)" : "var(--amber)";
                         const hinweis = v.status === "gebucht" ? "Gebucht"
                             : v.status === "unbekannt" ? "Keine Rechnung mit dieser Nummer gefunden"
                                 : v.status === "bezahlt" ? "Diese Rechnung ist bereits vollst\u00E4ndig bezahlt"
+                                : v.status === "storniert" ? "Storniert (" + v.ersatzHinweis + ") \u2013 Zahlung bitte beim Sch\u00FCler der Ersatzrechnung zuordnen"
                                     : v.status === "kein_betrag" ? "Kein Betrag in der Zeile erkennbar"
                                         : v.status === "mehrdeutig" ? "Mehrere Betr\u00E4ge in der Zeile \u2013 bitte w\u00E4hlen"
                                             : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab"
@@ -29994,7 +30282,7 @@ function App() {
                     ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Aktuell ist kein Paket-Guthaben knapp.")
                     : paketKnapp.map(x => {
                         const tone = x.remaining <= 0 ? "#B3362A" : "var(--amber)";
-                        return React.createElement("button", { key: x.s.id, onClick: () => { setPaketKnappOpen(false); setActiveId(x.s.id); setView("daten"); pendingStudentTabRef.current = "fahrten"; },
+                        return React.createElement("button", { key: x.s.id, onClick: () => { setPaketKnappOpen(false); oeffneSchuelerReiter(x.s.id, "fahrten"); },
                                 className: "card", style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, textAlign: "left" } },
                             React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: tone, flexShrink: 0 } }),
                             React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: 700 } }, dispName(x.s)),
@@ -35712,6 +36000,18 @@ function dashZahl(n, stellen) {
     return Number(n || 0).toLocaleString("de-DE", { minimumFractionDigits: stellen || 0, maximumFractionDigits: stellen || 0 });
 }
 
+// Umsatz einer Fahrstunde aus school_fahrstunden. Die RPC liefert price schon als GESAMTbetrag
+// der Stunde (Preis je UE x UE), aber null, wenn die Stunde keinen eigenen Preis trägt - dann gilt
+// wie überall in der App (lessonPricePerUE) der Standardpreis der Fahrschule. Vorher zählte eine
+// solche Stunde mit 0 €: live rund 40 % aller Stunden, Umsatz und %-Vergütung waren entsprechend
+// zu niedrig und wichen von der Monatsabrechnung ab, die schon so rechnet (Audit K-H2).
+// Paketdeckung und "nicht berechnen" kennt diese Zahl bewusst nicht - sie ist der Wert der
+// erbrachten Stunden, nicht das Fakturierte (dafür fehlen der RPC die Spalten).
+function dashStundenUmsatz(l, stdPreis) {
+    if (l && l.price != null && l.price !== "")
+        return Number(l.price) || 0;
+    return ((Number(l && l.minutes) || 0) / 45) * (Number(stdPreis) || 0);
+}
 // Grenzen des gewaehlten Zeitraums als YYYY-MM-DD. Die Leistungen tragen ihr Datum als Text in
 // genau diesem Format, ein Stringvergleich reicht also und spart jedes Date-Parsen pro Zeile.
 function dashZeitraum(z) {
@@ -35773,7 +36073,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
             const k = l.teacher_email || "(unbekannt)";
             proLehrer[k] = proLehrer[k] || { minuten: 0, umsatz: 0, stunden: 0 };
             proLehrer[k].minuten += Number(l.minutes) || 0;
-            proLehrer[k].umsatz += Number(l.price) || 0;
+            proLehrer[k].umsatz += dashStundenUmsatz(l, stdPreis);
             proLehrer[k].stunden += 1;
         });
         const minutenGesamt = Object.values(proLehrer).reduce((s, v) => s + v.minuten, 0);
