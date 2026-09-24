@@ -7052,7 +7052,7 @@ const xrR2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const xrF2 = (n) => xrR2(n).toFixed(2);
 
 function buildXRechnung(o) {
-  const { inv, seller, buyer, zahlungszielTage, kUntFallback } = o;
+  const { inv, seller, buyer, zahlungszielTage, kUntFallback, leistung } = o;
   // Altrechnungen von vor Einführung des kleinunternehmer-Felds besitzen es nicht (undefined) -
   // dann auf die aktuelle Fahrschul-Einstellung zurückfallen, wie bei exportDatev()/exportRechnungen()/
   // invoiceSheet(), statt sie fälschlich als regelbesteuert (19% USt) zu behandeln.
@@ -7127,6 +7127,16 @@ function buildXRechnung(o) {
   L.push('  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>');
   // BT-10 ist in XRechnung Pflicht; ohne eigene Referenz des Kunden die Rechnungsnummer.
   L.push(`  <cbc:BuyerReference>${xrEsc(buyer.referenz || inv.number)}</cbc:BuyerReference>`);
+  // Leistungszeitpunkt bzw. -zeitraum (§14 Abs. 4 Nr. 6 UStG, F-M11): stand bisher nur auf dem
+  // Ausdruck, bei B2B ist aber die E-Rechnung das maßgebliche Original. Zeitraum als
+  // InvoicePeriod (BG-14, UBL-Reihenfolge: direkt nach BuyerReference), ein einzelner Tag als
+  // Delivery/ActualDeliveryDate (BT-72, weiter unten nach dem Käufer).
+  const isoTag = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+  // Ohne datierte Fahrstunden gilt wie auf dem Ausdruck "Leistungsdatum entspricht dem Rechnungsdatum".
+  const zeitraum = leistung && isoTag(leistung.von) && isoTag(leistung.bis) ? leistung
+    : (isoTag(inv.date) ? { von: inv.date, bis: inv.date } : null);
+  if (zeitraum && zeitraum.von !== zeitraum.bis)
+    L.push(`  <cac:InvoicePeriod><cbc:StartDate>${xrEsc(zeitraum.von)}</cbc:StartDate><cbc:EndDate>${xrEsc(zeitraum.bis)}</cbc:EndDate></cac:InvoicePeriod>`);
   // Verkaeufer
   L.push('  <cac:AccountingSupplierParty><cac:Party>');
   if (seller.email) L.push(`    <cbc:EndpointID schemeID="EM">${xrEsc(seller.email)}</cbc:EndpointID>`);
@@ -7156,6 +7166,8 @@ function buildXRechnung(o) {
   if (buyer.ustId) L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(buyer.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
   L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(buyer.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
   L.push('  </cac:Party></cac:AccountingCustomerParty>');
+  if (zeitraum && zeitraum.von === zeitraum.bis)
+    L.push(`  <cac:Delivery><cbc:ActualDeliveryDate>${xrEsc(zeitraum.von)}</cbc:ActualDeliveryDate></cac:Delivery>`);
   // Immer ausgeben: die IBAN ist oben Pflicht (BR-DE-1), 58 = SEPA-Ueberweisung.
   L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
   L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
@@ -8809,7 +8821,10 @@ function rekonstruierteDeckungUE(s, stdPrice) {
             return;
         (proRechnung[l.invoiced] = proRechnung[l.invoiced] || []).push(l);
     });
-    Object.keys(proRechnung).forEach(nr => {
+    // Ältere Rechnungen zuerst: deren zurückgerechnete Deckung hat das Guthaben schon verbraucht,
+    // wenn die spätere Rechnung ihre Obergrenze bestimmt (siehe restUE unten).
+    const nachDatum = Object.keys(proRechnung).sort((a, b) => String((invByNumber[a] || {}).date || "").localeCompare(String((invByNumber[b] || {}).date || "")));
+    nachDatum.forEach(nr => {
         const ls = proRechnung[nr];
         const inv = invByNumber[nr];
         // Nur wenn KEINE Stunde dieser Rechnung einen Schnappschuss hat - sonst gilt der gespeicherte.
@@ -8831,7 +8846,20 @@ function rekonstruierteDeckungUE(s, stdPrice) {
         // Stunde sind Rundung, keine Deckung.
         if (!(gedecktEur > 0.005 * (ls.length + 1)))
             return;
-        let restUE = guthabenDamals;
+        // Obergrenze: das Guthaben, das beim Abrechnen noch übrig war. Stunden mit früherem Datum
+        // hatten es chronologisch schon angebrochen - nicht abgerechnete (voll gedeckte) mit ihren
+        // ganzen UE, abgerechnete mit ihrer Deckung. Vorher galt das GANZE damalige Guthaben als
+        // Obergrenze; nach einer Preiserhöhung (voll mit dem heutigen Preis gerechnet) wurde dann
+        // mehr als gedeckt gelesen, als noch da war, und die nächste Rechnung fiel zu niedrig aus.
+        const erstesDatum = ls.reduce((m, l) => (m == null || (l.date || "") < m) ? (l.date || "") : m, null) || "";
+        const vorher = (s.drivenLessons || []).filter(x => ls.indexOf(x) < 0 && (x.date || "") < erstesDatum)
+            .reduce((sum, x) => {
+            const ue = (Number(x.minutes) || 0) / 45;
+            if (!x.invoiced)
+                return sum + ue;
+            return sum + Math.min(ue, x.invoicedCoveredUE != null ? (Number(x.invoicedCoveredUE) || 0) : (out[x.id] || 0));
+        }, 0);
+        let restUE = Math.max(0, guthabenDamals - vorher);
         ls.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).forEach(l => {
             const ue = (Number(l.minutes) || 0) / 45, preis = lessonPricePerUE(l, stdPrice);
             if (gedecktEur <= 0.005 || restUE <= 0 || !(preis > 0))
@@ -8844,26 +8872,93 @@ function rekonstruierteDeckungUE(s, stdPrice) {
     });
     return out;
 }
+// Damaliger Standardpreis je Rechnung für abgerechnete Stunden OHNE eigenen Preis und ohne
+// invoicedPrice-Schnappschuss (Altdaten vor dieser Änderung). Die Rechnung ist unveränderlich:
+// ihr Fahrstundenanteil (Summe minus mitberechnete Kostenposten) minus die Stunden mit eigenem
+// Preis, geteilt durch die berechneten UE der Stunden ohne Preis, ergibt genau den Preis, der
+// damals galt. Nur wenn die Deckung jeder Stunde feststeht (Schnappschuss oder gar kein Paket) -
+// die Rückrechnung der Deckung selbst braucht einen Preis, beides zugleich ist nicht bestimmbar.
+// abgerechnet: Map Stunde -> gedeckte UE (aus lessonBillables). Ergebnis: { Rechnungsnummer: Preis }.
+function abgerechneterStandardpreis(s, abgerechnet) {
+    const out = {};
+    const ohnePaket = packageCreditUE(s) <= 0;
+    const proRechnung = {};
+    abgerechnet.forEach((covered, l) => { (proRechnung[l.invoiced] = proRechnung[l.invoiced] || []).push(l); });
+    Object.keys(proRechnung).forEach(nr => {
+        const ls = proRechnung[nr];
+        const eigenerPreis = l => (l.invoicedPrice != null && l.invoicedPrice !== "") || (l.price != null && l.price !== "");
+        const ohne = ls.filter(l => !eigenerPreis(l));
+        if (ohne.length === 0)
+            return;
+        if (!ohnePaket && ls.some(l => l.invoicedCoveredUE == null))
+            return;
+        const inv = (s.invoices || []).find(x => x && x.number === nr);
+        if (!inv)
+            return;
+        const kosten = (s.costItems || []).filter(it => it.invoiced === nr).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+        let rest = (Number(inv.total) || 0) - kosten;
+        let ueOhne = 0;
+        ls.forEach(l => {
+            const billUE = (Number(l.minutes) || 0) / 45 - (abgerechnet.get(l) || 0);
+            if (eigenerPreis(l))
+                rest -= billUE * Number(l.invoicedPrice != null && l.invoicedPrice !== "" ? l.invoicedPrice : l.price);
+            else
+                ueOhne += billUE;
+        });
+        if (!(ueOhne > 0.001))
+            return;
+        // Auf Cent: Preise werden in Cent eingegeben, die Positionen waren je Stunde auf Cent gerundet.
+        const preis = Math.round(rest / ueOhne * 100) / 100;
+        if (Number.isFinite(preis) && preis > 0)
+            out[nr] = preis;
+    });
+    return out;
+}
 function lessonBillables(s, stdPrice) {
     const lessons = (s.drivenLessons || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     let creditUE = packageCreditUE(s);
     const rekonstruiert = rekonstruierteDeckungUE(s, stdPrice);
+    // Zweistufig: ZUERST ziehen alle schon abgerechneten Stunden ihre festgeschriebene Deckung vom
+    // Guthaben ab - unabhängig vom Datum -, erst DANACH wird der Rest chronologisch auf die offenen
+    // Stunden verteilt. Vorher lief alles in einem Durchlauf nach Datum: wurde eine Stunde mit
+    // FRÜHEREM Datum nachgetragen (vergessener Termin, confirmPastLesson), nahm sie das Guthaben,
+    // und die abgerechnete Stunde behielt trotzdem ihren Schnappschuss - gedeckt waren dann mehr UE,
+    // als das Paket hat, und die nächste Rechnung fiel um genau diesen Anteil zu niedrig aus
+    // (Abschluss-Audit: 10 von 9 UE gedeckt, 120 € statt 180 € berechnet).
+    const abgerechnet = new Map();
+    lessons.forEach(l => {
+        if (!l.invoiced)
+            return;
+        const ue = (Number(l.minutes) || 0) / 45;
+        // Bereits abgerechnete Stunde: die zum Rechnungszeitpunkt tatsächlich gedeckte UE
+        // liegt fest (invoicedCoveredUE-Schnappschuss aus confirmInvoice) und wird nicht neu
+        // berechnet - sonst würde ein SPÄTER dazugekauftes Paket rückwirkend eine schon
+        // bezahlte Stunde "abdecken" und das Guthaben fehlt dann bei den tatsächlich noch
+        // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten), wird er aus der
+        // Rechnung zurückgerechnet (rekonstruierteDeckungUE), höchstens aber so viel, wie
+        // noch Guthaben da ist; ist nichts rekonstruierbar, gilt 0.
+        const covered = l.invoicedCoveredUE != null
+            ? Math.min(ue, Number(l.invoicedCoveredUE) || 0)
+            : Math.min(ue, rekonstruiert[l.id] || 0, creditUE);
+        creditUE = Math.max(0, creditUE - covered);
+        abgerechnet.set(l, covered);
+    });
+    const damaligerStdPreis = abgerechneterStandardpreis(s, abgerechnet);
     return lessons.map(l => {
         const ue = (Number(l.minutes) || 0) / 45;
         if (l.invoiced) {
-            // Bereits abgerechnete Stunde: die zum Rechnungszeitpunkt tatsächlich gedeckte UE
-            // liegt fest (invoicedCoveredUE-Schnappschuss aus confirmInvoice) und wird nicht neu
-            // berechnet - sonst würde ein SPÄTER dazugekauftes Paket rückwirkend eine schon
-            // bezahlte Stunde "abdecken" und das Guthaben fehlt dann bei den tatsächlich noch
-            // offenen, künftigen Stunden. Fehlt der Schnappschuss (Altdaten), wird er aus der
-            // Rechnung zurückgerechnet (rekonstruierteDeckungUE), höchstens aber so viel, wie an
-            // dieser Stelle noch Guthaben da ist; ist nichts rekonstruierbar, gilt 0.
-            const covered = l.invoicedCoveredUE != null
-                ? Math.min(ue, Number(l.invoicedCoveredUE) || 0)
-                : Math.min(ue, rekonstruiert[l.id] || 0, creditUE);
-            creditUE = Math.max(0, creditUE - covered);
+            const covered = abgerechnet.get(l) || 0;
             const billableUE = ue - covered;
-            const amount = Math.round(billableUE * lessonPricePerUE(l, stdPrice) * 100) / 100;
+            // Der Betrag einer abgerechneten Stunde steht auf der Rechnung fest - er darf sich nicht
+            // mit einer späteren Änderung des Standardpreises mitbewegen (sonst "offen: 10 €" samt
+            // Zahlungserinnerung bei voll bezahlter Rechnung, Abschluss-Audit). Deshalb der beim
+            // Abrechnen festgeschriebene Preis (invoicedPrice), bei Altdaten ohne ihn der aus der
+            // Rechnung zurückgerechnete damalige Standardpreis, erst zuletzt der heutige.
+            const preis = l.invoicedPrice != null && l.invoicedPrice !== "" && Number.isFinite(Number(l.invoicedPrice))
+                ? Number(l.invoicedPrice)
+                : (l.price != null && l.price !== "") ? Number(l.price)
+                    : (damaligerStdPreis[l.invoiced] != null ? damaligerStdPreis[l.invoiced] : lessonPricePerUE(l, stdPrice));
+            const amount = Math.round(billableUE * preis * 100) / 100;
             return { lesson: l, ue, coveredUE: covered, billableUE, amount };
         }
         const covered = Math.min(ue, creditUE);
@@ -8981,6 +9076,16 @@ function parseKontoauszug(text) {
 // andere auf der Bank - vorher liefen auch Bargeld und Gutscheine über die Bank, der Kontostand
 // laut Buchhaltung stimmte dann nie mit dem Kontoauszug überein (F-M4). Was nicht exportiert
 // werden kann (kein Datum, Betrag nicht positiv), wird gezählt statt still verworfen (F-N12).
+// Steuerstatus (§19 UStG ja/nein) einer Rechnung: das eigene Feld, bei Altrechnungen ohne Feld der
+// heutige Stand der Fahrschule (fallback). Eine Stornorechnung übernimmt IMMER den aufgelösten
+// Status ihrer Originalrechnung: cancel_invoice setzt bei einer Altrechnung ohne Feld fest
+// "kleinunternehmer: false" - bei einer §19-Fahrschule wies das Storno dann 19 % USt aus und
+// buchte im DATEV auf erloes_19 gegen, das Original aber auf erloes_frei (Abschluss-Audit).
+function rechnungKleinunternehmer(s, inv, fallback) {
+    const orig = inv && inv.stornoOf ? ((s && s.invoices) || []).find(x => x && x.number === inv.stornoOf) : null;
+    const quelle = orig || inv;
+    return quelle && quelle.kleinunternehmer != null ? !!quelle.kleinunternehmer : !!fallback;
+}
 function datevZahlungsart(method) {
     const m = String(method || "").trim();
     if (/^gutschein/i.test(m))
@@ -9000,7 +9105,7 @@ function datevBuchungsliste(stuList, jahr, monat, k, nameOf) {
             if (!inMonat(inv.date)) return;
             const brutto = Math.round((Number(inv.total) || 0) * 100) / 100;
             if (Math.abs(brutto) <= 0.005) return;
-            const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : k.kUntFallback;
+            const kUnt = rechnungKleinunternehmer(s, inv, k.kUntFallback);
             if (kUnt) out.brauchtFrei = true;
             out.buchungen.push({ umsatz: Math.abs(brutto), sh: brutto > 0 ? "S" : "H", konto: k.debitor,
                 gegenkonto: kUnt ? k.erloesFrei : k.erloes19, bu: "",
@@ -9100,11 +9205,43 @@ function tageUeberfaellig(inv, zahlungszielTage, heuteMs) {
         return null;
     return Math.floor((heuteMs - new Date(f).getTime()) / 86400000);
 }
-// Auf eine bestimmte Rechnung verbuchte Zahlungen. Zahlungen ohne invoiceId sind
-// Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
+// Auf die Rechnungen angerechnete Zahlungen als { invoiceId: Betrag }. Zahlungen ohne invoiceId
+// sind Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
 // damit eine Rechnung nur dann als bezahlt gilt, wenn das auch so erfasst wurde.
+// Überzahlung einer gültigen Rechnung ist Guthaben: der Überhang wird den anderen gültigen,
+// noch offenen Rechnungen angerechnet, die älteste zuerst. Anlass (Abschluss-Audit zu F-H2): beim
+// Storno umgebuchte Zahlungen landen komplett auf der NÄCHSTEN Rechnung (confirmInvoice); war die
+// kleiner (Ersatzrechnung aufgeteilt, oder vorher eine Prüfungsgebühr abgerechnet), war sie
+// unsichtbar überzahlt, die Folgerechnung galt als offen, wurde überfällig und gemahnt, obwohl der
+// Saldo 0 war. Bewusst als Rechnung und nicht durch Aufteilen der Zahlung: eine schon gedruckte
+// Quittung und der DATEV-Export behalten so den tatsächlich erhaltenen Betrag. Stornierte
+// Rechnungen und Stornorechnungen geben keinen Überhang ab und nehmen keinen an.
+function rechnungsZahlungen(s) {
+    const direkt = {};
+    ((s && s.payments) || []).forEach(p => { if (p && p.invoiceId)
+        direkt[p.invoiceId] = (direkt[p.invoiceId] || 0) + (Number(p.amount) || 0); });
+    const out = Object.assign({}, direkt);
+    const gueltig = ((s && s.invoices) || []).filter(inv => inv && inv.id && !inv.cancelledBy && !inv.stornoOf);
+    let ueberhang = gueltig.reduce((sum, inv) => sum + Math.max(0, (direkt[inv.id] || 0) - (Number(inv.total) || 0)), 0);
+    gueltig.slice().sort((a, b) => String(a.date || "").localeCompare(String(b.date || ""))).forEach(inv => {
+        if (ueberhang <= 0.005)
+            return;
+        const offen = Math.round(((Number(inv.total) || 0) - (direkt[inv.id] || 0)) * 100) / 100;
+        if (offen <= 0.005)
+            return;
+        const anteil = Math.min(offen, ueberhang);
+        out[inv.id] = (out[inv.id] || 0) + anteil;
+        ueberhang -= anteil;
+    });
+    return out;
+}
 function invoicePaid(s, invId) {
-    return (s.payments || []).filter(p => p.invoiceId === invId)
+    return rechnungsZahlungen(s)[invId] || 0;
+}
+// Nur die direkt auf diese Rechnung gebuchten Zahlungen (ohne angerechneten Überhang) - für das
+// Umbuchen beim Storno, das genau diese Zahlungen verschiebt.
+function invoicePaidDirekt(s, invId) {
+    return ((s && s.payments) || []).filter(p => p.invoiceId === invId)
         .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 }
 // Offener Restbetrag einer Rechnung (nie negativ).
@@ -9348,6 +9485,10 @@ function ToastConfirmHost() {
     }, []);
     function resolve(val) { if (confirmState)
         confirmState.resolve(val); setConfirmState(null); }
+    // Wegtippen/Escape: normalerweise wie "Abbrechen" (false). Rückfragen, bei denen "Nein" selbst
+    // eine Entscheidung ist, übergeben abortValue (z.B. null) - sonst würde ein Wegtippen als
+    // "Nein" gelten und die Aktion trotzdem ausführen (Storno-Rückfrage, Abschluss-Audit).
+    function dismiss() { resolve(confirmState && "abortValue" in confirmState ? confirmState.abortValue : false); }
     function resolvePrompt(val) { if (promptState)
         promptState.resolve(val); setPromptState(null); }
     useEffect(() => {
@@ -9356,7 +9497,7 @@ function ToastConfirmHost() {
             if (e.key !== "Escape") return;
             e.stopImmediatePropagation();
             if (promptState) resolvePrompt(null);
-            else if (confirmState) resolve(false);
+            else if (confirmState) dismiss();
         }
         document.addEventListener("keydown", onEsc, true);
         return () => document.removeEventListener("keydown", onEsc, true);
@@ -9367,7 +9508,7 @@ function ToastConfirmHost() {
         toast && React.createElement("div", { key: toast.key, role: toast.tone === "error" ? "alert" : "status", "aria-live": toast.tone === "error" ? "assertive" : "polite", "aria-atomic": "true", onClick: () => setToast(null), title: "Zum Ausblenden tippen", className: "kb-lift", style: { cursor: "pointer", position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
                 background: toast.tone === "error" ? "#B32E22" : "var(--ink)", color: toast.tone === "error" ? "#fff" : "var(--canvas)", padding: "12px 18px", borderRadius: "var(--r-pill)", fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
                 boxShadow: "0 10px 30px rgba(0,0,0,.35)", textAlign: "center", lineHeight: 1.4, whiteSpace: "pre-line" } }, toast.msg),
-        confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        confirmState && React.createElement("div", { onClick: () => dismiss(), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 confirmState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, confirmState.title),
@@ -9382,7 +9523,8 @@ function ToastConfirmHost() {
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 8, background: "#B32E22", color: "#fff", border: "none" }, onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"))
                     : React.createElement(React.Fragment, null,
                         React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"),
-                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen")))),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"),
+                        confirmState.abortLabel && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => dismiss() }, confirmState.abortLabel)))),
         promptState && React.createElement("div", { onClick: () => resolvePrompt(null), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -17514,6 +17656,13 @@ function App() {
     // XRechnung-XML zu einer Rechnung erzeugen und herunterladen. Firmenkundendaten stehen am
     // Schueler (firmaName/firmaUstId/...), Verkaeuferdaten in den Rechnungsdaten der Fahrschule.
     function xrechnungHerunterladen(inv, stu) {
+        // Eine stornierte Rechnung (oder die Stornorechnung selbst) wäre als XRechnung eine
+        // zahlbare Rechnung (Typ 380, Fälligkeit, IBAN, voller Betrag) ohne Stornohinweis - wie
+        // beim Girocode gesperrt (F-M5, Abschluss-Audit).
+        if (!inv || inv.cancelledBy || inv.stornoOf) {
+            showToast("Für eine stornierte Rechnung gibt es keine E-Rechnung.");
+            return;
+        }
         try {
             const iv = (school && school.invoice_settings) || {};
             if (!iv.ustId && !iv.steuernummer) {
@@ -17570,6 +17719,7 @@ function App() {
             }
             const out = buildXRechnung({
                 inv,
+                leistung: rechnungsLeistungszeitraum(stu, inv),
                 seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
                     plz: vk.plz, ort: vk.ort, ustId: iv.ustId || "", steuernummer: iv.steuernummer || "",
                     iban: ibanPruefung.iban, tel: vkTel, email: vkMail },
@@ -18053,7 +18203,11 @@ function App() {
             return;
         }
         if (p.action === "zahlung") {
-            const stu = students.find(s => s.id === p.studentId);
+            // Gleiche Regeln wie savePaymentForm (Abschluss-Audit): aktueller Stand statt Render-
+            // Stand, ISO-Datum Pflicht (sonst fällt die Zahlung aus jedem DATEV-Monat), eigene id
+            // (printReceipt findet sie sonst nur über den Index) und die Zahlart - ohne sie buchte
+            // der DATEV-Export auch "bar bezahlt" aufs Bankkonto statt in die Kasse.
+            const stu = (studentsRef.current || []).find(s => s.id === p.studentId);
             if (!stu) {
                 showToast("Schüler nicht gefunden. Bitte erneut versuchen.");
                 return;
@@ -18063,7 +18217,13 @@ function App() {
                 showToast("Betrag ungültig. Bitte erneut versuchen.");
                 return;
             }
-            const pays = [...(stu.payments || []), { date: p.date || today0(), amount }];
+            const datum = p.date ? String(p.date).trim() : today0();
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(datum)) {
+                showToast("Datum der Zahlung nicht erkannt. Bitte mit Datum erneut versuchen oder über \u201EZahlung erfassen\u201C eintragen.");
+                return;
+            }
+            const method = typeof p.method === "string" ? p.method.trim().slice(0, 40) : "";
+            const pays = [...(stu.payments || []), { id: uniqueId("pay"), date: datum, amount, method }];
             writeStudent({ ...stu, payments: pays });
             setActiveId(stu.id);
             setAssistant(null);
@@ -22262,7 +22422,10 @@ function App() {
         if (cur) {
             const coveredById = {};
             lessonBillables(cur, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
-            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0 } : l);
+            // Auch den Preis je UE festschreiben (invoicedPrice): bei Stunden ohne eigenen Preis gilt
+            // sonst immer der HEUTIGE Standardpreis, und eine spätere Preisänderung verschob den
+            // Saldo einer längst bezahlten Rechnung (Abschluss-Audit, siehe lessonBillables).
+            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0, invoicedPrice: lessonPricePerUE(l, Number(pricePerHour) || 0) } : l);
             const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
             const invoices = [...(cur.invoices || []), inv];
             // Beim Storno vorgemerkte Zahlungen (siehe cancelInvoice) gehören jetzt zu dieser Rechnung.
@@ -22297,14 +22460,21 @@ function App() {
         // (Standard: ja). Die Ersatzrechnung gibt es in diesem Moment noch nicht - die Zahlungen
         // werden bis dahin als "umbuchenVon" vorgemerkt und von confirmInvoice() der nächsten
         // Rechnung dieses Schülers zugeordnet.
-        const bezahlt = invoicePaid(active, inv.id);
+        const bezahlt = invoicePaidDirekt(active, inv.id);
         let umbuchen = false;
         if (bezahlt > 0.005) {
+            // Drei Ausgänge: Ja / Nein / Abbrechen. Wegtippen oder Escape brechen den GANZEN Storno
+            // ab (abortValue null) - vorher galt das als "Nein", der Storno lief mit einer
+            // unwiderruflichen Nummer trotzdem durch und die Zahlungen blieben an der stornierten
+            // Rechnung hängen (genau der Ausgangsfehler F-H2, Abschluss-Audit).
             umbuchen = await askConfirm({
                 title: "Zahlungen übernehmen?",
                 message: "Auf " + inv.number + " sind schon " + eurFmt(bezahlt) + " eingegangen. Sollen diese Zahlungen der nächsten Rechnung (Ersatzrechnung) gutgeschrieben werden?\n\nBei \u201ENein\u201C bleiben sie bei der stornierten Rechnung, etwa wenn du das Geld zurückzahlst.",
                 confirmLabel: "Ja, gutschreiben", cancelLabel: "Nein", danger: false,
+                abortLabel: "Storno abbrechen", abortValue: null,
             });
+            if (umbuchen === null)
+                return;
         }
         let storno;
         try {
@@ -22320,7 +22490,7 @@ function App() {
         // (gleicher Bug, gleicher Fix - siehe dortiger Kommentar).
         const cur = (studentsRef.current || []).find(s => s.id === active.id);
         if (cur) {
-            const drivenLessons = (cur.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, ...rest } = l; return rest; })() : l);
+            const drivenLessons = (cur.drivenLessons || []).map(l => l.invoiced === inv.number ? (() => { const { invoiced, invoicedCoveredUE, invoicedPrice, ...rest } = l; return rest; })() : l);
             const costItems = (cur.costItems || []).map(it => it.invoiced === inv.number ? (() => { const { invoiced, ...rest } = it; return rest; })() : it);
             const invoices = (cur.invoices || []).map(i => i.id === inv.id ? { ...i, cancelledBy: storno.number } : i).concat([storno]);
             const next = { ...cur, drivenLessons, costItems, invoices };
@@ -22600,7 +22770,11 @@ function App() {
             return;
         }
         const stage = laufendeErinnerungen(active).length + 1;
-        const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
+        // Die jüngste GÜLTIGE, noch offene Rechnung nennen - nicht einfach das letzte Element:
+        // cancel_invoice hängt die Stornorechnung hinten an, die Erinnerung nannte dann die Nummer
+        // der Gutschrift, und eine Überweisung mit dieser Nummer konnte der Kontoauszug-Abgleich
+        // nicht zuordnen (Abschluss-Audit). Gibt es keine offene Rechnung, keine Nummer nennen.
+        const lastInvoice = (active.invoices || []).filter(iv => iv && !iv.cancelledBy && !iv.stornoOf && invoiceOpen(active, iv) > 0.005).slice(-1)[0] || null;
         const text = reminderText(stage, active, open, lastInvoice);
         const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
         const reminders = [...(active.reminders || []), { date: ymd(new Date()), stage, amount: open, gezahltBis: Math.round(sumPayments(active) * 100) / 100 }];
@@ -22953,7 +23127,7 @@ function App() {
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(inv.total))),
                     // XRechnung nur bei Firmenkunden anbieten - fuer Privatkunden gibt es weder
                     // eine Pflicht noch einen Empfaenger, der etwas damit anfangen kann.
-                    active.istFirmenkunde && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
+                    active.istFirmenkunde && !inv.stornoOf && !inv.cancelledBy && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
                     !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); cancelInvoice(inv); }, "aria-label": "Rechnung stornieren", title: "Rechnung stornieren", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", fontSize: 12, flexShrink: 0 } }, "Stornieren")))),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Ausbildungsvertrag"),
@@ -25377,8 +25551,18 @@ function App() {
                 const already = (appts || []).some(a => a.student_id === s.id && (a.status === "confirmed" || a.status === "pending" || a.status === "offered") && ymd(a.start_at) === dateKey);
                 if (already)
                     return;
-                const von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
+                let von = s.wunschliste.von > dayVon ? s.wunschliste.von : dayVon;
                 const bis = s.wunschliste.bis < dayBis ? s.wunschliste.bis : dayBis;
+                // Heute erst ab der nächsten vollen Viertelstunde suchen, wie freieLueckenAmTag
+                // (H-M6): sonst schlug der Radar nachmittags "08:00 – 08:45" vor, und "Anbieten"
+                // legte ein Angebot in der Vergangenheit an - statt des noch freien
+                // Nachmittagsfensters (Abschluss-Audit).
+                if (i === 0) {
+                    const { hour, minute } = berlinParts(new Date());
+                    const ab = fromMin(Math.ceil((hour * 60 + minute) / 15) * 15);
+                    if (ab > von)
+                        von = ab;
+                }
                 // Warteliste-Angebote tragen keine student_id (jeder passende Schüler sieht sie) -
                 // die Prüfung oben greift für sie also nie. Liegt an diesem Tag schon ein Angebot
                 // für seine Klasse in seinem Wunschfenster, ist er versorgt; sonst rückte nach
@@ -30074,7 +30258,7 @@ function App() {
             const rows = [];
             students.filter(s => s._isMine).forEach(s => {
                 (s.invoices || []).forEach(inv => {
-                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
+                    const kUnt = rechnungKleinunternehmer(s, inv, kUntFallback);
                     const total = Number(inv.total) || 0;
                     const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
                     const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -31032,7 +31216,7 @@ function App() {
         // nicht den heutigen Stand der Fahrschule - sonst würde ein späterer Wechsel §19 UStG <->
         // Regelbesteuerung alle bereits gestellten Rechnungen rückwirkend falsch ausweisen. Nur
         // bei Altrechnungen von vor diesem Fix (Feld fehlt) auf den aktuellen Stand zurückfallen.
-        const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!iv.kleinunternehmer;
+        const kUnt = rechnungKleinunternehmer(active, inv, !!iv.kleinunternehmer);
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -31875,7 +32059,11 @@ function App() {
                                         " \u20AC")),
                                 React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 14 } },
                                     React.createElement("span", { style: { color: "var(--muted)" } }, "Datum"),
-                                    React.createElement("span", { style: { fontWeight: 600 } }, dLabel))),
+                                    React.createElement("span", { style: { fontWeight: 600 } }, dLabel)),
+                                // Zahlart sichtbar machen: sie entscheidet im DATEV-Export über Kasse oder Bank.
+                                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "4px 0", fontSize: 14 } },
+                                    React.createElement("span", { style: { color: "var(--muted)" } }, "Zahlart"),
+                                    React.createElement("span", { style: { fontWeight: 600 } }, (typeof p.method === "string" && p.method.trim()) || "nicht angegeben"))),
                             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 14 } }, "Bitte pr\u00FCfen und best\u00E4tigen. Erst dann wird die Zahlung erfasst."),
                             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, onClick: () => runAssistantAction(p) }, "Best\u00E4tigen und erfassen"),
                             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAssistant(a => ({ ...a, proposal: null })) }, "Doch anders"));
@@ -37785,7 +37973,11 @@ function PayerPage({ code }) {
             React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Dieser Zahler-Link ist nicht (mehr) gültig. Bitte bei der Fahrschule nachfragen."));
     const invoices = (data.invoices || []).filter(inv => !inv.cancelledBy && !inv.stornoOf).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
     const payments = data.payments || [];
-    const paidFor = id => payments.filter(p => p.invoiceId === id).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    // Dieselbe Anrechnung wie in der App (rechnungsZahlungen): ein Überhang aus einer überzahlten
+    // Rechnung deckt die übrigen - sonst sähe der Zahler eine Rechnung als offen, die intern
+    // längst als bezahlt gilt.
+    const verteilt = rechnungsZahlungen({ invoices, payments });
+    const paidFor = id => verteilt[id] || 0;
     const name = [data.vorname, data.name].filter(Boolean).join(" ");
     const gesamt = invoices.reduce((s, i) => s + (Number(i.total) || 0), 0);
     const bezahlt = invoices.reduce((s, i) => s + Math.min(paidFor(i.id), Number(i.total) || 0), 0);
