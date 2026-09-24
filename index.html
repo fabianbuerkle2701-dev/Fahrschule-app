@@ -8695,17 +8695,29 @@ function rekonstruierteDeckungUE(s, stdPrice) {
             return;
         const kosten = (s.costItems || []).filter(it => it.invoiced === nr).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
         const berechnet = (Number(inv.total) || 0) - kosten;
+        // Nur Pakete, die es am Rechnungstag schon gab (Pakete ohne Datum zählen mangels Wissen
+        // mit). Sonst würde bei einer Rechnung VOR dem Paketkauf jede Preisabweichung - etwa eine
+        // seither erhöhte Standardpreis-Stunde ohne eigenen Preis - als "gedeckt" gelesen und dem
+        // später gekauften Paket Guthaben entziehen; die nächste Rechnung fiele dann zu hoch aus.
+        const guthabenDamals = (s.packages || []).filter(p => !p.date || !inv.date || String(p.date) <= String(inv.date))
+            .reduce((sum, p) => sum + (Number(p.includedUE) || 0), 0);
+        if (!(guthabenDamals > 0))
+            return;
         const voll = ls.reduce((sum, l) => sum + ((Number(l.minutes) || 0) / 45) * lessonPricePerUE(l, stdPrice), 0);
         let gedecktEur = Math.round((voll - berechnet) * 100) / 100;
-        if (!(gedecktEur > 0.005))
+        // Jede Position wurde einzeln auf Cent gerundet - Abweichungen bis zu einem halben Cent je
+        // Stunde sind Rundung, keine Deckung.
+        if (!(gedecktEur > 0.005 * (ls.length + 1)))
             return;
+        let restUE = guthabenDamals;
         ls.slice().sort((a, b) => (a.date || "").localeCompare(b.date || "")).forEach(l => {
             const ue = (Number(l.minutes) || 0) / 45, preis = lessonPricePerUE(l, stdPrice);
-            if (gedecktEur <= 0.005 || !(preis > 0))
+            if (gedecktEur <= 0.005 || restUE <= 0 || !(preis > 0))
                 return;
-            const c = Math.min(ue, gedecktEur / preis);
+            const c = Math.min(ue, gedecktEur / preis, restUE);
             out[l.id] = c;
             gedecktEur -= c * preis;
+            restUE -= c;
         });
     });
     return out;
