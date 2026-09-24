@@ -11006,6 +11006,22 @@ function formSchnappschuss(obj) {
         return null;
     }
 }
+// Öffentliche Adresse der App für Links, die AUSSERHALB der App weiterleben (Kalender-Abo,
+// Audit I-N23). Vorher fest "allindrive.netlify.app" - ein Umzug hätte jedes neu eingerichtete
+// Abo an die alte Adresse gebunden. Die native App lädt über server.url (mobile/*/capacitor.config.json)
+// dieselbe https-Adresse wie der Browser; nur wenn die Seite von keiner echten https-Adresse
+// kommt (lokaler Test, capacitor://), greift diese zentrale Rückfall-Adresse - bei einem Umzug
+// hier und in server.url anpassen.
+const APP_OEFFENTLICHE_URL = "https://app.allindrive.app";
+function oeffentlicheBasisUrl() {
+    try {
+        const o = window.location.origin || "";
+        if (/^https:\/\//i.test(o) && !/^https:\/\/(localhost|127\.|\[::1\])/i.test(o))
+            return o;
+    }
+    catch (e) { }
+    return APP_OEFFENTLICHE_URL;
+}
 // Welche Einstellungs-Zeilen nur für einen Fahrschul-Admin bzw. den zentralen App-Admin sichtbar/
 // erreichbar sind - ersetzt die alte settingsTab==="admin"-Prüfung, jetzt pro Zeile statt pro Tab.
 const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "gutscheine", "loeschprotokoll", "personalunterlagen"]);
@@ -11960,8 +11976,6 @@ function App() {
     }
     function saveDatevSettings(patch) { if (school)
         writeSchool(s => s && ({ ...s, datev_settings: { ...(s.datev_settings || {}), ...patch } })); }
-    function saveLocations(list) { if (school)
-        writeSchool(s => s && ({ ...s, locations: list })); }
     const [stuSig, setStuSig] = useState(null);
     const [updateToast, setUpdateToast] = useState(false);
     const [showChangelog, setShowChangelog] = useState(false);
@@ -25371,8 +25385,12 @@ function App() {
         const a = document.createElement("a");
         a.href = url;
         a.download = "schuelerdaten-" + dispName(stu).replace(/[^\wäöüÄÖÜß]+/g, "-").toLowerCase() + ".json";
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        // Erst später freigeben (Audit I-M13): Safari/iOS und die App-WebView holen die Datei erst
+        // nach dem click() ab - ein sofortiges revokeObjectURL() ließ den Download ins Leere laufen.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
     function renderAufbewahrung() {
         const archiviert = (students || []).filter(s => s.archived && s._isMine)
@@ -25727,6 +25745,8 @@ function App() {
             }
         }
         const nativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+        // Kalender-Abo-Link auf der Adresse, unter der die App gerade läuft (Audit I-N23).
+        const kalenderAboUrl = oeffentlicheBasisUrl() + "/.netlify/functions/calendar-feed?token=" + encodeURIComponent(calendarFeedToken || "");
         // ── Live-Status je Zeile: echte aktuelle Werte statt nur ein Titel ──
         // Audit I-N14: vorher zählte jeder Tag mit irgendeiner Zeit als "eingerichtet", und ohne
         // Zeiten hieß es "rund um die Uhr buchbar" - auch wenn alle Tage gesperrt waren oder die
@@ -26178,12 +26198,12 @@ function App() {
                                     } }, calendarFeedBusy ? "Wird eingerichtet…" : "Abo-Link erzeugen")
                                 : React.createElement(React.Fragment, null,
                                     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
-                                        React.createElement("input", { readOnly: true, value: "https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, onFocus: e => e.target.select(), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "var(--field-bg)", color: "var(--muted)" } })),
+                                        React.createElement("input", { readOnly: true, value: kalenderAboUrl, onFocus: e => e.target.select(), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "var(--field-bg)", color: "var(--muted)" } })),
                                     React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
-                                        React.createElement("a", { href: "webcal://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, className: "btn btn-primary", style: { flex: "1 1 auto", textAlign: "center" } }, "In Kalender-App öffnen"),
+                                        React.createElement("a", { href: kalenderAboUrl.replace(/^https:/, "webcal:"), className: "btn btn-primary", style: { flex: "1 1 auto", textAlign: "center" } }, "In Kalender-App öffnen"),
                                         React.createElement("button", { className: "btn btn-ghost", onClick: async () => {
                                                 try {
-                                                    await navigator.clipboard.writeText("https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken);
+                                                    await navigator.clipboard.writeText(kalenderAboUrl);
                                                     showToast("Link kopiert");
                                                 }
                                                 catch (err) {
@@ -26341,13 +26361,13 @@ function App() {
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             locations.length === 0 && !locEdit &&
                                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12 } }, "Noch keine Standorte angelegt. Lege für jede Filiale einen Standort an, dem du dann Schüler zuweisen kannst."),
-                            locations.map((loc, i) => React.createElement("div", { key: i, style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : "1px solid var(--line)" } },
+                            locations.map((loc, i) => React.createElement("div", { key: loc.id || i, style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : "1px solid var(--line)" } },
                                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, loc.name),
                                     (loc.street || loc.zip || loc.city) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, [loc.street, [loc.zip, loc.city].filter(Boolean).join(" ")].filter(Boolean).join(", ")),
                                     (loc.phone || loc.email) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, [loc.phone, loc.email].filter(Boolean).join(" · "))),
                                 React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } },
-                                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
+                                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, id: loc.id || null, orig: loc, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => { if (await askConfirm({ message: "Standort \"" + loc.name + "\" löschen? Zugewiesene Schüler verlieren die Zuordnung." })) {
                                             // Server räumt zuerst ALLE betroffenen Schüler auf (auch die anderer
                                             // Fahrlehrer, die der Client gar nicht geladen hat) und die eigene
@@ -26395,11 +26415,22 @@ function App() {
                                                 showToast("Bitte einen Namen für den Standort eingeben.");
                                                 return;
                                             }
-                                            const entry = { id: (locEdit.index !== null && locations[locEdit.index] && locations[locEdit.index].id) || uniqueId("loc"),
-                                                name: locEdit.name.trim(), street: locEdit.street.trim(), zip: locEdit.zip.trim(), city: locEdit.city.trim(),
-                                                phone: locEdit.phone.trim(), email: locEdit.email.trim() };
-                                            const next = locEdit.index === null ? [...locations, entry] : locations.map((l, j) => j === locEdit.index ? entry : l);
-                                            saveLocations(next);
+                                            // Audit I-N16: vorher per Index aus dem Render beim Öffnen - wurde in der
+                                            // Zwischenzeit ein anderer Standort gelöscht (hier oder in einer anderen
+                                            // Sitzung), überschrieb "Speichern" den falschen. Jetzt über die ID (bzw. das
+                                            // Objekt selbst bei alten Einträgen ohne ID) im AKTUELLEN Stand; ist der
+                                            // Standort inzwischen weg, wird die Eingabe als neuer angehängt statt verworfen.
+                                            const le = locEdit;
+                                            const entry = { id: le.id || uniqueId("loc"),
+                                                name: le.name.trim(), street: le.street.trim(), zip: le.zip.trim(), city: le.city.trim(),
+                                                phone: le.phone.trim(), email: le.email.trim() };
+                                            writeSchool(sc => {
+                                                if (!sc)
+                                                    return sc;
+                                                const liste = Array.isArray(sc.locations) ? sc.locations : [];
+                                                const i = le.index === null ? -1 : liste.findIndex(x => x === le.orig || (le.id && x.id === le.id));
+                                                return { ...sc, locations: i < 0 ? [...liste, entry] : liste.map((l, j) => j === i ? entry : l) };
+                                            });
                                             setLocEdit(null);
                                         } }, "Speichern"),
                                     React.createElement("button", { className: "btn btn-ghost", onClick: () => setLocEdit(null) }, "Abbrechen"))) : React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 12 }, onClick: () => setLocEdit({ index: null, name: "", street: "", zip: "", city: "", phone: "", email: "" }) }, "+ Standort hinzufügen"))
@@ -26955,7 +26986,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Fahrtenbuch konnte nicht exportiert werden.", "error");
@@ -27130,7 +27162,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Rechnungen konnten nicht exportiert werden.");
@@ -27148,7 +27181,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Backup konnte nicht erstellt werden.", "error");
@@ -29729,8 +29763,10 @@ function App() {
                             return React.createElement("div", { className: "card", style: { margin: "14px 16px 0", padding: "13px 14px" } },
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", marginBottom: 7 } }, "Teilbarer Link f\u00FCr Fahrlehrer ohne App"),
                                 React.createElement("div", { style: { fontSize: 12.5, wordBreak: "break-all", background: "var(--field-bg)", borderRadius: 9, padding: "9px 11px", marginBottom: 9 } }, link),
-                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => { try {
-                                        navigator.clipboard.writeText(link);
+                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => { try {
+                                        // Audit I-N20: writeText ist asynchron - ohne await kam "Link kopiert."
+                                        // auch dann, wenn das Kopieren abgelehnt wurde (z.B. Safari ohne Fokus).
+                                        await navigator.clipboard.writeText(link);
                                         showToast("Link kopiert.");
                                     }
                                     catch (e) {
