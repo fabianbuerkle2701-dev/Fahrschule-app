@@ -11811,6 +11811,10 @@ function App() {
       return () => clearTimeout(_tt);
     }, [tourStep, tourOn, students]);
     const [videos, setVideos] = useState(null); // null=noch nicht geladen
+    // Ladefehler als eigener Zustand statt "Noch keine Videos" (Audit I-N21); videosLadeNr stößt
+    // "Erneut versuchen" an.
+    const [videosFehler, setVideosFehler] = useState("");
+    const [videosLadeNr, setVideosLadeNr] = useState(0);
     const [videoUpload, setVideoUpload] = useState(null); // {file,title,category,busy,error}
     const [videoCat, setVideoCat] = useState(VIDEO_KATEGORIEN[0].code); // aktiver Kategorie-Reiter (Fahrlehrer-Ansicht)
     const [openSection, setOpenSection] = useState(null);
@@ -12146,6 +12150,8 @@ function App() {
     const [staffFiles, setStaffFiles] = useState(null); // null | Dateien des ausgewählten Fahrlehrers (Admin-Ansicht)
     const [staffUploading, setStaffUploading] = useState(false);
     const [myStaffFiles, setMyStaffFiles] = useState(null); // null | eigene Unterlagen (Fahrlehrer-Ansicht)
+    // "Meine Unterlagen": Laden sichtbar machen statt stumm (Audit I-N22) - {laedt, fehler}
+    const [myStaffFilesStatus, setMyStaffFilesStatus] = useState({ laedt: false, fehler: "" });
     // Für die Staleness-Prüfung beim Eintreffen von Datei-Listen (statt eines setState-Updaters mit
     // Nebenwirkung, den React nicht verlässlich sofort ausführt).
     const staffInstructorRef = useRef(staffInstructor);
@@ -13013,16 +13019,29 @@ function App() {
             catch (e) { }
         }
     }, [students, uid, birthdayNotify]);
+    // Nur von der Schul-ID abhängig, nicht vom ganzen school-Objekt: das ändert sich bei jeder
+    // Einstellung (Farbe, Preise, updated_at nach dem Speichern) und lud die Videos jedes Mal
+    // neu (Audit I-N21).
+    const videosSchoolId = (school && school.id) || null;
     useEffect(() => {
         if (view !== "videos" || !uid)
             return;
+        let abgebrochen = false;
         // Bei Fehler den bisherigen Stand behalten (nur beim allerersten Laden leere Liste statt
-        // endlos "Lädt…") und Bescheid geben - vorher sah ein Fehler aus wie "keine Videos".
-        fetchVideos(uid, school && school.id).then(setVideos).catch(e => {
+        // endlos "Lädt…") und den Fehler auf der Seite zeigen - vorher sah er aus wie "keine Videos".
+        fetchVideos(uid, videosSchoolId).then(list => {
+            if (abgebrochen)
+                return;
+            setVideos(list);
+            setVideosFehler("");
+        }).catch(e => {
+            if (abgebrochen)
+                return;
             setVideos(v => v === null ? [] : v);
-            showToast("Videos konnten nicht geladen werden:\n" + fehlerText(e), "error");
+            setVideosFehler(fehlerText(e));
         });
-    }, [view, uid, school]);
+        return () => { abgebrochen = true; };
+    }, [view, uid, videosSchoolId, videosLadeNr]);
     // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
     const [workHours, setWorkHours] = useState(null); // null solange nicht geladen
     const [workHoursError, setWorkHoursError] = useState("");
@@ -13296,7 +13315,9 @@ function App() {
             setStaffInstructor(null);
             setStaffFiles(null);
             setMyStaffFiles(null);
+            setMyStaffFilesStatus({ laedt: false, fehler: "" });
             setVideos(null);
+            setVideosFehler("");
             // Aufgeschobene Speichervorgänge von A nicht mehr laufen lassen (sonst schriebe z.B.
             // der Cache-Timer A's Schülerkartei nach dem Löschen wieder in den localStorage).
             dropPendingSaves();
@@ -13945,9 +13966,11 @@ function App() {
     }
     function loadMyStaffFiles() {
         setMyStaffFiles(null);
-        // Bei Fehler bleibt null -> der Knopf "Unterlagen laden" steht wieder da.
-        fetchStaffFiles(uid).then(list => setMyStaffFiles(list))
-            .catch(e => showToast("Unterlagen konnten nicht geladen werden:\n" + fehlerText(e), "error"));
+        // Ladezustand und Fehler direkt an der Stelle zeigen (Audit I-N22): vorher passierte nach
+        // dem Tipp sichtbar nichts, bis die Liste (oder nur ein kurzer Toast) kam.
+        setMyStaffFilesStatus({ laedt: true, fehler: "" });
+        fetchStaffFiles(uid).then(list => { setMyStaffFiles(list); setMyStaffFilesStatus({ laedt: false, fehler: "" }); })
+            .catch(e => setMyStaffFilesStatus({ laedt: false, fehler: fehlerText(e) }));
     }
     function loadStudentFiles() {
         if (!active)
@@ -26087,7 +26110,9 @@ function App() {
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Dateien, die dir ein Fahrschul-Admin hier hinterlegt hat, z.B. Lohnabrechnungen oder deinen Vertrag."),
                             myStaffFiles === null
-                                ? React.createElement("button", { className: "btn btn-ghost", onClick: loadMyStaffFiles }, "Unterlagen laden")
+                                ? React.createElement(React.Fragment, null,
+                                    myStaffFilesStatus.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, whiteSpace: "pre-line" } }, "Unterlagen konnten nicht geladen werden: ", myStaffFilesStatus.fehler),
+                                    React.createElement("button", { className: "btn btn-ghost", disabled: myStaffFilesStatus.laedt, onClick: loadMyStaffFiles }, myStaffFilesStatus.laedt ? "Lädt…" : myStaffFilesStatus.fehler ? "Erneut versuchen" : "Unterlagen laden"))
                                 : myStaffFiles.length === 0
                                     ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Unterlagen für dich hinterlegt.")
                                     : STAFF_CATEGORIES.map(c => { const files = myStaffFiles.filter(f => f.category === c.id); if (!files.length)
@@ -27221,6 +27246,11 @@ function App() {
                 const row = await uploadVideo(uid, school && school.id, videoUpload.file, videoUpload.title.trim(), videoUpload.category);
                 setVideos(v => [row, ...(v || [])]);
                 setVideoUpload(null);
+                // Rückmeldung und gleich die Kategorie des neuen Videos zeigen (Audit I-N21) -
+                // vorher verschwand nur das Formular, das Video landete ggf. in einem anderen Reiter.
+                if (row && row.category)
+                    setVideoCat(row.category);
+                showFlash("✓ Video hochgeladen");
             }
             catch (e) {
                 setVideoUpload(u => ({ ...u, busy: false, error: e.message || "Upload fehlgeschlagen." }));
@@ -27262,10 +27292,13 @@ function App() {
                         React.createElement("select", { value: videoUpload.category, onChange: e => setVideoUpload(u => ({ ...u, category: e.target.value })) }, VIDEO_KATEGORIEN.map(k => React.createElement("option", { key: k.code, value: k.code }, k.label))))),
                     videoUpload.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red,#B3362A)", marginBottom: 8 } }, videoUpload.error),
                     React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("button", { className: "btn btn-primary", disabled: videoUpload.busy, onClick: onUpload }, videoUpload.busy ? "Lädt hoch…" : "Hochladen"),
+                        React.createElement("button", { className: "btn btn-primary", disabled: videoUpload.busy, onClick: onUpload }, videoUpload.busy ? "Lädt hoch… bitte warten" : "Hochladen"),
                         React.createElement("button", { className: "btn btn-ghost", disabled: videoUpload.busy, onClick: () => setVideoUpload(null) }, "Abbrechen")))),
             videos === null && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "L\u00E4dt\u2026"),
-            videos !== null && list.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Videos hochgeladen."),
+            videosFehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, whiteSpace: "pre-line" } },
+                "Videos konnten nicht geladen werden: ", videosFehler, " ",
+                React.createElement("button", { onClick: () => { setVideosFehler(""); setVideosLadeNr(n => n + 1); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut versuchen")),
+            videos !== null && !videosFehler && list.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Videos hochgeladen."),
             videos !== null && list.length > 0 && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "seg", style: { marginBottom: 14, overflowX: "auto", flexWrap: "nowrap" } }, VIDEO_KATEGORIEN.map(k => React.createElement("button", { key: k.code, className: videoCat === k.code ? "on" : "", onClick: () => setVideoCat(k.code), style: { whiteSpace: "nowrap" } },
                     k.label,
