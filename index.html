@@ -33217,9 +33217,22 @@ function StudentArea({ code, info, appMode }) {
             return;
         setReflectForm(f => ({ ...f, busy: true, error: "" }));
         try {
-            await publicLessonReflectionSubmit(code, name, pin, reflectForm.lessonId, reflectForm.ratings, reflectForm.note);
+            const rf = reflectForm;
+            await publicLessonReflectionSubmit(code, name, pin, rf.lessonId, rf.ratings, rf.note);
             const fresh = await publicStudentLessons(code, name, pin);
-            setData(cur => cur ? { ...cur, lessons: fresh } : cur);
+            // publicStudentLessons liefert bei einem Nachladefehler null. Das landete bisher direkt
+            // in data.lessons - die ganze Fahrstundenliste verschwand hinter der Fehlerkarte, obwohl
+            // die Einschätzung längst gespeichert war. Dann die bisherige Liste behalten und nur die
+            // eine Stunde lokal als eingeschätzt markieren (die Fahrlehrer-Bewertung kommt beim
+            // nächsten Laden).
+            setData(cur => {
+                if (!cur)
+                    return cur;
+                if (Array.isArray(fresh))
+                    return { ...cur, lessons: fresh };
+                const alt = Array.isArray(cur.lessons) ? cur.lessons : [];
+                return { ...cur, lessons: alt.map(l => l && l.id === rf.lessonId ? { ...l, reflected: true, myRatings: rf.ratings } : l) };
+            });
             setReflectForm(null);
         }
         catch (e) {
@@ -33332,7 +33345,13 @@ function StudentArea({ code, info, appMode }) {
         setCancelBusy(a.id);
         const mySession = sessionIdRef.current;
         try {
-            await publicStudentCancelAppt(code, name.trim(), pin.trim(), a.id);
+            const res = await publicStudentCancelAppt(code, name.trim(), pin.trim(), a.id);
+            // Die RPC meldet Ablehnungen (PIN inzwischen geändert, Termin gehört nicht mehr dem
+            // Schüler, schon gelöscht) nicht als Fehler, sondern als Rückgabewert "error". Ohne
+            // diese Prüfung lief der Code einfach weiter - die Liste zeigte den Termin unverändert,
+            // aber ohne jede Meldung, und der Schüler glaubte, er habe abgesagt.
+            if (res !== "deleted" && res !== "requested")
+                throw new Error("cancel_" + res);
             // Überblick neu laden, damit der aktualisierte Status sofort erscheint
             const d = await publicStudentOverview(code, name.trim(), pin.trim());
             // Nicht mehr übernehmen, wenn zwischenzeitlich (Abmelden + jemand anderes loggt sich
@@ -33342,7 +33361,8 @@ function StudentArea({ code, info, appMode }) {
                 setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
         }
         catch (e) {
-            setCancelErr(t("err_cancel"));
+            if (sessionIdRef.current === mySession)
+                setCancelErr(t("err_cancel"));
         }
         setCancelBusy("");
     }
@@ -33391,6 +33411,8 @@ function StudentArea({ code, info, appMode }) {
         setData(null);
         setPin("");
         setErr("");
+        setClaimMsg(null); // "Termin gesichert" gehört dem abgemeldeten Schüler
+        setCancelErr("");
         // Auf einem geteilten Gerät sonst noch der volle Name der/des vorherigen Fahrschülerin/
         // Fahrschülers in der Login-Maske sichtbar (nur der PIN wurde bisher zurückgesetzt), und
         // ein automatischer Login-Versuch beim nächsten Öffnen würde weiterhin unter diesem Namen
@@ -33498,33 +33520,44 @@ function StudentArea({ code, info, appMode }) {
         setWlBusy(false);
     }
     const [claimBusy, setClaimBusy] = React.useState("");
-    const [claimMsg, setClaimMsg] = React.useState("");
+    // Meldung gehört zu GENAU einem Angebot ({id, text}). Vorher ein einziger String für alle
+    // Karten: bei zwei Angeboten stand "schon vergeben" auf beiden, und die Erfolgsmeldung war
+    // nie zu sehen, weil die gesicherte Karte im selben Moment aus der Liste verschwindet -
+    // "ok" wird deshalb getrennt oberhalb der Angebote angezeigt.
+    const [claimMsg, setClaimMsg] = React.useState(null); // null | {id, key}
     async function claimOffer(offerId) {
         setClaimBusy(offerId);
-        setClaimMsg("");
+        setClaimMsg(null);
         const mySession = sessionIdRef.current;
+        // Meldung nur für die Sitzung, die den Klick ausgelöst hat (geteiltes Gerät, siehe
+        // sessionIdRef). Gespeichert wird der Übersetzungsschlüssel, nicht der Text - sonst
+        // bliebe die Meldung nach einem Sprachwechsel in der alten Sprache stehen.
+        const melde = (key) => { if (sessionIdRef.current === mySession)
+            setClaimMsg({ id: offerId, key }); };
+        let res;
         try {
-            const res = await publicClaimAppointmentOffer(code, name.trim(), pin.trim(), offerId);
-            if (res === "ok") {
-                // Beide setData()-Aufrufe nur übernehmen, wenn zwischenzeitlich nicht ab- und als
-                // jemand anderes wieder eingeloggt wurde, siehe sessionIdRef-Kommentar oben.
-                if (sessionIdRef.current === mySession)
-                    setData(cur => cur ? { ...cur, offers: (cur.offers || []).filter(o => o.id !== offerId) } : cur);
+            res = await publicClaimAppointmentOffer(code, name.trim(), pin.trim(), offerId);
+        }
+        catch (e) {
+            melde("offer_claim_failed");
+            setClaimBusy("");
+            return;
+        }
+        if (res === "ok") {
+            // Erfolg sofort melden: schlägt erst das Nachladen des Überblicks fehl, ist der Termin
+            // trotzdem gesichert - vorher landete genau dieser Fall in "Konnte nicht gebucht werden".
+            melde("offer_claim_ok");
+            if (sessionIdRef.current === mySession)
+                setData(cur => cur ? { ...cur, offers: (cur.offers || []).filter(o => o.id !== offerId) } : cur);
+            try {
                 const d = await publicStudentOverview(code, name.trim(), pin.trim());
                 if (d && sessionIdRef.current === mySession)
                     setData(cur => ({ ...d, lessons: (cur && cur.lessons) || d.lessons }));
-                setClaimMsg("ok");
             }
-            else if (res === "taken")
-                setClaimMsg(t("offer_claim_taken"));
-            else if (res === "conflict")
-                setClaimMsg(t("offer_claim_conflict"));
-            else
-                setClaimMsg(t("offer_claim_failed"));
+            catch (e) { }
         }
-        catch (e) {
-            setClaimMsg(t("offer_claim_failed"));
-        }
+        else
+            melde(res === "taken" ? "offer_claim_taken" : res === "conflict" ? "offer_claim_conflict" : "offer_claim_failed");
         setClaimBusy("");
     }
     const inp = { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--field-bg)", color: "var(--ink)" };
@@ -33680,14 +33713,14 @@ function StudentArea({ code, info, appMode }) {
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.4 } }, t("keine_fahrstunde_banner"))),
         // Frei gewordene Termine ganz oben, direkt unter der nächsten Fahrstunde: "wer zuerst
         // zusagt, bekommt den Slot" - das lohnt sich nur, wenn es sofort ins Auge fällt.
+        claimMsg && claimMsg.key === "offer_claim_ok" && React.createElement("div", { role: "status", className: "card", style: { padding: "12px 16px", marginBottom: 14, fontSize: 13, fontWeight: 600, color: "var(--sage-deep)", background: "var(--sage-bg)" } }, t("offer_claim_ok")),
         offers.map(o => React.createElement("div", { key: o.id, className: "card", style: { padding: "14px 16px", marginBottom: 14, borderLeft: "4px solid var(--sage)" } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 8 } },
                 React.createElement("span", { style: { fontSize: 20, flexShrink: 0 } }, "🎉"),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, t("offer_titel"))),
             React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", marginBottom: 10 } },
                 fmtDLong(o.start_at) + " · " + hm(o.start_at) + " Uhr"),
-            claimMsg && claimBusy === "" && React.createElement("div", { style: { fontSize: 12.5, color: claimMsg === "ok" ? "var(--sage-deep)" : "var(--red)", marginBottom: 10 } },
-                claimMsg === "ok" ? t("offer_claim_ok") : claimMsg),
+            claimMsg && claimMsg.id === o.id && claimMsg.key !== "offer_claim_ok" && claimBusy === "" && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red)", marginBottom: 10 } }, t(claimMsg.key)),
             React.createElement("button", { className: "btn btn-primary btn-block", disabled: claimBusy === o.id, onClick: () => claimOffer(o.id) },
                 claimBusy === o.id ? t("offer_claim_busy") : t("offer_claim_btn")))),
         React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },
@@ -33950,12 +33983,25 @@ function ApptRow({ a, past, onCancel, cancelBusy, t }) {
 }
 /* ════════ Öffentliche Zahler-Seite: nur Rechnungen & Zahlstatus, kein Ausbildungsstand ════════ */
 function PayerPage({ code }) {
-    const [data, setData] = React.useState(undefined); // undefined=lädt, null=ungültig, {}=geladen
+    const [data, setData] = React.useState(undefined); // undefined=lädt, null=ungültig, "fehler"=nicht erreichbar, {}=geladen
+    const [versuch, setVersuch] = React.useState(0);
     React.useEffect(() => {
-        publicPayerOverview(code).then(d => setData(d || null)).catch(() => setData(null));
-    }, [code]);
+        let weg = false;
+        // Ein Netz- oder Serverfehler ist etwas anderes als ein ungültiger Link: vorher landeten
+        // beide bei "Link ungültig", und Eltern im Funkloch fragten bei der Fahrschule nach einem
+        // neuen Link, obwohl der alte in Ordnung war.
+        publicPayerOverview(code).then(d => { if (!weg)
+            setData(d || null); }).catch(() => { if (!weg)
+            setData("fehler"); });
+        return () => { weg = true; };
+    }, [code, versuch]);
     if (data === undefined)
         return React.createElement(Splash, { text: "Lädt…" });
+    if (data === "fehler")
+        return React.createElement("div", { className: "pad", style: { paddingTop: 60, textAlign: "center" } },
+            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 8 } }, "Keine Verbindung"),
+            React.createElement("p", { role: "alert", style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Die Zahlungsübersicht konnte gerade nicht geladen werden. Bitte Internetverbindung prüfen und erneut versuchen."),
+            React.createElement("button", { className: "btn btn-primary", onClick: () => { setData(undefined); setVersuch(v => v + 1); } }, "Erneut versuchen"));
     if (!data)
         return React.createElement("div", { className: "pad", style: { paddingTop: 60, textAlign: "center" } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 8 } }, "Link ungültig"),
