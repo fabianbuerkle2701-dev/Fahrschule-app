@@ -369,6 +369,19 @@
   .save-pill{display:block;font-size:10.5px;font-weight:700;background:transparent;color:var(--muted);
     border-radius:99px;padding:4px 0;white-space:nowrap;text-align:right;border:none}
   .save-pill.err{color:var(--red-ink);text-decoration:underline;min-height:44px;padding:0 6px}
+  /* Handy-Kopfzeile (375px): "✓ Gespeichert" brauchte ~75px - der Fahrschulname daneben wurde
+     auf "Fa…" gekürzt. Unter 480px daher nur ein Symbol; der Text bleibt für Screenreader im
+     DOM (role=status/aria-live liest ihn weiter vor). Der Fehlerzustand bleibt ein
+     Text-Knopf - der muss auffallen und antippbar sein. */
+  .save-pill-ico{display:none}
+  @keyframes save-pill-dreh{to{transform:rotate(360deg)}}
+  @media (max-width:479px){
+    .save-pill:not(.err){display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0}
+    .save-pill:not(.err) .save-pill-ico{display:block}
+    .save-pill:not(.err) .save-pill-ico.dreht{animation:save-pill-dreh 1s linear infinite}
+    .save-pill:not(.err) .save-pill-text{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+      clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
+  }
   /* Kompaktes Wetter-Pill oben rechts in der Kopfzeile (Redesign 2026) - nur Icon + aktuelle
      Temperatur, wie im Entwurf. */
   .weather-chip{display:none;align-items:center;gap:5px;flex-shrink:0;background:var(--field-bg);
@@ -6353,10 +6366,12 @@ async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentW
             student_day_limit: studentDayLim, student_week_limit: studentWeekLim }, { onConflict: "id" });
         if (error)
             throw new Error(error.message || "Limits konnten nicht gespeichert werden");
+        return true;
     }
     catch (e) {
         console.error("Limits speichern fehlgeschlagen:", e);
         showToast("Deine Buchungslimits konnten nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
+        return false;
     }
 }
 // Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender).
@@ -6369,10 +6384,12 @@ async function saveTeacherNameToProfile(uid, name) {
         const { error } = await sb.from("profiles").upsert({ id: uid, email, display_name: name || null }, { onConflict: "id" });
         if (error)
             throw new Error(error.message || "Anzeigename konnte nicht gespeichert werden");
+        return true;
     }
     catch (e) {
         console.error("Anzeigename speichern fehlgeschlagen:", e);
         showToast("Dein Anzeigename konnte nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
+        return false;
     }
 }
 // Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
@@ -6762,6 +6779,31 @@ async function adminDeleteAccount(targetUid) {
     const data = await resp.json().catch(() => null);
     if (!resp.ok || !data)
         throw new Error((data && data.error) || "Löschen fehlgeschlagen (HTTP " + resp.status + ")");
+    return true;
+}
+// Das EIGENE Konto löschen (Audit I-H2: Art. 17 DSGVO, App Store 5.1.1(v) - bisher konnte das nur
+// der App-Admin). Die Function nimmt die Konto-ID ausschließlich aus dem Token. Wirft bei Fehler
+// mit der Meldung der Function - die kann mehrzeilig sein ("\n- Grund"), wenn Rechnungen oder
+// geteilte Schüler die Löschung blockieren.
+async function deleteOwnAccount() {
+    const { data: sess } = await sb.auth.getSession();
+    const token = sess && sess.session && sess.session.access_token;
+    if (!token)
+        throw new Error("Deine Anmeldung ist abgelaufen. Bitte neu anmelden und noch einmal versuchen.");
+    let resp;
+    try {
+        resp = await fetch("/.netlify/functions/delete-own-account", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+            body: JSON.stringify({ confirm: "LÖSCHEN" }),
+        });
+    }
+    catch (e) {
+        throw new Error(fehlerText(e));
+    }
+    const data = await resp.json().catch(() => null);
+    if (!data || data.ok !== true)
+        throw new Error((data && data.error) || "Dein Konto konnte gerade nicht gelöscht werden (HTTP " + resp.status + "). Es wurde nichts verändert - bitte später noch einmal versuchen.");
     return true;
 }
 // Abo-Status/Betrag eines Fahrlehrers setzen, oder eine Zahlung als heute erledigt markieren.
@@ -11121,6 +11163,102 @@ function SettingsScreen({ title, onBack, children }) {
 function clusterLabel(text, tone) {
     return React.createElement("div", { className: "eyebrow", style: { color: "var(--" + tone + "-deep)", marginTop: 18, marginBottom: 2 } }, text);
 }
+// Zahlenfeld mit eigenem Entwurfstext (Audit I-M4/I-M7/I-N25). Vorher hing value direkt an der
+// gespeicherten Zahl: "7," wurde sofort zu 7 (7,50 war nicht eingebbar), ein geleertes Feld
+// sprang auf den Standardwert zurück (20 € bzw. 14 Tage/6 Wochen/Stückzahl 1), und "5a" landete
+// als NaN in der Fahrschule - referral_reward ist NOT NULL, danach scheiterte jedes weitere
+// Schul-Speichern. Hier wird nur ein gültiger Wert weitergereicht (onWert); Leeres oder
+// Ungültiges bleibt Entwurf, wird rot markiert und beim Verlassen des Feldes auf den
+// gespeicherten Wert zurückgesetzt. leerWert !== undefined: leeres Feld ist ein echter Wert
+// (z.B. null = "nichts eingestellt") und wird sofort weitergereicht.
+function EntwurfFeld({ wert, parse, onWert, leerWert, anzeige, ...rest }) {
+    const zeige = v => (v == null || v === "") ? "" : (anzeige ? anzeige(v) : String(v));
+    const [text, setText] = useState(() => zeige(wert));
+    const [ungueltig, setUngueltig] = useState(false);
+    const fokusRef = useRef(false);
+    // Von außen geänderter Wert (Neuladen, andere Sitzung) übernehmen - aber nie mitten ins Tippen.
+    useEffect(() => { if (!fokusRef.current) {
+        setText(zeige(wert));
+        setUngueltig(false);
+    } }, [wert]);
+    return React.createElement("input", { ...rest, type: "text", value: text, "aria-invalid": ungueltig ? "true" : undefined,
+        style: { ...(rest.style || {}), ...(ungueltig ? { borderColor: "var(--red)" } : null) },
+        onFocus: () => { fokusRef.current = true; },
+        onChange: e => {
+            const t = e.target.value;
+            setText(t);
+            if (!t.trim()) {
+                setUngueltig(false);
+                if (leerWert !== undefined)
+                    onWert(leerWert);
+                return;
+            }
+            const n = parse(t.trim());
+            if (n == null || Number.isNaN(n)) {
+                setUngueltig(true);
+                return;
+            }
+            setUngueltig(false);
+            onWert(n);
+        },
+        onBlur: () => {
+            fokusRef.current = false;
+            if (!text.trim() || ungueltig) {
+                setText(zeige(wert));
+                setUngueltig(false);
+            }
+        } });
+}
+// Parser für EntwurfFeld: Beträge im deutschen Format (nie negativ) und ganze Zahlen ab min.
+function parseBetragFeld(t) {
+    const n = parseBetrag(t);
+    return n >= 0 ? n : NaN;
+}
+function parseGanzzahlAb(min) {
+    return t => (/^\d+$/.test(t) && parseInt(t, 10) >= min) ? parseInt(t, 10) : NaN;
+}
+function betragAnzeige(v) { return String(v).replace(".", ","); }
+// Arbeitszeit eines Tages prüfen (Audit I-M5). Die Buchungsseite (withinWorkHours) wertet einen
+// Tag nur mit Beginn UND Ende als Zeitfenster - nur "von" hieß still "ganztägig buchbar", und
+// "von" nach "bis" hieß "nie buchbar". Liefert einen Hinweistext oder "".
+function arbeitszeitProblem(day) {
+    if (!day || day.blocked)
+        return "";
+    const von = day.von || "", bis = day.bis || "";
+    if (von && !bis)
+        return "Bitte auch das Ende eintragen - nur mit Beginn und Ende gilt das Zeitfenster.";
+    if (!von && bis)
+        return "Bitte auch den Beginn eintragen - nur mit Beginn und Ende gilt das Zeitfenster.";
+    if (von && bis && von >= bis)
+        return "Das Ende muss nach dem Beginn liegen - so wäre der Tag nie buchbar.";
+    return "";
+}
+// Vergleichbarer Stand eines Formular-Objekts (Audit I-M8): busy/error sind Zustand des Dialogs,
+// keine Eingabe. null = nicht vergleichbar, dann lieber nachfragen.
+function formSchnappschuss(obj) {
+    try {
+        return JSON.stringify(obj, (k, v) => (k === "busy" || k === "error") ? undefined : v);
+    }
+    catch (e) {
+        return null;
+    }
+}
+// Öffentliche Adresse der App für Links, die AUSSERHALB der App weiterleben (Kalender-Abo,
+// Audit I-N23). Vorher fest "allindrive.netlify.app" - ein Umzug hätte jedes neu eingerichtete
+// Abo an die alte Adresse gebunden. Die native App lädt über server.url (mobile/*/capacitor.config.json)
+// dieselbe https-Adresse wie der Browser; nur wenn die Seite von keiner echten https-Adresse
+// kommt (lokaler Test, capacitor://), greift diese zentrale Rückfall-Adresse - bei einem Umzug
+// hier und in server.url anpassen.
+const APP_OEFFENTLICHE_URL = "https://app.allindrive.app";
+function oeffentlicheBasisUrl() {
+    try {
+        const o = window.location.origin || "";
+        if (/^https:\/\//i.test(o) && !/^https:\/\/(localhost|127\.|\[::1\])/i.test(o))
+            return o;
+    }
+    catch (e) { }
+    return APP_OEFFENTLICHE_URL;
+}
 // Welche Einstellungs-Zeilen nur für einen Fahrschul-Admin bzw. den zentralen App-Admin sichtbar/
 // erreichbar sind - ersetzt die alte settingsTab==="admin"-Prüfung, jetzt pro Zeile statt pro Tab.
 const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "gutscheine", "loeschprotokoll", "personalunterlagen"]);
@@ -12117,6 +12255,10 @@ function App() {
       return () => clearTimeout(_tt);
     }, [tourStep, tourOn, students]);
     const [videos, setVideos] = useState(null); // null=noch nicht geladen
+    // Ladefehler als eigener Zustand statt "Noch keine Videos" (Audit I-N21); videosLadeNr stößt
+    // "Erneut versuchen" an.
+    const [videosFehler, setVideosFehler] = useState("");
+    const [videosLadeNr, setVideosLadeNr] = useState(0);
     const [videoUpload, setVideoUpload] = useState(null); // {file,title,category,busy,error}
     const [videoCat, setVideoCat] = useState(VIDEO_KATEGORIEN[0].code); // aktiver Kategorie-Reiter (Fahrlehrer-Ansicht)
     const [openSection, setOpenSection] = useState(null);
@@ -12168,13 +12310,15 @@ function App() {
     // reicht den Stand aus schoolRef herein) statt {...school, ...} aus dem Render einzufangen -
     // sonst setzte z.B. ein Aufruf nach einem Bestätigungsdialog (Standort löschen) oder zwei
     // schnelle Änderungen vor dem nächsten Render andere, eben geänderte Felder wieder zurück.
-    function saveReferralReward(v) { if (school)
-        writeSchool(s => s && ({ ...s, referral_reward: (v === "" ? 20 : Number(v)) })); }
+    // Nur endliche Zahlen speichern (Audit I-M4): NaN landete sonst in referral_reward (NOT NULL)
+    // und ließ danach jedes Schul-Speichern scheitern.
+    function saveReferralReward(v) { if (school && v !== "" && v != null && Number.isFinite(Number(v)))
+        writeSchool(s => s && ({ ...s, referral_reward: Number(v) })); }
     // Standard-Ausfallgebühr: null heißt "nichts eingestellt" - reportNoShow() schlägt dann
     // weiterhin die Hälfte des UE-Preises vor (bisheriges Verhalten), statt einer erzwungenen Zahl.
     const noShowFeeDefault = (school && school.no_show_fee_default != null) ? Number(school.no_show_fee_default) : null;
     function saveNoShowFeeDefault(v) { if (school)
-        writeSchool(s => s && ({ ...s, no_show_fee_default: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, no_show_fee_default: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     // Stornofrist für kurzfristige Absagen im Schülerportal: null heißt "keine Frist eingestellt"
     // (keine Warnung, keine Gebührenfrage) - bewusst wie noShowFeeDefault standardmäßig aus, damit
     // sich am Verhalten für Fahrschulen ohne eigene Regelung dazu nichts ändert.
@@ -12186,17 +12330,15 @@ function App() {
     // der Standardwert, damit sich am Verhalten ohne eigene Einstellung nichts ändert.
     const zahlungszielTage = (school && school.zahlungsziel_tage != null) ? Number(school.zahlungsziel_tage) : 14;
     function saveZahlungszielTage(v) { if (school)
-        writeSchool(s => s && ({ ...s, zahlungsziel_tage: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, zahlungsziel_tage: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     // Puffer für den Rückwärts-Fahrplan (Behördenbearbeitung + Prüfungstermin-Wartezeit), oben auf
     // die reine Fahrstundenzeit gerechnet - 6 Wochen als vorsichtiger Standard (siehe Marktstudie:
     // Behördenstau bis zu 3 Monate in Einzelfällen, hier bewusst konservativ statt spekulativ hoch).
     const planungPufferWochen = (school && school.planung_puffer_wochen != null) ? Number(school.planung_puffer_wochen) : 6;
     function savePlanungPufferWochen(v) { if (school)
-        writeSchool(s => s && ({ ...s, planung_puffer_wochen: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, planung_puffer_wochen: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     function savePricePerHour(v) { if (school)
         writeSchool(s => s && ({ ...s, price_hour: (v === "" ? "" : v) })); }
-    function savePackages(list) { if (school)
-        writeSchool(s => s && ({ ...s, packages: list })); }
     function saveVehicles(list) { if (school)
         writeSchool(s => s && ({ ...s, vehicles: list })); }
     function saveKlassen(list) { if (school)
@@ -12280,8 +12422,6 @@ function App() {
     }
     function saveDatevSettings(patch) { if (school)
         writeSchool(s => s && ({ ...s, datev_settings: { ...(s.datev_settings || {}), ...patch } })); }
-    function saveLocations(list) { if (school)
-        writeSchool(s => s && ({ ...s, locations: list })); }
     const [stuSig, setStuSig] = useState(null);
     const [updateToast, setUpdateToast] = useState(false);
     const [showChangelog, setShowChangelog] = useState(false);
@@ -12316,7 +12456,10 @@ function App() {
         setFlash(msg);
         flashTimer.current = setTimeout(() => setFlash(""), 2500);
     }
-    const [onboarding, setOnboarding] = useState(null); // null | {step:0|1|2}
+    const [onboarding, setOnboarding] = useState(null); // null | {step:0|1|2, busy?, fehler?}
+    // Synchrone Sperre für "Schüler anlegen" im Einrichtungsassistenten (Audit I-N18): busy wirkt
+    // erst nach dem nächsten Render, ein Doppeltipp legte sonst zwei Schüler an.
+    const onboardingBusyRef = useRef(false);
     // Redesign 2.0.0 Etappe 3 (spec 5.5): "Heute"-Liste zeigt max. 4 Termine, Rest hinter
     // "Weitere anzeigen" - Hook hier oben (nicht in renderHome() selbst), weil renderHome() nur
     // bedingt aufgerufen wird (view === "home" && renderHome()) und Hooks nie bedingt laufen dürfen.
@@ -12424,6 +12567,10 @@ function App() {
     } });
     const [settingsScreen, setSettingsScreen] = useState(null); // null = Einstellungen-Startliste, sonst die id einer Zeile (z.B. "profil","standorte","kosten")
     const [settingsQuery, setSettingsQuery] = useState(""); // Suchfilter auf der Einstellungen-Startliste
+    // Einstellungen › Konto: "Passwort ändern" aufgeklappt? / "Konto löschen" zweistufig
+    // (null | {stufe:1|2, eingabe, busy, fehler}) - siehe renderEinstellungen().
+    const [pwAendernOffen, setPwAendernOffen] = useState(false);
+    const [kontoLoeschen, setKontoLoeschen] = useState(null);
     const [locEdit, setLocEdit] = useState(null); // null | {index|null, name, street, zip, city, phone, email}
     const [vehicleEdit, setVehicleEdit] = useState(null); // null | {index|null, name, plate, type} – ein Formular statt 3 Eingabe-Dialogen nacheinander
     const [vehicleCostForm, setVehicleCostForm] = useState(null); // null | {vehId, date, category, amount, note, error}
@@ -12450,6 +12597,8 @@ function App() {
     const [staffFiles, setStaffFiles] = useState(null); // null | Dateien des ausgewählten Fahrlehrers (Admin-Ansicht)
     const [staffUploading, setStaffUploading] = useState(false);
     const [myStaffFiles, setMyStaffFiles] = useState(null); // null | eigene Unterlagen (Fahrlehrer-Ansicht)
+    // "Meine Unterlagen": Laden sichtbar machen statt stumm (Audit I-N22) - {laedt, fehler}
+    const [myStaffFilesStatus, setMyStaffFilesStatus] = useState({ laedt: false, fehler: "" });
     // Für die Staleness-Prüfung beim Eintreffen von Datei-Listen (statt eines setState-Updaters mit
     // Nebenwirkung, den React nicht verlässlich sofort ausführt).
     const staffInstructorRef = useRef(staffInstructor);
@@ -12505,14 +12654,29 @@ function App() {
     const [workHoursOpen, setWorkHoursOpen] = useState(false);
     function writeWorkHours(next) {
         setWorkHours(next);
+        // Audit I-M5: ein Tag mit nur Beginn/nur Ende oder Ende vor Beginn wird NICHT gespeichert -
+        // die Buchungsseite hätte ihn als ganztägig bzw. nie buchbar gewertet. Der Hinweis steht
+        // direkt am Tag; gespeichert wird, sobald alle Tage stimmig sind (Zwischenstände beim
+        // Umstellen von Beginn und Ende landen so auch nicht kurz auf der Buchungsseite).
+        if (["mo", "di", "mi", "do", "fr", "sa"].some(k => arbeitszeitProblem(next && next[k]))) {
+            const offen = pendingSavesRef.current.get("workHours");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("workHours");
+            }
+            return;
+        }
         // Aufschub über planSave (statt eigenem Timer), damit auch das beim Verlassen der Seite
         // und vor dem Abmelden noch gespeichert wird (siehe pendingSavesRef).
         planSave("workHours", () => {
             if (!uid)
                 return true;
-            return saveWorkHoursToProfile(uid, next).then(() => true, e => {
+            // Eigener Fehlerzustand fürs Speichern (Audit I-M6): vorher landete ein Speicherfehler
+            // in workHoursError und hieß "konnten nicht geladen werden", und "Erneut versuchen"
+            // lud den Server-Stand neu - die gerade gemachten Änderungen waren damit weg.
+            return saveWorkHoursToProfile(uid, next).then(() => { setWorkHoursSaveError(""); return true; }, e => {
                 console.error("Arbeitszeiten speichern fehlgeschlagen:", e);
-                setWorkHoursError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler") + ". Bitte erneut versuchen.");
+                setWorkHoursSaveError(fehlerText(e));
                 return false;
             });
         }, 500);
@@ -12923,6 +13087,43 @@ function App() {
     // (nächster useEffect) gemeinsam genutzt, damit beide Wege nie auseinanderlaufen können.
     // Gibt true zurück, wenn eine Ebene "getroffen" wurde (auch wenn sie wegen .busy gerade nicht
     // schließbar ist - dann soll weder Escape noch der Wisch tiefer durchgreifen).
+    // Audit I-M8: Fahrstunde/Posten/Zahlung/Leistung/Rechnungsentwurf schlossen bei einem Tipp
+    // daneben oder Escape kommentarlos - die Eingaben (bei der Leistung sogar die Unterschrift)
+    // waren weg. Der Stand beim Öffnen wird hier gemerkt; weicht er beim Schließen ab, wird erst
+    // nachgefragt. Die ausdrücklichen "Abbrechen"-Knöpfe bleiben ohne Rückfrage.
+    const formStartRef = useRef({});
+    useEffect(() => {
+        const jetzt = { lesson: lessonForm, item: itemForm, payment: paymentForm, leistung: leistungForm, invoice: invoiceDraft };
+        Object.keys(jetzt).forEach(k => {
+            if (!jetzt[k])
+                delete formStartRef.current[k];
+            else if (!(k in formStartRef.current))
+                formStartRef.current[k] = formSchnappschuss(jetzt[k]);
+        });
+    }, [lessonForm, itemForm, paymentForm, leistungForm, invoiceDraft]);
+    // Sperre, damit Wischgeste/Escape/Tipp während der offenen Rückfrage keine zweite stapeln.
+    const verwerfenFrageRef = useRef(false);
+    // key: Eintrag in formStartRef; obj: aktueller Formularstand; geaendert: fester Wert statt des
+    // Vergleichs (KI-Ergebnisse: vorhanden = würde verloren gehen).
+    function schliessenNachRueckfrage(key, obj, schliessen, geaendert) {
+        if (obj && obj.busy)
+            return;
+        if (geaendert === undefined) {
+            const start = formStartRef.current[key];
+            const nun = formSchnappschuss(obj);
+            geaendert = start === undefined ? false : (start === null || nun === null || start !== nun);
+        }
+        if (!geaendert) {
+            schliessen();
+            return;
+        }
+        if (verwerfenFrageRef.current)
+            return;
+        verwerfenFrageRef.current = true;
+        askConfirm({ message: "Deine Eingaben in diesem Fenster gehen verloren. Wirklich verwerfen?", confirmLabel: "Verwerfen", cancelLabel: "Weiter bearbeiten", danger: true })
+            .then(ok => { verwerfenFrageRef.current = false; if (ok)
+            schliessen(); });
+    }
     function closeTopOverlay() {
         if (cmdOpen) return false;
         // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
@@ -12938,16 +13139,26 @@ function App() {
         else if (apptChoice) setApptChoice(null);
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
-        else if (invoiceDraft) setInvoiceDraft(null);
+        else if (invoiceDraft) schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null));
         else if (apptForm) { if (!apptForm.busy) setApptForm(null); }
         else if (qrModal) setQrModal(false);
-        else if (calImport) { if (!calImport.busy) setCalImport(null); }
-        else if (adkImport) { if (!adkImport.busy) setAdkImport(null); }
+        // Audit I-M9: diese sieben Dialoge fehlten hier - Escape bzw. die Zurück-Geste schloss
+        // dann den Bildschirm DAHINTER, während der Dialog offen stehen blieb. Reihenfolge nach
+        // zIndex (185/175/170, dann die 160er vor den übrigen 160er-Formularen).
+        else if (loeschDialog) { if (!loeschDialog.busy) setLoeschDialog(null); }
+        else if (voucherForm) { if (!voucherForm.busy) setVoucherForm(null); }
+        else if (voucherRedeem) { if (!voucherRedeem.busy) setVoucherRedeem(null); }
+        else if (csvImport) { if (!csvImport.busy) setCsvImport(null); }
+        else if (calImport) schliessenNachRueckfrage("calImport", calImport, () => setCalImport(null), !!(calImport.items && calImport.items.length));
+        else if (adkImport) schliessenNachRueckfrage("adkImport", adkImport, () => setAdkImport(null), !!(adkImport.results && adkImport.results.length));
+        else if (theoryCheckinModal) setTheoryCheckinModal(null);
+        else if (examSlotAssign) setExamSlotAssign(null);
+        else if (examSlotForm) setExamSlotForm(null);
         else if (assistant) { if (!assistant.busy) setAssistant(null); }
-        else if (lessonForm) setLessonForm(null);
-        else if (itemForm) setItemForm(null);
-        else if (paymentForm) setPaymentForm(null);
-        else if (leistungForm) setLeistungForm(null);
+        else if (lessonForm) schliessenNachRueckfrage("lesson", lessonForm, () => setLessonForm(null));
+        else if (itemForm) schliessenNachRueckfrage("item", itemForm, () => setItemForm(null));
+        else if (paymentForm) schliessenNachRueckfrage("payment", paymentForm, () => setPaymentForm(null));
+        else if (leistungForm) schliessenNachRueckfrage("leistung", leistungForm, () => setLeistungForm(null));
         else if (importState) setImportState(null);
         else if (interessentImport) setInteressentImport(null);
         else if (proposeForm) setProposeForm(null);
@@ -12970,7 +13181,11 @@ function App() {
         else if (schoolLeistungen) setSchoolLeistungen(null);
         else if (adminEdit) setAdminEdit(null);
         else if (adminTeachers) setAdminTeachers(null);
-        else if (tabMenu) setTabMenu(null);
+        // Nur die schwebenden Menüs der Tab-Leiste - ein inline aufgeklappter Bereich der
+        // Seitenleiste ("sb-…") ist keine Ebene (seit I-N19 ohne Klickfläche, bleibt also offen)
+        // und darf Escape/Zurück-Geste nicht vor den Dialogen und der Einstellungs-Unterseite
+        // darunter abfangen.
+        else if (tabMenu && tabMenu.indexOf("sb-") !== 0) setTabMenu(null);
         else if (handoverModal) { if (!handoverModal.busy)
             setHandoverModal(null); }
         else if (interessentForm) { if (!interessentForm.busy)
@@ -12985,7 +13200,9 @@ function App() {
         else if (welcomeOffer) setWelcomeOffer(null);
         else if (showNachweisModal) setShowNachweisModal(false);
         else if (contractSignId) setContractSignId(null);
-        else if (settingsScreen) setSettingsScreen(null);
+        // Nur auf der Einstellungen-Seite selbst: im Vorlagen-Editor (view "vorlage") bleibt die
+        // Unterseite bewusst stehen, damit "Zurück" dorthin führt - Escape schloss sie sonst unsichtbar.
+        else if (settingsScreen && view === "einstellungen") setSettingsScreen(null);
         else return false;
         return true;
     }
@@ -12996,7 +13213,37 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
+    // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
+    // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
+    // sie wieder offen, und Escape/Zurück-Geste "schlossen" sie unsichtbar auf einer anderen Seite.
+    // Ausnahme "vorlage": der Vorlagen-Editor wird aus Einstellungen › Arbeit geöffnet und kehrt
+    // dorthin zurück.
+    useEffect(() => {
+        try { window.scrollTo(0, 0); } catch (e) { }
+        if (view !== "einstellungen" && view !== "vorlage")
+            setSettingsScreen(null);
+    }, [view]);
+    useEffect(() => {
+        // Mobil ist die Unterseite eine eigene fixierte Scroll-Ebene, am PC scrollt das Fenster.
+        // Nur beim Öffnen zurücksetzen - beim Schließen gleitet die alte Seite noch sichtbar
+        // hinaus und soll dabei nicht nach oben springen.
+        const el = settingsScreen ? document.querySelector(".settings-content") : null;
+        if (el)
+            el.scrollTop = 0;
+        // Konto-Unterseite verlassen: halb ausgefüllte Passwort-/Löschmaske nicht wieder aufklappen
+        // (eine laufende Löschung bleibt stehen, ihr Ergebnis soll noch ankommen).
+        if (settingsScreen !== "konto") {
+            setPwAendernOffen(false);
+            setKontoLoeschen(k => (k && k.busy) ? k : null);
+        }
+        try {
+            if (settingsScreen && window.matchMedia && window.matchMedia("(min-width: 900px)").matches)
+                window.scrollTo(0, 0);
+        }
+        catch (e) { }
+    }, [settingsScreen]);
     const viewSlideRef = useRef(null);
     // Leichtes Einblenden bei jedem Screen-/Reiter-Wechsel (Tap UND Wisch-Geste treffen das
     // gleichermaßen, da beide letztlich view/studentTab/settingsScreen ändern) - bewusst
@@ -13147,7 +13394,9 @@ function App() {
                     else setView("liste");
                     return;
                 }
-                if (view !== "home") setView("home");
+                // Vorlagen-Editor: zurück in die Einstellungen, aus denen er geöffnet wurde (I-M11).
+                if (view === "vorlage") setView("einstellungen");
+                else if (view !== "home") setView("home");
             });
         }
         document.addEventListener("touchstart", onStart, { passive: true });
@@ -13158,7 +13407,7 @@ function App() {
             document.removeEventListener("touchmove", onMove);
             document.removeEventListener("touchend", onEnd);
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -13230,19 +13479,33 @@ function App() {
             catch (e) { }
         }
     }, [students, uid, birthdayNotify]);
+    // Nur von der Schul-ID abhängig, nicht vom ganzen school-Objekt: das ändert sich bei jeder
+    // Einstellung (Farbe, Preise, updated_at nach dem Speichern) und lud die Videos jedes Mal
+    // neu (Audit I-N21).
+    const videosSchoolId = (school && school.id) || null;
     useEffect(() => {
         if (view !== "videos" || !uid)
             return;
+        let abgebrochen = false;
         // Bei Fehler den bisherigen Stand behalten (nur beim allerersten Laden leere Liste statt
-        // endlos "Lädt…") und Bescheid geben - vorher sah ein Fehler aus wie "keine Videos".
-        fetchVideos(uid, school && school.id).then(setVideos).catch(e => {
+        // endlos "Lädt…") und den Fehler auf der Seite zeigen - vorher sah er aus wie "keine Videos".
+        fetchVideos(uid, videosSchoolId).then(list => {
+            if (abgebrochen)
+                return;
+            setVideos(list);
+            setVideosFehler("");
+        }).catch(e => {
+            if (abgebrochen)
+                return;
             setVideos(v => v === null ? [] : v);
-            showToast("Videos konnten nicht geladen werden:\n" + fehlerText(e), "error");
+            setVideosFehler(fehlerText(e));
         });
-    }, [view, uid, school]);
+        return () => { abgebrochen = true; };
+    }, [view, uid, videosSchoolId, videosLadeNr]);
     // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
     const [workHours, setWorkHours] = useState(null); // null solange nicht geladen
     const [workHoursError, setWorkHoursError] = useState("");
+    const [workHoursSaveError, setWorkHoursSaveError] = useState(""); // Speichern fehlgeschlagen (nicht Laden)
     useEffect(() => {
         if (!uid)
             return;
@@ -13384,6 +13647,7 @@ function App() {
     // änderungsbedingte Schreibvorgang übernahm den fremden Wert dadurch unbemerkt ins Profil
     // des jetzt aktiven Kontos. Jetzt wird beim ersten Durchlauf nach Login immer der echte
     // Server-Stand geladen und lokal übernommen, bevor irgendetwas zurückgeschrieben wird.
+    const limitSaveChainRef = useRef(Promise.resolve());
     const limitSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
@@ -13406,8 +13670,16 @@ function App() {
                 .catch(() => { });
             return;
         }
-        saveLimitsToProfile(uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit);
+        // Audit I-M7: vorher ein upsert pro Tastendruck, alle parallel - kam die Antwort für "49"
+        // nach der für "495" an, blieb 49 gespeichert. Jetzt aufgeschoben (planSave: nur der letzte
+        // Stand läuft, auch beim Verlassen der Seite) und hintereinander statt gleichzeitig.
+        const lim = [dayLimit, weekLimit, studentDayLimit, studentWeekLimit];
+        planSave("limits", () => {
+            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3]));
+            return limitSaveChainRef.current;
+        }, 600);
     }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
+    const nameSaveChainRef = useRef(Promise.resolve());
     const nameSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
@@ -13425,7 +13697,24 @@ function App() {
                 .catch(() => { });
             return;
         }
-        saveTeacherNameToProfile(uid, teacherName);
+        // Ein leerer Name wird nicht gespeichert (Audit I-M7): display_name ist Pflichtangabe des
+        // Profils - ein kurz geleertes Feld öffnete sonst beim nächsten Start den Pflichtdialog.
+        // Aufgeschoben wie die Limits oben, damit nicht jeder Tastendruck einzeln (parallel) läuft.
+        const name = teacherName.trim();
+        if (!name) {
+            // Auch einen noch geplanten Zwischenstand ("F" beim Löschen Buchstabe für Buchstabe)
+            // verwerfen - sonst landete genau der als Name im Profil.
+            const offen = pendingSavesRef.current.get("teacherName");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("teacherName");
+            }
+            return;
+        }
+        planSave("teacherName", () => {
+            nameSaveChainRef.current = nameSaveChainRef.current.then(() => saveTeacherNameToProfile(uid, name));
+            return nameSaveChainRef.current;
+        }, 600);
     }, [uid, teacherName]);
     const [loadErr, setLoadErr] = useState("");
     // Load students + template + school when logged in: cache first, then cloud
@@ -13486,7 +13775,9 @@ function App() {
             setStaffInstructor(null);
             setStaffFiles(null);
             setMyStaffFiles(null);
+            setMyStaffFilesStatus({ laedt: false, fehler: "" });
             setVideos(null);
+            setVideosFehler("");
             // Aufgeschobene Speichervorgänge von A nicht mehr laufen lassen (sonst schriebe z.B.
             // der Cache-Timer A's Schülerkartei nach dem Löschen wieder in den localStorage).
             dropPendingSaves();
@@ -13577,16 +13868,18 @@ function App() {
                         const needPrice = (sc.price_hour == null) && oldPrice;
                         const needPkg = (!Array.isArray(sc.packages) || sc.packages.length === 0) && oldPkg && oldPkg.length;
                         if (needPrice || needPkg) {
-                            const merged = { ...sc };
+                            const patch = {};
                             if (needPrice)
-                                merged.price_hour = Number(oldPrice);
+                                patch.price_hour = Number(oldPrice);
                             if (needPkg)
-                                merged.packages = oldPkg;
+                                patch.packages = oldPkg;
                             // Über writeSchool statt direkt saveSchool(): das übernimmt nach dem
                             // Speichern das neue updated_at in den State. Vorher blieb das alte
                             // stehen und die nächste Änderung in den Einstellungen scheiterte als
                             // vermeintlicher Konflikt mit einer anderen Sitzung (Audit A2-N9).
-                            writeSchool(merged);
+                            // Als Updater auf den aktuellen Stand (schoolRef), nicht auf das beim Laden
+                            // eingefangene sc - fetchMyRights kann nach einer ersten Änderung ankommen.
+                            writeSchool(cur => cur && ({ ...cur, ...patch }));
                         }
                         localStorage.removeItem("v3_price_hour_" + uid);
                         localStorage.removeItem("v3_packages_" + uid);
@@ -14134,9 +14427,11 @@ function App() {
     }
     function loadMyStaffFiles() {
         setMyStaffFiles(null);
-        // Bei Fehler bleibt null -> der Knopf "Unterlagen laden" steht wieder da.
-        fetchStaffFiles(uid).then(list => setMyStaffFiles(list))
-            .catch(e => showToast("Unterlagen konnten nicht geladen werden:\n" + fehlerText(e), "error"));
+        // Ladezustand und Fehler direkt an der Stelle zeigen (Audit I-N22): vorher passierte nach
+        // dem Tipp sichtbar nichts, bis die Liste (oder nur ein kurzer Toast) kam.
+        setMyStaffFilesStatus({ laedt: true, fehler: "" });
+        fetchStaffFiles(uid).then(list => { setMyStaffFiles(list); setMyStaffFilesStatus({ laedt: false, fehler: "" }); })
+            .catch(e => setMyStaffFilesStatus({ laedt: false, fehler: fehlerText(e) }));
     }
     function loadStudentFiles() {
         if (!active)
@@ -25899,7 +26194,7 @@ function App() {
             setAdminSchools(prev => (prev || []).map(s => s.id === adminEdit.id ? { ...s, ...adminEdit } : s));
             // falls es die eigene Fahrschule ist, auch oben aktualisieren
             if (school && school.id === adminEdit.id)
-                writeSchool({ ...school, name: adminEdit.name, subtitle: adminEdit.subtitle, color: adminEdit.color });
+                writeSchool(cur => cur && cur.id === adminEdit.id && ({ ...cur, name: adminEdit.name, subtitle: adminEdit.subtitle, color: adminEdit.color }));
             setAdminEdit(null);
         }
         catch (e) {
@@ -26273,7 +26568,7 @@ function App() {
             if (adminEdit && adminEdit.id === sc.id)
                 setAdminEdit({ ...adminEdit, logo: dataUrl });
             if (school && school.id === sc.id)
-                writeSchool({ ...school, logo: dataUrl });
+                writeSchool(cur => cur && cur.id === sc.id && ({ ...cur, logo: dataUrl }));
         }
         catch (err) {
             showToast("Logo konnte nicht gesetzt werden:\n" + fehlerText(err), "error");
@@ -26312,8 +26607,12 @@ function App() {
         const a = document.createElement("a");
         a.href = url;
         a.download = "schuelerdaten-" + dispName(stu).replace(/[^\wäöüÄÖÜß]+/g, "-").toLowerCase() + ".json";
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+        // Erst später freigeben (Audit I-M13): Safari/iOS und die App-WebView holen die Datei erst
+        // nach dem click() ab - ein sofortiges revokeObjectURL() ließ den Download ins Leere laufen.
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
     }
     function renderAufbewahrung() {
         const archiviert = (students || []).filter(s => s.archived && s._isMine)
@@ -26675,9 +26974,65 @@ function App() {
             clearAccountCaches(uid);
             await sb.auth.signOut();
         }
+        // Konto löschen, Stufe 2 (Audit I-H2). Nach Erfolg gibt es nichts mehr zu speichern: die
+        // aufgeschobenen Speichervorgänge werden verworfen statt geflusht (sie liefen ohne Konto
+        // nur in Fehler), der lokale Zwischenspeicher wird geleert, und abgemeldet wird nur lokal -
+        // ein signOut beim Server mit dem Token eines gelöschten Kontos scheitert ohnehin.
+        async function kontoEndgueltigLoeschen() {
+            const k = kontoLoeschen;
+            if (!k || k.busy)
+                return;
+            if (String(k.eingabe || "").trim().toUpperCase() !== "LÖSCHEN") {
+                setKontoLoeschen({ ...k, fehler: "Bitte zur Bestätigung LÖSCHEN eintippen." });
+                return;
+            }
+            setKontoLoeschen({ ...k, busy: true, fehler: "" });
+            try {
+                await deleteOwnAccount();
+            }
+            catch (e) {
+                setKontoLoeschen(prev => prev && ({ ...prev, busy: false, fehler: (e && e.message) || "Unbekannter Fehler" }));
+                return;
+            }
+            // Laufende Aufzeichnung ohne Speichern beenden (GPS-Watcher abmelden) - der Schüler
+            // existiert nicht mehr.
+            if (recSession)
+                stopRecording(false);
+            dropPendingSaves();
+            // Maske zurücksetzen - meldet sich danach jemand im selben Fenster neu an, soll dort
+            // nicht noch "Wird gelöscht…" stehen.
+            setKontoLoeschen(null);
+            setSettingsScreen(null);
+            clearAccountCaches(uid);
+            try {
+                await sb.auth.signOut({ scope: "local" });
+            }
+            catch (e) {
+                console.error(e);
+            }
+        }
         const nativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+        // Kalender-Abo-Link auf der Adresse, unter der die App gerade läuft (Audit I-N23).
+        const kalenderAboUrl = oeffentlicheBasisUrl() + "/.netlify/functions/calendar-feed?token=" + encodeURIComponent(calendarFeedToken || "");
         // ── Live-Status je Zeile: echte aktuelle Werte statt nur ein Titel ──
-        const workDaysCount = workHours ? Object.keys(workHours).filter(k => workHours[k] && !workHours[k].blocked && (workHours[k].von || workHours[k].bis)).length : 0;
+        // Audit I-N14: vorher zählte jeder Tag mit irgendeiner Zeit als "eingerichtet", und ohne
+        // Zeiten hieß es "rund um die Uhr buchbar" - auch wenn alle Tage gesperrt waren oder die
+        // Arbeitszeiten noch gar nicht geladen. Jetzt so gezählt, wie die Buchungsseite
+        // (withinWorkHours) Mo-Sa wirklich wertet; Sonntag ist für Schüler immer gesperrt.
+        const whStand = workHours ? ["mo", "di", "mi", "do", "fr", "sa"].reduce((acc, k) => {
+            const d = workHours[k];
+            if (d && d.blocked)
+                acc.gesperrt++;
+            else if (d && d.von && d.bis)
+                acc[arbeitszeitProblem(d) ? "gesperrt" : "fenster"]++;
+            else
+                acc.ganz++;
+            return acc;
+        }, { fenster: 0, ganz: 0, gesperrt: 0 }) : null;
+        const whStatusText = !whStand ? "Arbeitszeiten, Limits, Buchungslink"
+            : (whStand.fenster === 0 && whStand.ganz === 0) ? "Für Schüler nicht buchbar"
+                : [whStand.fenster > 0 && (whStand.fenster + (whStand.fenster === 1 ? " Tag" : " Tage") + " mit Zeitfenster"),
+                    whStand.ganz > 0 && (whStand.ganz + (whStand.ganz === 1 ? " Tag" : " Tage") + " ganztägig buchbar")].filter(Boolean).join(" · ");
         const invoiceInv = (school && school.invoice_settings) || {};
         const invoiceIv = key => invoiceInv[key] || "";
         const invoicePct = Math.round(100 * ["firma", "strasse", "plzOrt", "iban"].filter(k => invoiceIv(k)).length / 4);
@@ -26708,7 +27063,7 @@ function App() {
         };
         const settingsRows = [
             { id: "profil", section: "mein-bereich", tone: "sage", label: "Profil", icon: IC.profil, keywords: "profil name foto standort geburtstag benachrichtigung", status: teacherName || "Kein Name hinterlegt" },
-            { id: "arbeit", section: "mein-bereich", tone: "sage", label: "Arbeit & Ausbildung", icon: IC.arbeit, keywords: "arbeitszeiten limit buchungslink erinnerung bewertung sortierung adk strecken", status: workDaysCount === 0 ? "Keine Arbeitszeiten – rund um die Uhr buchbar" : workDaysCount + " Tage" + (dayLimit > 0 ? " · " + dayLimit + " Min/Tag" : "") },
+            { id: "arbeit", section: "mein-bereich", tone: "sage", label: "Arbeit & Ausbildung", icon: IC.arbeit, keywords: "arbeitszeiten limit buchungslink erinnerung bewertung sortierung adk strecken", status: whStatusText + (dayLimit > 0 ? " · " + dayLimit + " Min/Tag" : "") },
             { id: "unterlagen", section: "mein-bereich", tone: "sage", label: "Meine Unterlagen", icon: IC.unterlagen, keywords: "unterlagen dokumente lohn vertrag zertifikat", status: myStaffFiles ? myStaffFiles.length + (myStaffFiles.length === 1 ? " Datei" : " Dateien") : "Zum Ansehen öffnen" },
             { id: "konto-daten", section: "mein-bereich", tone: "sage", label: "Daten & Sicherung", icon: IC.konto_daten, keywords: "sicherung backup export fahrtenbuch csv kalender abonnieren ics", status: "Backup, Export, Kalender" },
             { id: "meine-fahrschule", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Meine Fahrschule", icon: IC.fahrschule, keywords: "name logo farbe schule", status: (school && school.name) || "Fahrschule" },
@@ -26755,8 +27110,9 @@ function App() {
                     React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 6 } },
                         // Die Demo laeuft bewusst immer hell (siehe theme-Effekt). Der Schalter war
                         // trotzdem bedienbar und tat dann nichts - er ist dort jetzt deaktiviert
-                        // und sagt auch, warum.
-                        settingRow("Dark Mode", IS_DEMO() ? "In der Demo-Ansicht immer hell - im eigenen Konto frei umschaltbar" : "Dunkles Design, z.B. fürs Fahren in der Dämmerung", React.createElement("button", { className: "icon-x", onClick: () => { if (IS_DEMO()) { demoBlock("In der Demo-Ansicht ist die Darstellung fest hell."); return; } setTheme(theme === "dark" ? "light" : "dark"); }, "aria-label": "Dark Mode umschalten", disabled: IS_DEMO(), style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: IS_DEMO() ? "not-allowed" : "pointer", opacity: IS_DEMO() ? 0.45 : 1,
+                        // und sagt auch, warum. role="switch" + aria-checked (Audit I-N26): vorher las
+                        // ein Screenreader nur "Taste", ohne zu sagen, ob der Schalter an oder aus ist.
+                        settingRow("Dark Mode", IS_DEMO() ? "In der Demo-Ansicht immer hell - im eigenen Konto frei umschaltbar" : "Dunkles Design, z.B. fürs Fahren in der Dämmerung", React.createElement("button", { className: "icon-x", onClick: () => { if (IS_DEMO()) { demoBlock("In der Demo-Ansicht ist die Darstellung fest hell."); return; } setTheme(theme === "dark" ? "light" : "dark"); }, role: "switch", "aria-checked": (!IS_DEMO() && theme === "dark") ? "true" : "false", "aria-label": "Dark Mode", disabled: IS_DEMO(), style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: IS_DEMO() ? "not-allowed" : "pointer", opacity: IS_DEMO() ? 0.45 : 1,
                                 background: (!IS_DEMO() && theme === "dark") ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
                             React.createElement("span", { style: { position: "absolute", top: 3, left: (!IS_DEMO() && theme === "dark") ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
                                     background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } }))),
@@ -26797,7 +27153,9 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Anzeigename (z.B. Fabian Bürkle)",
                                 React.createElement("input", { type: "text", value: teacherName, placeholder: "Vor- und Nachname", onChange: e => setTeacherName(e.target.value) })),
-                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer."))),
+                                !teacherName.trim()
+                                    ? React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginTop: 6, lineHeight: 1.5 } }, "Der Name ist Pflicht und wird erst gespeichert, wenn hier wieder etwas steht.")
+                                    : React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, wenn du ein Fahrzeug buchst."))),
                         React.createElement("div", { className: "eyebrow" }, "Profilbild"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
                             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
@@ -26833,7 +27191,7 @@ function App() {
                         React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 16 } }, settingRow("Geburtstage", "Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat", React.createElement("button", { onClick: () => { const next = !birthdayNotify; setBirthdayNotify(next); try {
                                     localStorage.setItem("v3_birthday", next ? "1" : "0");
                                 }
-                                catch (e) { } }, "aria-label": "Geburtstags-Hinweis umschalten", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
+                                catch (e) { } }, role: "switch", "aria-checked": birthdayNotify ? "true" : "false", "aria-label": "Geburtstags-Hinweis", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
                                 background: birthdayNotify ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
                             React.createElement("span", { style: { position: "absolute", top: 3, left: birthdayNotify ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
                                     background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } }))))),
@@ -26843,14 +27201,21 @@ function App() {
                             React.createElement("button", { onClick: () => setWorkHoursOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 14px", background: "transparent" } },
                                 React.createElement("span", { style: { fontSize: 14.5, fontWeight: 700 } }, "Wochentage & Zeiten"),
                                 React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                                    workHours && Object.keys(workHours).some(k => workHours[k] && (workHours[k].blocked || (workHours[k].von && workHours[k].bis))) &&
+                                    whStand && whStand.ganz < 6 &&
                                         React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 99, padding: "3px 9px" } }, "eingerichtet"),
-                                    workHours && workDaysCount === 0 &&
-                                        React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--red-ink)", background: "var(--danger-bg)", borderRadius: 99, padding: "3px 9px" } }, "rund um die Uhr buchbar"),
+                                    whStand && whStand.ganz === 6 &&
+                                        React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--red-ink)", background: "var(--danger-bg)", borderRadius: 99, padding: "3px 9px" } }, "Mo–Sa ganztägig buchbar"),
                                     React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round", strokeLinejoin: "round", style: { transform: workHoursOpen ? "rotate(180deg)" : "none", transition: "transform .15s", color: "var(--muted)" } },
                                         React.createElement("polyline", { points: "6 9 12 15 18 9" })))),
                             workHoursOpen && React.createElement("div", { style: { padding: "0 14px 14px" } },
                                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Schüler können über deinen Buchungslink Termine vorschlagen. Ohne Zeitangabe ist ein Tag ganztägig buchbar. Trägst du eine Zeit ein, sind nur Termine in diesem Fenster möglich. Mit dem Kreuz nimmst du einen Tag komplett aus der Buchbarkeit heraus. Für dich selbst gilt keine dieser Einschränkungen. Sonntag ist für Schüler immer gesperrt, unabhängig von der letzten Zeile - die steuert nur, ob Sonntag in deinem eigenen Kalender auftaucht."),
+                                workHoursSaveError && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, whiteSpace: "pre-line" } },
+                                    "Arbeitszeiten konnten nicht gespeichert werden: ",
+                                    workHoursSaveError,
+                                    " ",
+                                    // Erneut mit dem Stand auf dem Bildschirm speichern - nicht neu laden.
+                                    React.createElement("button", { onClick: () => { setWorkHoursSaveError(""); if (workHours)
+                                            writeWorkHours(workHours); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut speichern")),
                                 workHoursError && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 } },
                                     "Arbeitszeiten konnten nicht geladen werden: ",
                                     workHoursError,
@@ -26882,19 +27247,22 @@ function App() {
                                                         !blocked && (day.von || day.bis) && React.createElement("button", { onClick: () => writeWorkHours({ ...workHours, [k]: { ...day, von: "", bis: "" } }), style: { color: "var(--muted)", fontSize: 12, flexShrink: 0, padding: "4px 2px" } }, "Leeren"))),
                                             k === "so"
                                                 ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginLeft: 35, marginTop: 3 } }, "Für Schüler über den Buchungslink immer gesperrt, unabhängig von diesem Schalter.")
-                                                : blocked && React.createElement("div", { style: { fontSize: 11.5, color: "var(--red)", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar"));
+                                                : blocked ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--red)", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar")
+                                                    : arbeitszeitProblem(day) && React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginLeft: 35, marginTop: 3 } }, arbeitszeitProblem(day) + " Noch nicht gespeichert."));
                                     }))),
                         React.createElement("div", { className: "eyebrow" }, "Mein Ausbildungslimit"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                            // Limits als EntwurfFeld (Audit I-M7): ein geleertes Feld war sofort "0 = kein Limit"
+                            // und wurde so gespeichert; jetzt zählt nur eine eingegebene Zahl.
                             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Lege fest, wie viele Minuten praktische Ausbildung du pro Tag und pro Woche höchstens leisten darfst. Termine, die dein Limit überschreiten würden, lassen sich nicht bestätigen. 0 bedeutet kein Limit. Es zählen nur bestätigte Termine."),
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Tageslimit in Minuten (z.B. 495)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: dayLimit, onChange: e => setDayLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: dayLimit, parse: parseGanzzahlAb(0), onWert: setDayLimit })),
                                 dayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (dayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag.")),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: weekLimit, onChange: e => setWeekLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: weekLimit, parse: parseGanzzahlAb(0), onWert: setWeekLimit })),
                                 weekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (weekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Woche."))),
                         React.createElement("div", { className: "eyebrow" }, "Limit je Fahrschüler"),
@@ -26903,12 +27271,12 @@ function App() {
                                 "Begrenzt, wie viele Minuten Fahrstunden sich ein einzelner Schüler höchstens pro Tag bzw. Woche sichern kann - über den Buchungslink oder wenn du selbst einen Termin für ihn anlegst. Verhindert, dass ein Schüler versehentlich (oder absichtlich) zu viele Termine auf einmal blockt, während andere leer ausgehen. 0 bedeutet kein Limit."),
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Tageslimit je Schüler in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentDayLimit, onChange: e => setStudentDayLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: studentDayLimit, parse: parseGanzzahlAb(0), onWert: setStudentDayLimit })),
                                 studentDayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (studentDayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag und Schüler.")),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit je Schüler in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentWeekLimit, onChange: e => setStudentWeekLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: studentWeekLimit, parse: parseGanzzahlAb(0), onWert: setStudentWeekLimit })),
                                 studentWeekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (studentWeekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Woche und Schüler."))),
                         React.createElement("div", { className: "eyebrow" }, "Übungs-Verlauf ADK/Strecken"),
@@ -26984,7 +27352,9 @@ function App() {
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Dateien, die dir ein Fahrschul-Admin hier hinterlegt hat, z.B. Lohnabrechnungen oder deinen Vertrag."),
                             myStaffFiles === null
-                                ? React.createElement("button", { className: "btn btn-ghost", onClick: loadMyStaffFiles }, "Unterlagen laden")
+                                ? React.createElement(React.Fragment, null,
+                                    myStaffFilesStatus.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, whiteSpace: "pre-line" } }, "Unterlagen konnten nicht geladen werden: ", myStaffFilesStatus.fehler),
+                                    React.createElement("button", { className: "btn btn-ghost", disabled: myStaffFilesStatus.laedt, onClick: loadMyStaffFiles }, myStaffFilesStatus.laedt ? "Lädt…" : myStaffFilesStatus.fehler ? "Erneut versuchen" : "Unterlagen laden"))
                                 : myStaffFiles.length === 0
                                     ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Unterlagen für dich hinterlegt.")
                                     : STAFF_CATEGORIES.map(c => { const files = myStaffFiles.filter(f => f.category === c.id); if (!files.length)
@@ -27025,12 +27395,17 @@ function App() {
                                 aktiv && !lifetime && React.createElement(React.Fragment, null,
                                     React.createElement("div", { className: "eyebrow" }, "Bezahlen"),
                                     React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
-                                        paypalLink
-                                            ? (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
-                                                ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
-                                                : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
-                                                    "Bitte den Betrag manuell per PayPal an ", React.createElement("b", null, paypalLink), " senden."))
-                                            : React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
+                                        // paypalZiel() wie im Sperrbildschirm (SubscriptionGate): die eigene startsWith-Logik
+                                        // baute aus "www.paypal.me/name" einen kaputten Link (https://paypal.me/www.paypal.me/…).
+                                        (() => {
+                                            const pp = paypalZiel(paypalLink);
+                                            if (pp && pp.href)
+                                                return React.createElement("a", { href: pp.href, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen");
+                                            if (pp && pp.email)
+                                                return React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
+                                                    "Bitte den Betrag in der PayPal-App über „Geld senden“ an ", React.createElement("b", { style: { wordBreak: "break-all" } }, pp.email), " schicken.");
+                                            return React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung.");
+                                        })(),
                                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
                                                 if (!await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde." }))
                                                     return;
@@ -27094,12 +27469,12 @@ function App() {
                                     } }, calendarFeedBusy ? "Wird eingerichtet…" : "Abo-Link erzeugen")
                                 : React.createElement(React.Fragment, null,
                                     React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
-                                        React.createElement("input", { readOnly: true, value: "https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, onFocus: e => e.target.select(), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "var(--field-bg)", color: "var(--muted)" } })),
+                                        React.createElement("input", { readOnly: true, value: kalenderAboUrl, onFocus: e => e.target.select(), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16, background: "var(--field-bg)", color: "var(--muted)" } })),
                                     React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
-                                        React.createElement("a", { href: "webcal://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken, className: "btn btn-primary", style: { flex: "1 1 auto", textAlign: "center" } }, "In Kalender-App öffnen"),
+                                        React.createElement("a", { href: kalenderAboUrl.replace(/^https:/, "webcal:"), className: "btn btn-primary", style: { flex: "1 1 auto", textAlign: "center" } }, "In Kalender-App öffnen"),
                                         React.createElement("button", { className: "btn btn-ghost", onClick: async () => {
                                                 try {
-                                                    await navigator.clipboard.writeText("https://allindrive.netlify.app/.netlify/functions/calendar-feed?token=" + calendarFeedToken);
+                                                    await navigator.clipboard.writeText(kalenderAboUrl);
                                                     showToast("Link kopiert");
                                                 }
                                                 catch (err) {
@@ -27142,12 +27517,12 @@ function App() {
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Name der Fahrschule",
-                                React.createElement("input", { type: "text", defaultValue: (school && school.name) || "", onBlur: e => { if (school && e.target.value.trim() && e.target.value !== school.name)
-                                        writeSchool({ ...school, name: e.target.value.trim() }); } }))),
+                                React.createElement("input", { type: "text", defaultValue: (school && school.name) || "", onBlur: e => { const v = e.target.value.trim(); if (school && v && v !== school.name)
+                                        writeSchool(cur => cur && ({ ...cur, name: v })); } }))),
                             React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                                 React.createElement("label", null, "Untertitel (z.B. Automatik · Klasse B)",
-                                React.createElement("input", { type: "text", defaultValue: (school && school.subtitle) || "", onBlur: e => { if (school && e.target.value !== school.subtitle)
-                                        writeSchool({ ...school, subtitle: e.target.value }); } }))),
+                                React.createElement("input", { type: "text", defaultValue: (school && school.subtitle) || "", onBlur: e => { const v = e.target.value; if (school && v !== school.subtitle)
+                                        writeSchool(cur => cur && ({ ...cur, subtitle: v })); } }))),
                             React.createElement("div", { style: { marginBottom: 14 } },
                                 React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Logo"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
@@ -27157,19 +27532,19 @@ function App() {
                                             (school && school.logo) ? "Logo ändern" : "Logo hochladen",
                                             React.createElement("input", { type: "file", accept: "image/*", onChange: onLogoFile, style: { display: "none" } })),
                                         (school && school.logo) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px", fontSize: 13, color: "var(--red)" }, onClick: async () => { if (await askConfirm({ message: "Eigenes Logo entfernen und Standard-Logo verwenden?" }))
-                                                writeSchool({ ...school, logo: "" }); } }, "Auf Standard zurücksetzen")))),
+                                                writeSchool(cur => cur && ({ ...cur, logo: "" })); } }, "Auf Standard zurücksetzen")))),
                             React.createElement("div", null,
                                 React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Farbe"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" } },
-                                    React.createElement("input", { type: "color", value: (school && school.color) || "#FF9300", onChange: e => { if (school)
-                                            writeSchool({ ...school, color: e.target.value }); }, style: { width: 54, height: 44, border: "1.5px solid var(--line)", borderRadius: 10, padding: 2, background: "var(--card)", cursor: "pointer" } }),
+                                    React.createElement("input", { type: "color", value: (school && school.color) || "#FF9300", onChange: e => { const v = e.target.value; if (school)
+                                            writeSchool(cur => cur && ({ ...cur, color: v })); }, style: { width: 54, height: 44, border: "1.5px solid var(--line)", borderRadius: 10, padding: 2, background: "var(--card)", cursor: "pointer" } }),
                                     React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, ["#FF9300", "#E5484D", "#2B7FFF", "#12A150", "#7C3AED", "#0F172A"].map(c => React.createElement("button", { key: c, onClick: () => { if (school)
-                                            writeSchool({ ...school, color: c }); }, "aria-label": "Farbe " + c, style: { width: 30, height: 30, borderRadius: "50%", background: c,
+                                            writeSchool(cur => cur && ({ ...cur, color: c })); }, "aria-label": "Farbe " + c, style: { width: 30, height: 30, borderRadius: "50%", background: c,
                                             border: (school && school.color && school.color.toLowerCase() === c.toLowerCase()) ? "3px solid var(--ink)" : "2px solid var(--line)" } }))))),
                             React.createElement("div", { className: "field", style: { marginTop: 14 } },
                                 React.createElement("label", { htmlFor: "field-bundesland" }, "Bundesland",
-                                React.createElement("select", { id: "field-bundesland", value: (school && school.bundesland) || "", onChange: e => { if (school)
-                                        writeSchool({ ...school, bundesland: e.target.value || null }); } },
+                                React.createElement("select", { id: "field-bundesland", value: (school && school.bundesland) || "", onChange: e => { const v = e.target.value; if (school)
+                                        writeSchool(cur => cur && ({ ...cur, bundesland: v || null })); } },
                                     React.createElement("option", { value: "" }, "– keine Angabe –"),
                                     Object.entries(BUNDESLAENDER).map(([code, name]) => React.createElement("option", { key: code, value: code }, name))))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 2px 0", lineHeight: 1.5 } }, "Nur für die Feiertage im Kalender - ohne Angabe zeigt die App ausschließlich die neun bundesweiten Feiertage, mit Angabe zusätzlich die deines Bundeslands."),
@@ -27257,13 +27632,13 @@ function App() {
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             locations.length === 0 && !locEdit &&
                                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 12 } }, "Noch keine Standorte angelegt. Lege für jede Filiale einen Standort an, dem du dann Schüler zuweisen kannst."),
-                            locations.map((loc, i) => React.createElement("div", { key: i, style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : "1px solid var(--line)" } },
+                            locations.map((loc, i) => React.createElement("div", { key: loc.id || i, style: { display: "flex", alignItems: "flex-start", gap: 10, padding: "10px 0", borderTop: i === 0 ? "none" : "1px solid var(--line)" } },
                                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, loc.name),
                                     (loc.street || loc.zip || loc.city) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, [loc.street, [loc.zip, loc.city].filter(Boolean).join(" ")].filter(Boolean).join(", ")),
                                     (loc.phone || loc.email) && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, [loc.phone, loc.email].filter(Boolean).join(" · "))),
                                 React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } },
-                                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
+                                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => setLocEdit({ index: i, id: loc.id || null, orig: loc, name: loc.name || "", street: loc.street || "", zip: loc.zip || "", city: loc.city || "", phone: loc.phone || "", email: loc.email || "" }) }, "Bearbeiten"),
                                     React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => { if (await askConfirm({ message: "Standort \"" + loc.name + "\" löschen? Zugewiesene Schüler verlieren die Zuordnung." })) {
                                             // Server räumt zuerst ALLE betroffenen Schüler auf (auch die anderer
                                             // Fahrlehrer, die der Client gar nicht geladen hat) und die eigene
@@ -27311,11 +27686,22 @@ function App() {
                                                 showToast("Bitte einen Namen für den Standort eingeben.");
                                                 return;
                                             }
-                                            const entry = { id: (locEdit.index !== null && locations[locEdit.index] && locations[locEdit.index].id) || uniqueId("loc"),
-                                                name: locEdit.name.trim(), street: locEdit.street.trim(), zip: locEdit.zip.trim(), city: locEdit.city.trim(),
-                                                phone: locEdit.phone.trim(), email: locEdit.email.trim() };
-                                            const next = locEdit.index === null ? [...locations, entry] : locations.map((l, j) => j === locEdit.index ? entry : l);
-                                            saveLocations(next);
+                                            // Audit I-N16: vorher per Index aus dem Render beim Öffnen - wurde in der
+                                            // Zwischenzeit ein anderer Standort gelöscht (hier oder in einer anderen
+                                            // Sitzung), überschrieb "Speichern" den falschen. Jetzt über die ID (bzw. das
+                                            // Objekt selbst bei alten Einträgen ohne ID) im AKTUELLEN Stand; ist der
+                                            // Standort inzwischen weg, wird die Eingabe als neuer angehängt statt verworfen.
+                                            const le = locEdit;
+                                            const entry = { id: le.id || uniqueId("loc"),
+                                                name: le.name.trim(), street: le.street.trim(), zip: le.zip.trim(), city: le.city.trim(),
+                                                phone: le.phone.trim(), email: le.email.trim() };
+                                            writeSchool(sc => {
+                                                if (!sc)
+                                                    return sc;
+                                                const liste = Array.isArray(sc.locations) ? sc.locations : [];
+                                                const i = le.index === null ? -1 : liste.findIndex(x => x === le.orig || (le.id && x.id === le.id));
+                                                return { ...sc, locations: i < 0 ? [...liste, entry] : liste.map((l, j) => j === i ? entry : l) };
+                                            });
                                             setLocEdit(null);
                                         } }, "Speichern"),
                                     React.createElement("button", { className: "btn btn-ghost", onClick: () => setLocEdit(null) }, "Abbrechen"))) : React.createElement("button", { className: "btn btn-ghost", style: { marginTop: 12 }, onClick: () => setLocEdit({ index: null, name: "", street: "", zip: "", city: "", phone: "", email: "" }) }, "+ Standort hinzufügen"))
@@ -27492,13 +27878,14 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-empfehlungsbonus" }, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-empfehlungsbonus", type: "text", inputMode: "decimal", value: referralReward, onChange: e => saveReferralReward(normDecimal(e.target.value)), style: { flex: 1 } }),
+                                    // EntwurfFeld (Audit I-M4): Komma bleibt stehen, leer/ungültig wird nicht gespeichert.
+                                    React.createElement(EntwurfFeld, { id: "field-empfehlungsbonus", inputMode: "decimal", wert: referralReward, parse: parseBetragFeld, anzeige: betragAnzeige, onWert: saveReferralReward, style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Betrag, den Werber und geworbener Schüler je als Gutschrift bekommen, wenn eine Empfehlung im Schülerprofil oder bei der Selbstanmeldung eingelöst wird."),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-ausfallgebuehr-standard" }, "Standard-Ausfallgebühr (optional)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-ausfallgebuehr-standard", type: "text", inputMode: "decimal", value: noShowFeeDefault != null ? String(noShowFeeDefault) : "", onChange: e => saveNoShowFeeDefault(normDecimal(e.target.value)), placeholder: "z.B. 30", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-ausfallgebuehr-standard", inputMode: "decimal", wert: noShowFeeDefault, parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: saveNoShowFeeDefault, placeholder: "z.B. 30", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Vorgeschlagener Betrag beim Melden eines Nichterscheinens (Schülerseite, „Zuverlässigkeit\"). Leer lassen für automatisch die Hälfte des UE-Preises - in beiden Fällen frei anpassbar, bevor die Gebühr gebucht wird."),
                             React.createElement("div", { className: "field" },
@@ -27510,13 +27897,13 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-zahlungsziel" }, "Zahlungsziel"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-zahlungsziel", type: "text", inputMode: "numeric", value: String(zahlungszielTage), onChange: e => saveZahlungszielTage(e.target.value.replace(/\D/g, "")), placeholder: "14", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-zahlungsziel", inputMode: "numeric", wert: zahlungszielTage, parse: parseGanzzahlAb(1), leerWert: null, onWert: saveZahlungszielTage, placeholder: "14", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Tage"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Ab wie vielen Tagen nach dem Rechnungsdatum eine unbezahlte Rechnung im Mahnungen-Cockpit und in der Abrechnung als überfällig gilt. Standard 14 Tage."),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-planung-puffer" }, "Planungspuffer (Rückwärts-Fahrplan)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-planung-puffer", type: "text", inputMode: "numeric", value: String(planungPufferWochen), onChange: e => savePlanungPufferWochen(e.target.value.replace(/\D/g, "")), placeholder: "6", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-planung-puffer", inputMode: "numeric", wert: planungPufferWochen, parse: parseGanzzahlAb(0), leerWert: null, onWert: savePlanungPufferWochen, placeholder: "6", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Wochen"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Zeit, die der Rückwärts-Fahrplan je Schüler zusätzlich zur reinen Fahrstundenzeit einplant - für Bearbeitungszeit bei der Führerscheinstelle und die Wartezeit auf einen Prüfungstermin. Standard 6 Wochen, im Einzelfall regional sehr unterschiedlich."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
@@ -27528,7 +27915,17 @@ function App() {
                                         Number(p.includedUE) > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
                                             ueFmt(p.includedUE), " UE enthalten")),
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, eurFmt(p.amount)),
-                                    React.createElement("button", { className: "icon-x", onClick: () => savePackages(packages.filter((_, i) => i !== idx)), "aria-label": "Paket entfernen", style: { border: "none", background: "none", color: "var(--red)", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "×")))),
+                                    React.createElement("button", { className: "icon-x", onClick: async () => {
+                                            // Audit I-N15: ein Tipp entfernte das Paket sofort. Nach der Rückfrage gegen den
+                                            // AKTUELLEN Stand filtern (Objekt-Identität, ersatzweise gleicher Inhalt), nicht
+                                            // per Index aus dem Render davor.
+                                            if (!await askConfirm({ message: "Paket \"" + p.name + "\" entfernen? Schüler, die es schon übernommen haben, behalten ihren Posten." }))
+                                                return;
+                                            const inhalt = JSON.stringify(p);
+                                            writeSchool(sc => { if (!sc)
+                                                return sc; const liste = sc.packages || []; let i = liste.indexOf(p); if (i < 0)
+                                                i = liste.findIndex(x => JSON.stringify(x) === inhalt); return i < 0 ? sc : { ...sc, packages: liste.filter((_, j) => j !== i) }; });
+                                        }, "aria-label": "Paket " + p.name + " entfernen", style: { border: "none", background: "none", color: "var(--red)", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "×")))),
                             packageEdit ? React.createElement("div", { style: { marginTop: 10, paddingTop: 14, borderTop: "1px solid var(--line)" } },
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10 } }, "Neues Paket"),
                                 React.createElement("div", { className: "field", style: { marginBottom: 8 } },
@@ -27542,17 +27939,24 @@ function App() {
                                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, color: "var(--muted)" } }, "€"))),
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
                                         React.createElement("label", null, "Enthaltene UE",
-                                        React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: normDecimal(e.target.value) })), placeholder: "0" })))),
+                                        React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: normDecimal(e.target.value), error: "" })), placeholder: "0" })))),
                                 packageEdit.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red)", marginBottom: 8 } }, packageEdit.error),
                                 React.createElement("div", { style: { display: "flex", gap: 8 } },
                                     React.createElement("button", { className: "btn btn-primary", onClick: () => {
-                                            const amount = parseFloat((packageEdit.amount || "").replace(",", "."));
-                                            if (isNaN(amount)) {
-                                                setPackageEdit(f => ({ ...f, error: "Bitte einen gültigen Preis eingeben." }));
+                                            // parseBetrag statt parseFloat (Audit I-N15): "-50" und "1.000" (= 1 €)
+                                            // gingen vorher durch; negative Preise/UE ergeben keinen Sinn.
+                                            const amount = parseBetrag(packageEdit.amount || "");
+                                            if (!(amount >= 0)) {
+                                                setPackageEdit(f => ({ ...f, error: "Bitte einen gültigen Preis eingeben (0 oder mehr)." }));
                                                 return;
                                             }
-                                            const includedUE = (packageEdit.ue || "").trim() === "" ? 0 : parseFloat((packageEdit.ue || "").replace(",", "."));
-                                            savePackages([...packages, { name: packageEdit.name.trim() || "Paket", amount, includedUE: isNaN(includedUE) ? 0 : includedUE }]);
+                                            const includedUE = (packageEdit.ue || "").trim() === "" ? 0 : parseBetrag(packageEdit.ue);
+                                            if (!(includedUE >= 0)) {
+                                                setPackageEdit(f => ({ ...f, error: "Bitte bei den enthaltenen UE eine Zahl ab 0 eingeben." }));
+                                                return;
+                                            }
+                                            const neu = { name: packageEdit.name.trim() || "Paket", amount, includedUE };
+                                            writeSchool(sc => sc && ({ ...sc, packages: [...(sc.packages || []), neu] }));
                                             setPackageEdit(null);
                                         } }, "Hinzufügen"),
                                     React.createElement("button", { className: "btn btn-ghost", onClick: () => setPackageEdit(null) }, "Abbrechen"))) : React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => setPackageEdit({ name: "", amount: "", ue: "", error: "" }) }, "+ Paket hinzufügen"),
@@ -27721,7 +28125,38 @@ function App() {
                             React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)" } }, "Angemeldet als"),
                             React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, marginTop: 2, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, session.user.email),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
-                                myStudents, " eigene Schüler", sharedStudents > 0 ? " · " + sharedStudents + " geteilt" : ""))),
+                                myStudents, " eigene Schüler", sharedStudents > 0 ? " · " + sharedStudents + " geteilt" : "")),
+                        // Passwort ändern und Konto löschen: nicht im Demo-Konto - das teilen sich alle
+                        // Interessenten, ein geändertes Passwort sperrte alle anderen aus.
+                        !IS_DEMO() && React.createElement("div", { className: "eyebrow" }, "Sicherheit"),
+                        !IS_DEMO() && React.createElement("div", { className: "card", style: { padding: "13px 14px" } }, pwAendernOffen
+                            ? React.createElement(PasswortAendernFormular, { onFertig: () => setPwAendernOffen(false), onAbbrechen: () => setPwAendernOffen(false) })
+                            : React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setPwAendernOffen(true) }, "Passwort ändern")),
+                        // Audit I-H2: Konto selbst löschen, zweistufig - erst erklären, was passiert, dann
+                        // LÖSCHEN eintippen. Die Function prüft vorher selbst, ob Rechnungen, geteilte
+                        // Schüler o.Ä. dagegen sprechen, und erklärt das dann (mehrzeilig).
+                        !IS_DEMO() && React.createElement("div", { className: "eyebrow", style: { color: "var(--red-ink)" } }, "Konto löschen"),
+                        !IS_DEMO() && React.createElement("div", { className: "card", style: { padding: "13px 14px" } }, !kontoLoeschen
+                            ? React.createElement(React.Fragment, null,
+                                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Löscht dein Konto mit allen Schülern, Terminen und Dateien endgültig."),
+                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--red)" }, onClick: () => setKontoLoeschen({ stufe: 1, eingabe: "", busy: false, fehler: "" }) }, "Konto löschen …"))
+                            : kontoLoeschen.stufe === 1
+                                ? React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700, marginBottom: 8 } }, "Was beim Löschen passiert"),
+                                    React.createElement("ul", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)", margin: "0 0 12px", paddingLeft: 18 } },
+                                        React.createElement("li", null, "Dein Anmelde-Konto (", session.user.email, ") wird gelöscht."),
+                                        React.createElement("li", null, "Deine ", myStudents, " eigenen Schüler mit Fahrstunden, Terminen, Unterschriften und Dateien werden gelöscht."),
+                                        React.createElement("li", null, "Das lässt sich nicht rückgängig machen. Sichere vorher bei Bedarf unter „Daten & Sicherung“ ein Backup."),
+                                        React.createElement("li", null, "Gibt es Rechnungen (Aufbewahrungspflicht) oder mit Kollegen geteilte Schüler, wird nichts gelöscht - du bekommst dann eine Erklärung, was vorher zu klären ist.")),
+                                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--red)" }, onClick: () => setKontoLoeschen(k => k && ({ ...k, stufe: 2 })) }, "Weiter zur Bestätigung"),
+                                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setKontoLoeschen(null) }, "Abbrechen"))
+                                : React.createElement("form", { noValidate: true, onSubmit: e => { e.preventDefault(); kontoEndgueltigLoeschen(); } },
+                                    React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                                        React.createElement("label", null, "Zur Bestätigung LÖSCHEN eintippen",
+                                            React.createElement("input", { type: "text", autoComplete: "off", autoCapitalize: "characters", spellCheck: false, autoFocus: true, value: kontoLoeschen.eingabe, disabled: kontoLoeschen.busy, onChange: e => { const v = e.target.value; setKontoLoeschen(k => k && ({ ...k, eingabe: v, fehler: "" })); } }))),
+                                    kontoLoeschen.fehler && React.createElement("div", { role: "alert", style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, lineHeight: 1.5, marginBottom: 12, whiteSpace: "pre-line" } }, kontoLoeschen.fehler),
+                                    React.createElement("button", { type: "submit", className: "btn btn-block", disabled: kontoLoeschen.busy || kontoLoeschen.eingabe.trim().toUpperCase() !== "LÖSCHEN", style: { background: "var(--red)", color: "#fff" } }, kontoLoeschen.busy ? "Wird gelöscht…" : "Konto endgültig löschen"),
+                                    React.createElement("button", { type: "button", className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: kontoLoeschen.busy, onClick: () => setKontoLoeschen(null) }, "Abbrechen")))),
                     settingsScreen === "geraet" && React.createElement(SettingsScreen, { title: "Gerät & Benachrichtigungen", onBack: closeScreen },
                         React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Benachrichtigungen"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
@@ -27824,7 +28259,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Fahrtenbuch konnte nicht exportiert werden.", "error");
@@ -27980,7 +28416,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Rechnungen konnten nicht exportiert werden.");
@@ -27998,7 +28435,8 @@ function App() {
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            // Später freigeben wie in downloadApptIcs (Audit I-M13) - sofort brach Safari den Download ab.
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
         }
         catch (e) {
             showToast("Backup konnte nicht erstellt werden.", "error");
@@ -28033,6 +28471,11 @@ function App() {
                 const row = await uploadVideo(uid, school && school.id, videoUpload.file, videoUpload.title.trim(), videoUpload.category);
                 setVideos(v => [row, ...(v || [])]);
                 setVideoUpload(null);
+                // Rückmeldung und gleich die Kategorie des neuen Videos zeigen (Audit I-N21) -
+                // vorher verschwand nur das Formular, das Video landete ggf. in einem anderen Reiter.
+                if (row && row.category)
+                    setVideoCat(row.category);
+                showFlash("✓ Video hochgeladen");
             }
             catch (e) {
                 setVideoUpload(u => ({ ...u, busy: false, error: e.message || "Upload fehlgeschlagen." }));
@@ -28074,10 +28517,13 @@ function App() {
                         React.createElement("select", { value: videoUpload.category, onChange: e => setVideoUpload(u => ({ ...u, category: e.target.value })) }, VIDEO_KATEGORIEN.map(k => React.createElement("option", { key: k.code, value: k.code }, k.label))))),
                     videoUpload.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red,#B3362A)", marginBottom: 8 } }, videoUpload.error),
                     React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("button", { className: "btn btn-primary", disabled: videoUpload.busy, onClick: onUpload }, videoUpload.busy ? "Lädt hoch…" : "Hochladen"),
+                        React.createElement("button", { className: "btn btn-primary", disabled: videoUpload.busy, onClick: onUpload }, videoUpload.busy ? "Lädt hoch… bitte warten" : "Hochladen"),
                         React.createElement("button", { className: "btn btn-ghost", disabled: videoUpload.busy, onClick: () => setVideoUpload(null) }, "Abbrechen")))),
             videos === null && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "L\u00E4dt\u2026"),
-            videos !== null && list.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Videos hochgeladen."),
+            videosFehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, whiteSpace: "pre-line" } },
+                "Videos konnten nicht geladen werden: ", videosFehler, " ",
+                React.createElement("button", { onClick: () => { setVideosFehler(""); setVideosLadeNr(n => n + 1); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut versuchen")),
+            videos !== null && !videosFehler && list.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Videos hochgeladen."),
             videos !== null && list.length > 0 && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "seg", style: { marginBottom: 14, overflowX: "auto", flexWrap: "nowrap" } }, VIDEO_KATEGORIEN.map(k => React.createElement("button", { key: k.code, className: videoCat === k.code ? "on" : "", onClick: () => setVideoCat(k.code), style: { whiteSpace: "nowrap" } },
                     k.label,
@@ -28123,7 +28569,9 @@ function App() {
             commit(a);
         }
         function renameItem(si, ii, label) { const a = deepCopy(list); a[si].items[ii].label = label; commit(a); }
-        function setItemCount(si, ii, count) { const a = deepCopy(list); a[si].items[ii].count = Math.max(1, parseInt(count, 10) || 1); commit(a); }
+        // count kommt aus EntwurfFeld (schon geprüfte ganze Zahl ab 1) - vorher sprang ein kurz
+        // geleertes Feld sofort auf 1 zurück, "12" war so nur über "1" → "12" tippbar (Audit I-N25).
+        function setItemCount(si, ii, count) { const a = deepCopy(list); a[si].items[ii].count = Math.max(1, count); commit(a); }
         async function delItem(si, ii) {
             // Ohne Rückfrage entfernte ein Tipp einen Punkt samt bereits erfasstem Schülerfortschritt
             // sofort und unwiederbringlich aus jeder Anzeige (Fortschrittsberechnung läuft nur noch
@@ -28212,6 +28660,10 @@ function App() {
             window.addEventListener("touchmove", move, { passive: false });
             window.addEventListener("touchend", up);
         }
+        // Als Funktion aufgerufen, nicht als <Handle/> (Audit I-N25): eine hier im Render erzeugte
+        // Komponente ist bei jedem Render ein neuer Typ - React baute den Griff dann bei jedem
+        // setDrag() neu auf, das berührte Element verschwand mitten im Ziehen aus dem DOM und iOS
+        // lieferte keine touchmove-Ereignisse mehr.
         const Handle = ({ onDown }) => (React.createElement("span", { onPointerDown: onDown, onTouchStart: onDown, style: { flexShrink: 0, cursor: "grab", touchAction: "none", color: "#B0A896", padding: "6px 8px",
                 minWidth: 44, minHeight: 44, justifyContent: "center",
                 display: "inline-flex", alignItems: "center", fontSize: 18, lineHeight: 1, userSelect: "none", WebkitUserSelect: "none" }, "aria-label": "Zum Verschieben ziehen" },
@@ -28230,7 +28682,9 @@ function App() {
         const dropLine = React.createElement("div", { style: { height: 3, background: "var(--orange)", borderRadius: 2, margin: "2px 0" } });
         return React.createElement("div", { className: "pad" },
             React.createElement("div", { className: "card", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 13px", marginBottom: 12 } },
-                React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px", fontSize: 13 }, onClick: () => setView("liste") }, "\u2039 Zur\u00FCck"),
+                // Zurück dorthin, woher der Editor geöffnet wird: Einstellungen › Arbeit & Ausbildung
+                // (Audit I-M11) - vorher landete man in der Schülerliste.
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px", fontSize: 13 }, onClick: () => setView("einstellungen") }, "\u2039 Zur\u00FCck"),
                 React.createElement("div", { style: { flex: 1 } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, lineHeight: 1.05 } }, "Vorlage bearbeiten"),
                     React.createElement("div", { style: { fontSize: 11, color: "var(--muted)" } }, "Gilt f\u00FCr alle Sch\u00FCler mit dieser F\u00FChrerscheinklasse"))),
@@ -28278,7 +28732,7 @@ function App() {
                     React.createElement("div", { "data-sec-idx": si, className: "card sec", style: { borderLeftColor: sec.color || "#999", opacity: secDragging ? 0.5 : 1,
                             boxShadow: secDragging ? "0 6px 18px rgba(0,0,0,.18)" : undefined } },
                         React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, padding: "9px 10px" } },
-                            React.createElement(Handle, { onDown: e => startDrag(e, "sec", si) }),
+                            Handle({ onDown: e => startDrag(e, "sec", si) }),
                             React.createElement("button", { onClick: () => setOpenSection(isOpen ? null : sec.id), style: { flexShrink: 0, color: "var(--muted)", padding: "4px" } },
                                 React.createElement(IcChev, { open: isOpen })),
                             React.createElement("input", { value: sec.title, onChange: e => renameSec(si, e.target.value), style: { flex: 1, minWidth: 0, border: "1.5px solid transparent", borderRadius: 8, padding: "8px 9px", fontSize: 16,
@@ -28291,7 +28745,7 @@ function App() {
                                     drag && drag.type === "item" && drag.si === si && drag.overIndex === ii && dropLine,
                                     React.createElement("div", { "data-item-idx": ii, "data-sec": si, style: { display: "flex", alignItems: "center", gap: 6, padding: "6px 0", borderTop: "1px solid #F2EDE3",
                                             opacity: itDragging ? 0.5 : 1 } },
-                                        React.createElement(Handle, { onDown: e => startDrag(e, "item", si, ii) }),
+                                        Handle({ onDown: e => startDrag(e, "item", si, ii) }),
                                         React.createElement("input", { value: it.label, onChange: e => renameItem(si, ii, e.target.value), style: { flex: 1, minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 9px", fontSize: 16 } }),
                                         // Fahrzeugkunde existiert als ZWEI unabh\u00E4ngige Kopien (eine in der
                                         // ADK-, eine in der Strecken-Vorlage, siehe withFahrzeugkunde()) -
@@ -28303,7 +28757,7 @@ function App() {
                                         // sec.id !== "fahrzeugkunde").
                                         sec.id === "fahrzeugkunde"
                                             ? React.createElement("span", { style: { width: 48, textAlign: "center", fontSize: 13, color: "var(--muted)" }, title: "Fahrzeugkunde nutzt einen festen 5-Stufen-Regler, keine St\u00FCckzahl" }, "\u2014")
-                                            : React.createElement("input", { type: "number", min: "1", value: it.count || 1, onChange: e => setItemCount(si, ii, e.target.value), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 16, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
+                                            : React.createElement(EntwurfFeld, { inputMode: "numeric", "aria-label": "Anzahl Durchgänge", wert: it.count || 1, parse: parseGanzzahlAb(1), onWert: n => setItemCount(si, ii, n), style: { width: 48, border: "1.5px solid var(--line)", borderRadius: 8, padding: "8px 4px", fontSize: 16, textAlign: "center" }, title: "Anzahl Durchg\u00E4nge" }),
                                         delBtn(() => delItem(si, ii))));
                             }),
                             drag && drag.type === "item" && drag.si === si && drag.overIndex === sec.items.length && dropLine,
@@ -29152,6 +29606,19 @@ function App() {
     const mehrActive = mehrViews.indexOf(view) >= 0;
     const schuelerActive = schuelerViews.indexOf(view) >= 0;
     const fahrlehrerActive = fahrlehrerViews.indexOf(view) >= 0;
+    // Seitenleiste (Audit I-N19): dort markierten oft zwei Einträge gleichzeitig - "Schüler" UND
+    // der eigene Eintrag "Übersicht" (uebersicht zählt zu schuelerViews), "Fahrlehrer" UND "Mehr"
+    // (fahrlehrerViews steckt für die Handy-Leiste in mehrViews), und ein aufgeklappter Bereich
+    // UND sein Untereintrag. Hier eigene Werte nur für die Seitenleiste; der Obereintrag trägt die
+    // Markierung nur, solange sein aufgeklappter Untereintrag sie nicht schon zeigt.
+    const sbAusbildungSub = ["adk", "strecken", "tagebuch", "pruefungssimliste", "schaltkompetenzliste"];
+    const sbMehrSub = ["schulboard", "daten", "fuhrpark", "auswertung", "tagesgeschaeft", "interessenten", "einstellungen", "videos"];
+    // "daten" zählt zu schuelerViews, hat aber im aufgeklappten "Mehr" einen eigenen Untereintrag
+    // ("Schülerdaten") - dann trägt der die Markierung, nicht zusätzlich "Schüler".
+    const sbSchuelerOn = schuelerActive && view !== "uebersicht" && !(tabMenu === "sb-mehr" && view === "daten");
+    const sbAusbildungOn = ausbildungActive && !(tabMenu === "sb-ausbildung" && sbAusbildungSub.indexOf(view) >= 0);
+    const sbFahrlehrerOn = fahrlehrerActive && tabMenu !== "sb-fahrlehrer";
+    const sbMehrOn = mehrActive && !fahrlehrerActive && !(tabMenu === "sb-mehr" && sbMehrSub.indexOf(view) >= 0);
     return React.createElement("div", null,
         React.createElement("div", { className: "app" },
             React.createElement("nav", { className: "sidebar" },
@@ -29174,10 +29641,10 @@ function App() {
                 React.createElement("button", { className: "sb-item" + (view === "home" ? " on" : ""), onClick: () => { setView("home"); setTabMenu(null); } },
                     React.createElement(IcHome, null),
                     "Startseite"),
-                React.createElement("button", { className: "sb-item" + (schuelerActive ? " on" : ""), onClick: () => { setView("liste"); setTabMenu(null); } },
+                React.createElement("button", { className: "sb-item" + (sbSchuelerOn ? " on" : ""), onClick: () => { setView("liste"); setTabMenu(null); } },
                     React.createElement(IcUsers, null),
                     "Schüler"),
-                React.createElement("button", { className: "sb-item" + (ausbildungActive ? " on" : ""), onClick: () => setTabMenu(tabMenu === "sb-ausbildung" ? null : "sb-ausbildung") },
+                React.createElement("button", { className: "sb-item" + (sbAusbildungOn ? " on" : ""), "aria-expanded": tabMenu === "sb-ausbildung" ? "true" : "false", onClick: () => setTabMenu(tabMenu === "sb-ausbildung" ? null : "sb-ausbildung") },
                     React.createElement(IcCard, null),
                     "Ausbildung",
                     React.createElement("span", { className: "sb-chev" + (tabMenu === "sb-ausbildung" ? " open" : "") }, "\u25BE")),
@@ -29191,7 +29658,7 @@ function App() {
                         React.createElement("path", { d: "M9 8v8l7-4-7-4z" }))]].map(([id, lbl, ic]) => React.createElement("button", { key: id, className: "sb-item" + (view === id ? " on" : ""), onClick: () => { setView(id); setTabMenu(null); } },
                         ic,
                         lbl))),
-                React.createElement("button", { className: "sb-item" + (fahrlehrerActive ? " on" : ""), onClick: () => setTabMenu(tabMenu === "sb-fahrlehrer" ? null : "sb-fahrlehrer") },
+                React.createElement("button", { className: "sb-item" + (sbFahrlehrerOn ? " on" : ""), "aria-expanded": tabMenu === "sb-fahrlehrer" ? "true" : "false", onClick: () => setTabMenu(tabMenu === "sb-fahrlehrer" ? null : "sb-fahrlehrer") },
                     React.createElement("svg", { width: "19", height: "19", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("circle", { cx: "12", cy: "8", r: "4" }),
                         React.createElement("path", { d: "M4 20c0-4 3.5-7 8-7s8 3 8 7" })),
@@ -29209,7 +29676,7 @@ function App() {
                     React.createElement(IcCalendar, null),
                     "Kalender",
                     pendingCount > 0 && React.createElement("span", { className: "sb-badge" }, pendingCount)),
-                React.createElement("button", { className: "sb-item" + (mehrActive ? " on" : ""), onClick: () => setTabMenu(tabMenu === "sb-mehr" ? null : "sb-mehr") },
+                React.createElement("button", { className: "sb-item" + (sbMehrOn ? " on" : ""), "aria-expanded": tabMenu === "sb-mehr" ? "true" : "false", onClick: () => setTabMenu(tabMenu === "sb-mehr" ? null : "sb-mehr") },
                     React.createElement(IcSettings, null),
                     "Mehr",
                     React.createElement("span", { className: "sb-chev" + (tabMenu === "sb-mehr" ? " open" : "") }, "\u25BE")),
@@ -29265,8 +29732,12 @@ function App() {
                                 React.createElement(WeatherWidget, { city: myCity, weather: weather }),
                                 saveError
                                     ? React.createElement("button", { className: "save-pill err", onClick: retrySave, title: "Erneut speichern" }, "Nicht gespeichert · erneut")
-                                    : React.createElement("div", { className: "save-pill", role: "status", "aria-live": "polite" },
-                                        saved ? "✓ Gespeichert" : "Speichert…")),
+                                    : React.createElement("div", { className: "save-pill", role: "status", "aria-live": "polite", "aria-label": saved ? "Gespeichert" : "Speichert…", title: saved ? "Gespeichert" : "Speichert…" },
+                                        // Symbol nur unter 480px sichtbar (CSS .save-pill-ico), sonst der Text.
+                                        React.createElement("svg", { className: "save-pill-ico" + (saved ? "" : " dreht"), "aria-hidden": "true", width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round", strokeLinejoin: "round" }, saved
+                                            ? React.createElement("polyline", { points: "5 12.5 10 17.5 19 7.5" })
+                                            : React.createElement("path", { d: "M12 3a9 9 0 1 0 9 9" })),
+                                        React.createElement("span", { className: "save-pill-text" }, saved ? "✓ Gespeichert" : "Speichert…"))),
                             // Neu (spec 4.1): Fahrlehrer-Avatar rechts im Header, dieselbe Bild-/Initialen-Quelle
                             // wie der bestehende Profil-Avatar auf der Startseite (profileData.avatar_url/teacherName).
                             React.createElement("button", { onClick: () => { setSettingsScreen("profil"); setView("einstellungen"); }, className: "icon-x", "aria-label": "Profil", style: { padding: 0, border: "none", background: "none", cursor: "pointer", flexShrink: 0 } },
@@ -29316,7 +29787,11 @@ function App() {
                 view === "schaltkompetenz" && renderSchaltkompetenz(),
                 view === "daten" && active && renderDaten(),
                 ),
-                tabMenu && React.createElement("div", { onClick: () => setTabMenu(null), className: "modal-overlay", style: { position: "fixed", inset: 0, zIndex: 46 } }),
+                // Unsichtbare Klickfläche nur für die schwebenden Menüs der Tab-Leiste - die Bereiche
+                // der Seitenleiste ("sb-…") klappen inline auf. Dort lag die Fläche sonst über dem
+                // ganzen Inhalt und schluckte den nächsten Klick, bis man den Bereich wieder
+                // zuklappte (Audit I-N19).
+                tabMenu && tabMenu.indexOf("sb-") !== 0 && React.createElement("div", { onClick: () => setTabMenu(null), className: "modal-overlay", style: { position: "fixed", inset: 0, zIndex: 46 } }),
                 cmdOpen && renderCommandPalette(),
                 React.createElement("button", { onClick: () => setAssistant({ open: true, busy: false, error: "", input: "", proposal: null }), "aria-label": "KI-Helfer", className: "fab-assistant", style: { position: "fixed", right: 16, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 47,
                         width: 54, height: 54, borderRadius: "50%", border: "none", background: "var(--orange)", color: "#fff",
@@ -29492,7 +29967,7 @@ function App() {
                             React.createElement(IcSettings, null),
                             React.createElement("span", null, "Mehr")))))),
         calImport && React.createElement("div", { onClick: () => { if (!calImport.busy)
-                setCalImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                schliessenNachRueckfrage("calImport", calImport, () => setCalImport(null), !!(calImport.items && calImport.items.length)); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(18px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -29531,7 +30006,7 @@ function App() {
                             " Termine anlegen"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setCalImport(null) }, "Abbrechen"))))),
         adkImport && React.createElement("div", { onClick: () => { if (!adkImport.busy)
-                setAdkImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                schliessenNachRueckfrage("adkImport", adkImport, () => setAdkImport(null), !!(adkImport.results && adkImport.results.length)); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(18px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -29950,7 +30425,7 @@ function App() {
                 interessentImport.busy && React.createElement("div", { style: { padding: "30px 10px", textAlign: "center" } },
                     React.createElement("div", { style: { fontSize: 14, color: "var(--muted)" } }, "Screenshot wird ausgelesen\u2026"),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6 } }, "Das dauert ein paar Sekunden.")))),
-        lessonForm && React.createElement("div", { onClick: () => setLessonForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        lessonForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("lesson", lessonForm, () => setLessonForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, lessonForm.id ? "Fahrstunde bearbeiten" : "Fahrstunde erfassen"),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
@@ -29991,7 +30466,7 @@ function App() {
                         " \u20AC")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10, marginBottom: 8 }, onClick: saveLessonForm }, "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setLessonForm(null) }, "Abbrechen"))),
-        itemForm && React.createElement("div", { onClick: () => setItemForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        itemForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("item", itemForm, () => setItemForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, "Posten hinzufügen"),
                 itemForm.busy
@@ -30009,7 +30484,7 @@ function App() {
                         itemForm.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red)", marginTop: 8, whiteSpace: "pre-wrap" } }, itemForm.error),
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, onClick: saveItemForm }, "Hinzufügen")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!itemForm.busy, onClick: () => setItemForm(null) }, "Abbrechen"))),
-        paymentForm && React.createElement("div", { onClick: () => setPaymentForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        paymentForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("payment", paymentForm, () => setPaymentForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: paymentForm.invoiceNumber ? 4 : 16 } }, "Zahlung erfassen"),
                 paymentForm.invoiceNumber && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
@@ -30138,7 +30613,7 @@ function App() {
         leistungForm && leistungForm.step === "form" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const autoPrice = leistungPriceAuto(leistungForm);
-            return React.createElement("div", { onClick: () => setLeistungForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            return React.createElement("div", { onClick: () => schliessenNachRueckfrage("leistung", leistungForm, () => setLeistungForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
                 React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Leistung erstellen"),
                     React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, stu ? dispName(stu) : ""),
@@ -30323,14 +30798,14 @@ function App() {
                         ? React.createElement("div", null,
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Name deiner Fahrschule",
-                                React.createElement("input", { type: "text", defaultValue: school.name || "", key: "ob-name", onBlur: e => { if (e.target.value.trim())
-                                        writeSchool({ ...school, name: e.target.value.trim() }); } }))),
+                                React.createElement("input", { type: "text", defaultValue: school.name || "", key: "ob-name", onBlur: e => { const v = e.target.value.trim(); if (v)
+                                        writeSchool(cur => cur && ({ ...cur, name: v })); } }))),
                             React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                                 React.createElement("label", null, "Untertitel (z.B. Klasse B \u00B7 Automatik)",
-                                React.createElement("input", { type: "text", defaultValue: school.subtitle || "", key: "ob-sub", onBlur: e => writeSchool({ ...school, subtitle: e.target.value }) }))),
+                                React.createElement("input", { type: "text", defaultValue: school.subtitle || "", key: "ob-sub", onBlur: e => { const v = e.target.value; writeSchool(cur => cur && ({ ...cur, subtitle: v })); } }))),
                             React.createElement("div", { style: { marginBottom: 16 } },
                                 React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Farbe"),
-                                React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap" } }, ["#FF9300", "#E5484D", "#2B7FFF", "#12A150", "#7C3AED", "#0F172A"].map(c => React.createElement("button", { key: c, onClick: () => writeSchool({ ...school, color: c }), style: { width: 36, height: 36, borderRadius: "50%", background: c,
+                                React.createElement("div", { style: { display: "flex", gap: 10, flexWrap: "wrap" } }, ["#FF9300", "#E5484D", "#2B7FFF", "#12A150", "#7C3AED", "#0F172A"].map(c => React.createElement("button", { key: c, onClick: () => writeSchool(cur => cur && ({ ...cur, color: c })), style: { width: 36, height: 36, borderRadius: "50%", background: c,
                                         border: school.color === c ? "3px solid var(--ink)" : "2px solid var(--line)" } })))))
                         : React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
                             React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 4 } }, school.name || "Deine Fahrschule"),
@@ -30348,21 +30823,30 @@ function App() {
                             React.createElement("label", null, "Nachname",
                             React.createElement("input", { type: "text", id: "ob-name2", placeholder: "Mustermann" })))),
                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 20 } },
-                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: async () => {
+                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: !!onboarding.busy, onClick: async () => {
                                 var _a, _b;
+                                if (onboardingBusyRef.current)
+                                    return;
                                 const v = (((_a = document.getElementById("ob-vorname")) === null || _a === void 0 ? void 0 : _a.value) || "").trim();
                                 const n = (((_b = document.getElementById("ob-name2")) === null || _b === void 0 ? void 0 : _b.value) || "").trim();
                                 if (v || n) {
                                     const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
                                     const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: validMyLocationId || "" };
+                                    onboardingBusyRef.current = true;
+                                    setOnboarding(o => o && ({ ...o, busy: true, fehler: "" }));
                                     const created = await dbInsert(uid, draft);
-                                    if (created) {
-                                        updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                                    onboardingBusyRef.current = false;
+                                    if (!created) {
+                                        // Vorher ging es still zu Schritt 3 weiter, als wäre der Schüler angelegt.
+                                        setOnboarding(o => o && ({ ...o, busy: false, fehler: "Der Schüler konnte nicht angelegt werden. Bitte die Verbindung prüfen und erneut versuchen - oder überspringen und später in der Schülerliste anlegen." }));
+                                        return;
                                     }
+                                    updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
                                 }
                                 setOnboarding({ step: 2 });
-                            } }, "Sch\u00FCler anlegen \u2192"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setOnboarding({ step: 2 }) }, "\u00DCberspringen"))),
+                            } }, onboarding.busy ? "Wird angelegt\u2026" : "Sch\u00FCler anlegen \u2192"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, disabled: !!onboarding.busy, onClick: () => setOnboarding({ step: 2 }) }, "\u00DCberspringen")),
+                    onboarding.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginTop: -8, marginBottom: 16, lineHeight: 1.5 } }, onboarding.fehler)),
                 onboarding.step === 2 && React.createElement(React.Fragment, null,
                     React.createElement("div", { style: { fontSize: 36, marginBottom: 12 } }, "\uD83D\uDD17"),
                     React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, marginBottom: 8 } }, "Buchungslink f\u00FCr Sch\u00FCler"),
@@ -30480,7 +30964,10 @@ function App() {
                         React.createElement("span", { style: { color: "var(--muted)", fontSize: 18, flexShrink: 0 } }, "\u203A"));
                 }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setBirthdayPopup(null) }, "Schlie\u00DFen"))),
-        !IS_DEMO() && showChangelog && React.createElement("div", { onClick: () => { setShowChangelog(false); setChangelogExpanded(false); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        // Auch in der Demo anzeigen, wenn man "Was ist neu?" selbst antippt (Audit I-N27) - der Knopf
+        // tat dort sonst nichts. Das automatische Aufpoppen nach einem Update ist in der Demo
+        // weiterhin aus (siehe changelogWillShowRef-Effekt).
+        showChangelog && React.createElement("div", { onClick: () => { setShowChangelog(false); setChangelogExpanded(false); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -30593,8 +31080,10 @@ function App() {
                             return React.createElement("div", { className: "card", style: { margin: "14px 16px 0", padding: "13px 14px" } },
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 12, textTransform: "uppercase", letterSpacing: ".05em", color: "var(--muted)", marginBottom: 7 } }, "Teilbarer Link f\u00FCr Fahrlehrer ohne App"),
                                 React.createElement("div", { style: { fontSize: 12.5, wordBreak: "break-all", background: "var(--field-bg)", borderRadius: 9, padding: "9px 11px", marginBottom: 9 } }, link),
-                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => { try {
-                                        navigator.clipboard.writeText(link);
+                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: async () => { try {
+                                        // Audit I-N20: writeText ist asynchron - ohne await kam "Link kopiert."
+                                        // auch dann, wenn das Kopieren abgelehnt wurde (z.B. Safari ohne Fokus).
+                                        await navigator.clipboard.writeText(link);
                                         showToast("Link kopiert.");
                                     }
                                     catch (e) {
@@ -32139,7 +32628,7 @@ function App() {
                 theoryForm.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red)", marginBottom: 12 } }, theoryForm.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: theoryForm.busy, onClick: submitTheoryForm }, theoryForm.busy ? "Wird gesendet\u2026" : "Einreichen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: theoryForm.busy, onClick: () => setTheoryForm(null) }, "Abbrechen"))),
-        invoiceDraft && React.createElement("div", { onClick: () => setInvoiceDraft(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
+        invoiceDraft && React.createElement("div", { onClick: () => schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85dvh", overflowY: "auto" } },
@@ -32189,8 +32678,23 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 4 } }, "QR-Code für den Buchungslink"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.5, marginBottom: 16 } }, "Zum Ausdrucken oder Aushängen: Schüler scannen den Code und landen direkt auf der Buchungsseite."),
-                React.createElement("img", { src: "https://api.qrserver.com/v1/create-qr-code/?size=280x280&margin=10&data=" + encodeURIComponent(qrModal), alt: "QR-Code zum Buchungslink", width: 280, height: 280,
-                        style: { borderRadius: 12, border: "1px solid var(--line)", background: "#fff" } }),
+                // Lokal erzeugt mit dem eingebauten QR-Encoder (wie Girocode und Check-in-QR) statt über
+                // api.qrserver.com (Audit I-N24): dorthin ging sonst bei jedem Öffnen der Buchungslink
+                // samt IP-Adresse an einen Drittanbieter, der in der Datenschutzerklärung nicht steht.
+                // 560px gezeichnet, 280px angezeigt - scharf auf Retina-Bildschirmen und im Ausdruck.
+                (() => {
+                    let src = null;
+                    try {
+                        src = qrToDataUrl(String(qrModal), { size: 560, margin: 4 });
+                    }
+                    catch (e) {
+                        console.error("QR-Code konnte nicht erzeugt werden:", e);
+                    }
+                    return src
+                        ? React.createElement("img", { src: src, alt: "QR-Code zum Buchungslink", width: 280, height: 280,
+                            style: { borderRadius: 12, border: "1px solid var(--line)", background: "#fff" } })
+                        : React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px" } }, "Der QR-Code konnte nicht erzeugt werden. Der Link darunter funktioniert trotzdem.");
+                })(),
                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 12, wordBreak: "break-all" } }, qrModal),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 16 }, onClick: () => setQrModal(false) }, "Fertig"))),
         (IS_DEMO() && tourOn && DEMO_TOUR[tourStep]) ? React.createElement(React.Fragment, null,
