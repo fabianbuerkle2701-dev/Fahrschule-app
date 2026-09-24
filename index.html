@@ -6755,6 +6755,31 @@ async function adminDeleteAccount(targetUid) {
         throw new Error((data && data.error) || "Löschen fehlgeschlagen (HTTP " + resp.status + ")");
     return true;
 }
+// Das EIGENE Konto löschen (Audit I-H2: Art. 17 DSGVO, App Store 5.1.1(v) - bisher konnte das nur
+// der App-Admin). Die Function nimmt die Konto-ID ausschließlich aus dem Token. Wirft bei Fehler
+// mit der Meldung der Function - die kann mehrzeilig sein ("\n- Grund"), wenn Rechnungen oder
+// geteilte Schüler die Löschung blockieren.
+async function deleteOwnAccount() {
+    const { data: sess } = await sb.auth.getSession();
+    const token = sess && sess.session && sess.session.access_token;
+    if (!token)
+        throw new Error("Deine Anmeldung ist abgelaufen. Bitte neu anmelden und noch einmal versuchen.");
+    let resp;
+    try {
+        resp = await fetch("/.netlify/functions/delete-own-account", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+            body: JSON.stringify({ confirm: "LÖSCHEN" }),
+        });
+    }
+    catch (e) {
+        throw new Error(fehlerText(e));
+    }
+    const data = await resp.json().catch(() => null);
+    if (!data || data.ok !== true)
+        throw new Error((data && data.error) || "Dein Konto konnte gerade nicht gelöscht werden (HTTP " + resp.status + "). Es wurde nichts verändert - bitte später noch einmal versuchen.");
+    return true;
+}
 // Abo-Status/Betrag eines Fahrlehrers setzen, oder eine Zahlung als heute erledigt markieren.
 async function adminSetSubscription(targetUid, patch) {
     const { data: sess } = await sb.auth.getSession();
@@ -12077,6 +12102,10 @@ function App() {
     } });
     const [settingsScreen, setSettingsScreen] = useState(null); // null = Einstellungen-Startliste, sonst die id einer Zeile (z.B. "profil","standorte","kosten")
     const [settingsQuery, setSettingsQuery] = useState(""); // Suchfilter auf der Einstellungen-Startliste
+    // Einstellungen › Konto: "Passwort ändern" aufgeklappt? / "Konto löschen" zweistufig
+    // (null | {stufe:1|2, eingabe, busy, fehler}) - siehe renderEinstellungen().
+    const [pwAendernOffen, setPwAendernOffen] = useState(false);
+    const [kontoLoeschen, setKontoLoeschen] = useState(null);
     const [locEdit, setLocEdit] = useState(null); // null | {index|null, name, street, zip, city, phone, email}
     const [vehicleEdit, setVehicleEdit] = useState(null); // null | {index|null, name, plate, type} – ein Formular statt 3 Eingabe-Dialogen nacheinander
     const [vehicleCostForm, setVehicleCostForm] = useState(null); // null | {vehId, date, category, amount, note, error}
@@ -12721,6 +12750,12 @@ function App() {
         const el = settingsScreen ? document.querySelector(".settings-content") : null;
         if (el)
             el.scrollTop = 0;
+        // Konto-Unterseite verlassen: halb ausgefüllte Passwort-/Löschmaske nicht wieder aufklappen
+        // (eine laufende Löschung bleibt stehen, ihr Ergebnis soll noch ankommen).
+        if (settingsScreen !== "konto") {
+            setPwAendernOffen(false);
+            setKontoLoeschen(k => (k && k.busy) ? k : null);
+        }
         try {
             if (settingsScreen && window.matchMedia && window.matchMedia("(min-width: 900px)").matches)
                 window.scrollTo(0, 0);
@@ -25652,6 +25687,43 @@ function App() {
             clearAccountCaches(uid);
             await sb.auth.signOut();
         }
+        // Konto löschen, Stufe 2 (Audit I-H2). Nach Erfolg gibt es nichts mehr zu speichern: die
+        // aufgeschobenen Speichervorgänge werden verworfen statt geflusht (sie liefen ohne Konto
+        // nur in Fehler), der lokale Zwischenspeicher wird geleert, und abgemeldet wird nur lokal -
+        // ein signOut beim Server mit dem Token eines gelöschten Kontos scheitert ohnehin.
+        async function kontoEndgueltigLoeschen() {
+            const k = kontoLoeschen;
+            if (!k || k.busy)
+                return;
+            if (String(k.eingabe || "").trim().toUpperCase() !== "LÖSCHEN") {
+                setKontoLoeschen({ ...k, fehler: "Bitte zur Bestätigung LÖSCHEN eintippen." });
+                return;
+            }
+            setKontoLoeschen({ ...k, busy: true, fehler: "" });
+            try {
+                await deleteOwnAccount();
+            }
+            catch (e) {
+                setKontoLoeschen(prev => prev && ({ ...prev, busy: false, fehler: (e && e.message) || "Unbekannter Fehler" }));
+                return;
+            }
+            // Laufende Aufzeichnung ohne Speichern beenden (GPS-Watcher abmelden) - der Schüler
+            // existiert nicht mehr.
+            if (recSession)
+                stopRecording(false);
+            dropPendingSaves();
+            // Maske zurücksetzen - meldet sich danach jemand im selben Fenster neu an, soll dort
+            // nicht noch "Wird gelöscht…" stehen.
+            setKontoLoeschen(null);
+            setSettingsScreen(null);
+            clearAccountCaches(uid);
+            try {
+                await sb.auth.signOut({ scope: "local" });
+            }
+            catch (e) {
+                console.error(e);
+            }
+        }
         const nativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
         // ── Live-Status je Zeile: echte aktuelle Werte statt nur ein Titel ──
         // Audit I-N14: vorher zählte jeder Tag mit irgendeiner Zeit als "eingerichtet", und ohne
@@ -26030,12 +26102,17 @@ function App() {
                                 aktiv && !lifetime && React.createElement(React.Fragment, null,
                                     React.createElement("div", { className: "eyebrow" }, "Bezahlen"),
                                     React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
-                                        paypalLink
-                                            ? (paypalLink.startsWith("http") || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(paypalLink)
-                                                ? React.createElement("a", { href: paypalLink.startsWith("http") ? paypalLink : "https://paypal.me/" + paypalLink.replace(/^paypal\.me\//i, ""), target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen")
-                                                : React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
-                                                    "Bitte den Betrag manuell per PayPal an ", React.createElement("b", null, paypalLink), " senden."))
-                                            : React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
+                                        // paypalZiel() wie im Sperrbildschirm (SubscriptionGate): die eigene startsWith-Logik
+                                        // baute aus "www.paypal.me/name" einen kaputten Link (https://paypal.me/www.paypal.me/…).
+                                        (() => {
+                                            const pp = paypalZiel(paypalLink);
+                                            if (pp && pp.href)
+                                                return React.createElement("a", { href: pp.href, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 9, textAlign: "center" } }, "Jetzt mit PayPal bezahlen");
+                                            if (pp && pp.email)
+                                                return React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
+                                                    "Bitte den Betrag in der PayPal-App über „Geld senden“ an ", React.createElement("b", { style: { wordBreak: "break-all" } }, pp.email), " schicken.");
+                                            return React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung.");
+                                        })(),
                                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
                                                 if (!await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich bei PayPal abgeschickt wurde." }))
                                                     return;
@@ -26742,7 +26819,38 @@ function App() {
                             React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)" } }, "Angemeldet als"),
                             React.createElement("div", { style: { fontSize: 14.5, fontWeight: 600, marginTop: 2, marginBottom: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, session.user.email),
                             React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
-                                myStudents, " eigene Schüler", sharedStudents > 0 ? " · " + sharedStudents + " geteilt" : ""))),
+                                myStudents, " eigene Schüler", sharedStudents > 0 ? " · " + sharedStudents + " geteilt" : "")),
+                        // Passwort ändern und Konto löschen: nicht im Demo-Konto - das teilen sich alle
+                        // Interessenten, ein geändertes Passwort sperrte alle anderen aus.
+                        !IS_DEMO() && React.createElement("div", { className: "eyebrow" }, "Sicherheit"),
+                        !IS_DEMO() && React.createElement("div", { className: "card", style: { padding: "13px 14px" } }, pwAendernOffen
+                            ? React.createElement(PasswortAendernFormular, { onFertig: () => setPwAendernOffen(false), onAbbrechen: () => setPwAendernOffen(false) })
+                            : React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setPwAendernOffen(true) }, "Passwort ändern")),
+                        // Audit I-H2: Konto selbst löschen, zweistufig - erst erklären, was passiert, dann
+                        // LÖSCHEN eintippen. Die Function prüft vorher selbst, ob Rechnungen, geteilte
+                        // Schüler o.Ä. dagegen sprechen, und erklärt das dann (mehrzeilig).
+                        !IS_DEMO() && React.createElement("div", { className: "eyebrow", style: { color: "var(--red-ink)" } }, "Konto löschen"),
+                        !IS_DEMO() && React.createElement("div", { className: "card", style: { padding: "13px 14px" } }, !kontoLoeschen
+                            ? React.createElement(React.Fragment, null,
+                                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Löscht dein Konto mit allen Schülern, Terminen und Dateien endgültig."),
+                                React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--red)" }, onClick: () => setKontoLoeschen({ stufe: 1, eingabe: "", busy: false, fehler: "" }) }, "Konto löschen …"))
+                            : kontoLoeschen.stufe === 1
+                                ? React.createElement(React.Fragment, null,
+                                    React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700, marginBottom: 8 } }, "Was beim Löschen passiert"),
+                                    React.createElement("ul", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)", margin: "0 0 12px", paddingLeft: 18 } },
+                                        React.createElement("li", null, "Dein Anmelde-Konto (", session.user.email, ") wird gelöscht."),
+                                        React.createElement("li", null, "Deine ", myStudents, " eigenen Schüler mit Fahrstunden, Terminen, Unterschriften und Dateien werden gelöscht."),
+                                        React.createElement("li", null, "Das lässt sich nicht rückgängig machen. Sichere vorher bei Bedarf unter „Daten & Sicherung“ ein Backup."),
+                                        React.createElement("li", null, "Gibt es Rechnungen (Aufbewahrungspflicht) oder mit Kollegen geteilte Schüler, wird nichts gelöscht - du bekommst dann eine Erklärung, was vorher zu klären ist.")),
+                                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--red)" }, onClick: () => setKontoLoeschen(k => k && ({ ...k, stufe: 2 })) }, "Weiter zur Bestätigung"),
+                                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setKontoLoeschen(null) }, "Abbrechen"))
+                                : React.createElement("form", { noValidate: true, onSubmit: e => { e.preventDefault(); kontoEndgueltigLoeschen(); } },
+                                    React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                                        React.createElement("label", null, "Zur Bestätigung LÖSCHEN eintippen",
+                                            React.createElement("input", { type: "text", autoComplete: "off", autoCapitalize: "characters", spellCheck: false, autoFocus: true, value: kontoLoeschen.eingabe, disabled: kontoLoeschen.busy, onChange: e => { const v = e.target.value; setKontoLoeschen(k => k && ({ ...k, eingabe: v, fehler: "" })); } }))),
+                                    kontoLoeschen.fehler && React.createElement("div", { role: "alert", style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "9px 11px", fontSize: 13, lineHeight: 1.5, marginBottom: 12, whiteSpace: "pre-line" } }, kontoLoeschen.fehler),
+                                    React.createElement("button", { type: "submit", className: "btn btn-block", disabled: kontoLoeschen.busy || kontoLoeschen.eingabe.trim().toUpperCase() !== "LÖSCHEN", style: { background: "var(--red)", color: "#fff" } }, kontoLoeschen.busy ? "Wird gelöscht…" : "Konto endgültig löschen"),
+                                    React.createElement("button", { type: "button", className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: kontoLoeschen.busy, onClick: () => setKontoLoeschen(null) }, "Abbrechen")))),
                     settingsScreen === "geraet" && React.createElement(SettingsScreen, { title: "Gerät & Benachrichtigungen", onBack: closeScreen },
                         React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Benachrichtigungen"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
