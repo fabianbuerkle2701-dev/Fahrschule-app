@@ -5600,9 +5600,13 @@ function saveSchoolCache(uid, s) { try {
 }
 catch (e) { } }
 // Map a DB row -> app student object (data holds everything; id/owner/shared come from row)
-function rowToStudent(row) {
+// _isMine kommt aus owner === uid. Früher stand hier pauschal true und jeder Aufrufer musste es
+// selbst überschreiben - wer das vergaß (z.B. die Akte im Schul-Dashboard), bekam für einen
+// fremden Schüler die Besitzer-Knöpfe (Teilen, Archivieren, Löschen) angezeigt. Ohne uid gilt
+// der Schüler deshalb im Zweifel als NICHT eigener.
+function rowToStudent(row, uid) {
     const d = row.data || {};
-    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: true, _createdAt: row.created_at };
+    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: !!uid && row.owner === uid, _createdAt: row.created_at };
 }
 // Fetch all students visible to me (mine + shared with me)
 async function fetchStudents(uid) {
@@ -5616,7 +5620,7 @@ async function fetchStudents(uid) {
         console.error(error);
         throw new Error("DB-Fehler beim Laden: " + (error.message || JSON.stringify(error)));
     }
-    return (data || []).map(r => ({ ...rowToStudent(r), _isMine: r.owner === uid }));
+    return (data || []).map(r => rowToStudent(r, uid));
 }
 // Strip internal fields before saving data jsonb
 function cleanData(s) {
@@ -5628,13 +5632,13 @@ async function dbInsert(uid, s) {
     // ruft dbInsert() mit dem kompletten Backup inkl. _shared auf und erwartet, dass eine vorher
     // mit Kollegen geteilte Freigabe beim Wiederherstellen erhalten bleibt.
     const sharedWith = s._shared || [];
-    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }), _isMine: true }; }
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }, uid); }
     // Vorher lief das über withNetworkRetry, gab bei Fehlern aber null zurück statt zu werfen -
     // die Wiederholung griff dadurch nie. insertEinmal wiederholt echte Netzabbrüche ohne
     // Doppel-Schüler; der Vertrag "null bei Fehler" für die Aufrufer bleibt.
     try {
         const data = await insertEinmal("students", { owner: uid, data: cleanData(s), shared_with: sharedWith }, "Schüler konnte nicht gespeichert werden");
-        return { ...rowToStudent(data), _isMine: true };
+        return rowToStudent(data, uid);
     }
     catch (e) {
         return null;
@@ -11265,6 +11269,194 @@ function systemLeisteFaerben(dunkel) {
     }
     catch (e) { }
 }
+/* ── Schülerdaten: PIN, Freigabe, Stammdaten-Prüfung ──────────────────────────────────────
+   ShareBox, SharedName und PinVergabe stehen bewusst auf oberster Ebene statt innerhalb von
+   App(): dort definiert war jede von ihnen bei jedem Rendern von App() eine NEUE Funktion. React
+   hielt sie damit für einen anderen Komponententyp und baute sie jedes Mal neu auf - Eingabe,
+   Fokus, Meldung und die busy-Sperre gingen verloren, SharedName fragte die E-Mail bei jedem
+   Rendern erneut per RPC ab (Audit G-M5). Alles, was sie aus App() brauchen, kommt als Prop. */
+
+// Plausibilität der Stammdaten beim Verlassen eines Feldes. Liefert eine Meldung oder "".
+// Bewusst großzügig: nur offensichtliche Tippfehler abfangen (Geburtsjahr 0199, Anmeldung im
+// Jahr 2205, Buchstaben in der Telefonnummer), keine Formatvorschriften (Audit G-N14).
+function stammdatenFehler(key, wert, heuteKey) {
+    const w = String(wert == null ? "" : wert).trim();
+    if (!w)
+        return "";
+    const heute = heuteKey || new Date().toISOString().slice(0, 10);
+    const jahr = Number(heute.slice(0, 4));
+    if (key === "geb" || key === "ausbildungsbeginn") {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(w) || isNaN(new Date(w + "T12:00:00").getTime()))
+            return "Das Datum ist ungültig.";
+        const j = Number(w.slice(0, 4));
+        if (key === "geb") {
+            if (w > heute)
+                return "Das Geburtsdatum liegt in der Zukunft.";
+            if (j < jahr - 100)
+                return "Das Geburtsdatum liegt über 100 Jahre zurück – bitte das Jahr prüfen.";
+            if (j > jahr - 14)
+                return "Mit diesem Geburtsdatum wäre der Schüler jünger als 14 – bitte das Jahr prüfen.";
+        }
+        else {
+            if (j < jahr - 15)
+                return "Das Anmeldedatum liegt über 15 Jahre zurück – bitte das Jahr prüfen.";
+            if (j > jahr + 1)
+                return "Das Anmeldedatum liegt mehr als ein Jahr in der Zukunft – bitte das Jahr prüfen.";
+        }
+        return "";
+    }
+    if (key === "tel" || key === "festnetz") {
+        // Erlaubt, was in Telefonnummern üblich ist: Ziffern, Leerzeichen, + / - ( ) und Punkt.
+        if (/[^0-9\s+\/\-().]/.test(w))
+            return "Die Telefonnummer enthält Zeichen, die in keiner Nummer vorkommen.";
+        const ziffern = w.replace(/\D/g, "").length;
+        if (ziffern < 6)
+            return "Die Telefonnummer ist zu kurz.";
+        if (ziffern > 15)
+            return "Die Telefonnummer ist zu lang.";
+    }
+    return "";
+}
+function ShareBox({ student, eigeneEmail, onSharedChange }) {
+    const [email, setEmail] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState("");
+    const shared = student._shared || [];
+    async function add() {
+        const e = email.trim().toLowerCase();
+        if (!e || busy) {
+            return;
+        }
+        if (e === String(eigeneEmail || "").toLowerCase()) {
+            setMsg("Das ist deine eigene Adresse.");
+            return;
+        }
+        // busy bleibt bis zum Ende des gesamten Schreibvorgangs aktiv (nicht schon nach
+        // findUserByEmail) - sonst öffnet sich der Button wieder, während dbShare noch läuft,
+        // und ein zweiter Klick kann mit veraltetem "shared" die erste Freigabe überschreiben.
+        setBusy(true);
+        setMsg("");
+        const prof = await findUserByEmail(e);
+        if (!prof) {
+            setBusy(false);
+            setMsg("Kein Konto mit dieser E-Mail gefunden. Die Person muss sich zuerst einmal in der App registrieren.");
+            return;
+        }
+        if (shared.indexOf(prof.id) >= 0) {
+            setBusy(false);
+            setMsg("Schon freigegeben.");
+            return;
+        }
+        const next = [...shared, prof.id];
+        try {
+            await dbShare(student.id, next);
+        }
+        catch (err) {
+            setBusy(false);
+            setMsg("Freigabe fehlgeschlagen: " + err.message);
+            return;
+        }
+        onSharedChange(student.id, next);
+        setBusy(false);
+        setEmail("");
+        setMsg("Freigegeben für " + e);
+    }
+    async function removeShare(uidToRemove) {
+        if (busy)
+            return;
+        // Rückfrage wie beim Zahler-Zugang: ein Fehltipp auf "Entfernen" nahm der Kollegin
+        // sonst sofort und ohne Hinweis den Zugriff auf den Schüler (Audit G-N13).
+        if (!await askConfirm({ title: "Freigabe entfernen?", message: "Diese Person sieht " + ([(student.vorname || "").trim(), (student.name || "").trim()].filter(Boolean).join(" ") || "den Schüler") + " danach nicht mehr und kann nichts mehr eintragen.", confirmLabel: "Entfernen", danger: true }))
+            return;
+        const next = shared.filter(x => x !== uidToRemove);
+        setBusy(true);
+        setMsg("");
+        try {
+            await dbShare(student.id, next);
+        }
+        catch (err) {
+            setBusy(false);
+            setMsg("Entfernen fehlgeschlagen: " + err.message);
+            return;
+        }
+        onSharedChange(student.id, next);
+        setBusy(false);
+    }
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
+        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Mit Kollegin/Kollegen teilen"),
+        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Per E-Mail freigeben. Die Person muss sich einmal in der App registriert haben."),
+        React.createElement("div", { style: { display: "flex", gap: 8 } },
+            React.createElement("input", { type: "email", value: email, onChange: e => setEmail(e.target.value), onKeyDown: e => { if (e.key === "Enter") add(); }, placeholder: "kollege@email.de", "aria-label": "E-Mail der Kollegin oder des Kollegen", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16 } }),
+            React.createElement("button", { className: "btn btn-primary", disabled: busy, onClick: add }, busy ? "…" : "Teilen")),
+        msg && React.createElement("div", { role: "status", style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8 } }, msg),
+        shared.length > 0 && React.createElement("div", { style: { marginTop: 10 } },
+            React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 } },
+                "Freigegeben für ",
+                shared.length),
+            shared.map(id => React.createElement("div", { key: id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", fontSize: 13 } },
+                React.createElement(SharedName, { id: id }),
+                React.createElement("button", { onClick: () => removeShare(id), disabled: busy, style: { color: "var(--red)", fontWeight: 700, fontSize: 13, padding: "2px 6px" } }, "Entfernen")))));
+}
+function SharedName({ id }) {
+    const [email, setEmail] = useState("…");
+    useEffect(() => {
+        let on = true;
+        setEmail("…");
+        // Über eine schmale RPC statt direktem Tabellenzugriff - die geteilte Person kann
+        // einer anderen Fahrschule angehören, profiles ist dafür nicht mehr offen lesbar.
+        // Ohne Treffer nicht ewig "…" stehen lassen, sondern sagen, dass nichts kam.
+        sb.rpc("profile_email_by_id", { p_id: id }).then(({ data, error }) => {
+            if (on)
+                setEmail(data || (error ? "E-Mail nicht abrufbar" : "Konto ohne sichtbare E-Mail"));
+        }, () => { if (on)
+            setEmail("E-Mail nicht abrufbar"); });
+        return () => { on = false; };
+    }, [id]);
+    return React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, email);
+}
+/* PIN für den Fahrschülerbereich vergeben. Früher schrieb jedes getippte Zeichen sofort (500 ms
+   später) in die Datenbank - schon ab der ersten Ziffer, der Server kannte keine Mindestlänge
+   (Audit G-N11). Und ein neuer PIN half dem Schüler gar nicht, sobald er sich einen eigenen
+   gewählt hatte: der Login nimmt zuerst pinCustom, und students_teacher_update schreibt pinCustom
+   immer vom Serverstand zurück - ein Schüler mit vergessenem PIN blieb dauerhaft ausgesperrt
+   (Audit G-H1). Jetzt: Entwurf lokal tippen, erst "PIN speichern" setzt ihn über die RPC
+   teacher_reset_student_pin (prüft 4-8 Ziffern, entfernt pinCustom, hebt die Login-Sperre auf).
+   onSetzen(pin) -> Promise<boolean>; klartext = der in DIESER Sitzung vergebene PIN (sonst leer). */
+function PinVergabe({ student, klartext, onSetzen }) {
+    const [entwurf, setEntwurf] = useState("");
+    const [busy, setBusy] = useState(false);
+    const gueltig = /^\d{4,8}$/.test(entwurf);
+    const bekannt = klartext || ((student.pin && !isPinHash(student.pin)) ? student.pin : "");
+    async function setzen(pin) {
+        if (busy)
+            return;
+        setBusy(true);
+        let ok = false;
+        try {
+            ok = await onSetzen(pin);
+        }
+        finally {
+            setBusy(false);
+        }
+        if (ok)
+            setEntwurf("");
+    }
+    return React.createElement(React.Fragment, null,
+        React.createElement("div", { className: "field", style: { marginBottom: 8 } },
+            React.createElement("label", null, "Neuer PIN (4 bis 8 Ziffern)",
+                React.createElement("input", { type: "text", inputMode: "numeric", autoComplete: "off", maxLength: 8, value: entwurf, disabled: busy,
+                    placeholder: bekannt ? "" : (student.pin ? "PIN gesetzt · nicht mehr einsehbar" : "z.B. 2468"),
+                    onChange: e => setEntwurf(e.target.value.replace(/\D/g, "").slice(0, 8)),
+                    onKeyDown: e => { if (e.key === "Enter" && gueltig) setzen(entwurf); },
+                    style: { letterSpacing: "0.2em", fontFamily: "var(--font-d)", fontWeight: 700 } })),
+            bekannt && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 6 } },
+                "Aktueller Start-PIN: ",
+                React.createElement("strong", { style: { fontFamily: "var(--font-d)", letterSpacing: "0.12em" } }, bekannt)),
+            entwurf && !gueltig && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Mindestens 4 Ziffern.")),
+        React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
+            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: busy, onClick: () => setzen(securePin()) }, "Zufälligen PIN erzeugen"),
+            React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: busy || !gueltig, onClick: () => setzen(entwurf) }, busy ? "Wird gesetzt…" : "PIN speichern")));
+}
 function App() {
     const [session, setSession] = useState(undefined); // undefined=checking, null=logged out, obj=in
     const [students, setStudents] = useState(null);
@@ -12171,6 +12363,10 @@ function App() {
     // Zeitpunkt der letzten lokalen Änderung je Schüler-ID - ein Neuladen, das VOR dieser Änderung
     // gestartet wurde, darf den Schüler nicht mit seinem (älteren) Serverstand überschreiben.
     const studentTouchedRef = useRef(new Map());
+    // Der in DIESER Sitzung vergebene PIN je Schüler-ID, im Klartext nur im Speicher. Lokal im
+    // Schüler steht nach dem Setzen der Hash vom Server - so landet der Klartext-PIN nicht mehr
+    // im localStorage-Cache (Audit G-N11), lässt sich aber direkt danach noch teilen.
+    const pinKlartextRef = useRef({});
     function studentWriteDelta(id, d) {
         const m = studentWritesRef.current;
         const n = (m.get(id) || 0) + d;
@@ -13054,6 +13250,7 @@ function App() {
             // 5 s und meldete fälschlich "nicht alles gespeichert").
             studentWritesRef.current.clear();
             studentTouchedRef.current.clear();
+            pinKlartextRef.current = {};
             // Laufende Aufzeichnung hart beenden (C-M7) und die Wiederherstellungs-Prüfung für das
             // nächste Konto wieder scharf schalten (C-N15) - sonst sah Konto B einen eigenen,
             // liegen gebliebenen Aufzeichnungs-Puffer nie.
@@ -15942,6 +16139,80 @@ function App() {
 
     const updateActive = (patch) => { if (active)
         writeStudent({ ...active, ...patch }); };
+    // Freigabe (shared_with) nur lokal nachziehen - dbShare hat sie schon gespeichert, und
+    // _shared gehört nicht in die data-Spalte (cleanData), ein Speichervorgang wäre überflüssig.
+    function freigabeLokalSetzen(sid, next) {
+        const arr = updateStudents(prev => (prev || []).map(x => x.id === sid ? { ...x, _shared: next } : x));
+        if (uid)
+            saveCache(uid, arr);
+    }
+    // Neuen PIN für den Fahrschülerbereich setzen (siehe PinVergabe). Liefert true bei Erfolg.
+    async function studentPinSetzen(stu, pin) {
+        if (IS_DEMO()) {
+            demoBlock("Demo-Ansicht: der PIN wird nicht gespeichert.");
+            return false;
+        }
+        if (!/^\d{4,8}$/.test(pin || "")) {
+            showToast("Der PIN muss aus 4 bis 8 Ziffern bestehen.");
+            return false;
+        }
+        const cur = (studentsRef.current || []).find(x => x.id === stu.id) || stu;
+        const vor = (cur.vorname || "").trim() || "Der Schüler";
+        // Rückfrage nur, wenn schon ein PIN existiert - ein Fehltipp auf "Zufälligen PIN erzeugen"
+        // sperrte den Schüler sonst ohne Warnung aus seinem Zugang aus (Audit G-N13).
+        if (cur.pin || cur.pinCustom) {
+            const ok = await askConfirm({ title: "Neuen PIN vergeben?",
+                message: (cur.pinCustom ? vor + " hat sich inzwischen einen eigenen PIN gewählt. " : "")
+                    + "Der bisherige PIN funktioniert danach nicht mehr. " + vor + " meldet sich mit dem neuen an und legt dabei wieder einen eigenen fest.",
+                confirmLabel: "Neuen PIN setzen" });
+            if (!ok)
+                return false;
+        }
+        // Ein noch aufgeschobenes oder laufendes Speichern dieses Schülers trägt den ALTEN PIN im
+        // Gepäck (students_teacher_update übernimmt data.pin aus dem Client). Käme es nach der RPC
+        // an, wäre der neue PIN gleich wieder überschrieben - deshalb vorher wegschreiben/abwarten.
+        const key = "stu:" + cur.id;
+        const wartend = pendingSavesRef.current.get(key);
+        if (wartend) {
+            try {
+                await wartend.run();
+            }
+            catch (e) { }
+        }
+        for (let i = 0; i < 50 && (studentWritesRef.current.get(cur.id) || 0) > 0; i++)
+            await new Promise(r => setTimeout(r, 100));
+        const { error } = await sb.rpc("teacher_reset_student_pin", { p_student_id: cur.id, p_pin: pin });
+        if (error) {
+            console.error(error);
+            const m = String(error.message || "");
+            showToast("PIN konnte nicht gesetzt werden:\n" + (/PIN muss|Kein Zugriff|Demo-Modus/.test(m) ? m : fehlerText(error)), "error");
+            return false;
+        }
+        // Den Hash, den der Server daraus gemacht hat, nachladen und lokal übernehmen: spätere
+        // Speichervorgänge schicken data.pin wieder mit - der Hash bleibt dabei unverändert
+        // (trg_hash_student_pins hasht nur Klartext), und im Cache steht kein Klartext-PIN.
+        let hash = "";
+        try {
+            const { data } = await sb.from("students").select("pin:data->>pin").eq("id", cur.id).single();
+            hash = (data && data.pin) || "";
+        }
+        catch (e) { }
+        pinKlartextRef.current[cur.id] = pin;
+        const patched = patchStudentNow(cur.id, x => {
+            const n = { ...x, pin: isPinHash(hash) ? hash : pin, pinChanged: false };
+            delete n.pinCustom;
+            return n;
+        });
+        // Ist während der RPC ein neues Speichern eingeplant worden, hält es noch den alten
+        // Datensatz fest - durch den gerade gepatchten ersetzen (gleicher Schlüssel, planSave
+        // verwirft den alten Auftrag).
+        if (patched && hasPendingSave(key))
+            scheduleSave(patched);
+        if (uid)
+            saveCache(uid, studentsRef.current || []);
+        showToast("Neuer PIN für " + vor + ": " + pin + (cur.pinCustom ? "\nDer selbst gewählte PIN gilt nicht mehr." : ""));
+        return true;
+    }
     // Archivieren/Zurückholen. Beim Archivieren (= Prüfung bestanden) wird gefragt, ob die Bitte
     // um eine Bewertung verschickt werden soll - nur wenn ein Bewertungslink hinterlegt ist.
     async function archivierenUmschalten(s) {
@@ -17394,6 +17665,14 @@ function App() {
             showToast("Kein Telefon hinterlegt \u2013 Link wurde in die Zwischenablage kopiert.");
         }
     }
+    // Klartext-PIN zum Weitergeben: der in dieser Sitzung vergebene, sonst ein (alter) lokal noch
+    // im Klartext stehender. Ein Hash lässt sich nicht zurückrechnen - dann gibt es nichts zu teilen.
+    function pinKlartextFuer(s) {
+        if (!s)
+            return "";
+        const p = pinKlartextRef.current[s.id] || ((s.pin && !isPinHash(s.pin)) ? s.pin : "");
+        return /^\d{4,8}$/.test(p) ? p : "";
+    }
     async function shareStudentAccess(s) {
         if (!bookingCode) {
             showFlash("Erzeuge Buchungscode…");
@@ -17411,8 +17690,9 @@ function App() {
                 return;
             }
         }
-        if (!(s.pin && s.pin.length >= 4) || isPinHash(s.pin)) {
-            showToast(isPinHash(s.pin) ? "Dieser PIN ist aus Sicherheitsgründen nicht mehr einsehbar. Bitte einen neuen erzeugen." : "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.");
+        const pinKlar = pinKlartextFuer(s);
+        if (!pinKlar) {
+            showToast(s.pin ? "Dieser PIN ist aus Sicherheitsgründen nicht mehr einsehbar. Bitte einen neuen erzeugen." : "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.");
             return;
         }
         const url = bookingURL();
@@ -17428,7 +17708,7 @@ function App() {
             "2. unten auf \"Fortschritt\" tippen\n" +
             "3. Vorname (" + ((s.vorname || "").trim()) + ") und Nachname (" + ((s.name || "").trim()) + ") eingeben\n" +
             "4. deinen PIN eingeben\n\n" +
-            "Dein persönlicher PIN: " + s.pin + "\n\n" +
+            "Dein persönlicher PIN: " + pinKlar + "\n\n" +
             "Beim ersten Login legst du einen eigenen PIN fest, den nur du kennst. Bitte gib deinen Zugang nicht weiter.";
         try {
             if (navigator.share) {
@@ -21745,7 +22025,7 @@ function App() {
                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 } }, "KI schlägt eine kurze WhatsApp-Nachricht mit dem aktuellen Ausbildungsstand und einer passenden gemeinsamen Übung vor - du prüfst den Text und öffnest WhatsApp erst per Antippen."),
                 React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                     React.createElement("label", null, "Telefonnummer Eltern/Begleitperson (optional)",
-                    React.createElement("input", { type: "tel", defaultValue: active.elternTel || "", placeholder: "sonst wird die Nummer des Schülers verwendet",
+                    React.createElement("input", { key: "elternTel|" + (active.elternTel || ""), type: "tel", defaultValue: active.elternTel || "", placeholder: "sonst wird die Nummer des Schülers verwendet",
                         onBlur: e => { if (e.target.value !== (active.elternTel || ""))
                             updateActive({ elternTel: e.target.value }); } }))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => generateElternUpdate(active) }, "✨ Eltern-Update erstellen")),
@@ -21775,10 +22055,29 @@ function App() {
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } }, "Grundlage: Begleitetes Fahren ab 17 (§ 48a FeV). Die Kilometerstufen orientieren sich am Entwurf der Fahrpraxisanleitungs-Verordnung und gelten erst, sobald diese Erprobung in Kraft ist."));
     }
     function renderDaten() {
+        // Die Felder sind ungesteuert (defaultValue) und hingen bisher nur an active.id. Kam ein
+        // neuerer Stand vom Server (Kollege hat bei einem geteilten Schüler etwas geändert), zeigte
+        // das Feld weiter den alten Wert - und schon das Verlassen des Feldes schrieb ihn zurück,
+        // weil er sich vom neuen unterschied (Audit G-M4). stammKey hängt deshalb den aktuellen
+        // Wert an den key: ändert er sich von außen, wird das Feld mit dem neuen Wert neu aufgebaut.
+        const stammKey = (key) => key + "|" + (active[key] || "");
+        const stammBlur = (key, e, wert) => {
+            const neu = wert === undefined ? e.target.value : wert;
+            if (neu === (active[key] || ""))
+                return;
+            const fehler = stammdatenFehler(key, neu, ymd(new Date()));
+            if (fehler) {
+                // Nicht speichern, alten Wert zurück ins Feld - sonst stünde im Feld etwas anderes
+                // als im Datensatz (Audit G-N14).
+                e.target.value = active[key] || "";
+                showToast(fehler + " Nicht gespeichert.", "error");
+                return;
+            }
+            updateActive({ [key]: neu });
+        };
         const f = (key, label, type) => React.createElement("div", { className: "field", key: key },
             React.createElement("label", null, label,
-            React.createElement("input", { type: type || "text", defaultValue: active[key] || "", onBlur: e => { if (e.target.value !== (active[key] || ""))
-                    updateActive({ [key]: e.target.value }); } })));
+            React.createElement("input", { key: stammKey(key), type: type || "text", defaultValue: active[key] || "", onBlur: e => stammBlur(key, e) })));
         const vk = active.klasse || DEFAULT_KLASSE;
         const tpl = tplFor(vk);
         const amp = ampel(active, tpl.adk, tpl.strecken, sonderfahrtenSoll);
@@ -21934,30 +22233,30 @@ function App() {
                 active.istFirmenkunde && React.createElement("div", { className: "card", style: { padding: "12px 13px", marginBottom: 12 } },
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Firmenname",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaName || "", placeholder: "z.B. Spedition Muster GmbH",
-                            onBlur: e => { if (e.target.value !== (active.firmaName || "")) updateActive({ firmaName: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaName"), defaultValue: active.firmaName || "", placeholder: "z.B. Spedition Muster GmbH",
+                            onBlur: e => stammBlur("firmaName", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Straße und Hausnummer",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaStrasse || "",
-                            onBlur: e => { if (e.target.value !== (active.firmaStrasse || "")) updateActive({ firmaStrasse: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaStrasse"), defaultValue: active.firmaStrasse || "",
+                            onBlur: e => stammBlur("firmaStrasse", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "PLZ und Ort",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
-                            onBlur: e => { if (e.target.value !== (active.firmaPlzOrt || "")) updateActive({ firmaPlzOrt: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaPlzOrt"), defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
+                            onBlur: e => stammBlur("firmaPlzOrt", e) }))),
                     // Pflicht für die XRechnung (BT-49, elektronische Adresse des Käufers) -
                     // die Schüler-Daten haben sonst keine E-Mail-Adresse der Firma.
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "E-Mail für Rechnungen (für E-Rechnung nötig)",
-                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
-                            onBlur: e => { if (e.target.value.trim() !== (active.firmaEmail || "")) updateActive({ firmaEmail: e.target.value.trim() }); } }))),
+                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", key: stammKey("firmaEmail"), defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
+                            onBlur: e => stammBlur("firmaEmail", e, e.target.value.trim()) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "USt-IdNr. (optional)",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
-                            onBlur: e => { if (e.target.value !== (active.firmaUstId || "")) updateActive({ firmaUstId: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaUstId"), defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
+                            onBlur: e => stammBlur("firmaUstId", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Bestellnummer / Referenz des Kunden (optional)",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaReferenz || "",
-                            onBlur: e => { if (e.target.value !== (active.firmaReferenz || "")) updateActive({ firmaReferenz: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaReferenz"), defaultValue: active.firmaReferenz || "",
+                            onBlur: e => stammBlur("firmaReferenz", e) }))),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45, margin: "2px 2px 0" } },
                         "Bei einer Rechnung an diesen Schüler kannst du zusätzlich eine XRechnung-Datei erzeugen.")),
                 React.createElement("div", { className: "field" },
@@ -21965,8 +22264,7 @@ function App() {
                     React.createElement("input", { type: "date", value: active.theorie || "", onChange: e => updateActive({ theorie: e.target.value }) }))),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Bemerkungen",
-                    React.createElement("textarea", { rows: 3, defaultValue: active.bemerkungen || "", onBlur: e => { if (e.target.value !== (active.bemerkungen || ""))
-                            updateActive({ bemerkungen: e.target.value }); } }))),
+                    React.createElement("textarea", { key: stammKey("bemerkungen"), rows: 3, defaultValue: active.bemerkungen || "", onBlur: e => stammBlur("bemerkungen", e) }))),
                 // Kurzüberblick hier in den Schülerdaten, damit er sofort sichtbar ist, ohne extra
                 // in "Ausbildung" nachschauen zu müssen - die ausführliche, interaktive Ansicht (mit
                 // dem Hinweis zur Doppelstunden-Pflicht) bleibt bewusst NUR in Ausbildung › Reife
@@ -21990,9 +22288,9 @@ function App() {
                         "Vergib einen persönlichen PIN. Damit kann ",
                         dispName(active),
                         " im Fahrschülerbereich (Reiter Mein Fortschritt) den eigenen ADK-Stand, die Strecken und den Terminverlauf ansehen, Termine anfragen und stornieren sowie Lernvideos ansehen. Ohne PIN ist der Zugang gesperrt. Für die Anmeldung in der App „Allindrive für Fahrschüler“ braucht er beides: den Fahrschul-Code und seinen PIN."),
-                    React.createElement("div", { className: "field", style: { marginBottom: 10 } },
-                        React.createElement("label", null, "PIN (4 bis 8 Ziffern)",
-                        React.createElement("input", { type: "text", inputMode: "numeric", maxLength: 8, value: isPinHash(active.pin) ? "" : (active.pin || ""), placeholder: isPinHash(active.pin) ? "PIN gesetzt · nicht mehr einsehbar" : "z.B. 2468", onChange: e => updateActive({ pin: e.target.value.replace(/\D/g, "").slice(0, 8), pinCustom: "", pinChanged: false }), style: { letterSpacing: "0.2em", fontFamily: "var(--font-d)", fontWeight: 700 } }))),
+                    // key je Schüler: der getippte Entwurf gehört nie zu einem anderen Schüler.
+                    React.createElement(PinVergabe, { key: active.id, student: active, klartext: pinKlartextRef.current[active.id] || "",
+                        onSetzen: pin => studentPinSetzen(active, pin) }),
                     // Der Fahrschul-Code steht hier, weil hier der Moment ist, in dem man ihn
                     // braucht: der Schueler bekommt Code + Name + PIN, sonst kommt er in der
                     // Fahrschueler-App nicht hinein. Frueher lag er am unteren Ende von
@@ -22012,15 +22310,15 @@ function App() {
                                         showToast("Konnte nicht kopiert werden. Du kannst den Code auch antippen und von Hand kopieren.", "error");
                                     }
                                 } }, "Kopieren"))),
-                    React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, onClick: () => updateActive({ pin: securePin(), pinCustom: "", pinChanged: false }) }, "Zufälligen PIN erzeugen"),
-                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: !(active.pin && active.pin.length >= 4 && !isPinHash(active.pin)), onClick: () => shareStudentAccess(active) }, "Fahrschülerbereich teilen")),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { justifyContent: "center", gap: 8 }, disabled: !pinKlartextFuer(active), onClick: () => shareStudentAccess(active) }, "Fahrschülerbereich teilen"),
                     !active.pin &&
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8 } }, "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben."),
-                    isPinHash(active.pin) &&
+                    active.pin && !pinKlartextFuer(active) &&
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Ein PIN ist bereits vergeben, aber aus Sicherheitsgründen nicht mehr im Klartext einsehbar. Erzeuge bei Bedarf einen neuen, um ihn erneut zu teilen – der bisherige funktioniert für " + dispName(active) + " weiterhin, bis du ihn überschreibst."),
-                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinChanged
-                        ? "Der Schüler hat den PIN inzwischen selbst geändert. Du siehst hier nur noch den Start-PIN. Vergibst du einen neuen PIN, wird der selbst gewählte des Schülers überschrieben und er legt beim nächsten Login wieder einen eigenen fest."
+                    // pinCustom statt pinChanged: pinChanged setzt niemand (Audit G-H1), pinCustom
+                    // dagegen legt die Fahrschüler-App an, sobald der Schüler einen eigenen PIN wählt.
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinCustom
+                        ? "Der Schüler hat sich inzwischen einen eigenen PIN gewählt, den nur er kennt. Hat er ihn vergessen, vergib hier einen neuen: der selbst gewählte gilt dann nicht mehr, und er legt beim nächsten Login wieder einen eigenen fest."
                         : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt.")),
                 React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 12, marginBottom: 4 } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Zahler-Zugang"),
@@ -22064,97 +22362,13 @@ function App() {
                                 React.createElement("input", { type: "text", value: referralRedeemCode, onChange: e => setReferralRedeemCode(e.target.value.toUpperCase()), placeholder: "z.B. CLAR482" }))),
                             React.createElement("button", { className: "btn btn-primary btn-block", disabled: !referralRedeemCode.trim(), onClick: () => redeemReferral(active, referralRedeemCode) }, "Bonus gutschreiben"))),
                 active._isMine
-                    ? React.createElement(ShareBox, null)
+                    ? React.createElement(ShareBox, { key: active.id, student: active, eigeneEmail: (session && session.user && session.user.email) || "", onSharedChange: freigabeLokalSetzen })
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Schüler wurde mit dir geteilt. Du kannst Einträge bearbeiten, aber die Freigabe verwaltet der Besitzer.")),
             sel && React.createElement("div", { className: "station-panel" },
                 React.createElement("div", { className: "station-title" },
                     React.createElement("span", null, sel.icon + " " + STATION_TITLES[sel.key]),
                     React.createElement("span", { style: { marginLeft: "auto", fontSize: 12.5, fontWeight: 700, color: toneColors(sel.tone).fg } }, sel.chip)),
                 stationBody(sel.key)));
-    }
-    /* ── Teilen ── */
-    function ShareBox() {
-        const [email, setEmail] = useState("");
-        const [busy, setBusy] = useState(false);
-        const [msg, setMsg] = useState("");
-        const shared = active._shared || [];
-        async function add() {
-            const e = email.trim().toLowerCase();
-            if (!e) {
-                return;
-            }
-            if (e === session.user.email.toLowerCase()) {
-                setMsg("Das ist deine eigene Adresse.");
-                return;
-            }
-            // busy bleibt bis zum Ende des gesamten Schreibvorgangs aktiv (nicht schon nach
-            // findUserByEmail) - sonst öffnet sich der Button wieder, während dbShare/writeStudent
-            // noch laufen, und ein zweiter Klick kann mit veraltetem "shared" die erste Freigabe überschreiben.
-            setBusy(true);
-            setMsg("");
-            const prof = await findUserByEmail(e);
-            if (!prof) {
-                setBusy(false);
-                setMsg("Kein Konto mit dieser E-Mail gefunden. Die Person muss sich zuerst einmal in der App registrieren.");
-                return;
-            }
-            if (shared.indexOf(prof.id) >= 0) {
-                setBusy(false);
-                setMsg("Schon freigegeben.");
-                return;
-            }
-            const next = [...shared, prof.id];
-            try {
-                await dbShare(active.id, next);
-            }
-            catch (err) {
-                setBusy(false);
-                setMsg("Freigabe fehlgeschlagen: " + err.message);
-                return;
-            }
-            writeStudent({ ...active, _shared: next });
-            setBusy(false);
-            setEmail("");
-            setMsg("Freigegeben für " + e);
-        }
-        async function removeShare(uidToRemove) {
-            const next = shared.filter(x => x !== uidToRemove);
-            try {
-                await dbShare(active.id, next);
-            }
-            catch (err) {
-                setMsg("Entfernen fehlgeschlagen: " + err.message);
-                return;
-            }
-            writeStudent({ ...active, _shared: next });
-        }
-        return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
-            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Mit Kollegin/Kollegen teilen"),
-            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Per E-Mail freigeben. Die Person muss sich einmal in der App registriert haben."),
-            React.createElement("div", { style: { display: "flex", gap: 8 } },
-                React.createElement("input", { type: "email", value: email, onChange: e => setEmail(e.target.value), placeholder: "kollege@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16 } }),
-                React.createElement("button", { className: "btn btn-primary", disabled: busy, onClick: add }, busy ? "…" : "Teilen")),
-            msg && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8 } }, msg),
-            shared.length > 0 && React.createElement("div", { style: { marginTop: 10 } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 } },
-                    "Freigegeben f\u00FCr ",
-                    shared.length),
-                shared.map(id => React.createElement("div", { key: id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", fontSize: 13 } },
-                    React.createElement(SharedName, { id: id }),
-                    React.createElement("button", { onClick: () => removeShare(id), style: { color: "var(--red)", fontWeight: 700, fontSize: 13, padding: "2px 6px" } }, "Entfernen")))));
-    }
-    // Aufklappbarer Abschnitt (für den Adminbereich). Standardmäßig zu.
-    function SharedName({ id }) {
-        const [email, setEmail] = useState("…");
-        useEffect(() => {
-            let on = true;
-            // Über eine schmale RPC statt direktem Tabellenzugriff - die geteilte Person kann
-            // einer anderen Fahrschule angehören, profiles ist dafür nicht mehr offen lesbar.
-            sb.rpc("profile_email_by_id", { p_id: id }).then(({ data }) => { if (on && data)
-                setEmail(data); });
-            return () => { on = false; };
-        }, [id]);
-        return React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, email);
     }
     /* ── Vorlagen-Editor ── */
     /* ── Einstellungen ── */
