@@ -16292,38 +16292,49 @@ function App() {
         // Gepäck (students_teacher_update übernimmt data.pin aus dem Client). Käme es nach der RPC
         // an, wäre der neue PIN gleich wieder überschrieben - deshalb vorher wegschreiben/abwarten.
         const key = "stu:" + cur.id;
-        const wartend = pendingSavesRef.current.get(key);
-        if (wartend) {
+        // Dasselbe gilt für ein Speichern, das WÄHREND der RPC oder des Hash-Nachladens angestoßen
+        // wird (Fahrlehrer ändert in der Zeit etwas am Schüler): es hält noch den alten Datensatz
+        // und wartet an der Zeilensperre der RPC - landet also danach. Deshalb: vorher alles
+        // wegschreiben, danach prüfen, ob in der Zwischenzeit ein Speichern geplant wurde, und dann
+        // den PIN nach dem erneuten Abwarten noch einmal setzen (höchstens dreimal).
+        let hash = "";
+        for (let versuch = 0; versuch < 3; versuch++) {
+            const wartend = pendingSavesRef.current.get(key);
+            if (wartend) {
+                try {
+                    await wartend.run();
+                }
+                catch (e) { }
+            }
+            for (let i = 0; i < 50 && (studentWritesRef.current.get(cur.id) || 0) > 0; i++)
+                await new Promise(r => setTimeout(r, 100));
+            const rpcStart = Date.now();
+            const { error } = await sb.rpc("teacher_reset_student_pin", { p_student_id: cur.id, p_pin: pin });
+            if (error) {
+                console.error(error);
+                const m = String(error.message || "");
+                showToast("PIN konnte nicht gesetzt werden:\n" + (/PIN muss|Kein Zugriff|Demo-Modus/.test(m) ? m : fehlerText(error)), "error");
+                return false;
+            }
+            // Den Hash, den der Server daraus gemacht hat, nachladen und lokal übernehmen: spätere
+            // Speichervorgänge schicken data.pin wieder mit - der Hash bleibt dabei unverändert
+            // (trg_hash_student_pins hasht nur Klartext), und im Cache steht kein Klartext-PIN.
+            hash = "";
             try {
-                await wartend.run();
+                const { data } = await sb.from("students").select("pin:data->>pin").eq("id", cur.id).single();
+                hash = (data && data.pin) || "";
             }
             catch (e) { }
+            if ((studentTouchedRef.current.get(cur.id) || 0) < rpcStart)
+                break;
         }
-        for (let i = 0; i < 50 && (studentWritesRef.current.get(cur.id) || 0) > 0; i++)
-            await new Promise(r => setTimeout(r, 100));
-        const { error } = await sb.rpc("teacher_reset_student_pin", { p_student_id: cur.id, p_pin: pin });
-        if (error) {
-            console.error(error);
-            const m = String(error.message || "");
-            showToast("PIN konnte nicht gesetzt werden:\n" + (/PIN muss|Kein Zugriff|Demo-Modus/.test(m) ? m : fehlerText(error)), "error");
-            return false;
-        }
-        // Den Hash, den der Server daraus gemacht hat, nachladen und lokal übernehmen: spätere
-        // Speichervorgänge schicken data.pin wieder mit - der Hash bleibt dabei unverändert
-        // (trg_hash_student_pins hasht nur Klartext), und im Cache steht kein Klartext-PIN.
-        let hash = "";
-        try {
-            const { data } = await sb.from("students").select("pin:data->>pin").eq("id", cur.id).single();
-            hash = (data && data.pin) || "";
-        }
-        catch (e) { }
         pinKlartextRef.current[cur.id] = pin;
         const patched = patchStudentNow(cur.id, x => {
             const n = { ...x, pin: isPinHash(hash) ? hash : pin, pinChanged: false };
             delete n.pinCustom;
             return n;
         });
-        // Ist während der RPC ein neues Speichern eingeplant worden, hält es noch den alten
+        // Wurde trotz dreier Versuche zuletzt noch ein Speichern eingeplant, hält es den alten
         // Datensatz fest - durch den gerade gepatchten ersetzen (gleicher Schlüssel, planSave
         // verwirft den alten Auftrag).
         if (patched && hasPendingSave(key))
@@ -23180,24 +23191,38 @@ function App() {
         const was = appt.status === "confirmed" ? "deine Fahrstunde" : "der Termin";
         return greet + "leider muss " + was + " am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
     }
-    // Den (Rest-)Tag als "Krank" sperren - über die vorhandene Urlaub-Logik (URLAUB_MARK), damit
-    // ihn Buchungslink, Lücken-Radar und Terminvorschläge als belegt sehen. Heute ab jetzt (die
-    // schon gefahrenen Stunden des Vormittags bleiben unberührt), sonst ganztägig. Liegt dort
-    // bereits Urlaub, wird nichts doppelt angelegt. Liefert true, wenn der Tag danach gesperrt ist.
-    async function sickTagSperren(dateKey) {
+    // Das zu sperrende Zeitfenster: heute ab jetzt (auf 5 Min abgerundet), sonst der ganze Tag.
+    // null, wenn heute nichts mehr übrig ist.
+    function sickFenster(dateKey) {
         let vonZeit = "00:00";
         if (dateKey === ymd(new Date())) {
             const p = berlinParts(new Date());
             const min = p.hour * 60 + p.minute - ((p.hour * 60 + p.minute) % 5);
             if (min >= 23 * 60 + 55)
-                return false;
+                return null;
             vonZeit = String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
         }
         const startISO = combineDT(dateKey, vonZeit), endISO = combineDT(dateKey, "23:59");
-        const s = new Date(startISO).getTime(), e = new Date(endISO).getTime();
-        const schon = (apptsRef.current || []).some(a => isUrlaub(a) && new Date(a.start_at).getTime() < e && s < new Date(a.end_at || a.start_at).getTime());
-        if (schon)
+        return { startISO, endISO, s: new Date(startISO).getTime(), e: new Date(endISO).getTime() };
+    }
+    // Ist das Fenster schon komplett durch EINEN Urlaubs-/Krank-Block abgedeckt? Nur überlappen
+    // reicht nicht: ein Teil-Urlaub am Abend (z.B. 18-20 Uhr) ließ sonst den Nachmittag offen,
+    // während das Fenster "für Buchungen gesperrt" meldete.
+    function sickTagGesperrt(dateKey, liste) {
+        const f = sickFenster(dateKey);
+        return !!f && (liste || []).some(a => isUrlaub(a) && new Date(a.start_at).getTime() <= f.s && new Date(a.end_at || a.start_at).getTime() >= f.e);
+    }
+    // Den (Rest-)Tag als "Krank" sperren - über die vorhandene Urlaub-Logik (URLAUB_MARK), damit
+    // ihn Buchungslink, Lücken-Radar und Terminvorschläge als belegt sehen. Heute ab jetzt (die
+    // schon gefahrenen Stunden des Vormittags bleiben unberührt), sonst ganztägig. Liegt dort
+    // bereits ein Urlaub über das ganze Fenster, wird nichts doppelt angelegt. Liefert true, wenn der Tag danach gesperrt ist.
+    async function sickTagSperren(dateKey) {
+        const f = sickFenster(dateKey);
+        if (!f)
+            return false;
+        if (sickTagGesperrt(dateKey, apptsRef.current))
             return true;
+        const startISO = f.startISO, endISO = f.endISO;
         const c = await addAppt({ title: "Krank", start_at: startISO, end_at: endISO, status: "confirmed", note: URLAUB_MARK + "Krank", art: "" });
         return !!c;
     }
@@ -23240,7 +23265,7 @@ function App() {
         const list = sickModal.cancelled ? [] : sickDayAppts(sickModal.date);
         const gewaehlt = list.filter(a => sickAusgewaehlt(sickModal, a));
         const sperren = sickModal.sperren !== false;
-        const schonGesperrt = (appts || []).some(a => isUrlaub(a) && ymd(a.start_at) === sickModal.date);
+        const schonGesperrt = sickTagGesperrt(sickModal.date, appts);
         async function doCancelAll() {
             if (sickModal.busy)
                 return;
