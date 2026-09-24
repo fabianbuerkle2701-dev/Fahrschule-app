@@ -33120,22 +33120,28 @@ function TheoryPractice({ code }) {
 // Reine Ansichtskarte für den Schülerbereich: zeigt alle aufgezeichneten Strecken
 // übereinander. Kein Aufzeichnen, keine Stecknadeln, keine Bearbeitung.
 function StudentRouteMap({ lessons, color }) {
-    const elRef = React.useRef(null), mapRef = React.useRef(null);
-    const [ready, setReady] = React.useState(!!window.L);
+    const elRef = React.useRef(null), mapRef = React.useRef(null), layerRef = React.useRef(null);
+    // Gemeinsames Warten auf Leaflet (useLeafletBereit): vorher pollte diese Karte endlos alle
+    // 200 ms und stand bei gescheitertem Laden (kein Netz, Adblocker) für immer auf
+    // "Karte wird geladen…" - jetzt mit Fehleranzeige und "Erneut versuchen".
+    const [ready, ladeFehler, nochmal] = useLeafletBereit();
     const routes = (lessons || []).filter(l => l && l.route && Array.isArray(l.route.pts) && l.route.pts.length >= 2);
-    React.useEffect(() => { if (window.L) {
-        setReady(true);
-        return;
-    } rmapEnsureLeaflet(); const t = setInterval(() => { if (window.L) {
-        setReady(true);
-        clearInterval(t);
-    } }, 200); return () => clearInterval(t); }, []);
+    // StudentArea baut lessons bei jedem Render neu (filter().map()). Als Effekt-Abhängigkeit
+    // hieß das: bei jedem Render wurden ALLE Linien noch einmal obendrauf gezeichnet (nie
+    // entfernt) und fitBounds riss die Karte zurück, sobald der Schüler zoomte. Jetzt liegen die
+    // Linien in einer eigenen layerGroup, die vor dem Zeichnen geleert wird, und neu gezeichnet
+    // wird nur, wenn sich die Strecken wirklich ändern (gleiche Signatur wie AllRoutesMap).
+    const routesRef = React.useRef(routes);
+    routesRef.current = routes;
+    const routesSig = routes.map(l => { const p = l.route.pts; return p.length + ":" + JSON.stringify(p[0]) + ":" + JSON.stringify(p[p.length - 1]); }).join("|");
+    const lineColor = color || "#FF9300";
     React.useEffect(() => {
         if (!ready || !elRef.current || mapRef.current)
             return;
         const L = window.L;
         const map = L.map(elRef.current, { zoomControl: true, attributionControl: true }).setView([51.163, 10.447], 5);
         L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(map);
+        layerRef.current = L.layerGroup().addTo(map);
         mapRef.current = map;
         setTimeout(() => { try {
             map.invalidateSize();
@@ -33144,15 +33150,16 @@ function StudentRouteMap({ lessons, color }) {
         return () => { try {
             map.remove();
         }
-        catch (e) { } mapRef.current = null; };
+        catch (e) { } mapRef.current = null; layerRef.current = null; };
     }, [ready]);
     React.useEffect(() => {
-        const L = window.L, map = mapRef.current;
-        if (!L || !map)
+        const L = window.L, map = mapRef.current, layer = layerRef.current;
+        if (!L || !map || !layer)
             return;
+        layer.clearLayers();
         const bounds = [];
-        routes.forEach(l => {
-            L.polyline(l.route.pts, { color: color || "#FF9300", weight: 5, opacity: .8, lineJoin: "round" }).addTo(map);
+        (routesRef.current || []).forEach(l => {
+            L.polyline(l.route.pts, { color: lineColor, weight: 5, opacity: .8, lineJoin: "round" }).addTo(layer);
             l.route.pts.forEach(p => bounds.push(p));
         });
         if (bounds.length) {
@@ -33161,11 +33168,10 @@ function StudentRouteMap({ lessons, color }) {
             }
             catch (e) { }
         }
-    }, [ready, lessons]);
-    if (!ready)
-        return React.createElement("div", { style: { padding: "22px 12px", textAlign: "center", color: "var(--muted)", fontSize: 13, border: "1.5px solid var(--line)", borderRadius: 12 } }, "Karte wird geladen\u2026");
-    return React.createElement("div", { style: { border: "1.5px solid var(--line)", borderRadius: 14, overflow: "hidden" } },
-        React.createElement("div", { ref: elRef, style: { width: "100%", height: "44vh", minHeight: 260, background: "#e8e4da" } }));
+    }, [ready, routesSig, lineColor]);
+    return React.createElement("div", { style: { border: "1.5px solid var(--line)", borderRadius: 14, overflow: "hidden", position: "relative" } },
+        React.createElement("div", { ref: elRef, style: { width: "100%", height: "44vh", minHeight: 260, background: "#e8e4da" } }),
+        !ready && React.createElement(KarteLaedtHinweis, { fehler: ladeFehler, nochmal: nochmal, style: { position: "absolute", inset: 0, background: "var(--card)" } }));
 }
 // appMode: in der nativen Fahrschüler-App gibt es bereits einen Abmelden-Knopf in der Kopfzeile,
 // der die App vollständig abmeldet - der zweite hier drin wäre doppelt und verwirrend.
