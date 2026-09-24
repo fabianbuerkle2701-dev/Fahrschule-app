@@ -170,6 +170,7 @@ Format:
   "time": "HH:MM",
   "minutes": <Zahl>,
   "amount": <Zahl, nur bei zahlung>,
+  "method": "<nur bei zahlung: Bar | Überweisung | EC-Karte | PayPal, nur wenn genannt, sonst leer>",
   "title": "<nur bei termin>",
   "targetId": "<nur bei adk/strecken>",
   "targetLabel": "<label>",
@@ -203,7 +204,7 @@ Regeln für Aktionen (EINTRAGUNGEN), wie bisher:
 - Schüler eindeutig über die Namen zuordnen. Bei mehreren/keinem Treffer needsClarification true.
 - "fahrstunde": Schüler immer nötig; ohne Uhrzeit oder Dauer needsClarification true.
 - "termin": title setzen; ohne Uhrzeit oder Dauer needsClarification true.
-- "zahlung": Schüler und amount nötig; ohne Datum heutiges Datum (keine Rückfrage). Komma als Dezimaltrennzeichen.
+- "zahlung": Schüler und amount nötig; ohne Datum heutiges Datum (keine Rückfrage). Komma als Dezimaltrennzeichen. date immer als JJJJ-MM-TT. method nur setzen, wenn die Zahlart genannt wird ("bar" -> "Bar", "überwiesen" -> "Überweisung"), sonst leer lassen.
 - "adk"/"strecken": passenden Punkt aus dem Katalog finden, targetId und targetLabel zurückgeben. "erledigt"/"fertig"/"voll" -> value "voll", sonst konkrete Zahl.
 - "schueler": Stammdaten eines Schülers ändern. Setze field auf "tel" (Telefonnummer), "anschrift" (Adresse) oder "bemerkungen" (Notizen). Setze value auf den neuen Textwert. Bei Notizen: wenn der Fahrlehrer etwas HINZUFÜGEN will ("füge hinzu", "ergänze", "notiere noch"), setze mode auf "anhaengen", sonst "ersetzen". Schüler eindeutig zuordnen, sonst needsClarification true. Andere Felder als diese drei kannst du nicht ändern; sage das in clarification mit action unknown.
 - Relative Datumsangaben in JJJJ-MM-TT umrechnen.
@@ -313,6 +314,8 @@ App-Wissen (Stand aktuelle Version):
         const n = Number(parsed.amount);
         parsed.amount = Number.isFinite(n) ? n : null;
         if (parsed.amount == null) { parsed.needsClarification = true; parsed.clarification = parsed.clarification || "Welcher Betrag wurde bezahlt?"; }
+        // Zahlart nur als kurzer Text durchreichen (der Client bucht danach Kasse oder Bank).
+        parsed.method = typeof parsed.method === "string" ? parsed.method.trim().slice(0, 40) : "";
       }
       if (parsed.action === "fahrstunde" || parsed.action === "termin") {
         if (parsed.minutes != null) {
