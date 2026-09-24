@@ -18794,8 +18794,24 @@ function App() {
             showToast("Für diese Fahrstunde läuft gerade eine Streckenaufzeichnung. Bitte zuerst stoppen (und speichern), bevor der Eintrag gelöscht wird.");
             return;
         }
-        const lessons = (active.lessons || []).filter(l => l.id !== id);
-        updateActive({ lessons });
+        // Läuft nach await askConfirm (Tagebuch-Papierkorb): gegen den AKTUELLEN Stand löschen statt
+        // updateActive mit dem Render-Schnappschuss - ein Fokus-Refetch während der offenen
+        // Rückfrage (z. B. Zahlung einer Kollegin am geteilten Schüler) wäre sonst still
+        // überschrieben worden. Dazu Rückgängig wie bei removeLesson/removePayment: der Eintrag
+        // trägt Bewertungen, Notizen und die aufgezeichnete Strecke.
+        const sid = active && active.id;
+        if (!sid)
+            return;
+        const vorher = ((studentsRef.current || []).find(s => s.id === sid) || {}).lessons || [];
+        const pos = vorher.findIndex(l => l && l.id === id);
+        if (pos < 0)
+            return;
+        const eintrag = vorher[pos];
+        const patched = schuelerAendernUndSpeichern(sid, cur => (cur.lessons || []).some(l => l && l.id === id)
+            ? { ...cur, lessons: cur.lessons.filter(l => !(l && l.id === id)) } : null);
+        if (!patched)
+            return;
+        showUndo("Fahrstunde gelöscht", () => schuelerAendernUndSpeichern(sid, cur => ({ ...cur, lessons: wiederEinfuegen(cur.lessons, eintrag, pos) })));
     }
     function setLessonRating(id, field, val) {
         const l = (active.lessons || []).find(x => x.id === id);
@@ -19701,65 +19717,85 @@ function App() {
         sec.items.forEach(it => { strecken[it.id] = Math.max(0, Math.min(target, effCount(active, it))); });
         updateActive({ strecken });
     }
+    // Die vier Bulk-Funktionen laufen alle erst nach await askConfirm. Sie rechnen deshalb gegen
+    // den AKTUELLEN Schüler (schuelerAendernUndSpeichern) statt updateActive mit dem
+    // Render-Schnappschuss: ein Fokus-Refetch während der offenen Rückfrage (z. B. ADK-Haken
+    // einer Kollegin am geteilten Schüler) wurde sonst mit den alten Werten überschrieben.
     // Bulk: fill or clear a whole ADK section
     function bulkADKSection(sec, fill) {
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        sec.items.forEach(it => {
-            const c = effCount(active, it);
-            items[it.id] = fill ? c : 0;
-            if (fill) {
-                const arr = adkDates[it.id] || [];
-                if (arr.indexOf(today) === -1)
-                    adkDates[it.id] = [...arr, today];
-            }
-        });
-        updateActive({ items, adkDates });
-    }
-    // Bulk: fill or clear ALL ADK
-    function bulkADKAll(fill) {
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        tplFor(active.klasse).adk.forEach(sec => sec.items.forEach(it => {
-            const c = effCount(active, it);
-            items[it.id] = fill ? c : 0;
-            if (fill) {
-                const arr = adkDates[it.id] || [];
-                if (arr.indexOf(today) === -1)
-                    adkDates[it.id] = [...arr, today];
-            }
-        }));
-        updateActive({ items, adkDates });
-    }
-    // Bulk: fill or clear a whole strecken section
-    function bulkStreckenSection(sec, fill) {
-        if (sec.usesAdkStore) { bulkADKSection(sec, fill); return; }
-        const strecken = { ...active.strecken };
-        sec.items.forEach(it => { strecken[it.id] = fill ? effCount(active, it) : 0; });
-        updateActive({ strecken });
-    }
-    // Bulk: fill or clear ALL strecken. Abschnitte mit usesAdkStore (Fahrzeugkunde) schreiben in
-    // active.items statt active.strecken - gleicher Fortschritt wie in der ADK.
-    function bulkStreckenAll(fill) {
-        const strecken = { ...active.strecken };
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        tplFor(active.klasse).strecken.forEach(sec => sec.items.forEach(it => {
-            if (sec.usesAdkStore) {
-                items[it.id] = fill ? effCount(active, it) : 0;
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            sec.items.forEach(it => {
+                const c = effCount(cur, it);
+                items[it.id] = fill ? c : 0;
                 if (fill) {
                     const arr = adkDates[it.id] || [];
                     if (arr.indexOf(today) === -1)
                         adkDates[it.id] = [...arr, today];
                 }
-            }
-            else
-                strecken[it.id] = fill ? effCount(active, it) : 0;
-        }));
-        updateActive({ strecken, items, adkDates });
+            });
+            return { ...cur, items, adkDates };
+        });
+    }
+    // Bulk: fill or clear ALL ADK
+    function bulkADKAll(fill) {
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            tplFor(cur.klasse).adk.forEach(sec => sec.items.forEach(it => {
+                const c = effCount(cur, it);
+                items[it.id] = fill ? c : 0;
+                if (fill) {
+                    const arr = adkDates[it.id] || [];
+                    if (arr.indexOf(today) === -1)
+                        adkDates[it.id] = [...arr, today];
+                }
+            }));
+            return { ...cur, items, adkDates };
+        });
+    }
+    // Bulk: fill or clear a whole strecken section
+    function bulkStreckenSection(sec, fill) {
+        if (sec.usesAdkStore) { bulkADKSection(sec, fill); return; }
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const strecken = { ...cur.strecken };
+            sec.items.forEach(it => { strecken[it.id] = fill ? effCount(cur, it) : 0; });
+            return { ...cur, strecken };
+        });
+    }
+    // Bulk: fill or clear ALL strecken. Abschnitte mit usesAdkStore (Fahrzeugkunde) schreiben in
+    // active.items statt active.strecken - gleicher Fortschritt wie in der ADK.
+    function bulkStreckenAll(fill) {
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const strecken = { ...cur.strecken };
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            tplFor(cur.klasse).strecken.forEach(sec => sec.items.forEach(it => {
+                if (sec.usesAdkStore) {
+                    items[it.id] = fill ? effCount(cur, it) : 0;
+                    if (fill) {
+                        const arr = adkDates[it.id] || [];
+                        if (arr.indexOf(today) === -1)
+                            adkDates[it.id] = [...arr, today];
+                    }
+                }
+                else
+                    strecken[it.id] = fill ? effCount(cur, it) : 0;
+            }));
+            return { ...cur, strecken, items, adkDates };
+        });
     }
     // Is a section fully done?
     function adkSectionFull(sec) { return sec.items.every(it => Math.min(adkDone(active, it), effCount(active, it)) >= effCount(active, it)); }
