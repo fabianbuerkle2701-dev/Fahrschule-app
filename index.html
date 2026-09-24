@@ -12014,7 +12014,10 @@ function App() {
         setFlash(msg);
         flashTimer.current = setTimeout(() => setFlash(""), 2500);
     }
-    const [onboarding, setOnboarding] = useState(null); // null | {step:0|1|2}
+    const [onboarding, setOnboarding] = useState(null); // null | {step:0|1|2, busy?, fehler?}
+    // Synchrone Sperre für "Schüler anlegen" im Einrichtungsassistenten (Audit I-N18): busy wirkt
+    // erst nach dem nächsten Render, ein Doppeltipp legte sonst zwei Schüler an.
+    const onboardingBusyRef = useRef(false);
     // Redesign 2.0.0 Etappe 3 (spec 5.5): "Heute"-Liste zeigt max. 4 Termine, Rest hinter
     // "Weitere anzeigen" - Hook hier oben (nicht in renderHome() selbst), weil renderHome() nur
     // bedingt aufgerufen wird (view === "home" && renderHome()) und Hooks nie bedingt laufen dürfen.
@@ -25869,8 +25872,9 @@ function App() {
                     React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 6 } },
                         // Die Demo laeuft bewusst immer hell (siehe theme-Effekt). Der Schalter war
                         // trotzdem bedienbar und tat dann nichts - er ist dort jetzt deaktiviert
-                        // und sagt auch, warum.
-                        settingRow("Dark Mode", IS_DEMO() ? "In der Demo-Ansicht immer hell - im eigenen Konto frei umschaltbar" : "Dunkles Design, z.B. fürs Fahren in der Dämmerung", React.createElement("button", { className: "icon-x", onClick: () => { if (IS_DEMO()) { demoBlock("In der Demo-Ansicht ist die Darstellung fest hell."); return; } setTheme(theme === "dark" ? "light" : "dark"); }, "aria-label": "Dark Mode umschalten", disabled: IS_DEMO(), style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: IS_DEMO() ? "not-allowed" : "pointer", opacity: IS_DEMO() ? 0.45 : 1,
+                        // und sagt auch, warum. role="switch" + aria-checked (Audit I-N26): vorher las
+                        // ein Screenreader nur "Taste", ohne zu sagen, ob der Schalter an oder aus ist.
+                        settingRow("Dark Mode", IS_DEMO() ? "In der Demo-Ansicht immer hell - im eigenen Konto frei umschaltbar" : "Dunkles Design, z.B. fürs Fahren in der Dämmerung", React.createElement("button", { className: "icon-x", onClick: () => { if (IS_DEMO()) { demoBlock("In der Demo-Ansicht ist die Darstellung fest hell."); return; } setTheme(theme === "dark" ? "light" : "dark"); }, role: "switch", "aria-checked": (!IS_DEMO() && theme === "dark") ? "true" : "false", "aria-label": "Dark Mode", disabled: IS_DEMO(), style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: IS_DEMO() ? "not-allowed" : "pointer", opacity: IS_DEMO() ? 0.45 : 1,
                                 background: (!IS_DEMO() && theme === "dark") ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
                             React.createElement("span", { style: { position: "absolute", top: 3, left: (!IS_DEMO() && theme === "dark") ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
                                     background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } }))),
@@ -25949,7 +25953,7 @@ function App() {
                         React.createElement("div", { className: "card", style: { padding: "4px 14px 8px", marginBottom: 16 } }, settingRow("Geburtstage", "Beim Öffnen der App ein Hinweis, wenn heute ein Fahrschüler Geburtstag hat", React.createElement("button", { onClick: () => { const next = !birthdayNotify; setBirthdayNotify(next); try {
                                     localStorage.setItem("v3_birthday", next ? "1" : "0");
                                 }
-                                catch (e) { } }, "aria-label": "Geburtstags-Hinweis umschalten", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
+                                catch (e) { } }, role: "switch", "aria-checked": birthdayNotify ? "true" : "false", "aria-label": "Geburtstags-Hinweis", style: { width: 52, height: 30, borderRadius: 99, border: "none", position: "relative", cursor: "pointer",
                                 background: birthdayNotify ? "var(--orange)" : "#CFC7B8", transition: "background .2s" } },
                             React.createElement("span", { style: { position: "absolute", top: 3, left: birthdayNotify ? 25 : 3, width: 24, height: 24, borderRadius: "50%",
                                     background: "#fff", transition: "left .2s", boxShadow: "0 1px 3px rgba(0,0,0,.3)" } }))))),
@@ -29563,21 +29567,30 @@ function App() {
                             React.createElement("label", null, "Nachname",
                             React.createElement("input", { type: "text", id: "ob-name2", placeholder: "Mustermann" })))),
                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 20 } },
-                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: async () => {
+                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: !!onboarding.busy, onClick: async () => {
                                 var _a, _b;
+                                if (onboardingBusyRef.current)
+                                    return;
                                 const v = (((_a = document.getElementById("ob-vorname")) === null || _a === void 0 ? void 0 : _a.value) || "").trim();
                                 const n = (((_b = document.getElementById("ob-name2")) === null || _b === void 0 ? void 0 : _b.value) || "").trim();
                                 if (v || n) {
                                     const guessedKlasse = guessKlasseFromText(school && school.subtitle, klassen) || klassen[0] || DEFAULT_KLASSE;
                                     const draft = { ...newStudent(), vorname: v, name: n, klasse: guessedKlasse, location_id: validMyLocationId || "" };
+                                    onboardingBusyRef.current = true;
+                                    setOnboarding(o => o && ({ ...o, busy: true, fehler: "" }));
                                     const created = await dbInsert(uid, draft);
-                                    if (created) {
-                                        updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
+                                    onboardingBusyRef.current = false;
+                                    if (!created) {
+                                        // Vorher ging es still zu Schritt 3 weiter, als wäre der Schüler angelegt.
+                                        setOnboarding(o => o && ({ ...o, busy: false, fehler: "Der Schüler konnte nicht angelegt werden. Bitte die Verbindung prüfen und erneut versuchen - oder überspringen und später in der Schülerliste anlegen." }));
+                                        return;
                                     }
+                                    updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
                                 }
                                 setOnboarding({ step: 2 });
-                            } }, "Sch\u00FCler anlegen \u2192"),
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setOnboarding({ step: 2 }) }, "\u00DCberspringen"))),
+                            } }, onboarding.busy ? "Wird angelegt\u2026" : "Sch\u00FCler anlegen \u2192"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, disabled: !!onboarding.busy, onClick: () => setOnboarding({ step: 2 }) }, "\u00DCberspringen")),
+                    onboarding.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginTop: -8, marginBottom: 16, lineHeight: 1.5 } }, onboarding.fehler)),
                 onboarding.step === 2 && React.createElement(React.Fragment, null,
                     React.createElement("div", { style: { fontSize: 36, marginBottom: 12 } }, "\uD83D\uDD17"),
                     React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, marginBottom: 8 } }, "Buchungslink f\u00FCr Sch\u00FCler"),
@@ -29695,7 +29708,10 @@ function App() {
                         React.createElement("span", { style: { color: "var(--muted)", fontSize: 18, flexShrink: 0 } }, "\u203A"));
                 }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setBirthdayPopup(null) }, "Schlie\u00DFen"))),
-        !IS_DEMO() && showChangelog && React.createElement("div", { onClick: () => { setShowChangelog(false); setChangelogExpanded(false); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        // Auch in der Demo anzeigen, wenn man "Was ist neu?" selbst antippt (Audit I-N27) - der Knopf
+        // tat dort sonst nichts. Das automatische Aufpoppen nach einem Update ist in der Demo
+        // weiterhin aus (siehe changelogWillShowRef-Effekt).
+        showChangelog && React.createElement("div", { onClick: () => { setShowChangelog(false); setChangelogExpanded(false); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 120, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
