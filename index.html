@@ -13082,6 +13082,11 @@ function App() {
     // bis die Datenbank sie wirklich los ist.
     // apptSavingRef verhindert, dass ein zweiter Tap auf "Termin anlegen" denselben Termin nochmal speichert.
     const apptWritesRef = useRef(0);
+    // Generation der Termin-Schreibvorgänge: steigt bei Beginn UND Ende jedes Schreibens. Ein Abruf
+    // merkt sie sich beim Start - hat sie sich bis zur Antwort geändert, ist die Antwort älter als
+    // der lokale Stand und darf die Liste nicht ersetzen (sonst verschwand ein währenddessen
+    // angelegter Termin bis zum nächsten Neuladen oder sprang auf die alte Zeit zurück).
+    const apptGenRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
     // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
@@ -13225,11 +13230,24 @@ function App() {
                 // gab keinen Weg, eine neue Einordnung anzufordern außer die Seite neu zu laden.
                 React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 12, padding: "6px 10px" }, onClick: () => ladeBriefing(setter, facts, kind) }, "↻ Neu erstellen")));
     }
-    // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
-    function applyFetchedAppts(list) {
+    function apptSchreibStart() {
+        apptWritesRef.current++;
+        apptGenRef.current++;
+    }
+    function apptSchreibEnde() {
+        apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+        apptGenRef.current++;
+    }
+    // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden.
+    // startGen (apptGenRef beim Start des Abrufs): läuft gerade ein Schreibvorgang oder lief seitdem
+    // einer, wird die Antwort verworfen (false) - sie kennt die eigene Änderung noch nicht.
+    function applyFetchedAppts(list, startGen) {
+        if (startGen !== undefined && (apptWritesRef.current > 0 || apptGenRef.current !== startGen))
+            return false;
         const gone = apptDeletedRef.current;
         const src = reanchorDemoAppts(list || []);
         setAppts(src.filter(a => !gone.has(a.id)));
+        return true;
     }
     // App-weite Streckenaufzeichnung (Hooks hier oben, damit vor den frühen returns)
     const recWatchRef = useRef(null);
@@ -15128,6 +15146,21 @@ function App() {
         touchLastSeen(uid); // letzten Zugriff merken
         // Zuerst Fahrschule holen, damit die Vorlage (V3 vs. BVF) richtig gewählt wird
         let myRights = false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
+        let apptStartGen = 0; // apptGenRef beim Start des Termin-Abrufs (siehe applyFetchedAppts)
+        // Lief während des ersten Abrufs ein Termin-Schreibvorgang, ist dessen Antwort verworfen -
+        // dann kurz danach frisch nachladen, statt den Kalender bis zum nächsten Fokus-Wechsel nur
+        // mit den lokal angelegten Terminen stehen zu lassen.
+        const termineNachladen = (versuch) => {
+            setTimeout(() => {
+                if (cancelled)
+                    return;
+                const gen = apptGenRef.current;
+                fetchAppointments(uid).then(list => {
+                    if (!cancelled && !applyFetchedAppts(list, gen) && versuch < 5)
+                        termineNachladen(versuch + 1);
+                }).catch(() => { });
+            }, 1500);
+        };
         setSchoolFehlt(false);
         fetchMySchool(uid).catch(err => {
             // Ladefehler ist NICHT "keine Fahrschule": mit einer echten Fahrschule im Cache damit
@@ -15202,6 +15235,7 @@ function App() {
             // Rechte separat, aber verlässlich (ohne Race Condition) für die Admin-Vorlage-Prüfung holen
             // Termine getrennt abfangen: ein Fehler dort soll weder Schüler noch Vorlage blockieren,
             // und statt eines leeren Kalenders bleibt der bisherige Stand (Cache) mit Hinweis.
+            apptStartGen = apptGenRef.current;
             const apptsP = fetchAppointments(uid).catch(e => {
                 if (!cancelled)
                     showToast("Termine konnten nicht geladen werden:\n" + fehlerText(e), "error");
@@ -15224,8 +15258,8 @@ function App() {
             });
             putTpl(tplData);
             saveTplCache(uid, tplData);
-            if (apptData)
-                applyFetchedAppts(apptData);
+            if (apptData && !applyFetchedAppts(apptData, apptStartGen))
+                termineNachladen(1);
             setBookingCode(code || null);
             // Vorlage des Fahrschul-Admins vorsorglich laden, als möglicher Ausgangspunkt für Klassen,
             // die man selbst noch nicht angelegt hat. Der Abgleich, ob eine Klasse wirklich leer ist,
@@ -15279,8 +15313,9 @@ function App() {
                 // Scheitert das Neuladen, bleibt der bisherige Kalender stehen (fetchAppointments
                 // wirft jetzt statt [] zu liefern) - nur ein kurzer Hinweis, kein Fehlerfenster,
                 // weil das beim Wechsel in die App bei schwachem Netz öfter passiert.
+                const gen = apptGenRef.current;
                 fetchAppointments(uid).then(list => { if (!cancelled)
-                    applyFetchedAppts(list); })
+                    applyFetchedAppts(list, gen); })
                     .catch(() => { if (!cancelled)
                     showFlash("Termine konnten nicht aktualisiert werden (Verbindung?)"); });
             }
@@ -18977,7 +19012,7 @@ function App() {
     // ── Termine ──
     async function addAppt(appt) {
         setSaved(false);
-        apptWritesRef.current++;
+        apptSchreibStart();
         try {
             const created = await dbInsertAppt(uid, appt);
             setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
@@ -18991,7 +19026,7 @@ function App() {
             return null;
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
     }
     // ── Terminvorschlag an Schüler senden (per WhatsApp, mit Buchungslink zum Bestätigen) ──
@@ -19152,7 +19187,7 @@ function App() {
     }
     async function updateAppt(id, patch) {
         setSaved(false);
-        apptWritesRef.current++;
+        apptSchreibStart();
         // Verschiebt sich die Startzeit, ist eine frühere manuelle Erinnerung (reminded_at) nicht mehr
         // gültig - sie bezog sich auf die alte Zeit. Ohne Reset würde die Erinnerungen-Liste den Termin
         // für die NEUE Zeit fälschlich als "schon erinnert" überspringen (siehe markiereErinnert()).
@@ -19190,7 +19225,7 @@ function App() {
             return false;
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
     }
     async function removeAppt(id, opts) {
@@ -19198,7 +19233,7 @@ function App() {
         setSaved(false);
         // ID vormerken, damit ein Neuladen im Hintergrund den Termin nicht kurz wieder anzeigt
         apptDeletedRef.current.add(id);
-        apptWritesRef.current++;
+        apptSchreibStart();
         setAppts(prev => prev.filter(a => a.id !== id));
         let ok = true;
         try {
@@ -19215,14 +19250,14 @@ function App() {
             showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
         // Undo nur nach erfolgreichem Löschen - nach einem Fehlschlag steht der Termin ja wieder
         // in der Liste, ein "Rückgängig" hätte ihn dann ein zweites Mal angelegt.
         if (ok && backup && !(opts && opts.noUndo)) {
             const label = (opts && opts.label) || "Termin gelöscht";
             showUndo(label, async () => {
-                apptWritesRef.current++;
+                apptSchreibStart();
                 try {
                     // art muss mit übergeben werden, sonst fällt dbInsertAppt auf den Default
                     // "ÜST" zurück und ein wiederhergestellter Spezial-Termin (z.B. Autobahn,
@@ -19245,7 +19280,7 @@ function App() {
                     showToast("Wiederherstellen fehlgeschlagen:\n" + fehlerText(e), "error");
                 }
                 finally {
-                    apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+                    apptSchreibEnde();
                 }
             });
         }
@@ -24889,8 +24924,17 @@ function App() {
         if (!waitlistOffer)
             return;
         const { appt, queue } = waitlistOffer;
+        // Doppeltipp-Sperre wie in offerLueckenSlot: das Sheet bleibt bis nach dem await offen, ein
+        // zweiter Tipp legte ein zweites "offered" für dasselbe Fenster an - zwei Wartelisten-Schüler
+        // konnten dann je eines annehmen und standen gleichzeitig beim Fahrlehrer (Abschluss-Audit).
+        const sperre = appt.start_at;
+        if (lueckenOfferRef.current.has(sperre))
+            return;
+        lueckenOfferRef.current.add(sperre);
+        setWaitlistOffer(w => w && w.appt === appt ? { ...w, busy: true } : w);
         const freedStudent = students.find(x => x.id === appt.student_id);
         const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
+        apptSchreibStart();
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: appt.start_at, end_at: appt.end_at, art: appt.art,
@@ -24901,6 +24945,10 @@ function App() {
         }
         catch (e) {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
+        }
+        finally {
+            apptSchreibEnde();
+            lueckenOfferRef.current.delete(sperre);
         }
         offerNextInQueue(queue);
     }
@@ -25038,6 +25086,7 @@ function App() {
         if (lueckenOfferRef.current.has(sperre))
             return;
         lueckenOfferRef.current.add(sperre);
+        apptSchreibStart(); // Neuladen währenddessen darf das neue Angebot nicht verschlucken
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: combineDT(f.dateKey, f.from), end_at: combineDT(f.dateKey, f.to), art: "ÜST",
@@ -25050,6 +25099,7 @@ function App() {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         finally {
+            apptSchreibEnde();
             lueckenOfferRef.current.delete(sperre);
         }
     }
@@ -33649,8 +33699,8 @@ function App() {
                             : "Auf die Warteliste setzen, damit er nachrückt, sobald etwas frei wird – mit der Zeit dieses Termins als Wunsch."),
                     !waitlistOffer.betroffenGesetzt && React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 44, width: "100%" }, onClick: betroffenenAufWarteliste },
                         "Auf die Warteliste setzen")),
-                waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
-                    "Auf der Warteliste anbieten"),
+                waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12, opacity: waitlistOffer.busy ? .6 : 1 }, disabled: !!waitlistOffer.busy, onClick: createWaitlistOffer },
+                    waitlistOffer.busy ? "Wird angeboten…" : "Auf der Warteliste anbieten"),
                 // Kandidatenliste: ohne KI in der bisherigen Reihenfolge, mit KI nach Dringlichkeit
                 // sortiert, je Schüler ein Satz Begründung und eine fertige Nachricht im
                 // WhatsApp-Knopf. Verschickt wird weiterhin nichts von allein - der Knopf öffnet nur
