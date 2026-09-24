@@ -17387,18 +17387,28 @@ function App() {
         return ok;
     }
     // Vorschlag bestätigen / ablehnen
-    async function confirmAppt(id) {
-        const appt = (appts || []).find(a => a.id === id);
+    // Liefert { appt, stu } bei Erfolg, sonst null (Limit, abgebrochene Rückfrage, Speicherfehler) -
+    // die Sammel-Übernahme zählte einen Abbruch früher als Erfolg (Audit G-M9).
+    // opts.liste: Terminstand für Limit-/Überschneidungsprüfung (Standard: appts dieses Renderns).
+    // opts.sammel: in einer Schleife - keine Einzel-WhatsApp (die Schleife bündelt selbst), das
+    // Limit-Problem nicht als Toast, sondern in opts.gruende ablegen.
+    async function confirmAppt(id, opts) {
+        const o = opts || {};
+        const liste = o.liste || appts || [];
+        const appt = liste.find(a => a.id === id);
         if (appt) {
             // Limit-Prüfung beim Bestätigen (nur bestätigte zählen, dieser kommt dazu)
             const dKey = ymd(appt.start_at);
             const mins = apptMin(appt);
-            const lp = limitProblem(dKey, mins, id, appt.student_id);
+            const lp = limitProblem(dKey, mins, id, appt.student_id, liste);
             if (lp) {
-                showToast(lp + "\n\nDieser Vorschlag kann nicht bestätigt werden. Lehne ihn ab oder passe einen anderen Termin an.");
-                return;
+                if (o.sammel && o.gruende)
+                    o.gruende.push((apptStudentName(appt) || appt.title || "Termin") + " (" + fmtD(appt.start_at) + ", " + hm(appt.start_at) + "): " + lp.split("\n")[0]);
+                else
+                    showToast(lp + "\n\nDieser Vorschlag kann nicht bestätigt werden. Lehne ihn ab oder passe einen anderen Termin an.");
+                return null;
             }
-            const clash = findOverlaps(appts, appt.start_at, appt.end_at, id);
+            const clash = findOverlaps(liste, appt.start_at, appt.end_at, id);
             if (clash.length) {
                 const c = clash[0];
                 const cname = apptStudentName(c) || c.title || "Termin";
@@ -17406,7 +17416,7 @@ function App() {
                     + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
                     + "\n\nTrotzdem bestätigen?";
                 if (!await askConfirm({ message: txt }))
-                    return;
+                    return null;
             }
         }
         // Automatische Zuordnung: Vorschlag-Name eindeutig zu einem Schüler?
@@ -17420,7 +17430,11 @@ function App() {
         // Bestätigen fehlgeschlagen (Fehler zeigt updateAppt schon an): keine WhatsApp-Bestätigung
         // für einen Termin anbieten, der in der Datenbank weiterhin offen ist.
         if (!await updateAppt(id, patch))
-            return;
+            return null;
+        if (o.sammel) {
+            const stuS = matchedStu || (appt && appt.student_id ? (studentsRef.current || []).find(x => x.id === appt.student_id) : null) || null;
+            return { appt: appt ? { ...appt, ...patch } : null, stu: stuS };
+        }
         // WhatsApp-Bestätigung anbieten, gebündelt für alle Termine dieses Schülers. students/appts
         // frisch aus den Refs lesen statt der vor dem await eingefangenen Closure-Werte, damit ein
         // zwischenzeitliches Update (z.B. neuer Schüler, geänderter Terminstatus) nicht zu einer
@@ -17448,7 +17462,9 @@ function App() {
             });
             const allAppts = [thisAppt, ...related].sort((a, b) => a.start_at.localeCompare(b.start_at));
             setWaPrompt({ appts: allAppts, stu: stu || null });
+            return { appt: thisAppt, stu: stu || null };
         }
+        return { appt: null, stu: matchedStu };
     }
     // Levenshtein-Distanz: Anzahl der Buchstaben-Änderungen, um von a zu b zu kommen (Maß für Tippfehler-Ähnlichkeit)
     function editDistance(a, b) {
@@ -23667,30 +23683,59 @@ function App() {
             showToast("Es ist kein Termin ausgewählt.");
             return;
         }
+        // Erneut prüfen: zwischen dem Erstellen des Plans und dem Übernehmen kann sich der
+        // Kalender geändert haben (neue Buchung, anderer Termin verschoben) - geprüft wurde bisher
+        // nur einmal beim Erstellen (Audit G-N12). Fällt jetzt etwas durch, nichts anlegen und die
+        // Liste mit den neuen Gründen zeigen, damit der Fahrlehrer neu entscheidet.
+        const frisch = wegPlanPruefen(nehmen, plan.stuId);
+        const durchgefallen = frisch.filter(t => t.problem);
+        if (durchgefallen.length) {
+            setWegPlan(w => {
+                if (!w || w.stuId !== plan.stuId)
+                    return w;
+                const auswahl = new Set(w.auswahl);
+                const termine = w.termine.map((t, i) => {
+                    const j = nehmen.indexOf(t);
+                    if (j < 0 || !frisch[j].problem)
+                        return t;
+                    auswahl.delete(i);
+                    return { ...t, problem: frisch[j].problem };
+                });
+                return { ...w, termine, auswahl };
+            });
+            showToast((durchgefallen.length === 1 ? "1 Termin passt" : durchgefallen.length + " Termine passen") + " inzwischen nicht mehr in den Kalender und " + (durchgefallen.length === 1 ? "wurde" : "wurden") + " abgewählt. Bitte die Auswahl prüfen und erneut übernehmen.", "error");
+            return;
+        }
         const stu = (students || []).find(x => x.id === plan.stuId);
+        // Früher: "Die Fahrschüler bekommen darüber wie gewohnt Bescheid" - von allein bekommt
+        // niemand Bescheid. Jetzt steht danach eine fertige WhatsApp-Nachricht bereit.
         const ok = await askConfirm({
             title: "Termine anlegen?",
             message: nehmen.length + (nehmen.length === 1 ? " Termin wird" : " Termine werden") + " für "
-                + (stu ? dispName(stu) : "den Schüler") + " fest im Kalender angelegt.\n\nDie Fahrschüler bekommen darüber wie gewohnt Bescheid.",
+                + (stu ? dispName(stu) : "den Schüler") + " fest im Kalender angelegt.\n\nDanach bekommst du eine fertige WhatsApp-Nachricht mit den Terminen zum Verschicken.",
             confirmLabel: "Anlegen",
         });
         if (!ok)
             return;
         setWegPlan(w => w ? ({ ...w, uebernehmen: true }) : w);
         let gut = 0, schlecht = 0;
-        for (const t of nehmen) {
+        const angelegte = [];
+        for (const t of frisch) {
             try {
                 const angelegt = await addAppt({ start_at: t.start, end_at: t.ende, student_id: plan.stuId,
                     note: t.inhalt || "", title: "", status: "confirmed", art: t.art || "ÜST" });
-                if (angelegt) gut++; else schlecht++;
+                if (angelegt) { gut++; angelegte.push(angelegt); } else schlecht++;
             }
             catch (e) { schlecht++; }
         }
         setWegPlan(null);
-        showToast(schlecht
-            ? (gut + " angelegt, " + schlecht + " nicht - bitte im Kalender nachsehen.")
-            : ("Fertig: " + gut + (gut === 1 ? " Termin angelegt." : " Termine angelegt.")),
-            schlecht ? "error" : undefined);
+        if (schlecht || !gut)
+            showToast(schlecht
+                ? (gut + " angelegt, " + schlecht + " nicht - bitte im Kalender nachsehen.")
+                : "Es wurde kein Termin angelegt.", "error");
+        // Dasselbe Fenster wie nach dem Bestätigen eines Vorschlags: Text sehen, dann WhatsApp.
+        if (angelegte.length)
+            setWaPrompt({ appts: angelegte.slice().sort((a, b) => a.start_at.localeCompare(b.start_at)), stu: stu || null });
     }
 
     /* ── Leerlauf verdichten ─────────────────────────────────────────────────────────
@@ -24161,32 +24206,66 @@ function App() {
         if (!plan || !plan.termine.length) return;
         const annehmen = plan.termine.filter(t => plan.auswahl.has(t.id));
         const ablehnen = plan.termine.filter(t => !plan.auswahl.has(t.id));
+        // Der Text versprach früher "Die Fahrschüler bekommen darüber wie gewohnt Bescheid" - von
+        // allein bekommt aber niemand Bescheid. Jetzt ehrlich, und danach eine WhatsApp je Schüler.
         const ok = await askConfirm({
             title: "Vorschlag übernehmen?",
             message: annehmen.length + (annehmen.length === 1 ? " Termin wird bestätigt" : " Termine werden bestätigt")
-                + (ablehnen.length ? (", " + ablehnen.length + (ablehnen.length === 1 ? " wird abgelehnt" : " werden abgelehnt")) : "")
-                + ".\n\nDie Fahrschüler bekommen darüber wie gewohnt Bescheid.",
+                + (ablehnen.length ? (", " + ablehnen.length + (ablehnen.length === 1 ? " wird abgelehnt und gelöscht" : " werden abgelehnt und gelöscht")) : "")
+                + ".\n\nDanach bekommst du für jeden Schüler eine fertige WhatsApp-Nachricht mit seinen bestätigten Terminen.",
             confirmLabel: "Übernehmen",
         });
         if (!ok) return;
         setKiPlan(k => k ? ({ ...k, uebernehmen: true }) : k);
-        let gut = 0, schlecht = 0;
+        // Mitwachsender Terminstand: jede Bestätigung zählt für die Limit- und
+        // Überschneidungsprüfung der folgenden mit (Audit G-M9). appts aus diesem Rendern kennt die
+        // eben bestätigten nicht, apptsRef erst nach dem nächsten Rendern.
+        let liste = (apptsRef.current || appts || []).slice();
+        const gruende = [];
+        const bestaetigt = [];
+        let nichtBestaetigt = 0, nichtAbgelehnt = 0, abgelehnt = 0;
         for (const t of annehmen) {
-            try { await confirmAppt(t.id); gut++; } catch (e) { schlecht++; }
+            const r = await confirmAppt(t.id, { liste, sammel: true, gruende });
+            if (!r) { nichtBestaetigt++; continue; }
+            if (r.appt) {
+                liste = liste.map(a => a.id === t.id ? { ...a, ...r.appt } : a);
+                bestaetigt.push(r);
+            }
         }
+        // Ablehnen ohne Einzel-Rückfrage (die Sammel-Rückfrage oben deckt es ab - rejectAppt()
+        // fragte jeden Termin noch einmal einzeln) und ohne Einzel-Rückgängig: davon bliebe
+        // ohnehin nur das letzte stehen.
         for (const t of ablehnen) {
-            try { await rejectAppt(t.id); gut++; } catch (e) { schlecht++; }
+            if (await removeAppt(t.id, { noUndo: true }))
+                abgelehnt++;
+            else
+                nichtAbgelehnt++;
         }
-        setKiPlan(null);
-        showToast(schlecht
-            ? (gut + " übernommen, " + schlecht + " nicht - bitte im Kalender nachsehen.")
-            : ("Fertig: " + annehmen.length + " bestätigt" + (ablehnen.length ? ", " + ablehnen.length + " abgelehnt" : "") + "."),
-            schlecht ? "error" : undefined);
+        // WhatsApp je Schüler bündeln - früher überschrieb jede Bestätigung das Fenster der
+        // vorigen, übrig blieb nur die Nachricht an den letzten Schüler.
+        const gruppen = new Map();
+        bestaetigt.forEach(({ appt, stu }) => {
+            const k = stu ? ("s:" + stu.id) : ("t:" + (appt.title || "").toLowerCase().trim() + "|" + appt.id);
+            const g = gruppen.get(k) || { key: k, stu, name: stu ? dispName(stu) : (appt.title || "Termin"), appts: [] };
+            g.appts.push(appt);
+            gruppen.set(k, g);
+        });
+        const nachrichten = Array.from(gruppen.values()).map(g => {
+            g.appts.sort((a, b) => a.start_at.localeCompare(b.start_at));
+            const num = g.stu && g.stu.tel ? waNumber(g.stu.tel) : "";
+            return { ...g, waUrl: num ? ("https://wa.me/" + num + "?text=" + encodeURIComponent(waConfirmText(g.appts, g.stu))) : "" };
+        });
+        setKiPlan(k => k ? ({ ...k, uebernehmen: false, fertig: { bestaetigt: bestaetigt.length, abgelehnt, nichtBestaetigt, nichtAbgelehnt, gruende, nachrichten } }) : k);
+        if (nichtAbgelehnt)
+            showToast(nichtAbgelehnt + (nichtAbgelehnt === 1 ? " Vorschlag konnte" : " Vorschläge konnten") + " nicht abgelehnt werden - bitte im Kalender nachsehen.", "error");
     }
 
-    function limitProblem(dateKey, minutes, exceptId, studentId) {
+    // liste: optional der Terminstand, gegen den geprüft wird (Standard: appts aus diesem Rendern).
+    // Eine Schleife, die mehrere Termine nacheinander bestätigt, übergibt hier ihren mitwachsenden
+    // Stand - sonst sähe jede Prüfung nur die Termine von VOR der Schleife (Audit G-M9).
+    function limitProblem(dateKey, minutes, exceptId, studentId, liste) {
         if (dayLimit > 0) {
-            const used = confirmedMinutesOnDay(dateKey, exceptId);
+            const used = confirmedMinutesOnDay(dateKey, exceptId, liste);
             if (used + minutes > dayLimit) {
                 return "Tageslimit überschritten.\n\nAn diesem Tag sind bereits " + used + " von " + dayLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (used + minutes) + " Minuten führen.";
             }
@@ -24195,7 +24274,7 @@ function App() {
             const d = new Date(dateKey + "T12:00:00");
             const ws = ymd(startOfWeek(d));
             const we = ymd(addDays(startOfWeek(d), 6));
-            const usedW = (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
+            const usedW = (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
                 .reduce((sum, a) => sum + apptMin(a), 0);
             if (usedW + minutes > weekLimit) {
                 return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits " + usedW + " von " + weekLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (usedW + minutes) + " Minuten führen.";
@@ -24205,7 +24284,7 @@ function App() {
             const stu = students.find(s => s.id === studentId);
             const name = stu ? dispName(stu) : "Dieser Schüler";
             if (studentDayLimit > 0) {
-                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId);
+                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId, liste);
                 if (used + minutes > studentDayLimit) {
                     return name + " hat an diesem Tag bereits " + used + " von " + studentDayLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -24214,7 +24293,7 @@ function App() {
                 const d = new Date(dateKey + "T12:00:00");
                 const ws = ymd(startOfWeek(d));
                 const we = ymd(addDays(startOfWeek(d), 6));
-                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId);
+                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId, liste);
                 if (usedW + minutes > studentWeekLimit) {
                     return name + " hat in dieser Woche bereits " + usedW + " von " + studentWeekLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -30807,7 +30886,9 @@ function App() {
                             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 6 }, disabled: !!wegPlan.uebernehmen || !wegPlan.auswahl.size, onClick: wegPlanUebernehmen },
                                 wegPlan.uebernehmen ? "Wird angelegt…" : (wegPlan.auswahl.size + (wegPlan.auswahl.size === 1 ? " Termin anlegen" : " Termine anlegen"))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: !!wegPlan.uebernehmen, onClick: () => setWegPlan(null) }, "Abbrechen")))),
-        kiPlan && React.createElement("div", { onClick: () => { if (!kiPlan.uebernehmen) setKiPlan(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
+        // Tipp daneben schließt die Ergebnisliste nicht - dort stehen die noch zu verschickenden
+        // WhatsApp-Nachrichten (wie bei "Fahrlehrer krank", Audit G-M7).
+        kiPlan && React.createElement("div", { onClick: () => { if (!kiPlan.uebernehmen && !kiPlan.fertig) setKiPlan(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 170, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
@@ -30817,7 +30898,27 @@ function App() {
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" }))),
                     React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 19 } }, "Vorschlag für deine Woche")),
-                kiPlan.busy
+                kiPlan.fertig
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 10 } },
+                            [kiPlan.fertig.bestaetigt === 1 ? "1 Termin bestätigt" : kiPlan.fertig.bestaetigt + " Termine bestätigt",
+                                kiPlan.fertig.abgelehnt ? (kiPlan.fertig.abgelehnt + " abgelehnt") : "",
+                                kiPlan.fertig.nichtBestaetigt ? (kiPlan.fertig.nichtBestaetigt + " nicht bestätigt") : ""].filter(Boolean).join(", ") + "."),
+                        kiPlan.fertig.gruende.length > 0 && React.createElement("div", { style: { background: "var(--amber-bg)", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, lineHeight: 1.5, marginBottom: 12 } },
+                            React.createElement("div", { style: { fontWeight: 700, marginBottom: 4 } }, "Wegen der Limits nicht bestätigt (bleiben als Vorschlag offen):"),
+                            kiPlan.fertig.gruende.map((g, i) => React.createElement("div", { key: i }, g))),
+                        kiPlan.fertig.nachrichten.length > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 6 } },
+                            "Jetzt noch Bescheid geben – je Schüler eine Nachricht mit allen seinen bestätigten Terminen. Du siehst sie vor dem Senden."),
+                        kiPlan.fertig.nachrichten.map(n => React.createElement("div", { key: n.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: "1px solid var(--line)" } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, overflowWrap: "anywhere" } }, n.name),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, n.appts.length === 1 ? "1 Termin" : n.appts.length + " Termine")),
+                            n.waUrl
+                                ? React.createElement("a", { href: n.waUrl, target: "_blank", rel: "noopener noreferrer",
+                                        style: { flexShrink: 0, padding: "9px 14px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12.5, fontWeight: 700, textDecoration: "none", minHeight: 44, display: "flex", alignItems: "center" } }, "WhatsApp")
+                                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, n.stu ? "keine Nummer" : "kein Schüler"))),
+                        React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14 }, onClick: () => setKiPlan(null) }, "Fertig"))
+                : kiPlan.busy
                     ? React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, padding: "18px 0" } },
                         "Die Termine werden geprüft – Überschneidungen, Limits, Arbeitszeiten und Leerlauf dazwischen…")
                     : kiPlan.error
