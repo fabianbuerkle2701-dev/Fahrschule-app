@@ -6544,9 +6544,12 @@ async function fetchAppSettings() {
     return data;
 }
 async function saveAppSettings(patch) {
-    const { error } = await sb.from("app_settings").update(patch).eq("id", 1);
+    // .select("id") + pruefeTreffer: ohne Schreibrecht meldet die Datenbank keinen Fehler, sondern
+    // ändert still 0 Zeilen - die Oberfläche zeigte dann trotzdem "Gespeichert".
+    const { data, error } = await sb.from("app_settings").update(patch).eq("id", 1).select("id");
     if (error)
         throw new Error(error.message || "Speichern fehlgeschlagen");
+    pruefeTreffer(data, "Einstellung nicht gespeichert");
 }
 // Persönliche Profildaten laden (Name, Adresse, Telefon, Geburtsdatum). Gibt null bei Fehler zurück.
 async function fetchProfileData(uid) {
@@ -6691,6 +6694,10 @@ function isAdmin(session) {
         return true;
     return false;
 }
+// Konten, deren Abo-/Theorie-Schalter gerade gespeichert wird (Doppeltipp-Schutz, Audit H-N10).
+// Modulweit statt als Hook: es gibt nur eine App-Instanz, und ein neuer Hook in App() wäre
+// für einen reinen Sperrmerker zu viel.
+const aboSchalterLaeuft = new Set();
 // Alle Fahrschulen + Anzahl Fahrlehrer/Schüler laden. Die Zahlen kommen über eine
 // SECURITY-DEFINER-RPC, die selbst prüft, dass nur der zentrale App-Admin sie aufrufen darf -
 // vorher stützte sich das auf einen offenen profiles-Lesezugriff, der auch für alle anderen
@@ -6706,7 +6713,9 @@ async function adminFetchSchools() {
         console.error(statsError);
     const teacherCount = {}, studentCount = {};
     (stats || []).forEach(row => { teacherCount[row.school_id] = row.teachers; studentCount[row.school_id] = row.students; });
-    return (schools || []).map(sc => ({ ...sc, teachers: teacherCount[sc.id] || 0, students: studentCount[sc.id] || 0 }));
+    // Ohne Statistik null statt 0 (Audit H-M9): "0 Fahrlehrer · 0 Schüler" sah aus wie eine leere
+    // Fahrschule, obwohl die Zahlen nur nicht geladen werden konnten. Die Oberfläche zeigt dann "–".
+    return (schools || []).map(sc => ({ ...sc, teachers: statsError ? null : (teacherCount[sc.id] || 0), students: statsError ? null : (studentCount[sc.id] || 0) }));
 }
 async function adminSaveSchool(sc) {
     const { data, error } = await sb.from("schools")
@@ -9057,15 +9066,54 @@ catch (e) {
     return d;
 } }
 // ── Kalender-Datumshelfer ──
+// Montag der BERLINER Woche von d, als Gerätemitternacht (wie bisher - die Buchungsseite und der
+// Fahrzeugkalender nehmen den Wert direkt als Abfragegrenze). Welche Woche gemeint ist, entscheidet
+// jetzt ymd(): ein Termin am Sonntag 23:30 Berliner Zeit gehört auch auf einem Gerät in Istanbul
+// (dort schon Montag) noch zur alten Woche (Audit H-N14).
 function startOfWeek(d) {
-    const x = new Date(d);
-    x.setHours(0, 0, 0, 0);
-    const day = (x.getDay() + 6) % 7; // Mo=0 … So=6
-    x.setDate(x.getDate() - day);
+    const x = new Date(ymd(d) + "T00:00:00");
+    x.setDate(x.getDate() - (x.getDay() + 6) % 7); // Mo=0 … So=6
     return x;
 }
 function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
-function ymd(d) { const x = new Date(d); return x.getFullYear() + "-" + String(x.getMonth() + 1).padStart(2, "0") + "-" + String(x.getDate()).padStart(2, "0"); }
+// Berliner UTC-Versatz je UTC-Stunde zwischengespeichert: ymd() läuft beim Rendern des Kalenders
+// und im Lücken-Radar zehntausendfach, Intl.DateTimeFormat je Aufruf wäre dort spürbar langsam.
+// Exakt, weil Berlin nur zur vollen UTC-Stunde (01:00 UTC) zwischen MEZ und MESZ wechselt.
+const _berlinVersatzJeStunde = new Map();
+function berlinVersatzSchnell(t) {
+    const h = Math.floor(t / 3600000);
+    let v = _berlinVersatzJeStunde.get(h);
+    if (v === undefined) {
+        if (_berlinVersatzJeStunde.size > 50000)
+            _berlinVersatzJeStunde.clear();
+        v = berlinOffsetMinutes(new Date(h * 3600000));
+        _berlinVersatzJeStunde.set(h, v);
+    }
+    return v;
+}
+// Kalendertag (YYYY-MM-DD) in BERLINER Zeit (Audit H-N14). Vorher las ymd() die Gerätezeit, die
+// Beschriftungen (weekdayShort, dayMonth, hm) aber Berlin: auf Teneriffa landete ein Urlaubstag
+// ab 00:00 Berliner Zeit (dort 23:00 am Vortag) auf dem falschen Tag, in Istanbul standen
+// Wochentage neben den falschen Terminen.
+// Ausnahme mit Absicht: ein Date-OBJEKT genau auf Gerätemitternacht ist ein "nomineller Tag"
+// (new Date(y, m, 1), new Date(tag + "T00:00:00"), setHours(0,0,0,0)) - so bauen viele Stellen
+// ihre Tage, und die sollen denselben Tag zurückbekommen, den sie hineingesteckt haben. Termine
+// kommen als ISO-Zeichenkette aus der Datenbank und laufen deshalb immer über Berlin.
+function ymd(d) {
+    const x = new Date(d);
+    const t = x.getTime();
+    if (isNaN(t))
+        return "NaN-NaN-NaN";
+    if (typeof d !== "string" && x.getHours() === 0 && x.getMinutes() === 0 && x.getSeconds() === 0 && x.getMilliseconds() === 0)
+        return x.getFullYear() + "-" + String(x.getMonth() + 1).padStart(2, "0") + "-" + String(x.getDate()).padStart(2, "0");
+    const b = new Date(t + berlinVersatzSchnell(t) * 60000);
+    return b.getUTCFullYear() + "-" + String(b.getUTCMonth() + 1).padStart(2, "0") + "-" + String(b.getUTCDate()).padStart(2, "0");
+}
+// Ein Kalendertag als Date um 12:00 Gerätezeit. Für alles, was der Kalender als "Tag" im State
+// hält (calWeek, calDay): Mittag liegt für jede Gerätezeitzone bis ±11 h von Berlin im selben
+// Berliner Kalendertag - ymd(), getDate() und die Berlin-Beschriftungen sagen damit denselben Tag.
+// Mitternacht dagegen ist in Istanbul schon 23:00 am Berliner Vortag.
+function tagMittag(d) { return new Date(ymd(d) + "T12:00:00"); }
 function hm(d) { const { hour, minute } = berlinParts(new Date(d)); return String(hour).padStart(2, "0") + ":" + String(minute).padStart(2, "0"); }
 // ── Termin als .ics herunterladen (für Kalender-Apps auf dem Handy) ──
 function toICSDate(d) {
@@ -9428,8 +9476,13 @@ function combineDT(dateStr, timeStr) {
         return null;
     const t = timeStr || "00:00";
     const guessUTC = new Date(dateStr + "T" + t + ":00Z");
-    const offsetMin = berlinOffsetMinutes(guessUTC);
-    return new Date(guessUTC.getTime() - offsetMin * 60000).toISOString();
+    // Versatz zweimal bestimmen (Audit H-N12): der erste gilt am Zeitpunkt "Uhrzeit als UTC
+    // gelesen", der liegt aber bis zu zwei Stunden neben dem gemeinten Zeitpunkt. In der
+    // Umstellungsnacht wird daraus die falsche Stunde (25.10. 01:30 wurde 02:30, 28.03. 01:30
+    // wurde 00:30). Der zweite Versatz gilt am Kandidaten selbst und stimmt deshalb.
+    const v1 = berlinOffsetMinutes(guessUTC);
+    const v2 = berlinOffsetMinutes(new Date(guessUTC.getTime() - v1 * 60000));
+    return new Date(guessUTC.getTime() - v2 * 60000).toISOString();
 }
 // Sonnenuntergang für ein BELIEBIGES Datum (nicht nur heute) an einem Ort - anders als der
 // Wetter-Hook, der den Sonnenuntergang nur für den aktuellen Tag von Open-Meteo mitliefert.
@@ -12274,11 +12327,11 @@ function App() {
     const [mehrGroup, setMehrGroup] = useState(null); // null | "ausbildung" | "fahrschule" | "fahrschueler" | "lernen" - aufgeklappte Untergruppe im mobilen Mehr-Popup
     const [openLesson, setOpenLesson] = useState(null);
     const [tagebuchSuche, setTagebuchSuche] = useState(""); // Suchtext im Fahrtenbuch (renderTagebuch)
-    const [calWeek, setCalWeek] = useState(() => startOfWeek(new Date())); // Montag der gezeigten Woche
+    const [calWeek, setCalWeek] = useState(() => tagMittag(startOfWeek(new Date()))); // Montag der gezeigten Woche (12:00, siehe tagMittag)
     const [calMode, setCalMode] = useState("woche"); // "woche" | "tag"
     const [calWeekStyle, setCalWeekStyle] = useState("karten"); // "karten" | "zeitstrahl" - nur relevant bei calMode "woche"
     const [calDayStyle, setCalDayStyle] = useState("zeitstrahl"); // "karten" | "zeitstrahl" - nur relevant bei calMode "tag"
-    const [calDay, setCalDay] = useState(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; }); // gewählter Tag
+    const [calDay, setCalDay] = useState(() => tagMittag(new Date())); // gewählter Tag (12:00, siehe tagMittag)
     const [apptForm, setApptForm] = useState(null); // null | {date,start,end,student_id,note,id?}
     const [interessentForm, setInteressentForm] = useState(null); // null | {id?,vorname,name,tel,klasse,notiz,status,follow_up_am,busy}
     const [interessentDraft, setInteressentDraft] = useState(null); // { busy, text, err } | null - KI-Vorschlag für die Kontaktnachricht
@@ -15201,7 +15254,7 @@ function App() {
             return;
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
-        let count = 0, skipped = 0, skippedClash = 0;
+        let count = 0, skipped = 0, skippedClash = 0, skippedEnde = 0;
         // appts ist die beim Render fixierte Konstante und wird waehrend dieser Schleife nicht
         // aktualisiert, obwohl vorherige Durchlaeufe bereits neue Termine per addAppt() angelegt
         // haben (der dortige setAppts() loest zwar einen Re-Render aus, die hier noch laufende
@@ -15225,6 +15278,13 @@ function App() {
             }
             const endHM = normHM(it.end);
             const end = endHM ? new Date(combineDT(it.date, endHM)) : new Date(start.getTime() + 45 * 60000);
+            // Ende nicht nach dem Beginn (Audit H-M7): so ein Termin wurde mit 0 Minuten
+            // gespeichert, die Überschneidungsprüfung griff dann nicht, und er zählte nirgends.
+            // Lieber auslassen und melden als eine Dauer erfinden.
+            if (end.getTime() <= start.getTime()) {
+                skippedEnde++;
+                continue;
+            }
             const stu = it.studentId ? students.find(s => s.id === it.studentId) : null;
             // Dieselben zwei Prüfungen wie bei jedem anderen Weg, mehrere bestätigte Termine auf
             // einmal anzulegen (saveApptSerie() - gleiches Auto-Überspringen-statt-Nachfragen-Muster,
@@ -15232,12 +15292,9 @@ function App() {
             // Bestätigungsdialoge nacheinander keine brauchbare UX wären). Fehlten hier bisher
             // komplett, der Import konnte dadurch stillschweigend Doppelbuchungen anlegen.
             const mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
-            // limitProblem() liest appts intern weiter aus der beim Funktionsstart erfassten
-            // Closure (nicht als Parameter) - kann daher Termine, die im selben Importlauf gerade
-            // erst angelegt wurden, für die Tages-/Wochenlimit-Prüfung nicht berücksichtigen.
-            // findOverlaps() bekommt appts dagegen als Parameter und wird deshalb unten bewusst
-            // mit dem mitwachsenden localAppts statt der veralteten Konstante aufgerufen.
-            const lp = limitProblem(it.date, mins, null, stu ? stu.id : null);
+            // Beide Prüfungen bekommen das mitwachsende localAppts, damit auch die in diesem
+            // Importlauf schon angelegten Termine zählen (Audit H-M7, siehe limitProblem()).
+            const lp = limitProblem(it.date, mins, null, stu ? stu.id : null, localAppts);
             const clash = !lp && findOverlaps(localAppts, start.toISOString(), end.toISOString(), null);
             if (lp || (clash && clash.length)) {
                 skippedClash++;
@@ -15259,7 +15316,8 @@ function App() {
         setCalImport(null);
         setView("kalender");
         const reasons = [skipped ? skipped + (skipped === 1 ? " Uhrzeit nicht lesbar" : " Uhrzeit nicht lesbar") : "",
-            skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : ""].filter(Boolean).join(", ");
+            skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : "",
+            skippedEnde ? skippedEnde + " mit Ende vor Beginn" : ""].filter(Boolean).join(", ");
         showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : ""));
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
@@ -17929,18 +17987,23 @@ function App() {
             await updateAppt(id, { status: "confirmed" });
         }
     }
-    function bookingURL() {
+    // code optional: ein gerade erst erzeugter Code. setBookingCode() wirkt erst beim nächsten
+    // Rendern - bookingCode in dieser Closure bliebe leer, der erste Tipp lieferte "?buchen="
+    // und damit "unvollständig" (Audit H-M8).
+    function bookingURL(code) {
         const base = window.location.origin + window.location.pathname;
-        return base + "?buchen=" + (bookingCode || "");
+        return base + "?buchen=" + (code || bookingCode || "");
     }
     async function shareBooking() {
         // Sicherheits-Check: niemals einen Link ohne echten Buchungscode teilen
-        if (!bookingCode) {
+        let code = bookingCode;
+        if (!code) {
             showFlash("Erzeuge Buchungscode…");
             try {
                 const fresh = await fetchBookingCode(uid);
                 if (fresh) {
                     setBookingCode(fresh);
+                    code = fresh;
                 }
                 else {
                     showToast("Der Buchungslink konnte nicht erzeugt werden. Das ist meist eine Berechtigungsfrage in der Datenbank (fehlende oder zu enge Regel für profiles). Bitte kurz erneut versuchen oder Bescheid geben, damit die Ursache geprüft werden kann.", "error");
@@ -17952,7 +18015,7 @@ function App() {
                 return;
             }
         }
-        const url = bookingURL();
+        const url = bookingURL(code);
         if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
             showToast("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
             return;
@@ -19767,7 +19830,12 @@ function App() {
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 4 } }, "Ausbildungsstand"),
                     React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 16, color: amp.ink } }, amp.text)),
                 React.createElement(Ring, { pct: gesamt, size: 62, color: amp.farbe })),
-            naechsteFahrstunde && React.createElement("button", { onClick: () => { setCalDay(new Date(naechsteFahrstunde.start_at)); setView("kalender"); }, className: "card", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
+            naechsteFahrstunde && React.createElement("button", { onClick: () => {
+                    // Tag, Woche UND Tagesansicht setzen (Audit H-M4): nur calDay zu setzen liess die
+                    // Wochenansicht auf der alten Woche stehen, die Fahrstunde war dann nicht zu sehen.
+                    zeigeKalenderTag(naechsteFahrstunde.start_at, "tag");
+                    setView("kalender");
+                }, className: "card", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
                 React.createElement("img", { src: ILLUSTRATION_FORTSCHRITT, alt: "", "aria-hidden": "true", className: "ill-deko", style: { position: "absolute", right: -22, bottom: -16, width: "54%", maxWidth: 215, pointerEvents: "none" } }),
                 React.createElement("div", { style: { position: "relative", padding: "15px 17px", maxWidth: "56%" } },
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "var(--orange-deep)", textTransform: "uppercase", letterSpacing: ".06em", marginBottom: 6 } }, "Nächste Fahrstunde"),
@@ -22045,8 +22113,10 @@ function App() {
         const sessionUE = 2; // 90 Min als üblicher Fahrstunden-Block
         const anzahl = Math.max(2, Math.min(52, Math.ceil(plan.restUE / sessionUE)));
         const wiederholung = plan.ueProWoche > 1.2 ? "weekly" : "biweekly";
-        setApptForm({ id: null, date: ymd(addDays(new Date(), 1)), start: "16:00", end: "17:30", student_id: active.id, note: "", title: "", sonstige: false, art: "ÜST",
-            serie: { on: true, wiederholung, anzahl } });
+        const f = { id: null, date: ymd(addDays(new Date(), 1)), start: "16:00", end: "17:30", student_id: active.id, note: "", title: "", sonstige: false, art: "ÜST",
+            serie: { on: true, wiederholung, anzahl } };
+        // Mit Vergleichsstand wie openNewAppt(): ein Tipp daneben fragt nach, sobald etwas geändert wurde (Audit H-N17)
+        setApptForm({ ...f, _stand: apptFormStand(f) });
     }
     /* Karte "Weg zur Prüfung" im Führerschein-Reiter. Sie erscheint nur, wenn für den Schüler
        ein konkreter Termin für die praktische Prüfung hinterlegt ist (Prüfungsversuch oder
@@ -23288,8 +23358,19 @@ function App() {
         const busy = (appts || []).filter(a => ymd(a.start_at) === dateKey && (a.status === "confirmed" || a.status === "pending" || a.status === "offered" || a.status === "cancel_requested"))
             .map(a => ({ from: hm(a.start_at), to: a.end_at ? hm(a.end_at) : fromMin(toMin(hm(a.start_at)) + 45) }))
             .sort((a, b) => a.from.localeCompare(b.from));
-        const out = [];
+        // Vergangene Zeit ist keine freie Lücke (Audit H-M6): vergangene Tage liefern nichts,
+        // heute beginnt die Suche erst bei der nächsten vollen Viertelstunde.
+        const heuteKey = ymd(new Date());
+        if (dateKey < heuteKey)
+            return [];
         let cursor = wh.von;
+        if (dateKey === heuteKey) {
+            const { hour, minute } = berlinParts(new Date());
+            const ab = fromMin(Math.ceil((hour * 60 + minute) / 15) * 15);
+            if (ab > cursor)
+                cursor = ab;
+        }
+        const out = [];
         for (const b of busy) {
             // Wie in findFreeWindow: eine Lücke endet spätestens mit der Arbeitszeit.
             if (cursor >= wh.bis)
@@ -23375,17 +23456,87 @@ function App() {
             lueckenOfferRef.current.delete(sperre);
         }
     }
+    // Kalender auf einen Tag stellen - Tag UND Woche immer gemeinsam (Audit H-M4). Vorher setzten
+    // die Pfeile der Tagesansicht nur calDay: UE-Zahlen, Wochenlimit und "Schüler könnten passen"
+    // rechneten weiter mit der alten Woche. modus optional ("tag"/"woche").
+    function zeigeKalenderTag(d, modus) {
+        const tag = tagMittag(d);
+        setCalDay(tag);
+        setCalWeek(tagMittag(startOfWeek(tag)));
+        if (modus)
+            setCalMode(modus);
+    }
+    // Arbeitszeit eines Tages (YYYY-MM-DD) aus den Einstellungen, oder null wenn keine hinterlegt.
+    function arbeitszeitAm(dateKey) {
+        const wh = workHours && typeof workHours === "object" ? workHours[LUECKEN_DOW[new Date(dateKey + "T12:00:00").getDay()]] : null;
+        return wh && !wh.blocked && wh.von && wh.bis ? wh : null;
+    }
+    // Vorschlag für "Neuer Termin" ohne vorgegebene Uhrzeit (eigener Fund 4): fest 09:00 hiess
+    // abends ein Termin in der Vergangenheit. Heute: nächste volle Viertelstunde, die noch
+    // kommt. Passt danach keine Fahrstunde mehr in den Tag (Arbeitszeitende, ohne hinterlegte
+    // Arbeitszeit 20:00), der nächste Arbeitstag zu seinem Arbeitsbeginn.
+    function neuerTerminVorschlag(dateStr) {
+        const heute = ymd(new Date());
+        const tag = dateStr || heute;
+        if (tag !== heute)
+            return { date: tag, start: (arbeitszeitAm(tag) || {}).von || "09:00" };
+        const { hour, minute } = berlinParts(new Date());
+        const wh = arbeitszeitAm(tag);
+        // Mit hinterlegten Arbeitszeiten zählt nur ein Tag mit Arbeitszeit, sonst jeder Tag außer Sonntag.
+        const hatArbeitszeiten = !!(workHours && typeof workHours === "object" && Object.keys(workHours).length);
+        // Frühmorgens den Arbeitsbeginn vorschlagen (ohne hinterlegte Arbeitszeit wie bisher 09:00), nicht 06:15
+        const ab = Math.max(Math.ceil((hour * 60 + minute + 1) / 15) * 15, wh ? toMin(wh.von) : 9 * 60);
+        const ende = wh ? toMin(wh.bis) : 20 * 60;
+        if ((wh || !hatArbeitszeiten) && ab + 45 <= ende)
+            return { date: tag, start: fromMin(ab) };
+        for (let i = 1; i <= 14; i++) {
+            const k = ymd(addDays(new Date(tag + "T12:00:00"), i));
+            const whK = arbeitszeitAm(k);
+            if (whK || (!hatArbeitszeiten && new Date(k + "T12:00:00").getDay() !== 0))
+                return { date: k, start: (whK && whK.von) || "09:00" };
+        }
+        return { date: ymd(addDays(new Date(tag + "T12:00:00"), 1)), start: "09:00" };
+    }
+    // Vergleichswert für "wurde im Termin-Fenster etwas geändert?" (Audit H-N17)
+    function apptFormStand(f) {
+        return f ? [f.date, f.start, f.end, f.student_id, f.note, f.title, f.art, !!f.sonstige, !!(f.serie && f.serie.on)].join("|") : "";
+    }
+    // Neue Startzeit im Termin-Fenster: die Endzeit wandert mit und die Dauer bleibt (Audit H-N17).
+    // Vorher blieb das Ende stehen - aus 14:00-15:30 wurde nach "16:00" ein ungültiges 16:00-15:30.
+    function apptMitStart(f, neu) {
+        if (f.start && f.end && f.end > f.start && neu)
+            return { ...f, start: neu, end: fromMin(Math.min(toMin(neu) + toMin(f.end) - toMin(f.start), 23 * 60 + 59)) };
+        return { ...f, start: neu };
+    }
+    // Tipp neben das Termin-Fenster: nur ohne Rückfrage schliessen, wenn nichts geändert wurde -
+    // ein versehentlicher Tipp daneben verwarf sonst alle Eingaben (Audit H-N17).
+    async function apptFormWegtippen() {
+        const f = apptForm;
+        if (!f || f.busy)
+            return;
+        if (f._stand !== undefined && apptFormStand(f) !== f._stand
+            && !await askConfirm({ title: "Änderungen verwerfen?", message: "Deine Eingaben in diesem Termin gehen verloren.", confirmLabel: "Verwerfen" }))
+            return;
+        setApptForm(null);
+    }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
     function openNewAppt(dateStr, startHM) {
-        const s = startHM || "09:00";
+        const vorschlag = startHM ? { date: dateStr || ymd(new Date()), start: startHM } : neuerTerminVorschlag(dateStr);
+        const s = vorschlag.start;
         const parts = s.split(":");
         const endMin = Math.min(parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + 60, 23 * 60 + 59);
         const e = String(Math.floor(endMin / 60)).padStart(2, "0") + ":" + String(endMin % 60).padStart(2, "0");
-        setApptForm({ id: null, date: dateStr || ymd(new Date()), start: s, end: e, student_id: "", note: "", title: "", sonstige: false, art: "ÜST" });
+        const f = { id: null, date: vorschlag.date, start: s, end: e, student_id: "", note: "", title: "", sonstige: false, art: "ÜST" };
+        setApptForm({ ...f, _stand: apptFormStand(f) });
     }
     function openEditAppt(a) {
-        setApptForm({ id: a.id, date: ymd(a.start_at), start: hm(a.start_at), end: a.end_at ? hm(a.end_at) : "",
-            student_id: a.student_id || "", note: noteText(a), title: a.title || "", start_at: a.start_at, status: a.status, sonstige: isSonstige(a), art: apptArt(a) });
+        const f = { id: a.id, date: ymd(a.start_at), start: hm(a.start_at), end: a.end_at ? hm(a.end_at) : "",
+            student_id: a.student_id || "", note: noteText(a), title: a.title || "", start_at: a.start_at, status: a.status, sonstige: isSonstige(a), art: apptArt(a),
+            // Urlaub mitführen (Audit H-H1): noteText() entfernt die Urlaubs-Markierung, beim
+            // Speichern wurde der Urlaubstag deshalb zu einer 24-Stunden-Fahrstunde (ÜST
+            // 00:00-23:59, ~32 UE) - und mit Tageslimit liess er sich gar nicht speichern.
+            urlaub: isUrlaub(a) };
+        setApptForm({ ...f, _stand: apptFormStand(f) });
     }
     /* ── Theorie-Anwesenheit (QR-Check-in): ein Theorieunterricht-Termin (art TH) ist meist eine
        Gruppensitzung, die appointments.student_id bildet das nicht ab - deshalb eine eigene
@@ -23798,8 +23949,9 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 sickModal.cancelled ? notifyStep : selectStep));
     }
-    // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
-    // liste: optional ein anderer Terminstand als appts (Sammel-Übernahme, siehe kiPlanUebernehmen).
+    // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht).
+    // liste: optional ein anderer Terminstand als appts (Sammel-Übernahme kiPlanUebernehmen,
+    // Screenshot-Import) - appts aus dem letzten Rendern kennt die im selben Lauf angelegten Termine nicht.
     function confirmedMinutesOnDay(dateKey, exceptId, liste) {
         return (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
@@ -24747,8 +24899,9 @@ function App() {
     }
 
     // liste: optional der Terminstand, gegen den geprüft wird (Standard: appts aus diesem Rendern).
-    // Eine Schleife, die mehrere Termine nacheinander bestätigt, übergibt hier ihren mitwachsenden
-    // Stand - sonst sähe jede Prüfung nur die Termine von VOR der Schleife (Audit G-M9).
+    // Wer in einer Schleife mehrere Termine bestätigt oder anlegt (kiPlanUebernehmen, Screenshot-Import),
+    // übergibt seinen mitwachsenden Stand - sonst sähe jede Prüfung nur die Termine von VOR der
+    // Schleife und das Limit würde Termin für Termin überschritten (Audit G-M9, H-M7).
     function limitProblem(dateKey, minutes, exceptId, studentId, liste) {
         if (dayLimit > 0) {
             const used = confirmedMinutesOnDay(dateKey, exceptId, liste);
@@ -24805,8 +24958,9 @@ function App() {
         }
         const startISO = combineDT(f.date, f.start);
         const endISO = f.end ? combineDT(f.date, f.end) : null;
-        // Limit-Prüfung nur für praktische Ausbildung (nicht bei sonstiger Tätigkeit)
-        if (!f.sonstige) {
+        // Limit-Prüfung nur für praktische Ausbildung (nicht bei sonstiger Tätigkeit und nicht
+        // beim Urlaub - der zählt nirgends als Unterrichtszeit)
+        if (!f.sonstige && !f.urlaub) {
             const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
             const lp = limitProblem(f.date, mins, f.id, f.student_id);
             if (lp) {
@@ -24829,7 +24983,8 @@ function App() {
             start_at: startISO,
             end_at: endISO,
             student_id: f.student_id || null,
-            note: makeNote(f.sonstige, f.note || ""),
+            // Urlaub behält seine Markierung (Audit H-H1), sonst würde er zur Fahrstunde
+            note: f.urlaub ? URLAUB_MARK + (f.note || "") : makeNote(f.sonstige, f.note || ""),
             title: f.title || "",
             // Beim Bearbeiten den vorhandenen Status erhalten – sonst würde ein Vorschlag
             // (pending), ein Warteliste-Angebot (offered) oder eine Storno-Anfrage
@@ -24837,7 +24992,8 @@ function App() {
             // die zugehörigen Abläufe (Bestätigung/Storno-Auflösung) umgangen. Neue Termine
             // sind confirmed.
             status: f.id ? (f.status || "confirmed") : "confirmed",
-            art: f.art || "ÜST"
+            // Urlaub wird ohne Terminart angelegt (saveUrlaub: art "") - so bleibt es
+            art: f.urlaub ? "" : (f.art || "ÜST")
         };
         apptSavingRef.current = true;
         setApptForm({ ...f, busy: true });
@@ -24919,7 +25075,7 @@ function App() {
             }
             setApptForm(null);
             const skipText = skipped.length
-                ? " – übersprungen: " + skipped.map(s => new Date(s.date + "T00:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }) + " (" + s.reason + ")").join(", ")
+                ? " – übersprungen: " + skipped.map(s => new Date(s.date + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }) + " (" + s.reason + ")").join(", ")
                 : "";
             showFlash("✓ " + createdCount + " von " + dates.length + " Terminen angelegt" + skipText);
         }
@@ -24935,14 +25091,15 @@ function App() {
         // Auswirkung auf die Buchbarkeit). Kein eigener Toggle: die Kalenderanzeige folgt direkt
         // dem dort gespeicherten workHours.so.
         const soAktiv = !!(workHours && typeof workHours === "object" && workHours.so && !workHours.so.blocked);
-        const tageProWoche = soAktiv ? 7 : 6;
-        const days = Array.from({ length: tageProWoche }, (_, i) => addDays(calWeek, i));
-        const weekEnd = addDays(calWeek, tageProWoche - 1);
         const byDay = {};
         appts.forEach(a => { const k = ymd(a.start_at); (byDay[k] = byDay[k] || []).push(a); });
-        // dayMonth() liefert bereits "02.08." – ein weiterer Punkt vor dem Jahr ergäbe "02.08..2026"
-        const weekLabel = dayMonth(calWeek) + " – " + dayMonth(weekEnd) + new Date(weekEnd).getFullYear();
-        const dayLabel = new Date(calDay).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "long", year: "numeric" });
+        // Liegt am Sonntag dieser Woche trotzdem ein Termin (über die Tagesleiste, den Import oder
+        // aus der Zeit, als der Sonntag freigegeben war), bekommt die Woche ihre 7. Spalte - sonst
+        // zählte der Termin oben in den UE mit, war aber nirgends zu sehen (Audit H-M5).
+        const soHatTermine = (byDay[ymd(addDays(calWeek, 6))] || []).length > 0;
+        const tageProWoche = (soAktiv || soHatTermine) ? 7 : 6;
+        const days = Array.from({ length: tageProWoche }, (_, i) => addDays(calWeek, i));
+        const weekEnd = addDays(calWeek, tageProWoche - 1);
         const pending = appts.filter(a => a.status === "pending").sort((a, b) => a.start_at.localeCompare(b.start_at));
         const cancelRequests = appts.filter(a => a.status === "cancel_requested").sort((a, b) => a.start_at.localeCompare(b.start_at));
         // UE-Zählung: 1 UE = 45 Minuten, nur bestätigte Termine. Ohne Endzeit = 45 Min = 1 UE.
@@ -24953,14 +25110,18 @@ function App() {
             return mins / 45;
         }
         function sumUE(list) { return list.reduce((sum, a) => sum + ueOf(a), 0); }
-        const weekStartT = calWeek.getTime();
-        const weekEndT = addDays(calWeek, 7).getTime();
+        // Woche über Berliner Kalendertage statt über Millisekunden-Grenzen: calWeek steht auf
+        // 12:00 (tagMittag), als Zeitgrenze fielen sonst die Montagvormittage heraus. Dieselbe
+        // Abgrenzung wie limitProblem(), damit Balken und Speicher-Sperre dieselbe Woche meinen.
+        const weekStartKey = ymd(calWeek);
+        const weekEndKey = ymd(addDays(calWeek, 6));
+        const inGezeigterWoche = a => { const k = ymd(a.start_at); return k >= weekStartKey && k <= weekEndKey; };
         // Zählen nur echte Ausbildungszeit: keine sonstigen Tätigkeiten, kein Urlaub und keine
         // Terminarten, die als "zählt nicht als Fahrstunde" markiert sind (z.B. Privater Termin).
         const confirmed = appts.filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)));
-        const weekAppts = confirmed.filter(a => { const t = new Date(a.start_at).getTime(); return t >= weekStartT && t < weekEndT; });
-        const monthRef = new Date(calWeek); // Monat der gezeigten Woche
-        const monthAppts = confirmed.filter(a => { const d = new Date(a.start_at); return d.getMonth() === monthRef.getMonth() && d.getFullYear() === monthRef.getFullYear(); });
+        const weekAppts = confirmed.filter(inGezeigterWoche);
+        const monthKey = weekStartKey.slice(0, 7); // Monat der gezeigten Woche (ihres Montags)
+        const monthAppts = confirmed.filter(a => ymd(a.start_at).slice(0, 7) === monthKey);
         const weekUE = sumUE(weekAppts);
         const monthUE = sumUE(monthAppts);
         const fmtUE = n => Number.isInteger(n) ? String(n) : n.toFixed(1).replace(".", ",");
@@ -25104,11 +25265,13 @@ function App() {
                     React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(urlaubDay))),
                 React.createElement("div", { onClick: e => {
                         // Tipp auf eine freie Stelle legt einen Termin zur angetippten Uhrzeit an (15-Min-Raster).
+                        // Gerundet statt abgerundet (Audit H-N19): eine Viertelstunde ist in der Woche nur
+                        // 13px hoch, wer auf die 10:00-Linie zielt, trifft oft knapp darüber und bekam 09:45.
                         // Termin-Blöcke sind Buttons und behalten ihr eigenes Verhalten.
                         if (e.target.closest("button"))
                             return;
                         const rect = e.currentTarget.getBoundingClientRect();
-                        const mins = Math.max(startH * 60, Math.min(endH * 60 - 15, Math.floor((startH * 60 + (e.clientY - rect.top) / PXH * 60) / 15) * 15));
+                        const mins = Math.max(startH * 60, Math.min(endH * 60 - 15, Math.round((startH * 60 + (e.clientY - rect.top) / PXH * 60) / 15) * 15));
                         openNewAppt(k, String(Math.floor(mins / 60)).padStart(2, "0") + ":" + String(mins % 60).padStart(2, "0"));
                     }, style: { position: "relative", height: totalH * PXH, paddingLeft: 50, cursor: "pointer" } },
                     hours.map(h => React.createElement("div", { key: h, className: "cal-hourline", style: { position: "absolute", left: 0, right: 0, top: (h - startH) * PXH } },
@@ -25224,7 +25387,7 @@ function App() {
                                     if (e.target.closest("button"))
                                         return;
                                     const rect = e.currentTarget.getBoundingClientRect();
-                                    const mins = Math.max(startH * 60, Math.min(endH * 60 - 15, Math.floor((startH * 60 + (e.clientY - rect.top) / PXH * 60) / 15) * 15));
+                                    const mins = Math.max(startH * 60, Math.min(endH * 60 - 15, Math.round((startH * 60 + (e.clientY - rect.top) / PXH * 60) / 15) * 15));
                                     openNewAppt(k, String(Math.floor(mins / 60)).padStart(2, "0") + ":" + String(mins % 60).padStart(2, "0"));
                                 }, style: { position: "relative", height: totalH * PXH, cursor: "pointer" } },
                                 hours.map(h => React.createElement("div", { key: h, style: { position: "absolute", left: 0, right: 0, top: (h - startH) * PXH, borderTop: "1px solid var(--line)", opacity: .5 } })),
@@ -25279,18 +25442,20 @@ function App() {
                 // Zeile 1: wo bin ich, und wie komme ich weiter
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, maxWidth: 440, margin: "0 auto" } },
                     calMode === "woche" && React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche zurück",
-                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalWeek(addDays(calWeek, -7)) }, "‹"),
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => { setCalWeek(addDays(calWeek, -7)); setCalDay(addDays(calDay, -7)); } }, "‹"),
                     React.createElement("div", { style: { flex: 1, minWidth: 0, textAlign: "center" } },
                         React.createElement("div", { className: "home-eyebrow" },
                             calMode === "woche"
-                                ? ("KW " + isoKW(calWeek) + " · " + new Date(calWeek).getFullYear())
+                                // Jahr der KW = Jahr ihres Donnerstags (ISO 8601): die Woche ab 29.12.2025 ist
+                                // KW 1 · 2026, nicht "KW 1 · 2025" (Audit H-N13).
+                                ? ("KW " + isoKW(calWeek) + " · " + addDays(calWeek, 3).getFullYear())
                                 : new Date(calDay).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long", year: "numeric" })),
                         React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 17, marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
                             calMode === "woche"
                                 ? spanneLang(new Date(calWeek), new Date(weekEnd))
                                 : new Date(calDay).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "numeric", month: "long" }))),
                     calMode === "woche" && React.createElement("button", { className: "btn btn-ghost", "aria-label": "Nächste Woche",
-                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalWeek(addDays(calWeek, 7)) }, "›")),
+                        style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => { setCalWeek(addDays(calWeek, 7)); setCalDay(addDays(calDay, 7)); } }, "›")),
                 // Zeile 2: Zeitraum links, Darstellung rechts. Beides sind Ansichtsschalter und
                 // stehen deshalb nebeneinander statt in zwei getrennten Zeilen mit zwei Mustern.
                 // Die Darstellung als Symbolpaar: "Karten"/"Zeitstrahl" ausgeschrieben passte
@@ -25316,7 +25481,7 @@ function App() {
                     })(),
                     !(calMode === "woche" ? ymd(calWeek) === ymd(startOfWeek(new Date())) : isToday(calDay))
                         && React.createElement("button", { className: "btn btn-ghost", style: { padding: "0 12px", minHeight: 44, flexShrink: 0, fontSize: 13 },
-                            onClick: () => { const d = new Date(); d.setHours(0, 0, 0, 0); setCalWeek(startOfWeek(d)); setCalDay(d); } }, "Heute")),
+                            onClick: () => zeigeKalenderTag(new Date()) }, "Heute")),
                 // Zeile 3: Woche und Monat als zwei gleichrangige Zellen mit senkrechter
                 // Haarlinie dazwischen, statt als Fliesstext in einer Zeile. Die Zahl steht
                 // gross und tabellarisch ueber ihrer Beschriftung - so liest man sie im
@@ -25337,7 +25502,11 @@ function App() {
                                     React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)" } }, "UE"))))),
                         React.createElement(Help, { text: "UE = Unterrichtseinheit. 1 UE sind 45 Minuten. Gezählt werden nur bestätigte Termine." })),
                     weekLimit > 0 && (() => {
-                        const genutzt = weekUE * 45;
+                        // Echte Minuten wie in limitProblem() (Audit H-N20): die UE-Zählung rechnet jeden
+                        // kurzen Termin auf 45 Min hoch, der Balken meldete deshalb "Limit erreicht",
+                        // während das Speichern noch Minuten frei sah - oder umgekehrt.
+                        const genutzt = weekAppts.reduce((sum, a) => sum + apptMin(a), 0);
+                        const genutztUE = genutzt / 45;
                         const anteil = Math.min(100, Math.round(genutzt / weekLimit * 100));
                         const voll = genutzt >= weekLimit, nah = genutzt >= weekLimit * 0.85;
                         const ton = voll ? "var(--red)" : (nah ? "var(--amber)" : "var(--orange)");
@@ -25346,9 +25515,9 @@ function App() {
                                 React.createElement("div", { style: { height: "100%", width: Math.max(2, anteil) + "%", background: ton, borderRadius: 99, transition: "width .25s" } })),
                             React.createElement("div", { style: { fontSize: 11.5, color: voll ? "var(--red-ink)" : "var(--muted)", marginTop: 5, fontWeight: voll ? 700 : 400 } },
                                 genutzt > weekLimit
-                                    ? ("Wochenlimit überschritten – " + fmtUE(weekUE) + " von " + fmtUE(weekLimit / 45) + " UE")
+                                    ? ("Wochenlimit überschritten – " + fmtUE(genutztUE) + " von " + fmtUE(weekLimit / 45) + " UE")
                                     : voll ? ("Wochenlimit erreicht – " + fmtUE(weekLimit / 45) + " UE")
-                                           : (fmtUE(weekUE) + " von " + fmtUE(weekLimit / 45) + " UE in dieser Woche")));
+                                           : (fmtUE(genutztUE) + " von " + fmtUE(weekLimit / 45) + " UE in dieser Woche")));
                     })())),
             // Der volle "+ Termin"-Balken ist 2026-09-14 entfallen: der [+] in der Tab-Leiste
             // öffnet dasselbe Formular, liegt näher am Daumen und ist auf jedem Bildschirm da.
@@ -25432,14 +25601,14 @@ function App() {
                 // reserviert IMMER denselben Platz (opacity statt bedingtem Rendern), damit die
                 // Kacheln nicht durch fehlende Punkte in der Höhe hüpfen.
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 6, marginBottom: 14 } },
-                    React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche zurück", style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalDay(addDays(calDay, -7)) }, "‹"),
+                    React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche zurück", style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => zeigeKalenderTag(addDays(calDay, -7)) }, "‹"),
                     React.createElement("div", { style: { flex: 1, display: "flex", gap: 5, minWidth: 0 } },
-                        Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(calDay), i)).map(d => {
+                        Array.from({ length: 7 }, (_, i) => addDays(tagMittag(startOfWeek(calDay)), i)).map(d => {
                             const dKey = ymd(d);
                             const dActive = dKey === ymd(calDay);
                             const dToday = isToday(d);
                             const hatTermine = (byDay[dKey] || []).length > 0;
-                            return React.createElement("button", { key: dKey, onClick: () => setCalDay(d), style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "9px 2px",
+                            return React.createElement("button", { key: dKey, onClick: () => zeigeKalenderTag(d), style: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2, padding: "9px 2px",
                                     borderRadius: "var(--r-tile)", background: dActive ? "var(--orange)" : "var(--surface)",
                                     border: dActive ? "1px solid var(--orange)" : (dToday ? "2px solid var(--orange)" : "1px solid var(--line)"),
                                     boxShadow: dActive ? "var(--shadow-float)" : "none",
@@ -25448,7 +25617,7 @@ function App() {
                                 React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18 } }, d.getDate()),
                                 React.createElement("span", { style: { width: 4, height: 4, borderRadius: "50%", background: dActive ? "#181512" : "var(--orange)", opacity: hatTermine ? 1 : 0 } }));
                         })),
-                    React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche vor", style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => setCalDay(addDays(calDay, 7)) }, "›")),
+                    React.createElement("button", { className: "btn btn-ghost", "aria-label": "Woche vor", style: { padding: "10px", minWidth: 44, minHeight: 44, flexShrink: 0 }, onClick: () => zeigeKalenderTag(addDays(calDay, 7)) }, "›")),
                 // Sektionskopf (Datum + "Heute" + "Alle anzeigen") 2026-09-15 entfernt: seit die
                 // Kopfkarte oben das Tagesdatum, den Heute-Sprung und den Woche/Tag-Umschalter
                 // traegt, stand hier alles drei ein zweites Mal - direkt untereinander.
@@ -25460,7 +25629,8 @@ function App() {
                     const col = over ? "#B3362A" : (near ? "var(--amber)" : "var(--orange)");
                     return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14 } },
                         React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 7 } },
-                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, "Heute bestätigt"),
+                            // Beschriftung nach dem gezeigten Tag (Audit H-N15) - "Heute" stand auch bei jedem anderen Tag
+                            React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, isToday(calDay) ? "Heute bestätigt" : "An diesem Tag bestätigt"),
                             React.createElement("span", { style: { fontSize: 13, fontWeight: 800, fontFamily: "var(--font-d)", color: col, fontVariantNumeric: "tabular-nums" } },
                                 used,
                                 " / ",
@@ -25479,10 +25649,10 @@ function App() {
                     if (!luecken.length)
                         return null;
                     // "Schüler ohne Termin in dieser Woche" als Aufhänger - dieselbe Definition wie
-                    // die Wochenansicht oben (weekStartT/weekEndT), damit die Zahl nachvollziehbar ist.
+                    // die Wochenansicht oben (inGezeigterWoche), damit die Zahl nachvollziehbar ist.
                     const ohneTermin = (students || []).filter(s => s._isMine && !s.archived
                         && !(appts || []).some(a => a.student_id === s.id && (a.status === "confirmed" || a.status === "pending")
-                            && new Date(a.start_at).getTime() >= weekStartT && new Date(a.start_at).getTime() < weekEndT)).length;
+                            && inGezeigterWoche(a))).length;
                     return React.createElement(React.Fragment, null,
                         React.createElement("div", { className: "eyebrow", style: { margin: "16px 6px 8px" } }, "Freie Zeiten"),
                         luecken.map(l => React.createElement("button", { key: l.from + "-" + l.to, onClick: () => openNewAppt(ymd(calDay), l.from), className: "card green",
@@ -25529,10 +25699,15 @@ function App() {
                             let url = bookingURL();
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
                                 showFlash("Erzeuge Buchungscode…");
-                                const fresh = await fetchBookingCode(uid);
+                                // Den frischen Code direkt verwenden (Audit H-M8, siehe bookingURL)
+                                let fresh = null;
+                                try {
+                                    fresh = await fetchBookingCode(uid);
+                                }
+                                catch (e) { /* unten als "unvollständig" gemeldet */ }
                                 if (fresh)
                                     setBookingCode(fresh);
-                                url = bookingURL();
+                                url = bookingURL(fresh);
                             }
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
                                 showToast("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
@@ -25595,14 +25770,27 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, busy: false, error: "Löschen fehlgeschlagen: " + e.message } : prev);
         }
     }
-    // Abo an/aus umschalten
+    // Abo an/aus umschalten. Mit Rückfrage und festem Zielwert (Audit H-N10): vorher schaltete
+    // ein Tipp ohne Nachfrage, und beim Doppeltipp sendeten beide Aufrufe denselben Wert zum
+    // Server, lokal wurde aber zweimal umgedreht - die Anzeige stand danach falsch herum.
     async function toggleSubscription(acc) {
+        const an = !acc.subscription_active;
+        if (aboSchalterLaeuft.has(acc.id))
+            return;
+        if (!await askConfirm({ title: an ? "Abo aktivieren?" : "Abo deaktivieren?",
+                message: an ? acc.email + " wird als zahlendes Abo geführt." : acc.email + " verliert den Abo-Status. Danach gelten Probezeit und Zahlungsfrist.",
+                confirmLabel: an ? "Aktivieren" : "Deaktivieren" }))
+            return;
+        aboSchalterLaeuft.add(acc.id);
         try {
-            await adminSetSubscription(acc.id, { subscription_active: !acc.subscription_active });
-            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_active: !a.subscription_active } : a) } : prev);
+            await adminSetSubscription(acc.id, { subscription_active: an });
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_active: an } : a) } : prev);
         }
         catch (e) {
             showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            aboSchalterLaeuft.delete(acc.id);
         }
     }
     // Lifetime-Zugang an/aus. Ein Lifetime-Konto ist dauerhaft freigeschaltet: kein
@@ -25628,13 +25816,25 @@ function App() {
         }
     }
     // Theorie-üben-Zusatzpaket an/aus umschalten (separat vom Basis-Abo, siehe THEORY_UEBEN_RELEASED)
+    // Wie toggleSubscription: Rückfrage, fester Zielwert, kein zweiter Aufruf während einer läuft
     async function toggleTheoryAddon(acc) {
+        const an = !acc.theory_addon_active;
+        if (aboSchalterLaeuft.has(acc.id))
+            return;
+        if (!await askConfirm({ title: an ? "Theorie-Paket freischalten?" : "Theorie-Paket abschalten?",
+                message: an ? acc.email + " bekommt das Zusatzpaket Theorie üben." : acc.email + " verliert das Zusatzpaket Theorie üben.",
+                confirmLabel: an ? "Freischalten" : "Abschalten" }))
+            return;
+        aboSchalterLaeuft.add(acc.id);
         try {
-            await adminSetSubscription(acc.id, { theory_addon_active: !acc.theory_addon_active });
-            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, theory_addon_active: !a.theory_addon_active } : a) } : prev);
+            await adminSetSubscription(acc.id, { theory_addon_active: an });
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, theory_addon_active: an } : a) } : prev);
         }
         catch (e) {
             showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            aboSchalterLaeuft.delete(acc.id);
         }
     }
     // Monatsbeitrag eines Fahrlehrers ändern
@@ -25642,7 +25842,8 @@ function App() {
         const input = await askPrompt({ message: 'Monatsbeitrag für ' + acc.email + ' in Euro (leer lassen = kein fester Betrag):', defaultValue: acc.subscription_amount != null ? String(acc.subscription_amount) : "" });
         if (input === null)
             return;
-        const val = input.trim() === "" ? null : Number(input.replace(",", "."));
+        // parseBetrag statt Number(replace(",", ".")): "1.000" war sonst 1 € (Welle-A-Helfer)
+        const val = input.trim() === "" ? null : parseBetrag(input);
         if (val !== null && (isNaN(val) || val < 0)) {
             showToast("Bitte eine gültige Zahl eingeben.");
             return;
@@ -26002,7 +26203,7 @@ function App() {
             await adminDetachTeacher(uid);
             setAdminTeachers(prev => prev ? { ...prev, list: (prev.list || []).filter(t => t.id !== uid) } : prev);
             // Zähler in der Fahrschulliste anpassen
-            setAdminSchools(prev => (prev || []).map(s => s.id === (adminTeachers && adminTeachers.school.id) ? { ...s, teachers: Math.max(0, s.teachers - 1) } : s));
+            setAdminSchools(prev => (prev || []).map(s => s.id === (adminTeachers && adminTeachers.school.id) && s.teachers != null ? { ...s, teachers: Math.max(0, s.teachers - 1) } : s));
         }
         catch (e) {
             showToast("Stilllegen fehlgeschlagen:\n" + fehlerText(e), "error");
@@ -26142,7 +26343,18 @@ function App() {
                                 x.fristen.length > 1 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
                                     x.fristen.map(f => f.label + " (" + f.rechtsgrundlage + "): bis " + f.faellig.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })).join(" · "))),
                             React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => exportStudentData(x.s) }, "Export"),
-                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: () => removeStudent(x.s) }, "Löschen"));
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => {
+                                    // Vor Ablauf der Frist erst deutlich warnen (Audit H-N16) - der Knopf sah
+                                    // für löschreife und noch aufzubewahrende Schüler gleich aus.
+                                    if (!reif && !await askConfirm({ title: "Aufbewahrungsfrist läuft noch",
+                                            message: (x.faellig
+                                                ? dispName(x.s) + " ist noch bis " + x.faellig.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) + " aufzubewahren"
+                                                : "Für " + dispName(x.s) + " ist kein Archivdatum hinterlegt, die Frist lässt sich nicht berechnen")
+                                                + " (§ 31 Fahrlehrergesetz, bei Rechnungen § 147 AO). Wer vorher löscht, kann die Ausbildung bei einer Prüfung nicht mehr nachweisen.\n\nTrotzdem löschen?",
+                                            confirmLabel: "Trotzdem löschen" }))
+                                        return;
+                                    removeStudent(x.s);
+                                } }, "Löschen"));
                     })),
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 14 } },
                 "Gelöscht wird nur auf deine Bestätigung – die App löscht nichts von selbst. Schüler mit Rechnungen sind aus Revisionsgründen serverseitig vor dem Löschen geschützt."));
@@ -26187,7 +26399,7 @@ function App() {
         return React.createElement("div", { className: "pad readable-shell" },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, margin: "2px 2px 14px" } },
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setView("einstellungen") }, "\u2039 Zur\u00FCck"),
-                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, "Admin \u00B7 Fahrschulen")),
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, isAdmin(session) ? "Admin \u00B7 Fahrschulen" : "Moderation")),
             canModerateApp && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Streckenvorlagen pr\u00FCfen"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, routeQueue === null
@@ -26236,8 +26448,12 @@ function App() {
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
                     "Die Verwaltung aller Konten steht jetzt unter Einstellungen \u2192 Abonnement. Diese Seite hier bleibt f\u00FCr die Fahrschulen selbst."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => { setView("einstellungen"); setSettingsScreen("abo"); } }, "Zur Abo-Verwaltung")),
-            React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
-            adminSchools === null
+            // Fahrschulen verwalten nur für den zentralen App-Admin (Audit H-M9). Ein Moderator darf
+            // laut Datenbank weder fremde Fahrschulen lesen noch ändern noch die Zahlen abrufen:
+            // er sah nur die eigene Schule mit "0 Fahrlehrer · 0 Schüler", und "Bearbeiten"/"Logo"
+            // liefen ins Leere. Seine Aufgabe hier ist das Freigeben oben.
+            isAdmin(session) && React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
+            !isAdmin(session) ? null : adminSchools === null
                 ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                     React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lade alle Fahrschulen, um sie zu verwalten."),
                     React.createElement("button", { className: "btn btn-primary", disabled: adminBusy, onClick: loadAdmin }, adminBusy ? "Lädt…" : "Fahrschulen laden"))
@@ -26257,10 +26473,10 @@ function App() {
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, sc.subtitle || "—"))),
                         React.createElement("div", { style: { display: "flex", gap: 14, margin: "10px 0", fontSize: 12.5, color: "var(--ink-2)" } },
                             React.createElement("span", null,
-                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.teachers),
+                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.teachers == null ? "\u2013" : sc.teachers),
                                 " Fahrlehrer"),
                             React.createElement("span", null,
-                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.students),
+                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.students == null ? "\u2013" : sc.students),
                                 " Sch\u00FCler"),
                             React.createElement("span", null, sc.logo ? "eigenes Logo" : "Standard-Logo")),
                         React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
@@ -26277,10 +26493,40 @@ function App() {
             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
                 paypalLinkEdit === null
-                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => setPaypalLinkEdit((s && s.paypal_link) || "")) }, "Laden")
+                    // fetchAppSettings() liefert bei einem Fehler null. Dann NICHT mit leerem Feld
+                    // öffnen (Audit H-N11): ein Tipp auf "Speichern" hätte den echten Link gelöscht.
+                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => {
+                            if (!s) {
+                                showToast("Der PayPal-Link konnte nicht geladen werden. Bitte erneut versuchen.", "error");
+                                return;
+                            }
+                            setPaypalLinkEdit(s.paypal_link || "");
+                        }) }, "Laden")
                     : React.createElement("div", { style: { display: "flex", gap: 8 } },
                         React.createElement("input", { type: "text", value: paypalLinkEdit, onChange: e => setPaypalLinkEdit(e.target.value), placeholder: "z.B. paypal.me/deinname oder name@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + fehlerText(e), "error")) }, "Speichern"))),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: async () => {
+                                // Vor dem Speichern mit derselben paypalZiel()-Regel prüfen, nach der der
+                                // Bezahlen-Knopf den Link baut (Audit B-M10) - sonst fiel ein Tippfehler erst
+                                // auf, wenn ein Fahrlehrer zahlen wollte.
+                                const wert = (paypalLinkEdit || "").trim();
+                                if (wert && !paypalZiel(wert)) {
+                                    showToast("Das ist weder ein PayPal.Me-Link noch eine E-Mail-Adresse.\n\nBeispiele: paypal.me/deinname oder name@email.de", "error");
+                                    return;
+                                }
+                                if (!wert && !await askConfirm({ title: "PayPal-Link leeren?", message: "Die Fahrlehrer haben dann keinen Bezahlen-Knopf mehr.", confirmLabel: "Leeren" }))
+                                    return;
+                                try {
+                                    await saveAppSettings({ paypal_link: wert });
+                                    setPaypalLinkEdit(wert);
+                                    showFlash("✓ Gespeichert");
+                                }
+                                catch (e) {
+                                    showToast("Fehler:\n" + fehlerText(e), "error");
+                                }
+                            } }, "Speichern")),
+                // Vorschau, wohin der Bezahlen-Knopf mit diesem Eintrag führt
+                paypalLinkEdit && paypalZiel(paypalLinkEdit) && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8, wordBreak: "break-all" } },
+                    paypalZiel(paypalLinkEdit).email ? "Bezahlen an PayPal-Konto " + paypalZiel(paypalLinkEdit).email : "Bezahlen-Knopf öffnet " + paypalZiel(paypalLinkEdit).href)),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
             adminAccounts === null
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
@@ -26486,7 +26732,8 @@ function App() {
             isSchoolAdmin && { id: "schulboard", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Fahrschul-Dashboard",
                 icon: IC.admin, keywords: "dashboard auswertung fahrlehrer team zuteilen zuordnung schueler umhaengen statistik grafik auslastung umsatz pruefungsquote offene posten",
                 status: "Alle Fahrlehrer · Schüler zuteilen", direct: () => setView("schulboard") },
-            canModerateApp && { id: "admin", section: "konto", tone: "sky", label: "Fahrschulen verwalten", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator", status: "Alle Fahrschulen", direct: () => setView("admin") },
+            // Moderatoren sehen dort nur die Freigaben (Audit H-M9) - Beschriftung entsprechend
+            canModerateApp && { id: "admin", section: "konto", tone: "sky", label: isAdmin(session) ? "Fahrschulen verwalten" : "Beiträge freigeben", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator freigeben", status: isAdmin(session) ? "Alle Fahrschulen" : "Moderation", direct: () => setView("admin") },
             { id: "hilfe", section: "konto", tone: "sky", label: "Hilfe & FAQ", icon: IC.hilfe, keywords: "faq hilfe frage", status: FAQ_ITEMS.length + " Fragen" },
             { id: "info", section: "konto", tone: "sky", label: "Info", icon: IC.info, keywords: "version changelog info app", status: "Version " + APP_VERSION },
             { id: "datenschutz", section: "konto", tone: "sky", label: "Datenschutzerklärung", icon: IC.datenschutz, keywords: "datenschutz privacy", status: "", direct: () => setView("datenschutz") },
@@ -31679,38 +31926,40 @@ function App() {
                         } }, "Per WhatsApp senden")
                     : React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", padding: "10px 0" } }, "Für " + dispName(welcomeOffer) + " ist keine Telefonnummer hinterlegt."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => setWelcomeOffer(null) }, "Nicht jetzt"))),
-        apptForm && React.createElement("div", { onClick: () => { if (!apptForm.busy) setApptForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex",
+        apptForm && React.createElement("div", { onClick: apptFormWegtippen, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))",
                     maxHeight: "88dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, apptForm.id ? "Termin bearbeiten" : "Neuer Termin"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, apptForm.urlaub ? "Urlaub bearbeiten" : (apptForm.id ? "Termin bearbeiten" : "Neuer Termin")),
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "Datum",
                     React.createElement("input", { type: "date", value: apptForm.date, onChange: e => setApptForm({ ...apptForm, date: e.target.value }) }))),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 8 } },
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Von",
-                        React.createElement("input", { type: "time", step: "900", value: apptForm.start, onChange: e => setApptForm({ ...apptForm, start: e.target.value }) }))),
+                        React.createElement("input", { type: "time", step: "900", value: apptForm.start, onChange: e => setApptForm(apptMitStart(apptForm, e.target.value)) }))),
                     React.createElement("div", { className: "field", style: { flex: 1 } },
                         React.createElement("label", null, "Bis (optional)",
                         React.createElement("input", { type: "time", step: "900", value: apptForm.end, onChange: e => setApptForm({ ...apptForm, end: e.target.value }) })))),
                 React.createElement("div", { style: { marginBottom: 6 } },
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Startzeit \u00B7 Viertelstunde"),
-                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"].map(t => React.createElement("button", { key: t, onClick: () => setApptForm({ ...apptForm, start: t }), className: "btn " + (apptForm.start === t ? "btn-primary" : "btn-ghost"), style: { padding: "6px 10px", fontSize: 13, minWidth: 0 } }, t))),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"].map(t => React.createElement("button", { key: t, onClick: () => setApptForm(apptMitStart(apptForm, t)), className: "btn " + (apptForm.start === t ? "btn-primary" : "btn-ghost"), style: { padding: "6px 10px", fontSize: 13, minWidth: 0 } }, t))),
                     React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } }, ["00", ":15", ":30", ":45"].map((mm, i) => {
                         const min = ["00", "15", "30", "45"][i];
                         const cur = (apptForm.start || "09:00").slice(0, 2);
                         const t = cur + ":" + min;
-                        return React.createElement("button", { key: min, onClick: () => setApptForm({ ...apptForm, start: t }), className: "btn " + ((apptForm.start || "").slice(3) === min ? "btn-primary" : "btn-ghost"), style: { padding: "6px 12px", fontSize: 13 } },
+                        return React.createElement("button", { key: min, onClick: () => setApptForm(apptMitStart(apptForm, t)), className: "btn " + ((apptForm.start || "").slice(3) === min ? "btn-primary" : "btn-ghost"), style: { padding: "6px 12px", fontSize: 13 } },
                             ":",
                             min);
                     }))),
-                React.createElement("div", { style: { marginBottom: 14 } },
+                // Beim Urlaub (Audit H-H1) gibt es keine Dauer, Terminart, keinen Schüler und keine
+                // Bestätigung - diese Felder würden aus dem Urlaubstag nur wieder eine Fahrstunde machen.
+                !apptForm.urlaub && React.createElement("div", { style: { marginBottom: 14 } },
                     React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Dauer (setzt Endzeit)"),
                     React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [45, 55, 60, 90, 135].map(d => React.createElement("button", { key: d, onClick: () => setApptForm({ ...apptForm, end: addMinutesToTime(apptForm.start, d) }), className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 13 } }, d === 45 ? "1 FS (45 min)" : d === 55 ? "Prüfung (55 min)" : d === 60 ? "1,33 FS (60 min)" : d === 90 ? "2 FS (90 min)" : d === 135 ? "3 FS (135 min)" : d + " min")))),
-                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                !apptForm.urlaub && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "Art",
                     React.createElement("select", { value: apptForm.art || "ÜST", onChange: e => setApptForm({ ...apptForm, art: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, artOptgroups(arten)))),
                 apptForm.art === "NF" && apptForm.date && weather && weather !== "error" && weather.lat != null && (() => {
@@ -31730,7 +31979,7 @@ function App() {
                         "An diesem Tag geht die Sonne erst um " + sunset.toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) + " Uhr unter - für eine Dämmerungsfahrt könnte " + (apptForm.start || "00:00") + " Uhr noch zu früh sein. ",
                         React.createElement("button", { onClick: () => setApptForm({ ...apptForm, start: empfohlenStr, end: dauerMin > 0 ? addMinutesToTime(empfohlenStr, dauerMin) : apptForm.end }), style: { textDecoration: "underline", fontWeight: 700 } }, "Auf " + empfohlenStr + " Uhr setzen"));
                 })(),
-                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                !apptForm.urlaub && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "Sch\u00FCler (optional)",
                     React.createElement("select", { value: apptForm.student_id, onChange: e => setApptForm({ ...apptForm, student_id: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                         React.createElement("option", { value: "" }, "\u2013 kein Sch\u00FCler \u2013"),
@@ -31738,7 +31987,7 @@ function App() {
                 React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                     React.createElement("label", null, "Notiz (optional)",
                     React.createElement("input", { type: "text", value: apptForm.note, onChange: e => setApptForm({ ...apptForm, note: e.target.value }), placeholder: "z.B. Autobahnfahrt, Treffpunkt\u2026" }))),
-                React.createElement("div", { onClick: () => setApptForm({ ...apptForm, sonstige: !apptForm.sonstige }), style: { display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 13px", marginBottom: 16, borderRadius: 11, cursor: "pointer",
+                !apptForm.urlaub && React.createElement("div", { onClick: () => setApptForm({ ...apptForm, sonstige: !apptForm.sonstige }), style: { display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 13px", marginBottom: 16, borderRadius: 11, cursor: "pointer",
                         border: "1.5px solid " + (apptForm.sonstige ? "var(--orange)" : "var(--line)"), background: apptForm.sonstige ? "var(--orange-soft)" : "transparent" } },
                     React.createElement("div", { style: { width: 22, height: 22, borderRadius: 6, flexShrink: 0, marginTop: 1, border: "2px solid " + (apptForm.sonstige ? "var(--orange)" : "var(--muted)"),
                             background: apptForm.sonstige ? "var(--orange)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" } }, apptForm.sonstige && React.createElement("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: "3.5", strokeLinecap: "round", strokeLinejoin: "round" },
@@ -31786,7 +32035,7 @@ function App() {
                             React.createElement("path", { d: "M12 7v14" }),
                             React.createElement("path", { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" })),
                         "Stunde im Tagebuch bewerten"),
-                apptForm.id && (apptForm.status !== "pending") && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--green)" }, onClick: () => {
+                !apptForm.urlaub && apptForm.id && (apptForm.status !== "pending") && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--green)" }, onClick: () => {
                         const a = (appts || []).find(x => x.id === apptForm.id);
                         const appt = a || { id: apptForm.id, title: apptForm.title, start_at: apptForm.start_at, end_at: apptForm.end_at, note: apptForm.note, student_id: apptForm.student_id };
                         resendWhatsApp(appt);
