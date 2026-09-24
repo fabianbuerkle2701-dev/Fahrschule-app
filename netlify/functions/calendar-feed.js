@@ -171,6 +171,10 @@ exports.handler = async function (event) {
 
     return { statusCode: 200, headers, body: lines.join("\r\n") + "\r\n" };
   } catch (e) {
-    return { statusCode: 500, headers: { ...headers, "Content-Type": "text/plain" }, body: "Serverfehler: " + (e.message || "unbekannt") };
+    // Der Feed ist ohne Login über ?token= erreichbar - interne Fehlertexte (Statuscodes der
+    // Datenbank, Netzwerkdetails) gehören ins Netlify-Log, nicht zum Aufrufer (wie L-N7 in
+    // booking-chat & Co.). Kalender-Apps zeigen den Text ohnehin nicht an, sie versuchen es später.
+    console.error("calendar-feed: Serverfehler", e);
+    return { statusCode: 500, headers: { ...headers, "Content-Type": "text/plain" }, body: "Kalender gerade nicht verfügbar. Bitte später erneut versuchen." };
   }
 };

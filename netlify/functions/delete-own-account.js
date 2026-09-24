@@ -16,8 +16,18 @@
 // freigegebene Schüler würden auch bei diesen verschwinden, und Prüfungstermine/Reflexionen/
 // Anwesenheiten/Gutscheine/Löschprotokoll hängen per Fremdschlüssel am Konto. In diesen Fällen
 // antwortet die Function mit einer Erklärung, was vorher zu klären ist - angefasst wird nichts.
+//
+// Fahrschule (Abschluss-Audit 2026-09): schools hängt an keinem Konto, beim Löschen blieb die
+// eigene Fahrschule samt Stammdaten stehen. Jetzt:
+//   - einziger Admin einer Fahrschule MIT Kollegen: Löschung wird abgelehnt (409). Sonst hätte
+//     die Schule keinen Admin mehr, und nur der Support kann einen neuen bestimmen - die Kollegen
+//     kämen bis dahin nicht mehr an Standorte, Preise, Rechnungsdaten und Einladungen.
+//   - letztes Mitglied: die Fahrschule wird nach dem Konto mitgelöscht. Bewusst NICHT abgelehnt:
+//     die Konto-Löschung muss in der App selbst möglich sein (Art. 17, App Store), und niemand
+//     sonst braucht die Schule noch. Hängen noch Videos anderer Besitzer an ihr (würden per
+//     CASCADE mitgehen), bleibt sie stehen und die Reste stehen im Log.
 
-const { SUPABASE_URL, pruefeBlocker, sammleDateipfade, loescheAuthKonto, loescheDateien } = require("./lib/konto-loeschen");
+const { SUPABASE_URL, pruefeBlocker, sammleDateipfade, loescheAuthKonto, loescheDateien, loescheLeereSchule } = require("./lib/konto-loeschen");
 
 // Das öffentliche Demo-Konto teilen sich alle Interessenten - es darf niemand löschen.
 const DEMO_UID = "114d1f0a-9947-459d-8009-06282799ca44";
@@ -74,7 +84,7 @@ exports.handler = async function (event) {
       console.error("delete-own-account: " + pruefung.fehler);
       return fehler(502, "Die Löschung konnte gerade nicht geprüft werden. Bitte später noch einmal versuchen.");
     }
-    const { students, withInvoices, shared, otherRefs } = pruefung;
+    const { students, withInvoices, shared, otherRefs, schule } = pruefung;
     const gruende = [];
     if (withInvoices.length) {
       gruende.push("Für " + withInvoices.length + " Schüler gibt es Rechnungen. Rechnungen unterliegen der gesetzlichen Aufbewahrungspflicht und dürfen nicht einfach mitgelöscht werden.");
@@ -86,6 +96,10 @@ exports.handler = async function (event) {
     }
     if (otherRefs.length) {
       gruende.push("Mit deinem Konto sind noch Daten verknüpft, die aufbewahrt werden müssen: " + otherRefs.join(", ") + ".");
+    }
+    if (schule && schule.istAdmin && schule.andereMitglieder > 0 && schule.andereAdmins === 0) {
+      gruende.push("Du bist der einzige Admin deiner Fahrschule" + (schule.name ? " „" + schule.name + "“" : "") +
+        ". Ohne dich könnte niemand mehr Standorte, Preise, Rechnungsdaten und Einladungen verwalten. Die Admin-Rolle muss vorher an eine Kollegin oder einen Kollegen übergehen.");
     }
     if (gruende.length) {
       const msg = "Dein Konto kann nicht automatisch gelöscht werden:\n- " + gruende.join("\n- ") +
@@ -110,7 +124,19 @@ exports.handler = async function (event) {
     if (speicherFehler.length) {
       console.error("delete-own-account: Konto " + uid + " gelöscht, aber Dateien blieben liegen in: " + speicherFehler.join(", "));
     }
-    console.log("delete-own-account: Konto " + uid + " vom Nutzer selbst gelöscht - " + students.length + " Schüler, " + filesDeleted + " Dateien entfernt.");
+    // 6) Letztes Mitglied: die jetzt leere Fahrschule mitlöschen (Begründung oben). Scheitert das,
+    // ist das Konto trotzdem weg - die Schule bleibt dann wie bisher stehen und steht im Log.
+    let schuleGeloescht = false;
+    if (schule && schule.andereMitglieder === 0) {
+      if (schule.fremdeVideos > 0) {
+        console.error("delete-own-account: Fahrschule " + schule.id + " bleibt stehen - es hängen noch Videos anderer Besitzer daran.");
+      } else {
+        const sd = await loescheLeereSchule(serviceKey, schule.id);
+        if (sd.ok) schuleGeloescht = true;
+        else console.error("delete-own-account: Konto " + uid + " gelöscht, aber Fahrschule " + schule.id + " blieb stehen (HTTP " + sd.status + ").");
+      }
+    }
+    console.log("delete-own-account: Konto " + uid + " vom Nutzer selbst gelöscht - " + students.length + " Schüler, " + filesDeleted + " Dateien entfernt" + (schuleGeloescht ? ", leere Fahrschule " + schule.id + " mitgelöscht" : "") + ".");
     return { statusCode: 200, headers, body: JSON.stringify({ ok: true }) };
   } catch (e) {
     console.error("delete-own-account: Serverfehler", e);
