@@ -14041,6 +14041,10 @@ function App() {
     const [saved, setSaved] = useState(true);
     // null = alles geschrieben. Sonst der Schüler, dessen letzter Schreibversuch fehlschlug -
     // die Speicheranzeige wird damit gleichzeitig zum Wiederholen-Knopf (Designprüfung 2026-09-14).
+    // null | Schüler-ID | "__schule" | "__vorlage" - wessen Speichern zuletzt gescheitert ist.
+    // Fahrschule/Vorlage bekamen früher keinen Fehlerstatus: die Kopfzeile drehte "Speichert…"
+    // endlos oder zeigte nach dem nächsten Schüler-Save "✓ Gespeichert", obwohl die Einstellung
+    // nie ankam (Abschluss-Audit).
     const [saveError, setSaveError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     // Alle noch per Timer aufgeschobenen Speichervorgänge (Schüler, lokaler Cache, Fahrschule,
@@ -14113,6 +14117,15 @@ function App() {
     }
     function hasPendingSave(key) {
         return pendingSavesRef.current.has(key);
+    }
+    // Nach einem zurückgerollten Fehlschlag (Termin) die Anzeige wieder auf "gespeichert" stellen,
+    // sofern nichts anderes mehr wartet - sonst drehte "Speichert…" endlos (Abschluss-Audit).
+    // Der lokale Cache-Timer zählt nicht, er ist kein Cloud-Speichern.
+    function gespeichertWennNichtsOffen() {
+        for (const k of pendingSavesRef.current.keys())
+            if (k !== "cache")
+                return;
+        setSaved(true);
     }
     // Führt alle aufgeschobenen Speichervorgänge SOFORT aus (synchron angestoßen, damit auch ein
     // pagehide sie noch startet). Liefert false, wenn einer davon einen Fehler gemeldet hat.
@@ -15555,16 +15568,22 @@ function App() {
             // Nur "gespeichert" melden, wenn nicht schon die nächste Änderung wartet.
             if (!hasPendingSave("school"))
                 setSaved(true);
+            setSaveError(x => x === "__schule" ? null : x);
             return true;
         }
         catch (e) {
             if (e.isConflict) {
+                // Neu geladen = nichts mehr ungespeichert.
                 showToast(e.message);
                 fetchMySchool(uid).then(fresh => { if (fresh)
                     putSchool(fresh); }).catch(() => { });
+                if (!hasPendingSave("school"))
+                    setSaved(true);
             }
             else {
+                // Lokale Änderung ist NICHT gespeichert: Kopfzeile zeigt "Nicht gespeichert · erneut".
                 showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
+                setSaveError("__schule");
             }
             return false;
         }
@@ -15652,6 +15671,7 @@ function App() {
                 putTpl(t => t ? { ...t, updated_at: saved.updated_at } : t);
             if (!hasPendingSave("tpl"))
                 setSaved(true);
+            setSaveError(x => x === "__vorlage" ? null : x);
             return true;
         }
         catch (e) {
@@ -15660,9 +15680,12 @@ function App() {
                 const sc = schoolRef.current;
                 fetchTemplate(uid, sc && sc.name).then(fresh => { if (fresh)
                     putTpl(fresh); }).catch(() => { });
+                if (!hasPendingSave("tpl"))
+                    setSaved(true);
             }
             else {
                 showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+                setSaveError("__vorlage");
             }
             return false;
         }
@@ -15961,7 +15984,8 @@ function App() {
             try {
                 await dbUpdate(stu, dirty ? Array.from(dirty) : null);
                 setSaved(true);
-                setSaveError(null);
+                // Ein offener Fahrschul-/Vorlagen-Fehler bleibt stehen - dieser Erfolg betrifft ihn nicht.
+                setSaveError(e => (e === "__schule" || e === "__vorlage") ? e : null);
                 return true;
             }
             catch (e) {
@@ -15989,11 +16013,21 @@ function App() {
     const retrySave = useCallback(() => {
         if (!saveError)
             return;
-        const stu = (students || []).find(x => x.id === saveError);
         setSaveError(null);
+        // Fahrschule/Vorlage: den aktuellen Stand erneut einplanen (gleicher Weg wie jede Änderung).
+        if (saveError === "__schule") {
+            writeSchool(cur => cur);
+            return;
+        }
+        if (saveError === "__vorlage") {
+            if (tplRef.current)
+                writeTemplate(tplRef.current);
+            return;
+        }
+        const stu = (students || []).find(x => x.id === saveError);
         if (stu)
             scheduleSave(stu);
-    }, [saveError, students, scheduleSave]);
+    }, [saveError, students, scheduleSave, writeSchool, writeTemplate]);
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
         updateStudents(prev => {
@@ -19110,6 +19144,7 @@ function App() {
             // Fehler ist hier schon gemeldet - Aufrufer erkennen ihn am Rückgabewert null und
             // brechen ab (Formular offen lassen, kein "✓ angelegt", keine WhatsApp-Nachricht).
             showToast("Termin konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // nichts angelegt, nichts mehr offen - kein endloses "Speichert…"
             return null;
         }
         finally {
@@ -19309,6 +19344,7 @@ function App() {
             if (current)
                 setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Änderung fehlgeschlagen:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
             return false;
         }
         finally {
@@ -19335,6 +19371,7 @@ function App() {
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
         }
         finally {
             apptSchreibEnde();
@@ -28392,7 +28429,13 @@ function App() {
             if (recSession)
                 stopRecording(true); // schreibt die Strecke in den Schüler (aufgeschoben, s.u.)
             // Früher fehlgeschlagenes Speichern noch einmal versuchen (lebt sonst nur im Cache).
-            if (saveError) {
+            if (saveError === "__schule")
+                writeSchool(cur => cur);
+            else if (saveError === "__vorlage") {
+                if (tplRef.current)
+                    writeTemplate(tplRef.current);
+            }
+            else if (saveError) {
                 const stu = (studentsRef.current || []).find(x => x.id === saveError);
                 if (stu)
                     scheduleSave(stu);
