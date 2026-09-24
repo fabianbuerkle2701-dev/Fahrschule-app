@@ -31383,12 +31383,62 @@ const bfRec = {
     // themen: die für diese Fahrt vorgenommenen Übungen; zuletztStart überlebt das Beenden,
     // damit das Formular die Uhrzeit "von" noch kennt.
     themen: [], zuletztStart: 0,
+    // code: Fahrschul-Code für den localStorage-Puffer, gepuffert: Zeitpunkt des letzten Schreibens
+    code: "", gepuffert: 0,
     hoerer: [],
     melde() { this.hoerer.slice().forEach(f => { try {
         f();
     }
     catch (e) { } }); },
 };
+// Zwischenspeicher der Begleitfahrt-Strecke in localStorage (J-M2). Die Punkte lebten bisher nur
+// im Arbeitsspeicher (bfRec) und nach dem Beenden nur im Formular: App im Hintergrund beendet,
+// Seite neu geladen oder "Zurück" im Formular - und die ganze Fahrt war weg. Jetzt:
+//   während der Fahrt   {laufend:true,  start, themen, pts, at}  höchstens alle 5 s + beim Verbergen
+//   nach dem Beenden    {laufend:false, start, themen, route, at} bis gespeichert oder verworfen
+// Je Fahrschul-Code ein Schlüssel. Jeder Zugriff in try/catch - privater Modus, voller Speicher.
+function bfPufferKey(code) { return "v3_bf_puffer_" + code; }
+function bfPufferLesen(code) {
+    try {
+        const x = JSON.parse(localStorage.getItem(bfPufferKey(code)) || "null");
+        if (!x || typeof x !== "object")
+            return null;
+        if (x.route && Array.isArray(x.route.pts) && x.route.pts.length >= 2)
+            return x;
+        return Array.isArray(x.pts) && x.pts.length >= 2 ? x : null;
+    }
+    catch (e) {
+        return null;
+    }
+}
+function bfPufferSchreiben(code, x) {
+    try {
+        localStorage.setItem(bfPufferKey(code), JSON.stringify(x));
+    }
+    catch (e) { }
+}
+function bfPufferLoeschen(code) {
+    try {
+        localStorage.removeItem(bfPufferKey(code));
+    }
+    catch (e) { }
+}
+function bfRecPuffern() {
+    if (!bfRec.aktiv || !bfRec.code || bfRec.pts.length < 2)
+        return;
+    bfRec.gepuffert = Date.now();
+    // Ausgedünnt, damit ein stundenlanger Mitschnitt den Speicher nicht sprengt.
+    bfPufferSchreiben(bfRec.code, { laufend: true, start: bfRec.start, themen: bfRec.themen || [], pts: bfRecAusduennen(bfRec.pts, 3000), at: Date.now() });
+}
+// Aus einem Puffer (laufend oder fertig) die speicherbare Strecke machen.
+function bfPufferRoute(x) {
+    if (!x)
+        return null;
+    if (x.route)
+        return x.route;
+    const ende = x.at || Date.now();
+    return { pts: bfRecAusduennen(x.pts, 1500), dist: Math.round(rmapPathLen(x.pts)), dur: Math.max(0, Math.round((ende - (x.start || ende)) / 1000)), recordedAt: new Date(ende).toISOString() };
+}
 function bfRecAbonnieren(f) {
     bfRec.hoerer.push(f);
     return () => { bfRec.hoerer = bfRec.hoerer.filter(x => x !== f); };
@@ -31421,6 +31471,9 @@ async function bfRecWakeLock() {
 function bfRecOnVisible() {
     if (document.visibilityState === "visible" && bfRec.aktiv && !bfRec.wake)
         bfRecWakeLock();
+    // Beim Verbergen sofort sichern - danach kann das System die App jederzeit beenden.
+    if (document.visibilityState === "hidden")
+        bfRecPuffern();
 }
 function bfRecStart(onFehler) {
     if (bfRec.aktiv)
@@ -31436,8 +31489,11 @@ function bfRecStart(onFehler) {
     bfRec.themen = [];
     const punkt = (lat, lng) => {
         const p = [lat, lng];
-        if (bfRec.pts.length === 0 || rmapDist(bfRec.pts[bfRec.pts.length - 1], p) > 8)
+        if (bfRec.pts.length === 0 || rmapDist(bfRec.pts[bfRec.pts.length - 1], p) > 8) {
             bfRec.pts.push(p);
+            if (Date.now() - bfRec.gepuffert > 5000)
+                bfRecPuffern();
+        }
     };
     const nativeGeo = nativeBackgroundGeo();
     if (nativeGeo) {
@@ -31517,8 +31573,13 @@ function bfRecStop() {
     bfRec.start = 0;
     bfRec.themen = [];
     bfRec.melde();
-    if (pts.length < 2)
+    if (pts.length < 2) {
+        // Nichts Speicherbares - auch keinen Puffer zurücklassen, der später eine leere
+        // "nicht gespeicherte Fahrt" anbietet.
+        if (bfRec.code)
+            bfPufferLoeschen(bfRec.code);
         return null;
+    }
     const schlank = bfRecAusduennen(pts, 1500);
     return { pts: schlank, dist: Math.round(rmapPathLen(pts)), dur: Math.round(dauer), recordedAt: new Date().toISOString() };
 }
@@ -31540,6 +31601,13 @@ function BegleitFahrten({ code }) {
     catch (e) { }
     const loggedIn = !!(loginName && loginPin);
     const [fahrten, setFahrten] = React.useState(loggedIn ? undefined : []); // undefined=lädt
+    // Ladefehler bisher still als leere Liste: "Noch keine Fahrt eingetragen" und der Plan begann
+    // wieder bei der Bestandsaufnahme, obwohl längst Fahrten gespeichert waren (J-N15).
+    const [ladeFehler, setLadeFehler] = React.useState(false);
+    const [ladeVersuch, setLadeVersuch] = React.useState(0);
+    // Nicht gespeicherte Strecke aus einer früheren Sitzung (siehe bfPufferLesen). Während einer
+    // laufenden Aufzeichnung gehört der Puffer zu genau dieser Fahrt und wird nicht angeboten.
+    const [puffer, setPuffer] = React.useState(() => bfRec.aktiv ? null : bfPufferLesen(code));
     const [plan, setPlan] = React.useState({}); // uebungKey -> {stand, datum}
     // Pro Übungs-Key ein hochzählender Request-Zähler - standSetzen() nutzt ihn, um einen
     // verspätet fehlschlagenden ÄLTEREN Request nicht mehr zurückrollen zu lassen, wenn
@@ -31574,6 +31642,7 @@ function BegleitFahrten({ code }) {
         if (!loggedIn)
             return;
         let weg = false;
+        setLadeFehler(false);
         publicStudentOverview(code, loginName, loginPin)
             .then(r => {
             if (weg)
@@ -31600,10 +31669,10 @@ function BegleitFahrten({ code }) {
                 setPlan(p => ({ ...fetchedPlan, ...p }));
         })
             .catch(() => { if (!weg)
-            setFahrten([]); });
+            setLadeFehler(true); });
         return () => { weg = true; };
         /* eslint-disable-next-line */
-    }, [code, loggedIn, loginName, loginPin]);
+    }, [code, loggedIn, loginName, loginPin, ladeVersuch]);
     const liste = (fahrten || []).slice().sort((a, b) => (String(b.datum || "") + (b.start || "")).localeCompare(String(a.datum || "") + (a.start || "")));
     const summeKm = liste.reduce((s, f) => s + (Number(f.km) || 0), 0);
     const summeMin = liste.reduce((s, f) => s + (Number(f.dauer) || 0), 0);
@@ -31668,15 +31737,17 @@ function BegleitFahrten({ code }) {
             }
         }
     }
-    function neueFahrt(route, themen) {
+    // zeiten: {beginn, ende} als Date - nur bei der Wiederherstellung aus dem Puffer, sonst gilt
+    // der Start der eben beendeten Aufzeichnung und "jetzt".
+    function neueFahrt(route, themen, zeiten) {
         let vorbelegt = "";
         try {
             vorbelegt = localStorage.getItem(LS_BEGL) || "";
         }
         catch (e) { }
-        const jetzt = new Date();
+        const jetzt = (zeiten && zeiten.ende) || new Date();
         const hm = d => String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-        const beginn = route && bfRec.zuletztStart ? new Date(bfRec.zuletztStart) : null;
+        const beginn = zeiten ? (zeiten.beginn || null) : (route && bfRec.zuletztStart ? new Date(bfRec.zuletztStart) : null);
         setErr("");
         setHaken({}); // Häkchen der vorigen Fahrt gehören nicht in die neue
         setForm({ id: bfNewId(), datum: ymd(jetzt),
@@ -31685,8 +31756,9 @@ function BegleitFahrten({ code }) {
             start: beginn ? hm(beginn) : "",
             ende: route ? hm(jetzt) : "",
             dauer: route ? String(Math.round(route.dur / 60)) : "",
-            km: route ? String(Math.round(route.dist / 100) / 10) : "",
-            begleiter: vorbelegt, themen: themen || [], notiz: "", route: route || null, neu: true });
+            km: route ? String(Math.round(route.dist / 100) / 10).replace(".", ",") : "",
+            // ausPuffer: die Strecke liegt noch im localStorage-Puffer, bis gespeichert/verworfen wird
+            begleiter: vorbelegt, themen: themen || [], notiz: "", route: route || null, neu: true, ausPuffer: !!route });
         // Nach einer Aufzeichnung stimmen Datum und Werte schon - Felder zu, nur Abhaken zeigen.
         // Beim Eintragen von Hand müssen sie natürlich offen sein.
         setFormDetails(!route);
@@ -31694,12 +31766,17 @@ function BegleitFahrten({ code }) {
     function aufzeichnungStarten(themen) {
         setErr("");
         setAuswahl(null);
+        bfRec.code = code;
+        bfRec.gepuffert = 0;
         if (bfRecStart(m => setErr(m)))
             bfRec.themen = themen || [];
     }
     function aufzeichnungBeenden() {
         const themen = (bfRec.themen || []).slice();
+        const beginn = bfRec.start;
         const route = bfRecStop();
+        if (route)
+            bfPufferSchreiben(code, { laufend: false, start: beginn, themen, route, at: Date.now() });
         if (!route) {
             setErr("Es wurden zu wenige Punkte empfangen - die Strecke wurde nicht gespeichert. Du kannst die Fahrt trotzdem von Hand eintragen.");
             return;
@@ -31711,7 +31788,10 @@ function BegleitFahrten({ code }) {
             return;
         const eintrag = {
             id: form.id, datum: form.datum, start: form.start || "", ende: form.ende || "",
-            dauer: Number(form.dauer) || 0, km: Number(form.km) || 0,
+            // parseBetrag versteht "12,5" und "12.5" - das km-Feld ist ein Textfeld mit Dezimal-
+            // tastatur, damit auf dem iPhone überhaupt ein Komma eingegeben werden kann (J-N16).
+            dauer: form.dauer === "" || form.dauer == null ? 0 : parseBetrag(form.dauer),
+            km: form.km === "" || form.km == null ? 0 : parseBetrag(form.km),
             begleiter: (form.begleiter || "").trim(), themen: form.themen || [], notiz: (form.notiz || "").trim(),
             route: form.route || null,
         };
@@ -31731,6 +31811,20 @@ function BegleitFahrten({ code }) {
             setErr("Bitte ein Datum angeben.");
             return;
         }
+        // Negative oder unlesbare Werte und Fahrten in der Zukunft wurden bisher einfach
+        // gespeichert und verfälschten Kilometerstand und Fortschritt (J-N17).
+        if (!isFinite(eintrag.dauer) || !isFinite(eintrag.km) || eintrag.dauer < 0 || eintrag.km < 0) {
+            setErr("Dauer und Kilometer müssen gültige, positive Zahlen sein.");
+            return;
+        }
+        if (eintrag.dauer > 24 * 60 || eintrag.km > 2000) {
+            setErr("Das sind mehr als 24 Stunden oder 2.000 km - bitte die Werte prüfen.");
+            return;
+        }
+        if (eintrag.datum > ymd(new Date())) {
+            setErr("Das Datum liegt in der Zukunft.");
+            return;
+        }
         if (eintrag.dauer <= 0 && eintrag.km <= 0) {
             setErr("Bitte Dauer oder Kilometer eintragen.");
             return;
@@ -31747,6 +31841,9 @@ function BegleitFahrten({ code }) {
             localStorage.setItem(LS_BEGL, eintrag.begleiter);
         }
         catch (e) { }
+        // Jetzt ist die Strecke sicher auf dem Server - der Puffer hat ausgedient.
+        if (form.ausPuffer)
+            bfPufferLoeschen(code);
         // Ab hier hat diese Komponente selbst den aktuellen Stand - der noch laufende initiale
         // GET darf ihn nicht mehr überschreiben, egal wann er noch eintrifft.
         fahrtenLokalRef.current = true;
@@ -31769,6 +31866,35 @@ function BegleitFahrten({ code }) {
         fahrtenLokalRef.current = true;
         setFahrten(prev => (prev || []).filter(f => f.id !== form.id));
         setForm(null);
+    }
+    // "Zurück" aus einer neuen, aufgezeichneten Fahrt verwarf bisher kommentarlos die Strecke.
+    async function formZurueck() {
+        if (form && form.neu && form.ausPuffer) {
+            const ok = await askConfirm({ message: "Die aufgezeichnete Strecke ist noch nicht gespeichert. Wirklich verwerfen?", confirmLabel: "Verwerfen", cancelLabel: "Weiter bearbeiten", danger: true });
+            if (!ok)
+                return;
+            bfPufferLoeschen(code);
+        }
+        setForm(null);
+    }
+    function pufferWiederherstellen() {
+        const x = puffer;
+        const route = bfPufferRoute(x);
+        setPuffer(null);
+        if (!route)
+            return;
+        // Aus einem abgebrochenen Mitschnitt die fertige Form machen - bis zum Speichern bleibt
+        // sie so im Puffer, auch wenn die App noch einmal beendet wird.
+        if (x.laufend)
+            bfPufferSchreiben(code, { laufend: false, start: x.start, themen: x.themen || [], route, at: x.at });
+        neueFahrt(route, x.themen || [], { beginn: x.start ? new Date(x.start) : null, ende: new Date(x.at || Date.now()) });
+    }
+    async function pufferVerwerfen() {
+        const ok = await askConfirm({ message: "Die nicht gespeicherte Strecke endgültig verwerfen?", confirmLabel: "Verwerfen", cancelLabel: "Behalten", danger: true });
+        if (!ok)
+            return;
+        bfPufferLoeschen(code);
+        setPuffer(null);
     }
     // Aufklappbare Karte - hält den Bildschirm kurz, ohne Inhalte zu verstecken
     function klappe(key, titel, unter, tone, symbol, inhalt) {
@@ -31844,11 +31970,11 @@ function BegleitFahrten({ code }) {
     if (form) {
         const feld = (label, kind) => React.createElement("div", { className: "field", style: { marginBottom: 10 } },
             React.createElement("label", null, label,
-            React.createElement("input", { type: kind.type, inputMode: kind.inputMode, value: form[kind.key] || "", placeholder: kind.placeholder,
+            React.createElement("input", { type: kind.type, inputMode: kind.inputMode, max: kind.max, value: form[kind.key] || "", placeholder: kind.placeholder,
                 onChange: e => setForm(f => ({ ...f, [kind.key]: e.target.value })) })));
         return React.createElement("div", null,
             React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
-                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: () => setForm(null) }, "‹ Zurück"),
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 13 }, onClick: formZurueck }, "‹ Zurück"),
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, form.neu ? "Neue Fahrt" : "Fahrt bearbeiten")),
             React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
                 // Nach einer Aufzeichnung stimmen die Werte bereits - eine Zeile zeigt sie an,
@@ -31862,15 +31988,15 @@ function BegleitFahrten({ code }) {
                              form.km ? (String(form.km).replace(".", ",") + " km") : ""].filter(Boolean).join(" · ")),
                         React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", flexShrink: 0 } }, "Anpassen"))
                     : React.createElement(React.Fragment, null,
-                        feld("Datum", { key: "datum", type: "date" }),
+                        feld("Datum", { key: "datum", type: "date", max: ymd(new Date()) }),
                         // Uhrzeit von-bis wie im Fahrtenbuch des Fahrlehrers: eine Übungsfahrt ist eine
                         // Fahrstunde und wird auch zeitlich festgehalten, nicht nur als Dauer.
                         React.createElement("div", { style: { display: "flex", gap: 10 } },
                             React.createElement("div", { style: { flex: 1 } }, feld("Von", { key: "start", type: "time" })),
                             React.createElement("div", { style: { flex: 1 } }, feld("Bis", { key: "ende", type: "time" }))),
                         React.createElement("div", { style: { display: "flex", gap: 10 } },
-                            React.createElement("div", { style: { flex: 1 } }, feld("Dauer (Minuten)", { key: "dauer", type: "number", inputMode: "numeric", placeholder: "z.B. 45" })),
-                            React.createElement("div", { style: { flex: 1 } }, feld("Kilometer", { key: "km", type: "number", inputMode: "numeric", placeholder: "z.B. 28" })))),
+                            React.createElement("div", { style: { flex: 1 } }, feld("Dauer (Minuten)", { key: "dauer", type: "text", inputMode: "numeric", placeholder: "z.B. 45" })),
+                            React.createElement("div", { style: { flex: 1 } }, feld("Kilometer", { key: "km", type: "text", inputMode: "decimal", placeholder: "z.B. 28,5" })))),
                 feld("Begleitperson", { key: "begleiter", type: "text", placeholder: "z.B. Mama" }),
                 // Aufgezeichnete Strecke: Karte plus die gemessenen Werte, damit man sieht,
                 // woher Dauer und Kilometer kommen.
@@ -32101,7 +32227,7 @@ function BegleitFahrten({ code }) {
                                 Object.keys(f.erfolgBew || {}).forEach(hk => (f.erfolgBew[hk] || []).forEach((b, i) => { if (b)
                                     h[hk + "|" + i] = b; }));
                                 setHaken(h);
-                                setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || ""), themen: f.themen || [], neu: false }); },
+                                setForm({ ...f, dauer: String(f.dauer || ""), km: String(f.km || "").replace(".", ","), themen: f.themen || [], neu: false }); },
                                 className: "home-v2-weekrow" },
                                 React.createElement("span", { className: "home-iconchip", style: { background: "var(--sage-bg)", color: "var(--sage-deep)", width: 32, height: 32, flexShrink: 0 } }, bfIcon(["M5 17h14M6 17V9l2-4h8l2 4v8", "M7 21v-2M17 21v-2"], 16)),
                                 React.createElement("span", { style: { flex: 1, minWidth: 0 } },
@@ -32177,6 +32303,18 @@ function BegleitFahrten({ code }) {
                     width: ((BEGLEIT_KM_BEOBACHTUNG_BIS - BEGLEIT_KM_BEOBACHTUNG_VON) / BEGLEIT_KM_ZIEL * 100) + "%", background: "rgba(0,0,0,.28)" } }))),
         !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.5 } }, "Melde dich unter „Fortschritt“ mit deinem PIN an, dann führt euch die App durch die Ausbildung und speichert eure Fahrten. Lesen könnt ihr alles auch so."),
         err && React.createElement("div", { style: { fontSize: 13, color: "var(--red)", marginBottom: 12 } }, err),
+        ladeFehler && React.createElement("div", { role: "alert", className: "card", style: { padding: "14px 15px", marginBottom: 12, borderLeft: "4px solid var(--red)" } },
+            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 4 } }, "Eure Fahrten konnten nicht geladen werden."),
+            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 } }, "Bitte Internetverbindung prüfen. Bereits gespeicherte Fahrten gehen dabei nicht verloren."),
+            React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 44 }, onClick: () => setLadeVersuch(v => v + 1) }, "Erneut versuchen")),
+        puffer && React.createElement("div", { role: "status", className: "card", style: { padding: "14px 15px", marginBottom: 12, borderLeft: "4px solid var(--orange)" } },
+            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 4 } }, "Nicht gespeicherte Übungsfahrt"),
+            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 } },
+                (() => { const r = bfPufferRoute(puffer); const d = new Date(puffer.start || puffer.at || Date.now());
+                    return d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }) + " · " + rmapFmtDist((r && r.dist) || 0) + " - die Strecke wurde aufgezeichnet, aber noch nicht gespeichert."; })()),
+            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: !loggedIn, onClick: pufferWiederherstellen }, "Wiederherstellen"),
+                React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: pufferVerwerfen }, "Verwerfen"))),
         // Die nächste Stunde: Titel, ein Satz, ein Knopf. Alles Weitere zeigt das Anlegen.
         naechste
             ? (function () {
