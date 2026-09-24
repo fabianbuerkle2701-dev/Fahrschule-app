@@ -6540,9 +6540,12 @@ async function fetchAppSettings() {
     return data;
 }
 async function saveAppSettings(patch) {
-    const { error } = await sb.from("app_settings").update(patch).eq("id", 1);
+    // .select("id") + pruefeTreffer: ohne Schreibrecht meldet die Datenbank keinen Fehler, sondern
+    // ändert still 0 Zeilen - die Oberfläche zeigte dann trotzdem "Gespeichert".
+    const { data, error } = await sb.from("app_settings").update(patch).eq("id", 1).select("id");
     if (error)
         throw new Error(error.message || "Speichern fehlgeschlagen");
+    pruefeTreffer(data, "Einstellung nicht gespeichert");
 }
 // Persönliche Profildaten laden (Name, Adresse, Telefon, Geburtsdatum). Gibt null bei Fehler zurück.
 async function fetchProfileData(uid) {
@@ -6691,6 +6694,10 @@ function isAdmin(session) {
 // SECURITY-DEFINER-RPC, die selbst prüft, dass nur der zentrale App-Admin sie aufrufen darf -
 // vorher stützte sich das auf einen offenen profiles-Lesezugriff, der auch für alle anderen
 // Nutzer offenstand (siehe my_school_id()-Rechte-Einschränkung).
+// Konten, deren Abo-/Theorie-Schalter gerade gespeichert wird (Doppeltipp-Schutz, Audit H-N10).
+// Modulweit statt als Hook: es gibt nur eine App-Instanz, und ein neuer Hook in App() wäre
+// für einen reinen Sperrmerker zu viel.
+const aboSchalterLaeuft = new Set();
 async function adminFetchSchools() {
     const { data: schools, error } = await sb.from("schools").select("*").order("created_at", { ascending: true });
     if (error) {
@@ -6702,7 +6709,9 @@ async function adminFetchSchools() {
         console.error(statsError);
     const teacherCount = {}, studentCount = {};
     (stats || []).forEach(row => { teacherCount[row.school_id] = row.teachers; studentCount[row.school_id] = row.students; });
-    return (schools || []).map(sc => ({ ...sc, teachers: teacherCount[sc.id] || 0, students: studentCount[sc.id] || 0 }));
+    // Ohne Statistik null statt 0 (Audit H-M9): "0 Fahrlehrer · 0 Schüler" sah aus wie eine leere
+    // Fahrschule, obwohl die Zahlen nur nicht geladen werden konnten. Die Oberfläche zeigt dann "–".
+    return (schools || []).map(sc => ({ ...sc, teachers: statsError ? null : (teacherCount[sc.id] || 0), students: statsError ? null : (studentCount[sc.id] || 0) }));
 }
 async function adminSaveSchool(sc) {
     const { data, error } = await sb.from("schools")
@@ -24798,14 +24807,27 @@ function App() {
             setAdminAccounts(prev => prev ? { ...prev, busy: false, error: "Löschen fehlgeschlagen: " + e.message } : prev);
         }
     }
-    // Abo an/aus umschalten
+    // Abo an/aus umschalten. Mit Rückfrage und festem Zielwert (Audit H-N10): vorher schaltete
+    // ein Tipp ohne Nachfrage, und beim Doppeltipp sendeten beide Aufrufe denselben Wert zum
+    // Server, lokal wurde aber zweimal umgedreht - die Anzeige stand danach falsch herum.
     async function toggleSubscription(acc) {
+        const an = !acc.subscription_active;
+        if (aboSchalterLaeuft.has(acc.id))
+            return;
+        if (!await askConfirm({ title: an ? "Abo aktivieren?" : "Abo deaktivieren?",
+                message: an ? acc.email + " wird als zahlendes Abo geführt." : acc.email + " verliert den Abo-Status. Danach gelten Probezeit und Zahlungsfrist.",
+                confirmLabel: an ? "Aktivieren" : "Deaktivieren" }))
+            return;
+        aboSchalterLaeuft.add(acc.id);
         try {
-            await adminSetSubscription(acc.id, { subscription_active: !acc.subscription_active });
-            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_active: !a.subscription_active } : a) } : prev);
+            await adminSetSubscription(acc.id, { subscription_active: an });
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, subscription_active: an } : a) } : prev);
         }
         catch (e) {
             showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            aboSchalterLaeuft.delete(acc.id);
         }
     }
     // Lifetime-Zugang an/aus. Ein Lifetime-Konto ist dauerhaft freigeschaltet: kein
@@ -24831,13 +24853,25 @@ function App() {
         }
     }
     // Theorie-üben-Zusatzpaket an/aus umschalten (separat vom Basis-Abo, siehe THEORY_UEBEN_RELEASED)
+    // Wie toggleSubscription: Rückfrage, fester Zielwert, kein zweiter Aufruf während einer läuft
     async function toggleTheoryAddon(acc) {
+        const an = !acc.theory_addon_active;
+        if (aboSchalterLaeuft.has(acc.id))
+            return;
+        if (!await askConfirm({ title: an ? "Theorie-Paket freischalten?" : "Theorie-Paket abschalten?",
+                message: an ? acc.email + " bekommt das Zusatzpaket Theorie üben." : acc.email + " verliert das Zusatzpaket Theorie üben.",
+                confirmLabel: an ? "Freischalten" : "Abschalten" }))
+            return;
+        aboSchalterLaeuft.add(acc.id);
         try {
-            await adminSetSubscription(acc.id, { theory_addon_active: !acc.theory_addon_active });
-            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, theory_addon_active: !a.theory_addon_active } : a) } : prev);
+            await adminSetSubscription(acc.id, { theory_addon_active: an });
+            setAdminAccounts(prev => prev ? { ...prev, list: prev.list.map(a => a.id === acc.id ? { ...a, theory_addon_active: an } : a) } : prev);
         }
         catch (e) {
             showToast("Konnte nicht geändert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            aboSchalterLaeuft.delete(acc.id);
         }
     }
     // Monatsbeitrag eines Fahrlehrers ändern
@@ -24845,7 +24879,8 @@ function App() {
         const input = await askPrompt({ message: 'Monatsbeitrag für ' + acc.email + ' in Euro (leer lassen = kein fester Betrag):', defaultValue: acc.subscription_amount != null ? String(acc.subscription_amount) : "" });
         if (input === null)
             return;
-        const val = input.trim() === "" ? null : Number(input.replace(",", "."));
+        // parseBetrag statt Number(replace(",", ".")): "1.000" war sonst 1 € (Welle-A-Helfer)
+        const val = input.trim() === "" ? null : parseBetrag(input);
         if (val !== null && (isNaN(val) || val < 0)) {
             showToast("Bitte eine gültige Zahl eingeben.");
             return;
@@ -25197,7 +25232,7 @@ function App() {
             await adminDetachTeacher(uid);
             setAdminTeachers(prev => prev ? { ...prev, list: (prev.list || []).filter(t => t.id !== uid) } : prev);
             // Zähler in der Fahrschulliste anpassen
-            setAdminSchools(prev => (prev || []).map(s => s.id === (adminTeachers && adminTeachers.school.id) ? { ...s, teachers: Math.max(0, s.teachers - 1) } : s));
+            setAdminSchools(prev => (prev || []).map(s => s.id === (adminTeachers && adminTeachers.school.id) && s.teachers != null ? { ...s, teachers: Math.max(0, s.teachers - 1) } : s));
         }
         catch (e) {
             showToast("Stilllegen fehlgeschlagen:\n" + fehlerText(e), "error");
@@ -25337,7 +25372,18 @@ function App() {
                                 x.fristen.length > 1 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
                                     x.fristen.map(f => f.label + " (" + f.rechtsgrundlage + "): bis " + f.faellig.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })).join(" · "))),
                             React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => exportStudentData(x.s) }, "Export"),
-                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: () => removeStudent(x.s) }, "Löschen"));
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => {
+                                    // Vor Ablauf der Frist erst deutlich warnen (Audit H-N16) - der Knopf sah
+                                    // für löschreife und noch aufzubewahrende Schüler gleich aus.
+                                    if (!reif && !await askConfirm({ title: "Aufbewahrungsfrist läuft noch",
+                                            message: (x.faellig
+                                                ? dispName(x.s) + " ist noch bis " + x.faellig.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) + " aufzubewahren"
+                                                : "Für " + dispName(x.s) + " ist kein Archivdatum hinterlegt, die Frist lässt sich nicht berechnen")
+                                                + " (§ 31 Fahrlehrergesetz, bei Rechnungen § 147 AO). Wer vorher löscht, kann die Ausbildung bei einer Prüfung nicht mehr nachweisen.\n\nTrotzdem löschen?",
+                                            confirmLabel: "Trotzdem löschen" }))
+                                        return;
+                                    removeStudent(x.s);
+                                } }, "Löschen"));
                     })),
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 14 } },
                 "Gelöscht wird nur auf deine Bestätigung – die App löscht nichts von selbst. Schüler mit Rechnungen sind aus Revisionsgründen serverseitig vor dem Löschen geschützt."));
@@ -25382,7 +25428,7 @@ function App() {
         return React.createElement("div", { className: "pad readable-shell" },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, margin: "2px 2px 14px" } },
                 React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 12px" }, onClick: () => setView("einstellungen") }, "\u2039 Zur\u00FCck"),
-                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, "Admin \u00B7 Fahrschulen")),
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 21 } }, isAdmin(session) ? "Admin \u00B7 Fahrschulen" : "Moderation")),
             canModerateApp && React.createElement(React.Fragment, null,
                 React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Streckenvorlagen pr\u00FCfen"),
                 React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } }, routeQueue === null
@@ -25431,8 +25477,12 @@ function App() {
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
                     "Die Verwaltung aller Konten steht jetzt unter Einstellungen \u2192 Abonnement. Diese Seite hier bleibt f\u00FCr die Fahrschulen selbst."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => { setView("einstellungen"); setSettingsScreen("abo"); } }, "Zur Abo-Verwaltung")),
-            React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
-            adminSchools === null
+            // Fahrschulen verwalten nur für den zentralen App-Admin (Audit H-M9). Ein Moderator darf
+            // laut Datenbank weder fremde Fahrschulen lesen noch ändern noch die Zahlen abrufen:
+            // er sah nur die eigene Schule mit "0 Fahrlehrer · 0 Schüler", und "Bearbeiten"/"Logo"
+            // liefen ins Leere. Seine Aufgabe hier ist das Freigeben oben.
+            isAdmin(session) && React.createElement("div", { className: "eyebrow" }, "Fahrschulen"),
+            !isAdmin(session) ? null : adminSchools === null
                 ? React.createElement("div", { className: "card", style: { padding: "22px 16px", textAlign: "center" } },
                     React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", marginBottom: 14 } }, "Lade alle Fahrschulen, um sie zu verwalten."),
                     React.createElement("button", { className: "btn btn-primary", disabled: adminBusy, onClick: loadAdmin }, adminBusy ? "Lädt…" : "Fahrschulen laden"))
@@ -25452,10 +25502,10 @@ function App() {
                                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, sc.subtitle || "—"))),
                         React.createElement("div", { style: { display: "flex", gap: 14, margin: "10px 0", fontSize: 12.5, color: "var(--ink-2)" } },
                             React.createElement("span", null,
-                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.teachers),
+                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.teachers == null ? "\u2013" : sc.teachers),
                                 " Fahrlehrer"),
                             React.createElement("span", null,
-                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.students),
+                                React.createElement("b", { style: { fontFamily: "var(--font-d)" } }, sc.students == null ? "\u2013" : sc.students),
                                 " Sch\u00FCler"),
                             React.createElement("span", null, sc.logo ? "eigenes Logo" : "Standard-Logo")),
                         React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
@@ -25472,10 +25522,40 @@ function App() {
             React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 18 } },
                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "PayPal.Me-Link oder PayPal-E-Mail-Adresse, zu der der Bezahlen-Knopf der Fahrlehrer f\u00FChrt."),
                 paypalLinkEdit === null
-                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => setPaypalLinkEdit((s && s.paypal_link) || "")) }, "Laden")
+                    // fetchAppSettings() liefert bei einem Fehler null. Dann NICHT mit leerem Feld
+                    // öffnen (Audit H-N11): ein Tipp auf "Speichern" hätte den echten Link gelöscht.
+                    ? React.createElement("button", { className: "btn btn-ghost", onClick: () => fetchAppSettings().then(s => {
+                            if (!s) {
+                                showToast("Der PayPal-Link konnte nicht geladen werden. Bitte erneut versuchen.", "error");
+                                return;
+                            }
+                            setPaypalLinkEdit(s.paypal_link || "");
+                        }) }, "Laden")
                     : React.createElement("div", { style: { display: "flex", gap: 8 } },
                         React.createElement("input", { type: "text", value: paypalLinkEdit, onChange: e => setPaypalLinkEdit(e.target.value), placeholder: "z.B. paypal.me/deinname oder name@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", fontSize: 16 } }),
-                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: () => saveAppSettings({ paypal_link: paypalLinkEdit }).then(() => showFlash("✓ Gespeichert")).catch(e => showToast("Fehler:\n" + fehlerText(e), "error")) }, "Speichern"))),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 14px", fontSize: 13 }, onClick: async () => {
+                                // Vor dem Speichern mit derselben paypalZiel()-Regel prüfen, nach der der
+                                // Bezahlen-Knopf den Link baut (Audit B-M10) - sonst fiel ein Tippfehler erst
+                                // auf, wenn ein Fahrlehrer zahlen wollte.
+                                const wert = (paypalLinkEdit || "").trim();
+                                if (wert && !paypalZiel(wert)) {
+                                    showToast("Das ist weder ein PayPal.Me-Link noch eine E-Mail-Adresse.\n\nBeispiele: paypal.me/deinname oder name@email.de", "error");
+                                    return;
+                                }
+                                if (!wert && !await askConfirm({ title: "PayPal-Link leeren?", message: "Die Fahrlehrer haben dann keinen Bezahlen-Knopf mehr.", confirmLabel: "Leeren" }))
+                                    return;
+                                try {
+                                    await saveAppSettings({ paypal_link: wert });
+                                    setPaypalLinkEdit(wert);
+                                    showFlash("✓ Gespeichert");
+                                }
+                                catch (e) {
+                                    showToast("Fehler:\n" + fehlerText(e), "error");
+                                }
+                            } }, "Speichern")),
+                // Vorschau, wohin der Bezahlen-Knopf mit diesem Eintrag führt
+                paypalLinkEdit && paypalZiel(paypalLinkEdit) && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8, wordBreak: "break-all" } },
+                    paypalZiel(paypalLinkEdit).email ? "Bezahlen an PayPal-Konto " + paypalZiel(paypalLinkEdit).email : "Bezahlen-Knopf öffnet " + paypalZiel(paypalLinkEdit).href)),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
             adminAccounts === null
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
@@ -25681,7 +25761,8 @@ function App() {
             isSchoolAdmin && { id: "schulboard", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Fahrschul-Dashboard",
                 icon: IC.admin, keywords: "dashboard auswertung fahrlehrer team zuteilen zuordnung schueler umhaengen statistik grafik auslastung umsatz pruefungsquote offene posten",
                 status: "Alle Fahrlehrer · Schüler zuteilen", direct: () => setView("schulboard") },
-            canModerateApp && { id: "admin", section: "konto", tone: "sky", label: "Fahrschulen verwalten", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator", status: "Alle Fahrschulen", direct: () => setView("admin") },
+            // Moderatoren sehen dort nur die Freigaben (Audit H-M9) - Beschriftung entsprechend
+            canModerateApp && { id: "admin", section: "konto", tone: "sky", label: isAdmin(session) ? "Fahrschulen verwalten" : "Beiträge freigeben", icon: IC.admin, keywords: "admin fahrschulen verwalten moderator freigeben", status: isAdmin(session) ? "Alle Fahrschulen" : "Moderation", direct: () => setView("admin") },
             { id: "hilfe", section: "konto", tone: "sky", label: "Hilfe & FAQ", icon: IC.hilfe, keywords: "faq hilfe frage", status: FAQ_ITEMS.length + " Fragen" },
             { id: "info", section: "konto", tone: "sky", label: "Info", icon: IC.info, keywords: "version changelog info app", status: "Version " + APP_VERSION },
             { id: "datenschutz", section: "konto", tone: "sky", label: "Datenschutzerklärung", icon: IC.datenschutz, keywords: "datenschutz privacy", status: "", direct: () => setView("datenschutz") },
