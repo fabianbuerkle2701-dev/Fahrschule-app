@@ -6270,6 +6270,16 @@ async function fetchMySchool(uid) {
     // ohnehin schon zugeordneten, gesunden Konto darf ebenfalls nicht sofort als "keine Fahrschule"
     // gewertet werden - sonst zeigt App() ihren Wiederherstellungs-Screen fälschlich für ein völlig
     // intaktes Konto. Beide Fehlerfälle bekommen deshalb dieselben Retries wie das reine Timing-Problem.
+    // Bleibt der Lesefehler nach allen Versuchen bestehen, WIRFT die Funktion: null heißt nur noch
+    // "Profil hat nachweislich keine school_id". Vorher kam bei Funkloch/Supabase-Ausfall ebenfalls
+    // null zurück - App() hat daraus eine Fahrschule ohne id gemacht, den guten Schul-Cache damit
+    // überschrieben und die Maske "Keine Fahrschule zugeordnet" gezeigt; "Fahrschule anlegen"
+    // hätte das Profil dann an eine neue, leere Fahrschule umgehängt (Abschluss-Audit).
+    const ladeFehler = (e) => {
+        const err = new Error("Fahrschule konnte nicht geladen werden: " + ((e && e.message) || "Verbindung?"));
+        err.cause = e;
+        return err;
+    };
     for (let attempt = 0; attempt < 5; attempt++) {
         const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
         if (pe) {
@@ -6278,7 +6288,7 @@ async function fetchMySchool(uid) {
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
-            return null;
+            throw ladeFehler(pe);
         }
         const sid = prof && prof.school_id;
         if (sid) {
@@ -6289,7 +6299,7 @@ async function fetchMySchool(uid) {
                     await new Promise(r => setTimeout(r, 500));
                     continue;
                 }
-                return null;
+                throw ladeFehler(error);
             }
             return data;
         }
@@ -6690,9 +6700,9 @@ async function saveSchool(school) {
         console.warn("saveSchool: fehlende school.id, Speichern übersprungen");
         return;
     }
-    const numOrNull = v => (v === "" || v == null) ? null : Number(v);
+    const numOrNull = betragAusEingabe;
     const payload = { name: school.name, subtitle: school.subtitle, color: school.color, logo: school.logo || "",
-        price_hour: (school.price_hour === "" || school.price_hour == null) ? null : Number(school.price_hour),
+        price_hour: betragAusEingabe(school.price_hour),
         packages: school.packages || [], vehicles: school.vehicles || [], klassen: school.klassen || [], arten: school.arten || [],
         locations: school.locations || [], invoice_settings: school.invoice_settings || {},
         sonderfahrten_soll: school.sonderfahrten_soll || {},
@@ -6710,6 +6720,12 @@ async function saveSchool(school) {
         datev_settings: school.datev_settings || {},
         zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen),
         bundesland: school.bundesland || null };
+    // Unlesbare Zahl (NaN) nicht mitschicken: JSON machte daraus null und löschte den gespeicherten
+    // Wert, während die Anzeige "Gespeichert" meldete. Ohne das Feld bleibt der Serverstand stehen.
+    Object.keys(payload).forEach(k => {
+        if (typeof payload[k] === "number" && Number.isNaN(payload[k]))
+            delete payload[k];
+    });
     // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
     // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
     // Sitzungen sich sonst stillschweigend gegenseitig überschreiben. Kennt der Client noch kein
@@ -6966,7 +6982,11 @@ async function fetchVerguetungen(schoolId) {
     return data || [];
 }
 async function saveVerguetung(teacherId, modell, satz) {
-    const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz: satz == null || satz === "" ? null : Number(satz) });
+    // parseBetrag-Regeln wie bei allen Beträgen; NaN ginge per JSON als null raus und löschte den Satz.
+    const p_satz = betragAusEingabe(satz);
+    if (Number.isNaN(p_satz))
+        throw new Error("Bitte einen gültigen Wert eingeben (nur Zahl, z.B. 25 oder 12,5).");
+    const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz });
     if (error) { console.error(error); throw new Error(error.message || "Konnte nicht gespeichert werden"); }
 }
 /* ── Fahrschul-Dashboard: Schueler-Zuteilung und Akteneinsicht ──────────────────────────────
@@ -7045,6 +7065,10 @@ function buildXRechnung(o) {
   if (!seller.tel) throw new Error("Telefonnummer der Fahrschule fehlt (Standorte).");
   if (!seller.email) throw new Error("E-Mail-Adresse der Fahrschule fehlt.");
   if (!buyer.email) throw new Error("E-Mail-Adresse des Firmenkunden fehlt (Schülerdaten › Firmenkunde).");
+  // BR-DE-3/-4 (Verkäufer) und BR-DE-8/-9 (Käufer): Ort und PLZ sind Pflicht - leere Felder
+  // ergaben sonst eine Datei, die jeder Validator ablehnt.
+  if (!seller.plz || !seller.ort) throw new Error("PLZ und Ort der Fahrschule fehlen (Rechnungsdaten).");
+  if (!buyer.plz || !buyer.ort) throw new Error("PLZ und Ort des Firmenkunden fehlen (Schülerdaten › Firmenkunde).");
   const satz = kUnt ? 0 : 19;
   const brutto = xrR2(inv.total);
   // Netto aus der Bruttosumme ableiten, damit es exakt zur gedruckten Rechnung passt
@@ -8601,6 +8625,15 @@ function parseBetrag(v) {
     if (!/^-?(\d+\.?\d*|\.\d+)$/.test(t))
         return NaN;
     return Number(t);
+}
+// Betrag aus Formular-/Fahrschul-Zustand: leer -> null, schon eine Zahl -> unverändert (eine
+// gespeicherte Zahl wie 1.125 darf nicht als "1.125" = 1125 gelesen werden), Text -> parseBetrag.
+// Ersetzt Number()/parseFloat() an den übrigen Betragsfeldern: "1.200" wurde dort zu 1,20 €
+// und ein Tippfehler wie "55.5," zu NaN, das per JSON als null den Preis löschte (Abschluss-Audit).
+function betragAusEingabe(v) {
+    if (v === "" || v == null)
+        return null;
+    return typeof v === "number" ? v : parseBetrag(v);
 }
 // UE-Logik: 1 UE = 45 Minuten. Gefahrene Fahrstunden mit Dauer ergeben die UE.
 function lessonMinutes(s) {
@@ -13085,6 +13118,11 @@ function App() {
     // hängen (school ohne id, siehe DEFAULT_SCHOOL-Fallback unten), nichts ließ sich speichern und
     // es gab nirgends im Loggedin-Bereich eine Möglichkeit, einen Code erneut einzugeben.
     const [schoolRecovery, setSchoolRecovery] = useState({ code: "", newName: "", busy: false, err: "" });
+    // true nur, wenn fetchMySchool in DIESER Sitzung nachweislich "keine school_id" geliefert hat.
+    // Die Wiederherstellungs-Maske hängt daran statt allein an "school ohne id": eine id-lose
+    // Fahrschule kann auch aus einem alten Cache stammen, und bei einem bloßen Ladefehler darf die
+    // Maske ("Fahrschule anlegen" hängt das Profil um) nie erscheinen (Abschluss-Audit).
+    const [schoolFehlt, setSchoolFehlt] = useState(false);
     const [isSchoolAdmin, setIsSchoolAdmin] = useState(false); // darf Fahrschul-Einstellungen ändern
     const [isModerator, setIsModerator] = useState(false); // App-Moderator: darf Beiträge freigeben, alle Fahrschulen einsehen/bearbeiten
     const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
@@ -13099,6 +13137,11 @@ function App() {
     // bis die Datenbank sie wirklich los ist.
     // apptSavingRef verhindert, dass ein zweiter Tap auf "Termin anlegen" denselben Termin nochmal speichert.
     const apptWritesRef = useRef(0);
+    // Generation der Termin-Schreibvorgänge: steigt bei Beginn UND Ende jedes Schreibens. Ein Abruf
+    // merkt sie sich beim Start - hat sie sich bis zur Antwort geändert, ist die Antwort älter als
+    // der lokale Stand und darf die Liste nicht ersetzen (sonst verschwand ein währenddessen
+    // angelegter Termin bis zum nächsten Neuladen oder sprang auf die alte Zeit zurück).
+    const apptGenRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
     // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
@@ -13156,7 +13199,14 @@ function App() {
         const patched = fn(cur);
         if (!patched)
             return null;
+        // Geänderte Felder merken und den lokalen Cache nachziehen wie in writeStudent: ohne die
+        // Dirty-Keys schrieb scheduleSave bei geteilten Schülern entweder den kompletten, veralteten
+        // Datensatz über Kollegen-Änderungen oder - wenn schon andere Felder markiert waren - nur
+        // diese, und costItems/payments/contracts/packages aus diesem Patch kamen nie an (Abschluss-Audit).
+        markDirtyKeys(sid, cur, patched);
         updateStudents(prev => (prev || []).map(s => s.id === sid ? patched : s));
+        if (uid)
+            planSave("cache", () => { saveCache(uid, studentsRef.current || []); }, 500);
         return patched;
     }
     function putSchool(fnOrValue) {
@@ -13235,11 +13285,24 @@ function App() {
                 // gab keinen Weg, eine neue Einordnung anzufordern außer die Seite neu zu laden.
                 React.createElement("button", { className: "btn btn-ghost", style: { fontSize: 12, padding: "6px 10px" }, onClick: () => ladeBriefing(setter, facts, kind) }, "↻ Neu erstellen")));
     }
-    // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden
-    function applyFetchedAppts(list) {
+    function apptSchreibStart() {
+        apptWritesRef.current++;
+        apptGenRef.current++;
+    }
+    function apptSchreibEnde() {
+        apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+        apptGenRef.current++;
+    }
+    // Termine aus der Datenbank übernehmen, aber gerade gelöschte nie wieder einblenden.
+    // startGen (apptGenRef beim Start des Abrufs): läuft gerade ein Schreibvorgang oder lief seitdem
+    // einer, wird die Antwort verworfen (false) - sie kennt die eigene Änderung noch nicht.
+    function applyFetchedAppts(list, startGen) {
+        if (startGen !== undefined && (apptWritesRef.current > 0 || apptGenRef.current !== startGen))
+            return false;
         const gone = apptDeletedRef.current;
         const src = reanchorDemoAppts(list || []);
         setAppts(src.filter(a => !gone.has(a.id)));
+        return true;
     }
     // App-weite Streckenaufzeichnung (Hooks hier oben, damit vor den frühen returns)
     const recWatchRef = useRef(null);
@@ -13614,7 +13677,7 @@ function App() {
         writeSchool(s => s && ({ ...s, reform_stichtag: v || null })); }
     // Standardisierte Preismeldung - siehe preismeldungSheet().
     function savePreismeldungPreis(field, v) { if (school)
-        writeSchool(s => s && ({ ...s, [field]: (v === "" ? null : v) })); }
+        writeSchool(s => s && ({ ...s, [field]: (v === "" || v == null ? null : v) })); }
     async function openPreismeldung() {
         if (!school)
             return;
@@ -14015,6 +14078,10 @@ function App() {
     const [saved, setSaved] = useState(true);
     // null = alles geschrieben. Sonst der Schüler, dessen letzter Schreibversuch fehlschlug -
     // die Speicheranzeige wird damit gleichzeitig zum Wiederholen-Knopf (Designprüfung 2026-09-14).
+    // null | Schüler-ID | "__schule" | "__vorlage" - wessen Speichern zuletzt gescheitert ist.
+    // Fahrschule/Vorlage bekamen früher keinen Fehlerstatus: die Kopfzeile drehte "Speichert…"
+    // endlos oder zeigte nach dem nächsten Schüler-Save "✓ Gespeichert", obwohl die Einstellung
+    // nie ankam (Abschluss-Audit).
     const [saveError, setSaveError] = useState(null);
     const [syncing, setSyncing] = useState(false);
     // Alle noch per Timer aufgeschobenen Speichervorgänge (Schüler, lokaler Cache, Fahrschule,
@@ -14031,6 +14098,11 @@ function App() {
     // Zeitpunkt der letzten lokalen Änderung je Schüler-ID - ein Neuladen, das VOR dieser Änderung
     // gestartet wurde, darf den Schüler nicht mit seinem (älteren) Serverstand überschreiben.
     const studentTouchedRef = useRef(new Map());
+    // Zählt fehlgeschlagene Schüler-Speichervorgänge (nur hochgezählt). doSignOut vergleicht den
+    // Stand vor und nach dem Warten: ein schon LAUFENDES Speichern, das währenddessen scheitert,
+    // fiel sonst durch - flushPendingSaves sah es nicht mehr, und das Abmelden löschte den Cache
+    // ohne Rückfrage "Nicht alles gespeichert" (Abschluss-Audit).
+    const studentSaveFailsRef = useRef(0);
     // Der in DIESER Sitzung vergebene PIN je Schüler-ID, im Klartext nur im Speicher. Lokal im
     // Schüler steht nach dem Setzen der Hash vom Server - so landet der Klartext-PIN nicht mehr
     // im localStorage-Cache (Audit G-N11), lässt sich aber direkt danach noch teilen.
@@ -14042,6 +14114,27 @@ function App() {
             m.set(id, n);
         else
             m.delete(id);
+    }
+    // Eine frisch geladene Schülerliste einspielen, ohne laufende lokale Änderungen zu überfahren.
+    // "Beschäftigt" = Speichern läuft/wartet noch ODER lokal geändert, nachdem der Abruf gestartet
+    // wurde - dessen Serverstand ist für diesen Schüler schon veraltet und bleibt lokal. Alle
+    // anderen kommen auf den Serverstand; wer serverseitig fehlt (gelöscht, Freigabe entzogen),
+    // fliegt raus. Vorher hatte nur das Fokus-Neuladen diesen Schutz - das erste Laden nach dem
+    // Start und der Warteliste-Abgleich ersetzten die Liste blind: ein ADK-Haken, während das
+    // Laden lief, verschwand lokal, und die nächste Änderung schrieb ihn auch in der DB weg
+    // (Abschluss-Audit). Liefert die neue Liste; Cache schreibt der Aufrufer.
+    function schuelerListeEinspielen(list, startedAt) {
+        const writes = studentWritesRef.current, touched = studentTouchedRef.current;
+        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
+        const byId = new Map((list || []).map(s => [s.id, s]));
+        return updateStudents(prev => {
+            const merged = (prev || [])
+                .filter(s => busy(s.id) || byId.has(s.id))
+                .map(s => busy(s.id) ? s : byId.get(s.id));
+            const knownIds = new Set(merged.map(s => s.id));
+            const added = (list || []).filter(s => !knownIds.has(s.id));
+            return [...merged, ...added];
+        });
     }
     function planSave(key, fn, ms) {
         const m = pendingSavesRef.current;
@@ -14061,6 +14154,15 @@ function App() {
     }
     function hasPendingSave(key) {
         return pendingSavesRef.current.has(key);
+    }
+    // Nach einem zurückgerollten Fehlschlag (Termin) die Anzeige wieder auf "gespeichert" stellen,
+    // sofern nichts anderes mehr wartet - sonst drehte "Speichert…" endlos (Abschluss-Audit).
+    // Der lokale Cache-Timer zählt nicht, er ist kein Cloud-Speichern.
+    function gespeichertWennNichtsOffen() {
+        for (const k of pendingSavesRef.current.keys())
+            if (k !== "cache")
+                return;
+        setSaved(true);
     }
     // Führt alle aufgeschobenen Speichervorgänge SOFORT aus (synchron angestoßen, damit auch ein
     // pagehide sie noch startet). Liefert false, wenn einer davon einen Fehler gemeldet hat.
@@ -15026,6 +15128,7 @@ function App() {
             updateStudents(null);
             putTpl(null);
             putSchool(null);
+            setSchoolFehlt(false);
             setAppts([]);
             // Ohne diesen Reset überlebte eine laufende Prüfungssimulation/Schaltkompetenz-Sitzung
             // einen Kontowechsel (App() bleibt beim Sign-out gemountet) - das Live-Banner zeigte
@@ -15099,10 +15202,26 @@ function App() {
             setRecSession(null);
             setRecRestore(null);
             recRestoreCheckedRef.current = false;
+            // Speicheranzeige und kontogebundene Abfragen zurücksetzen (Abschluss-Audit, Rest C-M8):
+            // sonst sah Konto B nach "Trotzdem abmelden" dauerhaft "Nicht gespeichert · erneut"
+            // (saveError = Schüler-ID von A), sein Abmelden kündigte ungespeicherte Änderungen an,
+            // und eine offene Fahrstunden-Abfrage mit A's Schülernamen blockierte B's eigene.
+            setSaveError(null);
+            setSaved(true);
+            setSyncing(false);
+            setLoadErr("");
+            dirtyKeysRef.current = {};
+            apptDeletedRef.current.clear();
+            setLessonPrompt(null);
+            setWaitlistOffer(null);
+            setWaPrompt(null);
+            setApptForm(null);
             return;
         }
         // Antworten, die erst nach Abmelden/Kontowechsel eintreffen, verwerfen (Audit C-M8).
         let cancelled = false;
+        // Startzeit des Ladens: lokale Änderungen am Cache-Stand danach überleben die Serverantwort.
+        const ladeStart = Date.now();
         const cached = loadCache(uid);
         if (cached && cached.length) {
             updateStudents(cached);
@@ -15142,12 +15261,54 @@ function App() {
         touchLastSeen(uid); // letzten Zugriff merken
         // Zuerst Fahrschule holen, damit die Vorlage (V3 vs. BVF) richtig gewählt wird
         let myRights = false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
-        fetchMySchool(uid).then(schoolData => {
+        let apptStartGen = 0; // apptGenRef beim Start des Termin-Abrufs (siehe applyFetchedAppts)
+        // Lief während des ersten Abrufs ein Termin-Schreibvorgang, ist dessen Antwort verworfen -
+        // dann kurz danach frisch nachladen, statt den Kalender bis zum nächsten Fokus-Wechsel nur
+        // mit den lokal angelegten Terminen stehen zu lassen.
+        const termineNachladen = (versuch) => {
+            setTimeout(() => {
+                if (cancelled)
+                    return;
+                const gen = apptGenRef.current;
+                fetchAppointments(uid).then(list => {
+                    if (!cancelled && !applyFetchedAppts(list, gen) && versuch < 5)
+                        termineNachladen(versuch + 1);
+                }).catch(() => { });
+            }, 1500);
+        };
+        setSchoolFehlt(false);
+        fetchMySchool(uid).catch(err => {
+            // Ladefehler ist NICHT "keine Fahrschule": mit einer echten Fahrschule im Cache damit
+            // weitermachen (Schüler/Termine laden trotzdem), Cache unangetastet lassen und nur
+            // den Fehler zeigen. Ohne brauchbaren Cache bricht das Laden ab (unten .catch:
+            // loadErr, bisheriger Stand bleibt) - nie eine id-lose Ersatz-Fahrschule einsetzen.
+            if (cachedSchool && cachedSchool.id) {
+                if (!cancelled)
+                    setLoadErr(String(err && err.message ? err.message : err));
+                // Den aktuellen Stand statt des Cache-Objekts zurückgeben: die Retries dauern
+                // Sekunden, eine in der Zeit gemachte Einstellungs-Änderung (writeSchool) würde
+                // sonst unten per putSchool/saveSchoolCache auf den alten Cache zurückgedreht.
+                const aktuell = schoolRef.current;
+                return (aktuell && aktuell.id === cachedSchool.id) ? aktuell : cachedSchool;
+            }
+            throw err;
+        }).then(schoolData => {
             if (cancelled)
                 return null;
             const sc = schoolData || { ...DEFAULT_SCHOOL };
             putSchool(sc);
-            saveSchoolCache(uid, sc);
+            if (sc.id) {
+                saveSchoolCache(uid, sc);
+            }
+            else {
+                // Nachweislich keine school_id: Maske zeigen, aber keine id-lose Fahrschule in den
+                // Cache legen - sonst startete die App beim nächsten Mal mit diesem Platzhalter.
+                setSchoolFehlt(true);
+                try {
+                    localStorage.removeItem(schoolKey(uid));
+                }
+                catch (e) { }
+            }
             applySchoolColor(sc.color);
             fetchIsModerator(uid).then(v => { if (!cancelled)
                 setIsModerator(v); }).catch(() => { });
@@ -15193,6 +15354,7 @@ function App() {
             // Rechte separat, aber verlässlich (ohne Race Condition) für die Admin-Vorlage-Prüfung holen
             // Termine getrennt abfangen: ein Fehler dort soll weder Schüler noch Vorlage blockieren,
             // und statt eines leeren Kalenders bleibt der bisherige Stand (Cache) mit Hinweis.
+            apptStartGen = apptGenRef.current;
             const apptsP = fetchAppointments(uid).catch(e => {
                 if (!cancelled)
                     showToast("Termine konnten nicht geladen werden:\n" + fehlerText(e), "error");
@@ -15206,8 +15368,7 @@ function App() {
             const [list, tplData, apptData, code, rights, sc] = res;
             myRights = rights;
             setSyncing(false);
-            updateStudents(list || []);
-            saveCache(uid, list || []);
+            saveCache(uid, schuelerListeEinspielen(list || [], ladeStart));
             setActiveId(a => {
                 const currentStuId = findCurrentApptStudentId(apptData);
                 if (currentStuId && list.find(s => s.id === currentStuId))
@@ -15216,8 +15377,8 @@ function App() {
             });
             putTpl(tplData);
             saveTplCache(uid, tplData);
-            if (apptData)
-                applyFetchedAppts(apptData);
+            if (apptData && !applyFetchedAppts(apptData, apptStartGen))
+                termineNachladen(1);
             setBookingCode(code || null);
             // Vorlage des Fahrschul-Admins vorsorglich laden, als möglicher Ausgangspunkt für Klassen,
             // die man selbst noch nicht angelegt hat. Der Abgleich, ob eine Klasse wirklich leer ist,
@@ -15271,8 +15432,9 @@ function App() {
                 // Scheitert das Neuladen, bleibt der bisherige Kalender stehen (fetchAppointments
                 // wirft jetzt statt [] zu liefern) - nur ein kurzer Hinweis, kein Fehlerfenster,
                 // weil das beim Wechsel in die App bei schwachem Netz öfter passiert.
+                const gen = apptGenRef.current;
                 fetchAppointments(uid).then(list => { if (!cancelled)
-                    applyFetchedAppts(list); })
+                    applyFetchedAppts(list, gen); })
                     .catch(() => { if (!cancelled)
                     showFlash("Termine konnten nicht aktualisiert werden (Verbindung?)"); });
             }
@@ -15308,23 +15470,7 @@ function App() {
             fetchStudents(uid).then(list => {
                 if (cancelled)
                     return;
-                const writes = studentWritesRef.current, touched = studentTouchedRef.current;
-                // "Beschäftigt" = Speichern läuft/wartet noch ODER lokal geändert, nachdem dieses
-                // Neuladen gestartet wurde - dann ist die Serverantwort für ihn schon veraltet.
-                const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
-                const byId = new Map((list || []).map(s => [s.id, s]));
-                // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
-                // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
-                // nicht gerade speichernder Schüler serverseitig nicht mehr auf (gelöscht
-                // oder die Freigabe wurde entzogen), gehört er entfernt statt stehen zu bleiben.
-                const arr = updateStudents(prev => {
-                    const merged = (prev || [])
-                        .filter(s => busy(s.id) || byId.has(s.id))
-                        .map(s => busy(s.id) ? s : byId.get(s.id));
-                    const knownIds = new Set(merged.map(s => s.id));
-                    const added = (list || []).filter(s => !knownIds.has(s.id));
-                    return [...merged, ...added];
-                });
+                const arr = schuelerListeEinspielen(list, startedAt);
                 saveCache(uid, arr);
             }).catch(() => { });
         }
@@ -15486,16 +15632,22 @@ function App() {
             // Nur "gespeichert" melden, wenn nicht schon die nächste Änderung wartet.
             if (!hasPendingSave("school"))
                 setSaved(true);
+            setSaveError(x => x === "__schule" ? null : x);
             return true;
         }
         catch (e) {
             if (e.isConflict) {
+                // Neu geladen = nichts mehr ungespeichert.
                 showToast(e.message);
                 fetchMySchool(uid).then(fresh => { if (fresh)
                     putSchool(fresh); }).catch(() => { });
+                if (!hasPendingSave("school"))
+                    setSaved(true);
             }
             else {
+                // Lokale Änderung ist NICHT gespeichert: Kopfzeile zeigt "Nicht gespeichert · erneut".
                 showToast("Einstellungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
+                setSaveError("__schule");
             }
             return false;
         }
@@ -15509,10 +15661,13 @@ function App() {
         setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
         try {
             await joinSchoolByCode(schoolRecovery.code);
-            const fresh = await fetchMySchool(uid);
+            // Beitritt ist durch - ein Ladefehler danach landet im "noch nicht geladen"-Hinweis
+            // unten, nicht im catch (der meldete sonst den Beitritt als gescheitert).
+            const fresh = await fetchMySchool(uid).catch(() => null);
             if (fresh) {
                 putSchool(fresh);
                 saveSchoolCache(uid, fresh);
+                setSchoolFehlt(false);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
             else {
@@ -15529,10 +15684,13 @@ function App() {
         setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
         try {
             await createAndAssignSchool(schoolRecovery.newName);
-            const fresh = await fetchMySchool(uid);
+            // Anlegen ist durch - ein Ladefehler danach darf nicht als Fehlschlag erscheinen,
+            // sonst tippt der Nutzer erneut und legt eine zweite Fahrschule an.
+            const fresh = await fetchMySchool(uid).catch(() => null);
             if (fresh) {
                 putSchool(fresh);
                 saveSchoolCache(uid, fresh);
+                setSchoolFehlt(false);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
             else {
@@ -15546,6 +15704,13 @@ function App() {
     // Save template (debounced)
     const tplSaveChainRef = useRef(Promise.resolve());
     const writeTemplate = useCallback((next) => {
+        // Wie writeSchool (Audit A2-M3): ein Objekt aus dem letzten Render bzw. von vor einem Dialog
+        // kann noch das updated_at von VOR dem letzten Speichern tragen - dann das neuere aus tplRef
+        // nehmen, sonst meldete runTplSave einen Konflikt mit sich selbst, lud neu, und die gerade
+        // übernommene/zurückgesetzte Vorlage war weg (Abschluss-Audit).
+        const cur = tplRef.current;
+        if (next && cur && cur.updated_at && (!next.updated_at || next.updated_at < cur.updated_at))
+            next = { ...next, updated_at: cur.updated_at };
         putTpl(next);
         if (uid)
             saveTplCache(uid, next);
@@ -15570,6 +15735,7 @@ function App() {
                 putTpl(t => t ? { ...t, updated_at: saved.updated_at } : t);
             if (!hasPendingSave("tpl"))
                 setSaved(true);
+            setSaveError(x => x === "__vorlage" ? null : x);
             return true;
         }
         catch (e) {
@@ -15578,9 +15744,12 @@ function App() {
                 const sc = schoolRef.current;
                 fetchTemplate(uid, sc && sc.name).then(fresh => { if (fresh)
                     putTpl(fresh); }).catch(() => { });
+                if (!hasPendingSave("tpl"))
+                    setSaved(true);
             }
             else {
                 showToast("Vorlage konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+                setSaveError("__vorlage");
             }
             return false;
         }
@@ -15588,12 +15757,14 @@ function App() {
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
     // gespeicherte ADK, wird die Standard-ADK angezeigt (V3 die gewohnte Karte, sonst BVF),
     // damit die Karte nie leer ist. Sobald etwas bearbeitet wird, wird sie für die Klasse gespeichert.
-    function tplFor(klasse) {
-        return withFahrzeugkunde(tplForRaw(klasse));
+    // quelle optional: Vorlagen-Stand, aus dem gelesen wird (Standard: tpl dieses Renderns).
+    function tplFor(klasse, quelle) {
+        return withFahrzeugkunde(tplForRaw(klasse, quelle));
     }
-    function tplForRaw(klasse) {
+    function tplForRaw(klasse, quelle) {
+        const t = quelle === undefined ? tpl : quelle;
         const k = klasse || DEFAULT_KLASSE;
-        const stored = (tpl && tpl.byKlasse && tpl.byKlasse[k]) || null;
+        const stored = (t && t.byKlasse && t.byKlasse[k]) || null;
         if (stored && Array.isArray(stored.adk) && stored.adk.length)
             return stored;
         const isV3 = !!(school && (school.name || "").trim().toLowerCase() === "fahrschule v3");
@@ -15603,7 +15774,7 @@ function App() {
         // diagrammkarte für Klasse BE (Anhänger-Themen) statt der Klasse-B-Karte. Die Strecken
         // werden weiterhin von der Standardklasse (B) übernommen, bis eigene angelegt werden.
         if (k === "BE") {
-            const basis = tplForRaw(DEFAULT_KLASSE);
+            const basis = tplForRaw(DEFAULT_KLASSE, t);
             return { adk: deepCopy(BE_ADK), strecken: deepCopy(basis.strecken || []),
                 adkTitel: "", streckenTitel: basis.streckenTitel || "" };
         }
@@ -15613,20 +15784,24 @@ function App() {
         // Punkt-IDs identisch sind. Erst wer eine Klasse im Vorlagen-Editor bearbeitet,
         // legt damit eine eigene Vorlage für genau diese Klasse an.
         if (k !== DEFAULT_KLASSE)
-            return tplForRaw(DEFAULT_KLASSE);
+            return tplForRaw(DEFAULT_KLASSE, t);
         return { adk: deepCopy(isV3 ? DEFAULT_ADK : BVF_ADK),
             strecken: isV3 ? deepCopy(DEFAULT_STRECKEN) : [],
             adkTitel: "", streckenTitel: "" };
     }
     // Vorlage für eine bestimmte Klasse aktualisieren (Rest bleibt unverändert)
     function writeTplForKlasse(klasse, patch) {
+        // Gegen den AKTUELLEN Stand (tplRef) rechnen, nicht gegen das tpl des Renderns: Aufrufer nach
+        // await askConfirm (Stadtvorlage, Admin-Vorlage übernehmen, Zurücksetzen) hielten sonst
+        // eine Vorlage von vor dem Dialog samt altem updated_at in der Hand (Abschluss-Audit).
+        const tpl = tplRef.current;
         const k = klasse || DEFAULT_KLASSE;
         const hasOwn = !!(tpl && tpl.byKlasse && tpl.byKlasse[k]);
         // Erste Änderung an einer Klasse ohne eigene Vorlage: Der geerbte Stand (Klasse B)
         // wird als unabhängige tiefe Kopie übernommen. Spätere Änderungen an B und an
         // dieser Klasse beeinflussen sich dadurch nie gegenseitig (keine geteilten
         // Array-Referenzen zwischen den Klassen-Vorlagen).
-        const cur = hasOwn ? tplFor(k) : deepCopy(tplFor(k));
+        const cur = hasOwn ? tplFor(k, tpl) : deepCopy(tplFor(k, tpl));
         writeTemplate({ ...tpl, byKlasse: { ...((tpl && tpl.byKlasse) || {}), [k]: { ...cur, ...patch } } });
     }
     // Stadt-Streckenvorlagen: Dialog öffnen (lädt bestätigte Vorlagen der Stadt + eigene Vorschläge)
@@ -15873,7 +16048,8 @@ function App() {
             try {
                 await dbUpdate(stu, dirty ? Array.from(dirty) : null);
                 setSaved(true);
-                setSaveError(null);
+                // Ein offener Fahrschul-/Vorlagen-Fehler bleibt stehen - dieser Erfolg betrifft ihn nicht.
+                setSaveError(e => (e === "__schule" || e === "__vorlage") ? e : null);
                 return true;
             }
             catch (e) {
@@ -15885,6 +16061,7 @@ function App() {
                     dirty.forEach(k => jetzt.add(k));
                     dirtyKeysRef.current[stu.id] = jetzt;
                 }
+                studentSaveFailsRef.current++;
                 setSaveError(stu.id);
                 showToast("Änderungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
                 return false;
@@ -15900,11 +16077,21 @@ function App() {
     const retrySave = useCallback(() => {
         if (!saveError)
             return;
-        const stu = (students || []).find(x => x.id === saveError);
         setSaveError(null);
+        // Fahrschule/Vorlage: den aktuellen Stand erneut einplanen (gleicher Weg wie jede Änderung).
+        if (saveError === "__schule") {
+            writeSchool(cur => cur);
+            return;
+        }
+        if (saveError === "__vorlage") {
+            if (tplRef.current)
+                writeTemplate(tplRef.current);
+            return;
+        }
+        const stu = (students || []).find(x => x.id === saveError);
         if (stu)
             scheduleSave(stu);
-    }, [saveError, students, scheduleSave]);
+    }, [saveError, students, scheduleSave, writeSchool, writeTemplate]);
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
         updateStudents(prev => {
@@ -15950,6 +16137,9 @@ function App() {
                     patched.lessons = stu.lessons.map(l => l.apptId === oldId ? { ...l, apptId: newId } : l);
                 if (hasDismissed)
                     patched.dismissedAppts = stu.dismissedAppts.map(x => x === oldId ? newId : x);
+                // Sonst schriebe scheduleSave bei geteilten Schülern den vollen, veralteten Datensatz
+                // bzw. nur fremde Dirty-Felder (wie patchStudentNow, Abschluss-Audit).
+                markDirtyKeys(stu.id, stu, patched);
                 scheduleSave(patched);
                 return patched;
             });
@@ -16061,6 +16251,12 @@ function App() {
             showToast("Bitte eine gültige Dauer angeben.");
             return;
         }
+        // Ungültigen Preis schon VOR der Unterschrift melden - sonst unterschreibt der Schüler,
+        // und erst saveLeistung lehnt ab.
+        if (f.priceMode !== "auto" && Number.isNaN(betragAusEingabe(f.price))) {
+            showToast("Bitte einen gültigen Preis eingeben (nur Zahl, z.B. 45 oder 45,50).");
+            return;
+        }
         setLeistungForm({ ...f, step: "sign" });
     }
     // Nach der Unterschrift: Leistung verbindlich im Fahrtenbuch des Schülers speichern
@@ -16081,7 +16277,7 @@ function App() {
         // Im Formular gibt der Fahrlehrer den GESAMTPREIS ein/sieht ihn, daher hier umrechnen.
         const price = (f.priceMode === "auto")
             ? ((pricePerHour === "" || pricePerHour == null) ? null : Number(pricePerHour))
-            : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((Number(f.price) / ue) * 100) / 100);
+            : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((betragAusEingabe(f.price) / ue) * 100) / 100);
         // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
         // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
         // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
@@ -16129,7 +16325,7 @@ function App() {
             showToast("Bitte eine Uhrzeit angeben.");
             return;
         }
-        const priceVal = (lessonForm.price === "" || lessonForm.price == null) ? null : Number(lessonForm.price);
+        const priceVal = betragAusEingabe(lessonForm.price); // "1.200" = 1200, nicht 1,2
         // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
         // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
         // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
@@ -16853,6 +17049,7 @@ function App() {
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
         let count = 0, skipped = 0, skippedClash = 0, skippedEnde = 0;
+        const fehlgeschlagen = []; // Speichern gescheitert (Netz) - bleiben im Import zum erneuten Versuch
         // appts ist die beim Render fixierte Konstante und wird waehrend dieser Schleife nicht
         // aktualisiert, obwohl vorherige Durchlaeufe bereits neue Termine per addAppt() angelegt
         // haben (der dortige setAppts() loest zwar einen Re-Render aus, die hier noch laufende
@@ -16910,13 +17107,25 @@ function App() {
                 localAppts = [...localAppts, created];
                 count++;
             }
+            else {
+                fehlgeschlagen.push(it);
+            }
         }
-        setCalImport(null);
-        setView("kalender");
         const reasons = [skipped ? skipped + (skipped === 1 ? " Uhrzeit nicht lesbar" : " Uhrzeit nicht lesbar") : "",
             skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : "",
             skippedEnde ? skippedEnde + " mit Ende vor Beginn" : ""].filter(Boolean).join(", ");
-        showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : ""));
+        const zusammenfassung = "✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : "");
+        if (fehlgeschlagen.length) {
+            // Nicht angelegte Einträge nicht verwerfen: Import mit genau diesen offen lassen, damit
+            // man sieht, welche fehlen, und sie ohne neues Einlesen erneut anlegen kann. Vorher
+            // meldete die Zusammenfassung nur die Erfolge, und die erkannten Daten waren weg.
+            setCalImport(c => c ? { ...c, creating: false, items: fehlgeschlagen.map(x => ({ ...x, take: true })) } : c);
+            showToast(zusammenfassung + "\n" + fehlgeschlagen.length + (fehlgeschlagen.length === 1 ? " Termin konnte" : " Termine konnten") + " nicht gespeichert werden (Verbindung?) - sie stehen noch im Import, bitte erneut anlegen.", "error");
+            return;
+        }
+        setCalImport(null);
+        setView("kalender");
+        showFlash(zusammenfassung);
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
     async function handleAdkImportFiles(fileList) {
@@ -17315,9 +17524,21 @@ function App() {
                 return;
             }
             // "PLZ Ort" aus einem Feld trennen - die App speichert beides zusammen.
-            const teile = (t) => { const m = String(t || "").match(/^\s*(\d{4,5})\s+(.+)$/); return m ? { plz: m[1], ort: m[2].trim() } : { plz: "", ort: String(t || "").trim() }; };
+            // Tolerant gegenüber "D-70173 Stuttgart" und "70173, Stuttgart"; der Ort muss mit einem
+            // Nicht-Ziffer-Zeichen beginnen, sonst zerfiele "12345" in PLZ "1234" und Ort "5".
+            const teile = (t) => { const m = String(t || "").match(/^\s*(?:DE?-\s*)?(\d{4,5})\s*,?\s*([^\d\s,].*)$/i); return m ? { plz: m[1], ort: m[2].trim() } : { plz: "", ort: String(t || "").trim() }; };
             const vk = teile(iv.plzOrt);
             const kd = teile(stu.firmaPlzOrt || "");
+            // PLZ und Ort sind XRechnung-Pflicht (BR-DE-3/-4, BR-DE-8/-9) - vorab sagen, wo sie
+            // fehlen, statt eine Datei zu erzeugen, die der Validator ablehnt (Abschluss-Audit).
+            if (!vk.plz || !vk.ort) {
+                showToast("Für eine E-Rechnung braucht es PLZ und Ort der Fahrschule (z. B. \"70173 Stuttgart\"). Bitte unter Einstellungen › Rechnungsdaten eintragen.");
+                return;
+            }
+            if (!kd.plz || !kd.ort) {
+                showToast("Für eine E-Rechnung braucht es PLZ und Ort der Firma (z. B. \"70173 Stuttgart\"). Bitte in den Schülerdaten unter Firmenkunde eintragen.");
+                return;
+            }
             const out = buildXRechnung({
                 inv,
                 seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
@@ -18185,6 +18406,13 @@ function App() {
             delete n.pinCustom;
             return n;
         });
+        // patchStudentNow markiert pin/pinChanged/pinCustom als lokal geändert - hier spiegeln sie
+        // aber nur den Serverstand nach der RPC. Blieben sie markiert, schriebe das nächste Speichern
+        // eines geteilten Schülers sie erneut und löschte dabei einen inzwischen vom Schüler selbst
+        // gewählten PIN (pinCustom) wieder.
+        const pinDirty = dirtyKeysRef.current[cur.id];
+        if (pinDirty)
+            ["pin", "pinChanged", "pinCustom"].forEach(k => pinDirty.delete(k));
         // Wurde trotz dreier Versuche zuletzt noch ein Speichern eingeplant, hält es den alten
         // Datensatz fest - durch den gerade gepatchten ersetzen (gleicher Schlüssel, planSave
         // verwirft den alten Auftrag).
@@ -18976,7 +19204,7 @@ function App() {
     // ── Termine ──
     async function addAppt(appt) {
         setSaved(false);
-        apptWritesRef.current++;
+        apptSchreibStart();
         try {
             const created = await dbInsertAppt(uid, appt);
             setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
@@ -18987,10 +19215,11 @@ function App() {
             // Fehler ist hier schon gemeldet - Aufrufer erkennen ihn am Rückgabewert null und
             // brechen ab (Formular offen lassen, kein "✓ angelegt", keine WhatsApp-Nachricht).
             showToast("Termin konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // nichts angelegt, nichts mehr offen - kein endloses "Speichert…"
             return null;
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
     }
     // ── Terminvorschlag an Schüler senden (per WhatsApp, mit Buchungslink zum Bestätigen) ──
@@ -19151,7 +19380,7 @@ function App() {
     }
     async function updateAppt(id, patch) {
         setSaved(false);
-        apptWritesRef.current++;
+        apptSchreibStart();
         // Verschiebt sich die Startzeit, ist eine frühere manuelle Erinnerung (reminded_at) nicht mehr
         // gültig - sie bezog sich auf die alte Zeit. Ohne Reset würde die Erinnerungen-Liste den Termin
         // für die NEUE Zeit fälschlich als "schon erinnert" überspringen (siehe markiereErinnert()).
@@ -19186,10 +19415,11 @@ function App() {
             if (current)
                 setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Änderung fehlgeschlagen:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
             return false;
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
     }
     async function removeAppt(id, opts) {
@@ -19197,7 +19427,7 @@ function App() {
         setSaved(false);
         // ID vormerken, damit ein Neuladen im Hintergrund den Termin nicht kurz wieder anzeigt
         apptDeletedRef.current.add(id);
-        apptWritesRef.current++;
+        apptSchreibStart();
         setAppts(prev => prev.filter(a => a.id !== id));
         let ok = true;
         try {
@@ -19212,16 +19442,17 @@ function App() {
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
             showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
+            gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
         }
         finally {
-            apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+            apptSchreibEnde();
         }
         // Undo nur nach erfolgreichem Löschen - nach einem Fehlschlag steht der Termin ja wieder
         // in der Liste, ein "Rückgängig" hätte ihn dann ein zweites Mal angelegt.
         if (ok && backup && !(opts && opts.noUndo)) {
             const label = (opts && opts.label) || "Termin gelöscht";
             showUndo(label, async () => {
-                apptWritesRef.current++;
+                apptSchreibStart();
                 try {
                     // art muss mit übergeben werden, sonst fällt dbInsertAppt auf den Default
                     // "ÜST" zurück und ein wiederhergestellter Spezial-Termin (z.B. Autobahn,
@@ -19244,7 +19475,7 @@ function App() {
                     showToast("Wiederherstellen fehlgeschlagen:\n" + fehlerText(e), "error");
                 }
                 finally {
-                    apptWritesRef.current = Math.max(0, apptWritesRef.current - 1);
+                    apptSchreibEnde();
                 }
             });
         }
@@ -22259,17 +22490,10 @@ function App() {
     // {...active, ...} aus dem Render-Schnappschuss hätte inzwischen eingetroffene Änderungen am
     // Schüler still wieder zurückgedreht. fn liefert den neuen Datensatz oder null (= nichts tun).
     function schuelerAendernUndSpeichern(sid, fn) {
-        const patched = patchStudentNow(sid, cur => {
-            const next = fn(cur);
-            if (!next)
-                return null;
-            markDirtyKeys(cur.id, cur, next);
-            return next;
-        });
+        // Dirty-Keys und Cache erledigt patchStudentNow selbst.
+        const patched = patchStudentNow(sid, fn);
         if (!patched)
             return null;
-        if (uid)
-            planSave("cache", () => { saveCache(uid, studentsRef.current); }, 500);
         scheduleSave(patched);
         return patched;
     }
@@ -24040,7 +24264,8 @@ function App() {
             const f = vehicleCostForm;
             if (!f)
                 return;
-            const amount = parseFloat((f.amount || "").replace(",", "."));
+            // parseBetrag statt parseFloat: "1.200" (Versicherung) wurde sonst zu 1,20 € (Abschluss-Audit).
+            const amount = parseBetrag(f.amount || "");
             if (isNaN(amount) || amount < 0) {
                 setVehicleCostForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
                 return;
@@ -24730,8 +24955,13 @@ function App() {
         let aktuelleSchueler = students;
         if (uid) {
             try {
-                aktuelleSchueler = await fetchStudents(uid);
-                updateStudents(aktuelleSchueler);
+                const startedAt = Date.now();
+                const frisch = await fetchStudents(uid);
+                // Nicht blind ersetzen: eine gerade gebuchte Ausfallgebühr o. Ä. (Speichern noch
+                // offen) bliebe sonst lokal auf der Strecke (Abschluss-Audit).
+                aktuelleSchueler = schuelerListeEinspielen(frisch, startedAt);
+                if (uid)
+                    saveCache(uid, aktuelleSchueler);
             }
             catch (e) {
                 console.error("Schüler für Warteliste-Abgleich konnten nicht aktualisiert werden:", e);
@@ -24892,8 +25122,17 @@ function App() {
         if (!waitlistOffer)
             return;
         const { appt, queue } = waitlistOffer;
+        // Doppeltipp-Sperre wie in offerLueckenSlot: das Sheet bleibt bis nach dem await offen, ein
+        // zweiter Tipp legte ein zweites "offered" für dasselbe Fenster an - zwei Wartelisten-Schüler
+        // konnten dann je eines annehmen und standen gleichzeitig beim Fahrlehrer (Abschluss-Audit).
+        const sperre = appt.start_at;
+        if (lueckenOfferRef.current.has(sperre))
+            return;
+        lueckenOfferRef.current.add(sperre);
+        setWaitlistOffer(w => w && w.appt === appt ? { ...w, busy: true } : w);
         const freedStudent = students.find(x => x.id === appt.student_id);
         const klasse = (freedStudent && freedStudent.klasse) || DEFAULT_KLASSE;
+        apptSchreibStart();
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: appt.start_at, end_at: appt.end_at, art: appt.art,
@@ -24904,6 +25143,10 @@ function App() {
         }
         catch (e) {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
+        }
+        finally {
+            apptSchreibEnde();
+            lueckenOfferRef.current.delete(sperre);
         }
         offerNextInQueue(queue);
     }
@@ -25041,6 +25284,7 @@ function App() {
         if (lueckenOfferRef.current.has(sperre))
             return;
         lueckenOfferRef.current.add(sperre);
+        apptSchreibStart(); // Neuladen währenddessen darf das neue Angebot nicht verschlucken
         try {
             const created = await dbInsertAppt(uid, {
                 start_at: combineDT(f.dateKey, f.from), end_at: combineDT(f.dateKey, f.to), art: "ÜST",
@@ -25053,6 +25297,7 @@ function App() {
             showToast("Anbieten fehlgeschlagen:\n" + fehlerText(e), "error");
         }
         finally {
+            apptSchreibEnde();
             lueckenOfferRef.current.delete(sperre);
         }
     }
@@ -28259,17 +28504,27 @@ function App() {
             if (recSession)
                 stopRecording(true); // schreibt die Strecke in den Schüler (aufgeschoben, s.u.)
             // Früher fehlgeschlagenes Speichern noch einmal versuchen (lebt sonst nur im Cache).
-            if (saveError) {
+            if (saveError === "__schule")
+                writeSchool(cur => cur);
+            else if (saveError === "__vorlage") {
+                if (tplRef.current)
+                    writeTemplate(tplRef.current);
+            }
+            else if (saveError) {
                 const stu = (studentsRef.current || []).find(x => x.id === saveError);
                 if (stu)
                     scheduleSave(stu);
             }
+            const fehlerVorher = studentSaveFailsRef.current;
             let alles = await flushPendingSaves();
-            // Bereits laufende Speichervorgänge (Timer schon abgelaufen) ebenfalls abwarten.
-            await Promise.all([schoolSaveChainRef.current, tplSaveChainRef.current]).catch(() => { });
+            // Bereits laufende Speichervorgänge (Timer schon abgelaufen) ebenfalls abwarten - und
+            // ihr Ergebnis auswerten: runSchoolSave/runTplSave liefern false bei einem Fehlschlag.
+            const ketten = await Promise.all([schoolSaveChainRef.current, tplSaveChainRef.current]).catch(() => [false]);
+            if (ketten.some(x => x === false))
+                alles = false;
             for (let i = 0; i < 50 && studentWritesRef.current.size > 0; i++)
                 await new Promise(r => setTimeout(r, 100));
-            if (studentWritesRef.current.size > 0)
+            if (studentWritesRef.current.size > 0 || studentSaveFailsRef.current !== fehlerVorher)
                 alles = false;
             if (!alles && !await askConfirm({ title: "Nicht alles gespeichert", message: "Einige Änderungen konnten nicht gespeichert werden und gehen beim Abmelden verloren. Trotzdem abmelden?", confirmLabel: "Trotzdem abmelden", danger: true }))
                 return;
@@ -29171,7 +29426,9 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-preis-pro-ue" }, "Preis pro UE (45 Minuten)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-preis-pro-ue", type: "text", inputMode: "decimal", value: pricePerHour, onChange: e => savePricePerHour(normDecimal(e.target.value)), placeholder: "z.B. 55", style: { flex: 1 } }),
+                                    // EntwurfFeld statt Rohtext: gespeichert wird nur ein gültiger Betrag ("1.200" = 1200),
+                                    // Ungültiges bleibt rot markierter Entwurf (Abschluss-Audit, wie C-H3).
+                                    React.createElement(EntwurfFeld, { id: "field-preis-pro-ue", inputMode: "decimal", wert: (school && school.price_hour != null) ? school.price_hour : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: "", onWert: savePricePerHour, placeholder: "z.B. 55", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8, marginTop: 6 } }, "Standardisierte Preismeldung (geplante Reform)"),
@@ -29179,7 +29436,7 @@ function App() {
                             [["price_grundgebuehr", "Grundgebühr"], ["price_lehrmaterial", "Lehrmaterial"], ["price_sonderfahrt", "Sonderfahrt (je UE)"], ["price_pruefungsvorstellung", "Prüfungsvorstellung"]].map(([field, label]) => React.createElement("div", { key: field, className: "field", style: { marginBottom: 10 } },
                                 React.createElement("label", { htmlFor: "field-preismeldung-" + field }, label),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-preismeldung-" + field, type: "text", inputMode: "decimal", value: (school && school[field] != null) ? school[field] : "", onChange: e => savePreismeldungPreis(field, normDecimal(e.target.value)), placeholder: "z.B. 50", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-preismeldung-" + field, inputMode: "decimal", wert: (school && school[field] != null) ? school[field] : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: v => savePreismeldungPreis(field, v), placeholder: "z.B. 50", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€")))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 16 }, onClick: openPreismeldung }, "Preismeldung als PDF erstellen"),
                             React.createElement("div", { className: "field" },
@@ -31779,7 +32036,7 @@ function App() {
                 React.createElement("div", { style: { textAlign: "right", fontSize: 13, color: "var(--muted)", marginBottom: 4 } },
                     "Kosten dieser Stunde: ",
                     React.createElement("b", { style: { color: "var(--ink)" } },
-                        (((Number(lessonForm.minutes) || 0) / 45) * (Number(lessonForm.price) || 0)).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+                        (((Number(lessonForm.minutes) || 0) / 45) * (betragAusEingabe(lessonForm.price) || 0)).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                         " \u20AC")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10, marginBottom: 8 }, onClick: saveLessonForm }, "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setLessonForm(null) }, "Abbrechen"))),
@@ -32001,7 +32258,7 @@ function App() {
         leistungForm && leistungForm.step === "sign" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const veh = vehicles.find(v => v.id === leistungForm.vehicleId);
-            const price = (leistungForm.priceMode === "auto") ? leistungPriceAuto(leistungForm) : ((leistungForm.price === "" || leistungForm.price == null) ? null : Number(leistungForm.price));
+            const price = (leistungForm.priceMode === "auto") ? leistungPriceAuto(leistungForm) : betragAusEingabe(leistungForm.price);
             return React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
                 React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Leistung best\u00E4tigen"),
@@ -32060,7 +32317,7 @@ function App() {
         })(),
         // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
         // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
-        !IS_DEMO() && school && !school.id && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 400,
+        !IS_DEMO() && schoolFehlt && school && !school.id && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 400,
                 display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
             React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "26px 22px" } },
                 React.createElement("div", { style: { fontSize: 32, marginBottom: 10 } }, "🏫"),
@@ -33664,8 +33921,8 @@ function App() {
                             : "Auf die Warteliste setzen, damit er nachrückt, sobald etwas frei wird – mit der Zeit dieses Termins als Wunsch."),
                     !waitlistOffer.betroffenGesetzt && React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 44, width: "100%" }, onClick: betroffenenAufWarteliste },
                         "Auf die Warteliste setzen")),
-                waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: createWaitlistOffer },
-                    "Auf der Warteliste anbieten"),
+                waitlistOffer.candidates.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12, opacity: waitlistOffer.busy ? .6 : 1 }, disabled: !!waitlistOffer.busy, onClick: createWaitlistOffer },
+                    waitlistOffer.busy ? "Wird angeboten…" : "Auf der Warteliste anbieten"),
                 // Kandidatenliste: ohne KI in der bisherigen Reihenfolge, mit KI nach Dringlichkeit
                 // sortiert, je Schüler ein Satz Begründung und eine fertige Nachricht im
                 // WhatsApp-Knopf. Verschickt wird weiterhin nichts von allein - der Knopf öffnet nur
