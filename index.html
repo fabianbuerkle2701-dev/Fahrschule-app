@@ -9116,11 +9116,43 @@ function tageUeberfaellig(inv, zahlungszielTage, heuteMs) {
         return null;
     return Math.floor((heuteMs - new Date(f).getTime()) / 86400000);
 }
-// Auf eine bestimmte Rechnung verbuchte Zahlungen. Zahlungen ohne invoiceId sind
-// Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
+// Auf die Rechnungen angerechnete Zahlungen als { invoiceId: Betrag }. Zahlungen ohne invoiceId
+// sind Alt-Bestand bzw. allgemeine Einzahlungen und zaehlen bewusst nicht auf eine Rechnung,
 // damit eine Rechnung nur dann als bezahlt gilt, wenn das auch so erfasst wurde.
+// Überzahlung einer gültigen Rechnung ist Guthaben: der Überhang wird den anderen gültigen,
+// noch offenen Rechnungen angerechnet, die älteste zuerst. Anlass (Abschluss-Audit zu F-H2): beim
+// Storno umgebuchte Zahlungen landen komplett auf der NÄCHSTEN Rechnung (confirmInvoice); war die
+// kleiner (Ersatzrechnung aufgeteilt, oder vorher eine Prüfungsgebühr abgerechnet), war sie
+// unsichtbar überzahlt, die Folgerechnung galt als offen, wurde überfällig und gemahnt, obwohl der
+// Saldo 0 war. Bewusst als Rechnung und nicht durch Aufteilen der Zahlung: eine schon gedruckte
+// Quittung und der DATEV-Export behalten so den tatsächlich erhaltenen Betrag. Stornierte
+// Rechnungen und Stornorechnungen geben keinen Überhang ab und nehmen keinen an.
+function rechnungsZahlungen(s) {
+    const direkt = {};
+    ((s && s.payments) || []).forEach(p => { if (p && p.invoiceId)
+        direkt[p.invoiceId] = (direkt[p.invoiceId] || 0) + (Number(p.amount) || 0); });
+    const out = Object.assign({}, direkt);
+    const gueltig = ((s && s.invoices) || []).filter(inv => inv && inv.id && !inv.cancelledBy && !inv.stornoOf);
+    let ueberhang = gueltig.reduce((sum, inv) => sum + Math.max(0, (direkt[inv.id] || 0) - (Number(inv.total) || 0)), 0);
+    gueltig.slice().sort((a, b) => String(a.date || "").localeCompare(String(b.date || ""))).forEach(inv => {
+        if (ueberhang <= 0.005)
+            return;
+        const offen = Math.round(((Number(inv.total) || 0) - (direkt[inv.id] || 0)) * 100) / 100;
+        if (offen <= 0.005)
+            return;
+        const anteil = Math.min(offen, ueberhang);
+        out[inv.id] = (out[inv.id] || 0) + anteil;
+        ueberhang -= anteil;
+    });
+    return out;
+}
 function invoicePaid(s, invId) {
-    return (s.payments || []).filter(p => p.invoiceId === invId)
+    return rechnungsZahlungen(s)[invId] || 0;
+}
+// Nur die direkt auf diese Rechnung gebuchten Zahlungen (ohne angerechneten Überhang) - für das
+// Umbuchen beim Storno, das genau diese Zahlungen verschiebt.
+function invoicePaidDirekt(s, invId) {
+    return ((s && s.payments) || []).filter(p => p.invoiceId === invId)
         .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 }
 // Offener Restbetrag einer Rechnung (nie negativ).
@@ -9364,6 +9396,10 @@ function ToastConfirmHost() {
     }, []);
     function resolve(val) { if (confirmState)
         confirmState.resolve(val); setConfirmState(null); }
+    // Wegtippen/Escape: normalerweise wie "Abbrechen" (false). Rückfragen, bei denen "Nein" selbst
+    // eine Entscheidung ist, übergeben abortValue (z.B. null) - sonst würde ein Wegtippen als
+    // "Nein" gelten und die Aktion trotzdem ausführen (Storno-Rückfrage, Abschluss-Audit).
+    function dismiss() { resolve(confirmState && "abortValue" in confirmState ? confirmState.abortValue : false); }
     function resolvePrompt(val) { if (promptState)
         promptState.resolve(val); setPromptState(null); }
     useEffect(() => {
@@ -9372,7 +9408,7 @@ function ToastConfirmHost() {
             if (e.key !== "Escape") return;
             e.stopImmediatePropagation();
             if (promptState) resolvePrompt(null);
-            else if (confirmState) resolve(false);
+            else if (confirmState) dismiss();
         }
         document.addEventListener("keydown", onEsc, true);
         return () => document.removeEventListener("keydown", onEsc, true);
@@ -9383,7 +9419,7 @@ function ToastConfirmHost() {
         toast && React.createElement("div", { key: toast.key, role: toast.tone === "error" ? "alert" : "status", "aria-live": toast.tone === "error" ? "assertive" : "polite", "aria-atomic": "true", onClick: () => setToast(null), title: "Zum Ausblenden tippen", className: "kb-lift", style: { cursor: "pointer", position: "fixed", left: "50%", bottom: "calc(20px + env(safe-area-inset-bottom))", transform: "translateX(-50%)", zIndex: 2100,
                 background: toast.tone === "error" ? "#B32E22" : "var(--ink)", color: toast.tone === "error" ? "#fff" : "var(--canvas)", padding: "12px 18px", borderRadius: "var(--r-pill)", fontSize: 13.5, fontWeight: 600, maxWidth: "88vw",
                 boxShadow: "0 10px 30px rgba(0,0,0,.35)", textAlign: "center", lineHeight: 1.4, whiteSpace: "pre-line" } }, toast.msg),
-        confirmState && React.createElement("div", { onClick: () => resolve(false), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        confirmState && React.createElement("div", { onClick: () => dismiss(), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 confirmState.title && React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 18, marginBottom: 10 } }, confirmState.title),
@@ -9398,7 +9434,8 @@ function ToastConfirmHost() {
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 8, background: "#B32E22", color: "#fff", border: "none" }, onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"))
                     : React.createElement(React.Fragment, null,
                         React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => resolve(true) }, confirmState.confirmLabel || "Bestätigen"),
-                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen")))),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => resolve(false) }, confirmState.cancelLabel || "Abbrechen"),
+                        confirmState.abortLabel && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => dismiss() }, confirmState.abortLabel)))),
         promptState && React.createElement("div", { onClick: () => resolvePrompt(null), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -22016,14 +22053,21 @@ function App() {
         // (Standard: ja). Die Ersatzrechnung gibt es in diesem Moment noch nicht - die Zahlungen
         // werden bis dahin als "umbuchenVon" vorgemerkt und von confirmInvoice() der nächsten
         // Rechnung dieses Schülers zugeordnet.
-        const bezahlt = invoicePaid(active, inv.id);
+        const bezahlt = invoicePaidDirekt(active, inv.id);
         let umbuchen = false;
         if (bezahlt > 0.005) {
+            // Drei Ausgänge: Ja / Nein / Abbrechen. Wegtippen oder Escape brechen den GANZEN Storno
+            // ab (abortValue null) - vorher galt das als "Nein", der Storno lief mit einer
+            // unwiderruflichen Nummer trotzdem durch und die Zahlungen blieben an der stornierten
+            // Rechnung hängen (genau der Ausgangsfehler F-H2, Abschluss-Audit).
             umbuchen = await askConfirm({
                 title: "Zahlungen übernehmen?",
                 message: "Auf " + inv.number + " sind schon " + eurFmt(bezahlt) + " eingegangen. Sollen diese Zahlungen der nächsten Rechnung (Ersatzrechnung) gutgeschrieben werden?\n\nBei \u201ENein\u201C bleiben sie bei der stornierten Rechnung, etwa wenn du das Geld zurückzahlst.",
                 confirmLabel: "Ja, gutschreiben", cancelLabel: "Nein", danger: false,
+                abortLabel: "Storno abbrechen", abortValue: null,
             });
+            if (umbuchen === null)
+                return;
         }
         let storno;
         try {
@@ -37401,7 +37445,11 @@ function PayerPage({ code }) {
             React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)" } }, "Dieser Zahler-Link ist nicht (mehr) gültig. Bitte bei der Fahrschule nachfragen."));
     const invoices = (data.invoices || []).filter(inv => !inv.cancelledBy && !inv.stornoOf).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
     const payments = data.payments || [];
-    const paidFor = id => payments.filter(p => p.invoiceId === id).reduce((s, p) => s + (Number(p.amount) || 0), 0);
+    // Dieselbe Anrechnung wie in der App (rechnungsZahlungen): ein Überhang aus einer überzahlten
+    // Rechnung deckt die übrigen - sonst sähe der Zahler eine Rechnung als offen, die intern
+    // längst als bezahlt gilt.
+    const verteilt = rechnungsZahlungen({ invoices, payments });
+    const paidFor = id => verteilt[id] || 0;
     const name = [data.vorname, data.name].filter(Boolean).join(" ");
     const gesamt = invoices.reduce((s, i) => s + (Number(i.total) || 0), 0);
     const bezahlt = invoices.reduce((s, i) => s + Math.min(paidFor(i.id), Number(i.total) || 0), 0);
