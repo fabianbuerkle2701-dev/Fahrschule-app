@@ -6668,9 +6668,9 @@ async function saveSchool(school) {
         console.warn("saveSchool: fehlende school.id, Speichern übersprungen");
         return;
     }
-    const numOrNull = v => (v === "" || v == null) ? null : Number(v);
+    const numOrNull = betragAusEingabe;
     const payload = { name: school.name, subtitle: school.subtitle, color: school.color, logo: school.logo || "",
-        price_hour: (school.price_hour === "" || school.price_hour == null) ? null : Number(school.price_hour),
+        price_hour: betragAusEingabe(school.price_hour),
         packages: school.packages || [], vehicles: school.vehicles || [], klassen: school.klassen || [], arten: school.arten || [],
         locations: school.locations || [], invoice_settings: school.invoice_settings || {},
         sonderfahrten_soll: school.sonderfahrten_soll || {},
@@ -6688,6 +6688,12 @@ async function saveSchool(school) {
         datev_settings: school.datev_settings || {},
         zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen),
         bundesland: school.bundesland || null };
+    // Unlesbare Zahl (NaN) nicht mitschicken: JSON machte daraus null und löschte den gespeicherten
+    // Wert, während die Anzeige "Gespeichert" meldete. Ohne das Feld bleibt der Serverstand stehen.
+    Object.keys(payload).forEach(k => {
+        if (typeof payload[k] === "number" && Number.isNaN(payload[k]))
+            delete payload[k];
+    });
     // Optimistisches Sperren: schools wird als ein ganzer JSONB-Blob (u.a. Fuhrpark, Pakete)
     // gespeichert, ein reiner Full-Overwrite ohne Änderungserkennung ließ zwei gleichzeitige
     // Sitzungen sich sonst stillschweigend gegenseitig überschreiben. Kennt der Client noch kein
@@ -6944,7 +6950,11 @@ async function fetchVerguetungen(schoolId) {
     return data || [];
 }
 async function saveVerguetung(teacherId, modell, satz) {
-    const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz: satz == null || satz === "" ? null : Number(satz) });
+    // parseBetrag-Regeln wie bei allen Beträgen; NaN ginge per JSON als null raus und löschte den Satz.
+    const p_satz = betragAusEingabe(satz);
+    if (Number.isNaN(p_satz))
+        throw new Error("Bitte einen gültigen Wert eingeben (nur Zahl, z.B. 25 oder 12,5).");
+    const { error } = await sb.rpc("school_verguetung_set", { p_teacher_id: teacherId, p_modell: modell || null, p_satz });
     if (error) { console.error(error); throw new Error(error.message || "Konnte nicht gespeichert werden"); }
 }
 /* ── Fahrschul-Dashboard: Schueler-Zuteilung und Akteneinsicht ──────────────────────────────
@@ -8579,6 +8589,15 @@ function parseBetrag(v) {
     if (!/^-?(\d+\.?\d*|\.\d+)$/.test(t))
         return NaN;
     return Number(t);
+}
+// Betrag aus Formular-/Fahrschul-Zustand: leer -> null, schon eine Zahl -> unverändert (eine
+// gespeicherte Zahl wie 1.125 darf nicht als "1.125" = 1125 gelesen werden), Text -> parseBetrag.
+// Ersetzt Number()/parseFloat() an den übrigen Betragsfeldern: "1.200" wurde dort zu 1,20 €
+// und ein Tippfehler wie "55.5," zu NaN, das per JSON als null den Preis löschte (Abschluss-Audit).
+function betragAusEingabe(v) {
+    if (v === "" || v == null)
+        return null;
+    return typeof v === "number" ? v : parseBetrag(v);
 }
 // UE-Logik: 1 UE = 45 Minuten. Gefahrene Fahrstunden mit Dauer ergeben die UE.
 function lessonMinutes(s) {
@@ -13622,7 +13641,7 @@ function App() {
         writeSchool(s => s && ({ ...s, reform_stichtag: v || null })); }
     // Standardisierte Preismeldung - siehe preismeldungSheet().
     function savePreismeldungPreis(field, v) { if (school)
-        writeSchool(s => s && ({ ...s, [field]: (v === "" ? null : v) })); }
+        writeSchool(s => s && ({ ...s, [field]: (v === "" || v == null ? null : v) })); }
     async function openPreismeldung() {
         if (!school)
             return;
@@ -16097,6 +16116,12 @@ function App() {
             showToast("Bitte eine gültige Dauer angeben.");
             return;
         }
+        // Ungültigen Preis schon VOR der Unterschrift melden - sonst unterschreibt der Schüler,
+        // und erst saveLeistung lehnt ab.
+        if (f.priceMode !== "auto" && Number.isNaN(betragAusEingabe(f.price))) {
+            showToast("Bitte einen gültigen Preis eingeben (nur Zahl, z.B. 45 oder 45,50).");
+            return;
+        }
         setLeistungForm({ ...f, step: "sign" });
     }
     // Nach der Unterschrift: Leistung verbindlich im Fahrtenbuch des Schülers speichern
@@ -16117,7 +16142,7 @@ function App() {
         // Im Formular gibt der Fahrlehrer den GESAMTPREIS ein/sieht ihn, daher hier umrechnen.
         const price = (f.priceMode === "auto")
             ? ((pricePerHour === "" || pricePerHour == null) ? null : Number(pricePerHour))
-            : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((Number(f.price) / ue) * 100) / 100);
+            : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((betragAusEingabe(f.price) / ue) * 100) / 100);
         // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
         // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
         // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
@@ -16165,7 +16190,7 @@ function App() {
             showToast("Bitte eine Uhrzeit angeben.");
             return;
         }
-        const priceVal = (lessonForm.price === "" || lessonForm.price == null) ? null : Number(lessonForm.price);
+        const priceVal = betragAusEingabe(lessonForm.price); // "1.200" = 1200, nicht 1,2
         // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
         // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
         // summieren per reduce, ein einziger NaN-Betrag macht die gesamte Summe NaN) - kostenSection()
@@ -24067,7 +24092,8 @@ function App() {
             const f = vehicleCostForm;
             if (!f)
                 return;
-            const amount = parseFloat((f.amount || "").replace(",", "."));
+            // parseBetrag statt parseFloat: "1.200" (Versicherung) wurde sonst zu 1,20 € (Abschluss-Audit).
+            const amount = parseBetrag(f.amount || "");
             if (isNaN(amount) || amount < 0) {
                 setVehicleCostForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." });
                 return;
@@ -29216,7 +29242,9 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-preis-pro-ue" }, "Preis pro UE (45 Minuten)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-preis-pro-ue", type: "text", inputMode: "decimal", value: pricePerHour, onChange: e => savePricePerHour(normDecimal(e.target.value)), placeholder: "z.B. 55", style: { flex: 1 } }),
+                                    // EntwurfFeld statt Rohtext: gespeichert wird nur ein gültiger Betrag ("1.200" = 1200),
+                                    // Ungültiges bleibt rot markierter Entwurf (Abschluss-Audit, wie C-H3).
+                                    React.createElement(EntwurfFeld, { id: "field-preis-pro-ue", inputMode: "decimal", wert: (school && school.price_hour != null) ? school.price_hour : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: "", onWert: savePricePerHour, placeholder: "z.B. 55", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8, marginTop: 6 } }, "Standardisierte Preismeldung (geplante Reform)"),
@@ -29224,7 +29252,7 @@ function App() {
                             [["price_grundgebuehr", "Grundgebühr"], ["price_lehrmaterial", "Lehrmaterial"], ["price_sonderfahrt", "Sonderfahrt (je UE)"], ["price_pruefungsvorstellung", "Prüfungsvorstellung"]].map(([field, label]) => React.createElement("div", { key: field, className: "field", style: { marginBottom: 10 } },
                                 React.createElement("label", { htmlFor: "field-preismeldung-" + field }, label),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-preismeldung-" + field, type: "text", inputMode: "decimal", value: (school && school[field] != null) ? school[field] : "", onChange: e => savePreismeldungPreis(field, normDecimal(e.target.value)), placeholder: "z.B. 50", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-preismeldung-" + field, inputMode: "decimal", wert: (school && school[field] != null) ? school[field] : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: v => savePreismeldungPreis(field, v), placeholder: "z.B. 50", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€")))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 16 }, onClick: openPreismeldung }, "Preismeldung als PDF erstellen"),
                             React.createElement("div", { className: "field" },
@@ -31814,7 +31842,7 @@ function App() {
                 React.createElement("div", { style: { textAlign: "right", fontSize: 13, color: "var(--muted)", marginBottom: 4 } },
                     "Kosten dieser Stunde: ",
                     React.createElement("b", { style: { color: "var(--ink)" } },
-                        (((Number(lessonForm.minutes) || 0) / 45) * (Number(lessonForm.price) || 0)).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+                        (((Number(lessonForm.minutes) || 0) / 45) * (betragAusEingabe(lessonForm.price) || 0)).toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
                         " \u20AC")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10, marginBottom: 8 }, onClick: saveLessonForm }, "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setLessonForm(null) }, "Abbrechen"))),
@@ -32036,7 +32064,7 @@ function App() {
         leistungForm && leistungForm.step === "sign" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const veh = vehicles.find(v => v.id === leistungForm.vehicleId);
-            const price = (leistungForm.priceMode === "auto") ? leistungPriceAuto(leistungForm) : ((leistungForm.price === "" || leistungForm.price == null) ? null : Number(leistungForm.price));
+            const price = (leistungForm.priceMode === "auto") ? leistungPriceAuto(leistungForm) : betragAusEingabe(leistungForm.price);
             return React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
                 React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Leistung best\u00E4tigen"),
