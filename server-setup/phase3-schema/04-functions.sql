@@ -521,6 +521,10 @@ begin
 end;
 $function$;
 
+-- Abschluss-Audit 2026-09 (Migration abschluss_schule_zuordnung_email_suche): lehnt ab, wenn das
+-- Profil schon einer (anderen) Fahrschule zugeordnet ist - Schutz gegen Umhängen nach einer
+-- Offline-Fehlanzeige des Wiederherstellungs-Screens. Schulwechsel nur über adminDetachTeacher
+-- (school_id = NULL) und danach normalen Beitritt.
 CREATE OR REPLACE FUNCTION public.create_and_assign_school(p_name text)
  RETURNS TABLE(school_id uuid, school_name text)
  LANGUAGE plpgsql
@@ -529,13 +533,23 @@ CREATE OR REPLACE FUNCTION public.create_and_assign_school(p_name text)
 AS $function$
 declare
   v_school schools%rowtype;
+  v_bisher uuid;
 begin
   if _ist_demo() then
     raise exception 'Im Demo-Modus koennen keine Fahrschulen angelegt werden.';
   end if;
 
+  if auth.uid() is null then
+    raise exception 'Nicht angemeldet';
+  end if;
+
   if p_name is null or length(trim(p_name)) = 0 then
     raise exception 'Bitte einen Namen für die Fahrschule angeben';
+  end if;
+
+  select p.school_id into v_bisher from profiles p where p.id = auth.uid() for update;
+  if v_bisher is not null then
+    raise exception 'Dein Konto ist bereits einer Fahrschule zugeordnet. Bitte die App neu laden.';
   end if;
 
   insert into schools (name, subtitle, color)
@@ -729,6 +743,10 @@ begin
 end;
 $function$;
 
+-- Abschluss-Audit 2026-09 (Migration abschluss_schule_zuordnung_email_suche): lehnt ab, wenn das
+-- Profil schon einer (anderen) Fahrschule zugeordnet ist - Schutz gegen Umhängen nach einer
+-- Offline-Fehlanzeige des Wiederherstellungs-Screens. Schulwechsel nur über adminDetachTeacher
+-- (school_id = NULL) und danach normalen Beitritt.
 CREATE OR REPLACE FUNCTION public.join_school_by_code(p_code text)
  RETURNS TABLE(school_id uuid, school_name text)
  LANGUAGE plpgsql
@@ -737,6 +755,7 @@ CREATE OR REPLACE FUNCTION public.join_school_by_code(p_code text)
 AS $function$
 declare
   v_school schools%rowtype;
+  v_bisher uuid;
 begin
   if _ist_demo() then
     raise exception 'Im Demo-Modus kann die Fahrschule nicht gewechselt werden.';
@@ -749,6 +768,11 @@ begin
   select * into v_school from schools s where s.invite_code = p_code;
   if not found then
     raise exception 'Ungültiger Einladungscode';
+  end if;
+
+  select p.school_id into v_bisher from profiles p where p.id = auth.uid() for update;
+  if v_bisher is not null and v_bisher <> v_school.id then
+    raise exception 'Dein Konto ist bereits einer anderen Fahrschule zugeordnet. Bitte die App neu laden. Für einen Wechsel der Fahrschule wende dich an den Support.';
   end if;
 
   perform set_config('app.trusted_profile_write', 'on', true);
@@ -910,6 +934,8 @@ AS $function$
     )
 $function$;
 
+-- Abschluss-Audit 2026-09 (G-M10, zweite Hälfte; Migration abschluss_schule_zuordnung_email_suche):
+-- nur noch Treffer in der eigenen Fahrschule - vorher schulübergreifende Konten-Enumeration.
 CREATE OR REPLACE FUNCTION public.profile_id_by_email(p_email text)
  RETURNS TABLE(id uuid, email text)
  LANGUAGE sql
@@ -918,6 +944,9 @@ CREATE OR REPLACE FUNCTION public.profile_id_by_email(p_email text)
 AS $function$
   select p.id, p.email from public.profiles p
   where p.email = lower(trim(p_email))
+    and auth.uid() is not null
+    and p.school_id is not null
+    and p.school_id = (select me.school_id from public.profiles me where me.id = auth.uid())
   limit 1
 $function$;
 
@@ -933,6 +962,8 @@ $function$;
 -- Neue Fehlercodes (Client v2.9.33 zeigt unbekannte Codes als "nicht verfügbar"):
 --   INVALID_TIME (kein Start / Ende nicht nach Start), TOOLONG (> 240 Minuten),
 --   OUTSIDE_HOURS (außerhalb der Arbeitszeit - der Client prüft das vorab schon selbst).
+-- Abschluss-Audit 2026-09 (Migration abschluss_buchung_fremde_anfragen_kein_overlap): fremde
+-- offene Anfragen zählen nicht mehr als OVERLAP (K-H1-Rest), Begründung im Rumpf.
 CREATE OR REPLACE FUNCTION public.public_book_or_propose_appointment(code text, p_start timestamp with time zone, p_end timestamp with time zone, p_name text, p_note text, p_pin text DEFAULT NULL::text, p_art text DEFAULT NULL::text)
  RETURNS jsonb
  LANGUAGE plpgsql
@@ -948,7 +979,7 @@ declare
   v_dow int; v_daykey text; v_day jsonb;
   v_start_local text; v_end_local text;
   v_within_hours boolean := true; v_instant boolean := false;
-  v_name text; v_offen int; v_offen_name int;
+  v_name text; v_offen int; v_offen_name int; v_konflikt_anfragen int;
   v_tz constant text := 'Europe/Berlin';
 begin
   if p_art is not null and p_art not in ('ÜL','AB','NF') then
@@ -1002,7 +1033,19 @@ begin
   end if;
   if not v_within_hours then raise exception 'OUTSIDE_HOURS'; end if;
 
-  select count(*) into v_conflicts from appointments a
+  -- K-H1 (Abschluss-Audit): offene Anfragen ANDERER Absender (pending, noch keinem Schüler
+  -- zugeordnet) blockieren nicht mehr. Sonst konnte jemand ohne PIN mit wechselnden Namen
+  -- (40 Anfragen x 240 Min. pro Tag) wochenlang jeden Slot mit OVERLAP sperren - auch für echte
+  -- Schüler. Eine Anfrage ist noch kein Termin: bei zwei Anfragen auf denselben Slot entscheidet
+  -- der Fahrlehrer. Eigene offene Anfragen (gleicher Name) und alle bestätigten Termine zählen
+  -- weiter. Eine Sofortbuchung über eine fremde offene Anfrage hinweg wird zur normalen Anfrage
+  -- (siehe v_instant unten), damit sie die ältere Anfrage nicht still überholt.
+  select count(*) filter (where not (a.status = 'pending' and a.student_id is null
+                                     and lower(trim(a.title)) <> lower(v_name))),
+         count(*) filter (where a.status = 'pending' and a.student_id is null
+                                and lower(trim(a.title)) <> lower(v_name))
+    into v_conflicts, v_konflikt_anfragen
+  from appointments a
   where a.owner = v_owner and a.start_at < v_end
     and coalesce(a.end_at, a.start_at + interval '45 minutes') > p_start;
   if v_conflicts > 0 then raise exception 'OVERLAP'; end if;
@@ -1059,7 +1102,8 @@ begin
   v_instant := v_ok and v_row.id is not null
     and coalesce((v_row.data->>'instantBookOptIn')::boolean, false)
     and p_art is null
-    and p_start >= now() + interval '2 hours';
+    and p_start >= now() + interval '2 hours'
+    and v_konflikt_anfragen = 0;
 
   -- Fahrlehrer-Limit in Minuten, gezählt wie in der Anzeige des Buchungslinks: alles außer
   -- offenen Anfragen. Ist es erreicht, wird aus der Sofortbuchung eine normale Anfrage.
@@ -3118,3 +3162,36 @@ $function$;
 
 REVOKE ALL ON FUNCTION public.teacher_reset_student_pin(uuid, text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.teacher_reset_student_pin(uuid, text) TO authenticated;
+
+-- Registrierung per Einladungscode: vorab prüfen, ob der Code existiert, ohne die Fahrschule
+-- preiszugeben (Live-Migration invite_code_gueltig vom 23.9.2026, hier nachgezogen - fehlte bei
+-- einem Neuaufbau, fiel die Registrierung still auf "Konto ohne Fahrschule" zurück).
+CREATE OR REPLACE FUNCTION public.invite_code_gueltig(p_code text)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  select case
+    when p_code is null or length(trim(p_code)) < 6 then false
+    else exists (select 1 from schools s where s.invite_code = trim(p_code))
+  end;
+$function$;
+
+-- Abschluss-Audit 2026-09 (Migration abschluss_dateien_loeschen_policies): Hilfsfunktion der
+-- Storage-Policies *_verwaist in 06-grants-storage.sql. SECURITY DEFINER, weil unter RLS private
+-- Videos eines Kollegen unsichtbar wären und "keine Zeile mehr" dann fälschlich wahr wäre.
+CREATE OR REPLACE FUNCTION public._storage_pfad_verwaist(p_bucket text, p_name text)
+ RETURNS boolean
+ LANGUAGE sql
+ STABLE SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+  select case p_bucket
+    when 'videos' then not exists (select 1 from public.videos v where v.storage_path = p_name)
+    when 'theory-files' then not exists (select 1 from public.theory_resources r where r.file_path = p_name)
+    else false
+  end
+$function$;
+REVOKE ALL ON FUNCTION public._storage_pfad_verwaist(text, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public._storage_pfad_verwaist(text, text) TO authenticated;

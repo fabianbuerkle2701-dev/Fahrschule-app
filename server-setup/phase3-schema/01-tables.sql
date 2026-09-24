@@ -221,7 +221,8 @@ CREATE TABLE public.staff_files (
 CREATE TABLE public.student_files (
   id uuid DEFAULT gen_random_uuid() NOT NULL,
   student_id uuid NOT NULL,
-  owner uuid NOT NULL,
+  -- wer hochgeladen hat; NULL, wenn dieses Konto inzwischen gelöscht ist (Dokument gehört dem Schüler)
+  owner uuid,
   category text DEFAULT 'sonstiges'::text NOT NULL,
   filename text NOT NULL,
   storage_path text NOT NULL,

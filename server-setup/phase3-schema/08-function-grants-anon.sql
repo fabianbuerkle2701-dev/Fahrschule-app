@@ -68,3 +68,17 @@ REVOKE ALL ON FUNCTION public.public_propose_appointment(text, timestamp with ti
 REVOKE ALL ON FUNCTION public._student_pin_matches(text, text) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.teacher_reset_student_pin(uuid, text) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.teacher_reset_student_pin(uuid, text) TO authenticated;
+
+-- Abschluss-Audit 2026-09: nachgezogen, damit ein Neuaufbau (netcup) dieselben Rechte hat wie live.
+-- invite_code_gueltig läuft vor dem Login (Registrierung) - deshalb bewusst auch anon.
+REVOKE ALL ON FUNCTION public.invite_code_gueltig(text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.invite_code_gueltig(text) TO anon, authenticated;
+REVOKE ALL ON FUNCTION public.profile_id_by_email(text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.profile_id_by_email(text) TO authenticated;
+REVOKE ALL ON FUNCTION public._storage_pfad_verwaist(text, text) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public._storage_pfad_verwaist(text, text) TO authenticated;
+-- L-M4: den Zähler erhöhen dürfen nur die Netlify-Functions (service_role). Live erst NACH dem
+-- Function-Deploy (server-setup/post-deploy-audit-2026-09.sql) - bei einem Neuaufbau laufen die
+-- neuen Functions von Anfang an, deshalb hier direkt.
+REVOKE ALL ON FUNCTION public.public_chat_rate_limit(text, integer, text) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.public_chat_rate_limit(text, integer, text) TO service_role;

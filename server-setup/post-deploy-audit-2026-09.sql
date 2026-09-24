@@ -27,3 +27,11 @@
 -- dürfen künftig nur noch die Functions selbst (service_role).
 REVOKE ALL ON FUNCTION public.public_chat_rate_limit(text, integer, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.public_chat_rate_limit(text, integer, text) TO service_role;
+
+-- Abschluss-Audit 2026-09 (L-N9-Rest) - NICHT per SQL, nur im Supabase-Dashboard:
+--   - Auth > Password Security: "Leaked password protection" (HaveIBeenPwned) einschalten.
+--     Betrifft nur neue/geänderte Passwörter, bestehende Konten bleiben unberührt.
+--   - pg_net liegt im Schema public (Advisor extension_in_public). pg_net ist nicht
+--     verschiebbar (ALTER EXTENSION ... SET SCHEMA geht nicht); nur per Drop/Neuanlage im Schema
+--     extensions - vorher prüfen, dass notify_appointment_push/Cron-Jobs net.http_post weiter finden.
+--     Kein akutes Risiko, bei Gelegenheit (z.B. beim netcup-Umzug) erledigen.

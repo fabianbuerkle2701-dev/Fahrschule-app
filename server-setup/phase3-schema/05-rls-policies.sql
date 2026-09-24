@@ -194,6 +194,12 @@ CREATE POLICY theory_questions_select_authenticated ON public.theory_questions A
                    AND p.school_id = (SELECT me.school_id FROM profiles me WHERE me.id = (SELECT auth.uid())))
     )
   );
+-- Abschluss-Audit 2026-09 (L-H2-Rest): übernommene KI-Übungsfragen ließen sich nie wieder entfernen (keine UPDATE-/
+-- DELETE-Policy, kein RPC) - eine fachlich falsche Frage blieb für die ganze Fahrschule sichtbar.
+-- Löschen darf nur, wer sie angelegt hat; amtliche Fragen (created_by IS NULL) bleiben tabu.
+-- Keine Fremdschlüssel zeigen auf theory_questions (Fortschritt/Markierungen tragen nur die id).
+CREATE POLICY theory_questions_delete_own ON public.theory_questions AS PERMISSIVE FOR DELETE TO authenticated
+  USING (created_by IS NOT NULL AND created_by = (SELECT auth.uid()) AND is_sample = true);
 
 ALTER TABLE public.theory_resources ENABLE ROW LEVEL SECURITY;
 CREATE POLICY demo_ro_no_delete ON public.theory_resources AS RESTRICTIVE FOR DELETE TO authenticated USING ((auth.uid() IS DISTINCT FROM '114d1f0a-9947-459d-8009-06282799ca44'::uuid));

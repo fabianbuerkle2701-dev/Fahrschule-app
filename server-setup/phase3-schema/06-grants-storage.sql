@@ -110,3 +110,53 @@ CREATE POLICY videos_storage_select ON storage.objects AS PERMISSIVE FOR SELECT 
         SELECT profiles.school_id FROM profiles WHERE profiles.id = auth.uid()
       )))
   ));
+
+-- Abschluss-Audit 2026-09 (Migration abschluss_dateien_loeschen_policies), Videos: videos_storage_select/_delete erlauben den Zugriff nur, solange noch eine
+-- videos-Zeile auf die Datei zeigt. deleteVideo() löscht aber zuerst die Zeile und dann die
+-- Datei - storage.remove() fand danach 0 Objekte, ohne Fehler: jede gelöschte Videodatei blieb
+-- für immer im Bucket. Zusätzlich erlaubt: (a) der Besitzer im eigenen Ordner (uid/...), (b) ein
+-- Kollege derselben Fahrschule, aber NUR für Dateien, auf die keine videos-Zeile mehr zeigt
+-- (genau der Fall "schulweites Video gelöscht"). SELECT ist nötig, weil die Storage-API beim
+-- Löschen die betroffenen Zeilen zurückliest (DELETE ... RETURNING).
+CREATE POLICY videos_storage_select_verwaist ON storage.objects AS PERMISSIVE FOR SELECT TO authenticated
+  USING (bucket_id = 'videos' AND (
+    (storage.foldername(name))[1] = (auth.uid())::text
+    OR (public._storage_pfad_verwaist('videos', objects.name)
+        AND EXISTS (SELECT 1 FROM public.profiles p
+                    WHERE p.id::text = (storage.foldername(objects.name))[1]
+                      AND p.school_id IS NOT NULL
+                      AND p.school_id = (SELECT me.school_id FROM public.profiles me WHERE me.id = auth.uid())))
+  ));
+CREATE POLICY videos_storage_delete_verwaist ON storage.objects AS PERMISSIVE FOR DELETE TO authenticated
+  USING (bucket_id = 'videos' AND (
+    (storage.foldername(name))[1] = (auth.uid())::text
+    OR (public._storage_pfad_verwaist('videos', objects.name)
+        AND EXISTS (SELECT 1 FROM public.profiles p
+                    WHERE p.id::text = (storage.foldername(objects.name))[1]
+                      AND p.school_id IS NOT NULL
+                      AND p.school_id = (SELECT me.school_id FROM public.profiles me WHERE me.id = auth.uid())))
+  ));
+
+-- Abschluss-Audit 2026-09, theory-files hatte gar keine DELETE-Policy - Zurückziehen/Ablehnen eines Beitrags löschte
+-- nur die theory_resources-Zeile, die Datei blieb liegen. Erlaubt: der Einreicher im eigenen
+-- Ordner, und wer den Beitrag prüfen darf (_can_review_theory_resource) - solange die Zeile noch
+-- existiert oder, wenn sie schon weg ist, für Dateien im Ordner eines prüfbaren Einreichers.
+-- Die App ruft das Löschen der Datei erst mit einem Client-Update auf (index.html).
+CREATE POLICY theory_files_storage_select_verwaist ON storage.objects AS PERMISSIVE FOR SELECT TO authenticated
+  USING (bucket_id = 'theory-files' AND (
+    (storage.foldername(name))[1] = (auth.uid())::text
+    OR (public._storage_pfad_verwaist('theory-files', objects.name)
+        AND EXISTS (SELECT 1 FROM public.profiles p
+                    WHERE p.id::text = (storage.foldername(objects.name))[1]
+                      AND public._can_review_theory_resource(p.id)))
+  ));
+CREATE POLICY theory_files_storage_delete ON storage.objects AS PERMISSIVE FOR DELETE TO authenticated
+  USING (bucket_id = 'theory-files' AND (
+    (storage.foldername(name))[1] = (auth.uid())::text
+    OR EXISTS (SELECT 1 FROM public.theory_resources r
+               WHERE r.file_path = objects.name AND public._can_review_theory_resource(r.proposed_by))
+    OR (public._storage_pfad_verwaist('theory-files', objects.name)
+        AND EXISTS (SELECT 1 FROM public.profiles p
+                    WHERE p.id::text = (storage.foldername(objects.name))[1]
+                      AND public._can_review_theory_resource(p.id)))
+  ));
