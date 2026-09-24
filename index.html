@@ -12684,6 +12684,9 @@ function App() {
         // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
         // entscheiden", nicht "verwerfen". Beim nächsten Start wird wieder gefragt.
         if (recRestore) setRecRestore(null);
+        // "Fahrlehrer krank" liegt (zIndex 1240) über allen Blättern darunter - Escape/Zurück
+        // schloss bisher erst das Fenster DAHINTER, und auch mitten im Absagen (Audit G-M7).
+        else if (sickModal) { if (!sickModal.busy) setSickModal(null); }
         else if (kiPlan) { if (!kiPlan.uebernehmen) setKiPlan(null); }
         else if (wegPlan) { if (!wegPlan.uebernehmen) setWegPlan(null); }
         else if (leerlaufPlan) setLeerlaufPlan(null);
@@ -12728,7 +12731,6 @@ function App() {
             setHandoverModal(null); }
         else if (interessentForm) { if (!interessentForm.busy)
             setInteressentForm(null); }
-        else if (sickModal) setSickModal(null);
         else if (theoryGenModal) setTheoryGenModal(null);
         else if (calShare) setCalShare(null);
         else if (paketKnappOpen) setPaketKnappOpen(false);
@@ -23005,6 +23007,9 @@ function App() {
     // ggf. eingeschränkt), der die Zeit für Buchungen blockiert, aber nirgends als Unterrichtszeit zählt.
     const URLAUB_MARK = "\u00A7URLAUB\u00A7";
     function isUrlaub(a) { return !!(a && typeof a.note === "string" && a.note.indexOf(URLAUB_MARK) === 0); }
+    // Anzeigename eines Urlaubsblocks - "Fahrlehrer krank" sperrt den Tag über denselben Marker,
+    // im Kalender soll dort aber nicht "Urlaub" stehen.
+    function urlaubTitel(a) { return (a && a.note === URLAUB_MARK + "Krank") ? "Krank" : "Urlaub"; }
     // Illustration für Terminarten ohne Schülerbezug (2026-09-13) - liefert null, wenn der Termin
     // zu einem Schüler gehört, dann zeigt die Zeile stattdessen dessen Profilbild.
     // "Sonstige Tätigkeiten" deckt beides ab: die per Notiz markierten (isSonstige) und die
@@ -23128,49 +23133,88 @@ function App() {
             return false;
         return (stu.drivenLessons || []).some(l => l.leistung && l.apptId === a.id);
     }
-    // "Fahrlehrer krank": bestätigte Fahrstunden eines Tages, die bei Absage einen Schüler
-    // betreffen würden (Sonstige Tätigkeit und Urlaub zählen nicht als "Ausfall für jemanden").
+    // "Fahrlehrer krank": alle noch bevorstehenden Termine eines Tages, die bei einer Absage
+    // jemanden betreffen. Nicht nur bestätigte: offene Anfragen/Vorschläge (pending), Warteliste-
+    // Angebote (offered) und Stornoanfragen blieben sonst stehen und ließen sich weiter annehmen,
+    // obwohl der Fahrlehrer krank ist (Audit G-M6). Urlaub und per Notiz markierte sonstige
+    // Tätigkeiten zählen nicht. Nur bevorstehende - vergangene Fahrstunden desselben Tages haben
+    // stattgefunden, removeAppt löscht wirklich.
+    const SICK_STATUS = ["confirmed", "pending", "offered", "cancel_requested"];
     function sickDayAppts(dateKey) {
         const jetzt = new Date();
-        // Nur noch bevorstehende Termine des Tages - sonst würden beim "Fahrlehrer krank"-Sammelabsagen
-        // auch bereits gegebene (vergangene) Fahrstunden desselben Tages endgültig gelöscht (removeAppt
-        // löscht wirklich, siehe cancelSickDay mit noUndo:true), obwohl die Stunde real stattgefunden hat.
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey && new Date(a.start_at) > jetzt)
+        return (appts || []).filter(a => SICK_STATUS.includes(a.status) && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey && new Date(a.start_at) > jetzt)
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
+    }
+    // Vorauswahl: Fahrstunden ja; private Termine, Theorieunterricht und sonstige Tätigkeiten
+    // (ST/STI) nein - die hängen nicht zwingend am Fahrlehrer-Auto und wurden bisher ohne
+    // Abwahl und ohne Rückgängig mitgelöscht (Audit G-M6). Jede Zeile lässt sich umstellen.
+    function sickStandardAuswahl(a) {
+        const art = apptArt(a);
+        return !(art === "PRIVAT" || art === "TH" || art === "ST" || art === "STI");
+    }
+    function sickAusgewaehlt(modal, a) {
+        const u = (modal && modal.umgestellt) || {};
+        return Object.prototype.hasOwnProperty.call(u, a.id) ? !!u[a.id] : sickStandardAuswahl(a);
     }
     // WhatsApp-Text für eine krankheitsbedingte Absage - ohne Ersatztermin, der wird separat
     // vereinbart (Fahrlehrer weiß bei der Absage selbst oft noch nicht, wann Ersatz möglich ist).
     function waSickCancelText(appt, stu) {
         const name = (stu && stu.vorname) ? stu.vorname : (apptStudentName(appt) || appt.title || "");
         const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
-        return greet + "leider muss deine Fahrstunde am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
+        const was = appt.status === "confirmed" ? "deine Fahrstunde" : "der Termin";
+        return greet + "leider muss " + was + " am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
     }
-    // Bestätigte Termine eines Tages absagen (Fahrlehrer krank). Gibt die abgesagten Termine
+    // Den (Rest-)Tag als "Krank" sperren - über die vorhandene Urlaub-Logik (URLAUB_MARK), damit
+    // ihn Buchungslink, Lücken-Radar und Terminvorschläge als belegt sehen. Heute ab jetzt (die
+    // schon gefahrenen Stunden des Vormittags bleiben unberührt), sonst ganztägig. Liegt dort
+    // bereits Urlaub, wird nichts doppelt angelegt. Liefert true, wenn der Tag danach gesperrt ist.
+    async function sickTagSperren(dateKey) {
+        let vonZeit = "00:00";
+        if (dateKey === ymd(new Date())) {
+            const p = berlinParts(new Date());
+            const min = p.hour * 60 + p.minute - ((p.hour * 60 + p.minute) % 5);
+            if (min >= 23 * 60 + 55)
+                return false;
+            vonZeit = String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
+        }
+        const startISO = combineDT(dateKey, vonZeit), endISO = combineDT(dateKey, "23:59");
+        const s = new Date(startISO).getTime(), e = new Date(endISO).getTime();
+        const schon = (apptsRef.current || []).some(a => isUrlaub(a) && new Date(a.start_at).getTime() < e && s < new Date(a.end_at || a.start_at).getTime());
+        if (schon)
+            return true;
+        const c = await addAppt({ title: "Krank", start_at: startISO, end_at: endISO, status: "confirmed", note: URLAUB_MARK + "Krank", art: "" });
+        return !!c;
+    }
+    // Ausgewählte Termine eines Tages absagen (Fahrlehrer krank). Gibt die abgesagten Termine
     // samt Schüler zurück, damit die Benachrichtigungsliste danach angezeigt werden kann - die
     // Termine selbst sind zu diesem Zeitpunkt bereits aus appts entfernt (removeAppt).
-    async function cancelSickDay(dateKey) {
-        const list = sickDayAppts(dateKey);
+    // Bewusst KEIN Warteliste-Angebot mehr: die frei gewordenen Zeiten gibt es nicht, der
+    // Fahrlehrer ist ja krank. Früher bot maybeOfferWaitlist() genau diese Stunden anderen
+    // Schülern an (Audit G-H2).
+    async function cancelSickDay(dateKey, ids, sperren) {
+        const list = sickDayAppts(dateKey).filter(a => ids.includes(a.id));
         const cancelled = [];
         const failed = [];
         for (const a of list) {
+            // Schüler VOR dem Löschen bestimmen, und über apptStudent(): Buchungslink-Termine
+            // tragen oft nur den Namen im Titel, student_id ist leer - sie landeten sonst ohne
+            // Nummer in der Benachrichtigungsliste (Audit G-M8).
+            const stu = apptStudent(a);
             // Nur tatsächlich erfolgreich gelöschte Termine als "abgesagt" zählen - sonst hätte eine
             // fehlgeschlagene Einzellöschung (z.B. Netzwerkfehler) die WhatsApp-Benachrichtigung fürs
-            // Kind trotzdem als erledigt angezeigt, obwohl der Termin in der DB noch bestätigt ist.
+            // Kind trotzdem als erledigt angezeigt, obwohl der Termin in der DB noch besteht.
             const ok = await removeAppt(a.id, { noUndo: true, label: "Termin krankheitsbedingt abgesagt" });
             if (ok)
-                cancelled.push({ appt: a, stu: a.student_id ? students.find(s => s.id === a.student_id) : null });
+                cancelled.push({ appt: a, stu });
             else
                 failed.push(a);
         }
         if (failed.length)
-            showToast((failed.length === 1 ? "1 Termin konnte" : (failed.length + " Termine konnten")) + " nicht abgesagt werden und " + (failed.length === 1 ? "bleibt" : "bleiben") + " weiterhin bestätigt - bitte erneut versuchen.");
-        if (cancelled.length) {
-            // sickDayAppts() liefert nur status:"confirmed"-Termine, ein erneutes Erzwingen des
-            // Status ist hier anders als bei confirmCancel() nicht nötig.
-            const [first, ...rest] = cancelled.map(c => c.appt);
-            maybeOfferWaitlist(first, rest);
-        }
-        return cancelled;
+            showToast((failed.length === 1 ? "1 Termin konnte" : (failed.length + " Termine konnten")) + " nicht abgesagt werden und " + (failed.length === 1 ? "bleibt" : "bleiben") + " weiterhin bestehen - bitte erneut versuchen.");
+        const gesperrt = sperren ? await sickTagSperren(dateKey) : false;
+        if (sperren && !gesperrt)
+            showToast("Der Tag konnte nicht als „Krank“ im Kalender gesperrt werden. Bitte bei Bedarf von Hand als Urlaub eintragen.", "error");
+        return { cancelled, gesperrt };
     }
     // "Fahrlehrer krank"-Modal: eigene Funktion statt inline in der großen JSX-Rückgabe von
     // App(), damit die Verschachtelung überschaubar bleibt (siehe Changelog-Fehler durch
@@ -23178,63 +23222,90 @@ function App() {
     function renderSickModal() {
         const busy = !!sickModal.busy;
         const list = sickModal.cancelled ? [] : sickDayAppts(sickModal.date);
+        const gewaehlt = list.filter(a => sickAusgewaehlt(sickModal, a));
+        const sperren = sickModal.sperren !== false;
+        const schonGesperrt = (appts || []).some(a => isUrlaub(a) && ymd(a.start_at) === sickModal.date);
         async function doCancelAll() {
+            if (sickModal.busy)
+                return;
             setSickModal({ ...sickModal, busy: true });
-            const cancelled = await cancelSickDay(sickModal.date);
-            setSickModal({ date: sickModal.date, cancelled });
+            const r = await cancelSickDay(sickModal.date, gewaehlt.map(a => a.id), sperren);
+            setSickModal({ date: sickModal.date, cancelled: r.cancelled, gesperrt: r.gesperrt });
         }
+        const umstellen = (a) => setSickModal(m => m && !m.busy ? ({ ...m, umgestellt: { ...(m.umgestellt || {}), [a.id]: !sickAusgewaehlt(m, a) } }) : m);
+        const statusText = { pending: "Anfrage", offered: "Angebot", cancel_requested: "Storno angefragt" };
         const selectStep = React.createElement(React.Fragment, null,
             React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Fahrlehrer krank"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
-                "Sagt alle bestätigten Fahrstunden des gewählten Tages auf einmal ab. Für jeden betroffenen Schüler öffnet sich danach eine fertige WhatsApp-Nachricht zum Verschicken - du siehst sie vor dem Senden und tippst sie einzeln durch."),
+                "Sagt die angehakten Termine des gewählten Tages auf einmal ab. Für jeden betroffenen Schüler bekommst du danach eine fertige WhatsApp-Nachricht - du siehst sie vor dem Senden und tippst sie einzeln durch. Die frei werdenden Zeiten werden niemandem angeboten."),
             React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                 React.createElement("label", null, "Tag",
-                React.createElement("input", { type: "date", value: sickModal.date, onChange: e => setSickModal({ ...sickModal, date: e.target.value }) }))),
+                React.createElement("input", { type: "date", value: sickModal.date, disabled: busy, onChange: e => setSickModal({ ...sickModal, date: e.target.value, umgestellt: {} }) }))),
             list.length === 0
-                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Keine bestätigten Fahrstunden an diesem Tag.")
-                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
-                    list.map((a, i) => React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
-                        terminBild(a, apptStudent(a), { px: 36 }),
-                        React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, apptStudentName(a) || a.title || "Termin"),
-                        React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, hm(a.start_at) + " Uhr")))),
-            list.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doCancelAll },
-                busy ? "Sagt ab…" : ("Alle " + list.length + (list.length === 1 ? " Fahrstunde absagen" : " Fahrstunden absagen"))),
-            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setSickModal(null) }, "Abbrechen"));
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Keine bevorstehenden Termine an diesem Tag.")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 12 } },
+                    list.map((a, i) => {
+                        const an = sickAusgewaehlt(sickModal, a);
+                        const stu = apptStudent(a);
+                        return React.createElement("label", { key: a.id, className: "check", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", margin: 0, cursor: busy ? "default" : "pointer", borderTop: i > 0 ? "1px solid var(--line)" : "none", opacity: an ? 1 : 0.6 } },
+                            React.createElement("input", { type: "checkbox", checked: an, disabled: busy, onChange: () => umstellen(a) }),
+                            terminBild(a, stu, { px: 36 }),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600, overflowWrap: "anywhere" } }, (stu ? dispName(stu) : "") || a.title || artLabelPlain(apptArt(a)) || "Termin"),
+                                (statusText[a.status] || !sickStandardAuswahl(a)) && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
+                                    [statusText[a.status], !sickStandardAuswahl(a) ? artLabelPlain(apptArt(a)) : ""].filter(Boolean).join(" · "))),
+                            React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", flexShrink: 0 } }, hm(a.start_at) + " Uhr"));
+                    })),
+            !schonGesperrt && React.createElement("label", { className: "check", style: { display: "flex", margin: "0 2px 14px", fontSize: 13, lineHeight: 1.45 } },
+                React.createElement("input", { type: "checkbox", checked: sperren, disabled: busy, onChange: e => setSickModal({ ...sickModal, sperren: e.target.checked }) }),
+                "Tag im Kalender als „Krank“ sperren – dann bucht niemand über den Buchungslink hinein"),
+            (gewaehlt.length > 0 || (sperren && !schonGesperrt)) && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doCancelAll },
+                busy ? "Sagt ab…"
+                    : gewaehlt.length === 0 ? "Nur den Tag sperren"
+                        : ((gewaehlt.length === 1 ? "1 Termin absagen" : ("Alle " + gewaehlt.length + " Termine absagen")) + ((sperren && !schonGesperrt) ? " und Tag sperren" : ""))),
+            React.createElement("button", { className: "btn btn-ghost btn-block", disabled: busy, onClick: () => setSickModal(null) }, "Abbrechen"));
         const notifyRows = sickModal.cancelled ? sickModal.cancelled.map((c, i) => {
             const num = c.stu ? waNumber(c.stu.tel) : "";
             const waLink = num ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waSickCancelText(c.appt, c.stu)), target: "_blank", rel: "noopener noreferrer",
                     className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: "#128C3E" } }, "WhatsApp")
-                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, "keine Nummer");
+                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, c.stu ? "keine Nummer" : "kein Schüler");
             return React.createElement("div", { key: c.appt.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, apptStudentName(c.appt) || c.appt.title || "Schüler"),
+                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, (c.stu ? dispName(c.stu) : "") || c.appt.title || "Termin"),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, hm(c.appt.start_at) + " Uhr")),
                 waLink);
         }) : [];
+        const anzahl = sickModal.cancelled ? sickModal.cancelled.length : 0;
         const notifyStep = React.createElement(React.Fragment, null,
             React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } },
-                "✓ " + (sickModal.cancelled ? sickModal.cancelled.length : 0) + ((sickModal.cancelled && sickModal.cancelled.length === 1) ? " Fahrstunde abgesagt" : " Fahrstunden abgesagt")),
+                "✓ " + (anzahl === 1 ? "1 Termin abgesagt" : anzahl + " Termine abgesagt")),
+            sickModal.gesperrt && React.createElement("p", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 8 } },
+                "Der Tag steht jetzt als „Krank“ im Kalender und ist für Buchungen gesperrt."),
             notifyRows.length > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
                 "Jetzt noch Bescheid geben - ein Tipp öffnet WhatsApp mit fertigem Text, du siehst ihn vor dem Senden."),
             React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
                 notifyRows.length === 0 ? React.createElement("div", { style: { padding: "10px 0", fontSize: 13.5, color: "var(--muted)" } }, "Keine Schüler zu benachrichtigen.") : notifyRows),
             React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setSickModal(null) }, "Fertig"));
-        return React.createElement("div", { onClick: () => { if (!busy)
-                    setSickModal(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        // Tipp daneben schließt nur die Auswahl, nicht die Benachrichtigungsliste: die Termine sind
+        // dann schon gelöscht, und wer sie versehentlich wegtippt, weiß nicht mehr, wen er noch
+        // anschreiben muss (Audit G-M7). Dort geht es nur über "Fertig" zu.
+        return React.createElement("div", { onClick: () => { if (!busy && !sickModal.cancelled)
+                    setSickModal(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Fahrlehrer krank", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "88dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 sickModal.cancelled ? notifyStep : selectStep));
     }
     // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
-    function confirmedMinutesOnDay(dateKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
+    // liste: optional ein anderer Terminstand als appts (Sammel-Übernahme, siehe kiPlanUebernehmen).
+    function confirmedMinutesOnDay(dateKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Bestätigte praktische Minuten eines einzelnen Schülers an einem Tag bzw. in einer Woche -
     // für das Schüler-Limit (im Unterschied zu confirmedMinutesOnDay, das über alle Schüler summiert).
-    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
+    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
@@ -24367,7 +24438,7 @@ function App() {
                             return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left",
                                     borderRadius: 12, marginTop: 4, background: "var(--amber-bg)" } },
                                 React.createElement("img", { src: TERMINBILD_URLAUB, alt: "", "aria-hidden": "true", style: { width: TERMIN_BILD_PX, height: TERMIN_BILD_PX, borderRadius: "50%", flexShrink: 0, objectFit: "contain", background: "var(--surface)", padding: 2 } }),
-                                React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, "Urlaub"),
+                                React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, urlaubTitel(a)),
                                 React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(a)));
                         }
                         const pend = a.status === "pending";
@@ -24464,7 +24535,7 @@ function App() {
                 urlaubDay && React.createElement("button", { onClick: () => openEditAppt(urlaubDay), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", textAlign: "left",
                         borderBottom: "1px solid var(--line)", borderLeft: "4px solid var(--amber)", background: "var(--amber-bg)" } },
                     React.createElement("span", { style: { fontSize: 17 } }, "\uD83C\uDF34"),
-                    React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, "Urlaub"),
+                    React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, urlaubTitel(urlaubDay)),
                     React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(urlaubDay))),
                 React.createElement("div", { onClick: e => {
                         // Tipp auf eine freie Stelle legt einen Termin zur angetippten Uhrzeit an (15-Min-Raster).
