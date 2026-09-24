@@ -32657,6 +32657,34 @@ function TheoryPractice({ code }) {
         publicTheoryExamHistory(code, loggedInName, loggedInPin).then(setExamHistory);
         /* eslint-disable-next-line */
     }, [code, loggedIn, loggedInName, loggedInPin]);
+    // Angefangene Probeprüfung überlebt einen Tabwechsel: der Schülerbereich baut den Reiter beim
+    // Wechsel komplett neu auf (key je Reiter), und bisher war eine halb beantwortete Prüfung
+    // damit kommentarlos weg. Gespeichert werden nur Fragen-IDs, Position und die bisherigen
+    // Antworten; nach 24 Stunden gilt der Stand als verwaist.
+    const LS_PRUEF = "v3_theorie_pruefung_" + code;
+    const [pruefungOffen, setPruefungOffen] = React.useState(() => { try {
+        const x = JSON.parse(localStorage.getItem(LS_PRUEF) || "null");
+        return x && Array.isArray(x.ids) && x.ids.length && Array.isArray(x.answers) && Date.now() - (x.at || 0) < 24 * 3600000 ? x : null;
+    }
+    catch (e) {
+        return null;
+    } });
+    React.useEffect(() => {
+        if (screen !== "pruefung" || !queue.length)
+            return;
+        try {
+            localStorage.setItem(LS_PRUEF, JSON.stringify({ ids: queue.map(q => q.id), qIndex, answers: examAnswers, at: Date.now() }));
+        }
+        catch (e) { }
+        /* eslint-disable-next-line */
+    }, [screen, queue, qIndex, examAnswers]);
+    function pruefungSpeicherWeg() {
+        try {
+            localStorage.removeItem(LS_PRUEF);
+        }
+        catch (e) { }
+        setPruefungOffen(null);
+    }
     if (questions === undefined)
         return React.createElement("div", { className: "card", style: { padding: "16px", fontSize: 13, color: "var(--muted)" } }, "Lädt…");
     if (questions === null)
@@ -32709,12 +32737,48 @@ function TheoryPractice({ code }) {
         setChecked(false);
         setExamAnswers([]);
         setExamResult(null);
+        pruefungSpeicherWeg();
         setScreen("pruefung");
     }
-    function toggleOption(optId, multi) {
+    function pruefungFortsetzen() {
+        const x = pruefungOffen;
+        if (!x)
+            return;
+        const byId = {};
+        questions.forEach(q => { byId[q.id] = q; });
+        const qs = x.ids.map(id => byId[id]).filter(Boolean);
+        // Fragenbestand hat sich inzwischen geändert (Klasse umgestellt, Fragen entfernt) - dann
+        // lieber neu beginnen, als eine Prüfung mit Lücken zu werten.
+        if (qs.length !== x.ids.length || x.qIndex >= qs.length) {
+            pruefungSpeicherWeg();
+            return;
+        }
+        setQueue(qs);
+        setQIndex(x.qIndex || 0);
+        setExamAnswers(x.answers);
+        setSelected([]);
+        setChecked(false);
+        setExamResult(null);
+        setPruefungOffen(null);
+        setScreen("pruefung");
+    }
+    async function pruefungAbbrechen() {
+        if (examAnswers.length > 0 && !(await askConfirm({ message: "Probeprüfung abbrechen? Die bisherigen Antworten werden nicht gewertet.", confirmLabel: "Prüfung abbrechen", cancelLabel: "Weitermachen", danger: true })))
+            return;
+        pruefungSpeicherWeg();
+        setExamAnswers([]);
+        setSelected([]);
+        setScreen("pruefung_intro");
+    }
+    // Immer freie Mehrfachauswahl mit Kästchen, wie in der echten Prüfung: dort steht nie dabei,
+    // wie viele Antworten richtig sind. Vorher gab es Radio-Knöpfe bei genau einer richtigen
+    // Antwort, Kästchen plus "Mehrfachauswahl" sonst - damit verriet die Form die Anzahl der
+    // richtigen Antworten, und die Probeprüfung war leichter als das Original. Bewertet wird
+    // unverändert per Mengenvergleich (genau die richtigen, keine zu viel, keine zu wenig).
+    function toggleOption(optId) {
         if (checked)
             return;
-        setSelected(prev => multi ? (prev.includes(optId) ? prev.filter(x => x !== optId) : [...prev, optId]) : [optId]);
+        setSelected(prev => prev.includes(optId) ? prev.filter(x => x !== optId) : [...prev, optId]);
     }
     function toggleMark(q) {
         const newMarked = !(progress[q.id] && progress[q.id].marked);
@@ -32779,7 +32843,8 @@ function TheoryPractice({ code }) {
         const q = queue[qIndex];
         const correctIds = q.options.filter(o => o.correct).map(o => o.id);
         const isCorrect = correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
-        const nextAnswers = [...examAnswers, { id: q.id, points: q.points, correct: isCorrect }];
+        // sel: die gegebene Antwort - daraus zeigt das Ergebnis, was genau falsch war
+        const nextAnswers = [...examAnswers, { id: q.id, points: q.points, correct: isCorrect, sel: selected.slice() }];
         setExamAnswers(nextAnswers);
         // Fach lokal genauso fortschreiben wie in checkAnswer() - der Server (derselbe
         // public_theory_answer_submit-Aufruf unten) tut es ohnehin. Vorher wurde hier nur
@@ -32798,6 +32863,7 @@ function TheoryPractice({ code }) {
             setSelected([]);
             return;
         }
+        pruefungSpeicherWeg();
         const errorPoints = nextAnswers.filter(a => !a.correct).reduce((s, a) => s + (Number(a.points) || 0), 0);
         const richtig = nextAnswers.filter(a => a.correct).length;
         const R = pruefungsRegeln(myErsterwerb);
@@ -32865,7 +32931,7 @@ function TheoryPractice({ code }) {
                 myErsterwerb === false && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55, marginBottom: 10 } },
                     "Bei dir ist im Fahrschülerprofil eine Erweiterung hinterlegt - du hast also schon eine Fahrerlaubnis. Deshalb weniger Grundstoff-Fragen und eine strengere Grenze. Stimmt das nicht, sag deiner Fahrschule Bescheid."),
                 React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.6, marginBottom: 16 } },
-                    "Bestanden ist die Probeprüfung bei höchstens " + R.maxFehler + " Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - wie in der echten Prüfung. Alle Fragen stammen aus dem amtlichen Katalog, mit den zugehörigen Abbildungen. Das Ergebnis ist eine Orientierung, keine Vorhersage.")); })(),
+                    "Bestanden ist die Probeprüfung bei höchstens " + R.maxFehler + " Fehlerpunkten (Summe der Punktwerte falsch beantworteter Fragen) - wie in der echten Prüfung. Die Fragen stammen aus dem amtlichen Fragenkatalog (amtlicher Fragentext, ohne die amtlichen Abbildungen); Fragen mit Bild sind selbst gestellte Übungsfragen der Fahrschule. Das Ergebnis ist eine Orientierung, keine Vorhersage.")); })(),
                 examHistory.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12, justifyContent: "space-between" }, onClick: () => setScreen("pruefung_verlauf") },
                     React.createElement("span", null, examHistory.length + " Probeprüfung" + (examHistory.length === 1 ? "" : "en") + " gespeichert"),
                     React.createElement("span", { style: { color: "var(--muted)", fontWeight: 400 } }, "Verlauf ansehen ›")),
@@ -32937,19 +33003,43 @@ function TheoryPractice({ code }) {
                     "Zwei falsch beantwortete 5-Punkte-Fragen bedeuten auch in der echten Prüfung „nicht bestanden“ – selbst wenn die Fehlerpunkte noch unter der Grenze liegen.")),
             r.nichtGespeichert && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.45 } },
                 "Dieses Ergebnis konnte nicht in deinem Fahrschüler-Konto gespeichert werden und taucht deshalb nicht im Verlauf auf. Bitte prüfe deine Verbindung."),
+            // Bisher nur die Summe - wer durchgefallen war, erfuhr nicht, WELCHE Fragen falsch waren,
+            // und konnte genau daraus nichts lernen.
+            (() => {
+                const falsch = examAnswers.filter(a => a && !a.correct).map(a => ({ a, q: queue.find(x => x.id === a.id) })).filter(x => x.q);
+                if (!falsch.length)
+                    return null;
+                return React.createElement("div", { style: { marginBottom: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Falsch beantwortet (" + falsch.length + ")"),
+                    falsch.map(({ a, q }) => React.createElement("div", { key: q.id, className: "card", style: { padding: "14px 15px", marginBottom: 8 } },
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 6 } }, q.points + " Punkte"),
+                        renderQuestionMedia(q),
+                        React.createElement("div", { style: { fontSize: 14, fontWeight: 700, lineHeight: 1.4, marginBottom: q.answer_stem ? 6 : 10 } }, q.question),
+                        q.answer_stem && React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.4, color: "var(--ink-2)", marginBottom: 8 } }, q.answer_stem, "\u2009\u2026"),
+                        q.options.map(o => {
+                            const gewaehlt = Array.isArray(a.sel) && a.sel.includes(o.id);
+                            const zeichen = o.correct ? "\u2713" : (gewaehlt ? "\u2717" : "");
+                            return React.createElement("div", { key: o.id, style: { display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13, lineHeight: 1.45, padding: "5px 8px", borderRadius: 8, marginBottom: 4,
+                                    background: o.correct ? "var(--sage-bg)" : (gewaehlt ? "var(--danger-bg)" : "transparent"),
+                                    color: o.correct ? "var(--sage-deep)" : (gewaehlt ? "var(--danger)" : "var(--ink-2)") } },
+                                React.createElement("span", { style: { width: 14, flexShrink: 0, fontWeight: 800 } }, zeichen),
+                                React.createElement("span", { style: { flex: 1 } }, o.text, gewaehlt ? " (deine Antwort)" : ""));
+                        }))));
+            })(),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_intro") }, "Neue Probeprüfung"),
             examHistory.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: () => setScreen("pruefung_verlauf") }, "Alle Ergebnisse ansehen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setScreen("themen") }, "Zurück zu den Themen"));
     }
     if (screen === "pruefung") {
         const q = queue[qIndex];
-        const multi = q.options.filter(o => o.correct).length > 1;
         return React.createElement("div", null,
-            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 } },
-                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, "Probeprüfung · Frage " + (qIndex + 1) + " / " + queue.length),
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 8 } },
+                // Vorher gab es hier keinen Weg hinaus außer alle Fragen zu beantworten.
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "0 14px", minHeight: 44, fontSize: 13 }, onClick: pruefungAbbrechen }, "Abbrechen"),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, "Frage " + (qIndex + 1) + " / " + queue.length),
                 renderMarkButton(q)),
             React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.points + " Punkte" + (multi ? " · Mehrfachauswahl" : "")),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.points + " Punkte"),
                 renderHerkunft(q),
                 renderQuestionMedia(q),
                 React.createElement("div", { style: { fontSize: 15, fontWeight: 700, lineHeight: 1.4, marginBottom: q.answer_stem ? 8 : 16 } }, q.question),
@@ -32957,15 +33047,14 @@ function TheoryPractice({ code }) {
                 React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 9, marginBottom: 16 } },
                     q.options.map(o => {
                         const isSel = selected.includes(o.id);
-                        return React.createElement("button", { key: o.id, onClick: () => toggleOption(o.id, multi), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: isSel ? "var(--orange-soft)" : "var(--field-bg)", border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), cursor: "pointer", fontSize: 14 } },
-                            React.createElement("span", { style: { width: 18, height: 18, borderRadius: multi ? 5 : 99, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0 } }),
+                        return React.createElement("button", { key: o.id, role: "checkbox", "aria-checked": isSel, onClick: () => toggleOption(o.id), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: isSel ? "var(--orange-soft)" : "var(--field-bg)", border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), cursor: "pointer", fontSize: 14 } },
+                            React.createElement("span", { "aria-hidden": "true", style: { width: 18, height: 18, borderRadius: 5, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 12, fontWeight: 800, lineHeight: 1 } }, isSel ? "\u2713" : ""),
                             React.createElement("span", { style: { flex: 1 } }, o.text));
                     })),
                 React.createElement("button", { className: "btn btn-primary btn-block", disabled: selected.length === 0, onClick: submitExamAnswer }, qIndex + 1 < queue.length ? "Weiter" : "Prüfung abschließen")));
     }
     if (screen === "uebung") {
         const q = queue[qIndex];
-        const multi = q.options.filter(o => o.correct).length > 1;
         const correctIds = q.options.filter(o => o.correct).map(o => o.id);
         const isCorrect = checked && correctIds.length === selected.length && correctIds.every(id => selected.includes(id));
         return React.createElement("div", null,
@@ -32974,7 +33063,7 @@ function TheoryPractice({ code }) {
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 700 } }, (qIndex + 1) + " / " + queue.length + " · " + sessionRichtig + " richtig"),
                 renderMarkButton(q)),
             React.createElement("div", { className: "card", style: { padding: "16px 15px" } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.topic_key + " · " + q.points + " Punkte" + (multi ? " · Mehrfachauswahl" : "")),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 8 } }, q.topic_key + " · " + q.points + " Punkte"),
                 renderHerkunft(q),
                 renderQuestionMedia(q),
                 React.createElement("div", { style: { fontSize: 15, fontWeight: 700, lineHeight: 1.4, marginBottom: q.answer_stem ? 8 : 16 } }, q.question),
@@ -32997,8 +33086,8 @@ function TheoryPractice({ code }) {
                             bg = "var(--orange-soft)";
                             border = "1.5px solid var(--orange)";
                         }
-                        return React.createElement("button", { key: o.id, disabled: checked, onClick: () => toggleOption(o.id, multi), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: bg, border, cursor: checked ? "default" : "pointer", fontSize: 14 } },
-                            React.createElement("span", { style: { width: 18, height: 18, borderRadius: multi ? 5 : 99, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0 } }),
+                        return React.createElement("button", { key: o.id, role: "checkbox", "aria-checked": isSel, disabled: checked, onClick: () => toggleOption(o.id), style: { display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "11px 13px", borderRadius: 12, background: bg, border, cursor: checked ? "default" : "pointer", fontSize: 14 } },
+                            React.createElement("span", { "aria-hidden": "true", style: { width: 18, height: 18, borderRadius: 5, border: "1.5px solid " + (isSel ? "var(--orange)" : "var(--line)"), background: isSel ? "var(--orange)" : "transparent", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 12, fontWeight: 800, lineHeight: 1 } }, isSel ? "\u2713" : ""),
                             React.createElement("span", { style: { flex: 1 } }, o.text));
                     })),
                 checked && q.explanation && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } },
@@ -33032,10 +33121,17 @@ function TheoryPractice({ code }) {
         return Math.round((gemeistert / qs.length) * 100);
     }
     const gesamtPct = topicPct(questions);
+    const faelligeQs = questions.filter(q => { const st = lernStand(q, progress); return st.gesehen && st.faellig; });
     return React.createElement("div", null,
         !loggedIn && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", background: "var(--field-bg)", borderRadius: 10, padding: "10px 12px", marginBottom: 14, lineHeight: 1.5 } }, "Melde dich unter „Mein Fortschritt“ an, damit dein Übungsfortschritt gespeichert wird. Üben geht auch so schon."),
         // Eine card.home-list statt vier einzelner card-Kacheln - dasselbe Kachel-Mosaik-Muster,
         // das home-v2 auf der Fahrlehrer-Startseite bewusst durch eine Haarlinien-Liste ersetzt hat.
+        pruefungOffen && React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14, borderLeft: "4px solid var(--orange)" } },
+            React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 15, marginBottom: 3 } }, "Angefangene Probeprüfung"),
+            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Frage " + (Math.min(pruefungOffen.qIndex || 0, pruefungOffen.ids.length - 1) + 1) + " von " + pruefungOffen.ids.length),
+            React.createElement("div", { style: { display: "flex", gap: 8 } },
+                React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, onClick: pruefungFortsetzen }, "Fortsetzen"),
+                React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: pruefungSpeicherWeg }, "Verwerfen"))),
         React.createElement("div", { className: "card home-list", style: { marginBottom: 14 } },
         React.createElement("button", { onClick: () => setScreen("pruefung_intro") },
             React.createElement("span", { className: "home-iconchip", style: { background: "var(--clay-bg)", color: "var(--clay-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
@@ -33058,6 +33154,13 @@ function TheoryPractice({ code }) {
                 React.createElement("span", { className: "home-v2-display", style: { display: "block", fontWeight: 800, fontSize: 15 } }, "Zufällig üben"),
                 React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, Math.min(MIX_LEN, questions.length) + " Fragen aus allen Themen gemischt")),
             gesamtPct !== null && React.createElement("span", { style: { fontSize: 13, fontWeight: 800, color: "var(--orange-deep)", flexShrink: 0 } }, gesamtPct + "%")),
+        // "Zufällig üben" zieht 20 aus dem ganzen Katalog und trifft fällige Wiederholungen dadurch
+        // kaum - die Lernkartei plant sie, aber es gab keinen Weg, genau sie zu üben.
+        faelligeQs.length > 0 && React.createElement("button", { onClick: () => startRound(lernReihenfolge(faelligeQs, progress).slice(0, MIX_LEN)) },
+            React.createElement("span", { className: "home-iconchip", style: { background: "var(--amber-bg)", color: "var(--orange-deep)", flexShrink: 0 } }, React.createElement(IcBook, null)),
+            React.createElement("span", { style: { flex: 1 } },
+                React.createElement("span", { className: "home-v2-display", style: { display: "block", fontWeight: 800, fontSize: 15 } }, "Fällige wiederholen"),
+                React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2 } }, faelligeQs.length + " zur Wiederholung fällig"))),
         markedQs.length > 0 && React.createElement("button", { onClick: () => startRound(markedQs) },
             React.createElement("span", { className: "home-iconchip", style: { background: "var(--sky-bg)", color: "var(--sky-deep)", flexShrink: 0 } }, "★"),
             React.createElement("span", { style: { flex: 1 } },
@@ -33083,7 +33186,7 @@ function TheoryPractice({ code }) {
                         React.createElement("div", { style: { height: "100%", width: Math.round(100 * sch.gesehen / MINDESTENS_GEUEBT) + "%", background: "var(--orange)" } })),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
                         "Für Klasse " + (myKlasse || DEFAULT_KLASSE) + " stehen " + sch.gesamt + " Fragen bereit: " + sch.grundstoff + " Grundstoff für alle Klassen und " + sch.zusatzstoff + " klassenspezifische."));
-            const faellig = questions.filter(q => { const st = lernStand(q, progress); return st.gesehen && st.faellig; }).length;
+            const faellig = faelligeQs.length;
             const gut = sch.bestehtVoraussichtlich;
             return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14,
                     border: "1.5px solid " + (gut ? "var(--green)" : "var(--amber)"),
