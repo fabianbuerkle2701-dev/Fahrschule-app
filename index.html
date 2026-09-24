@@ -15776,7 +15776,8 @@ function App() {
     // Vorlage (ADK/Strecken) für eine Führerscheinklasse lesen. Hat die Klasse noch keine
     // gespeicherte ADK, wird die Standard-ADK angezeigt (V3 die gewohnte Karte, sonst BVF),
     // damit die Karte nie leer ist. Sobald etwas bearbeitet wird, wird sie für die Klasse gespeichert.
-    // quelle optional: Vorlagen-Stand, aus dem gelesen wird (Standard: tpl dieses Renderns).
+    // quelle (optional): Vorlage, aus der gelesen wird - Standard ist der Render-Stand tpl.
+    // writeTplForKlasse übergibt tplRef.current, weil es auch nach await aufgerufen wird.
     function tplFor(klasse, quelle) {
         return withFahrzeugkunde(tplForRaw(klasse, quelle));
     }
@@ -15809,12 +15810,17 @@ function App() {
             adkTitel: "", streckenTitel: "" };
     }
     // Vorlage für eine bestimmte Klasse aktualisieren (Rest bleibt unverändert)
+    // Rechnet gegen tplRef.current statt gegen den Render-Stand tpl: "Vorlage übernehmen" ruft
+    // das erst nach await askConfirm auf. Mit dem alten tpl ging ein inzwischen gespeichertes
+    // updated_at verloren, das nächste Speichern meldete dann einen Konflikt mit sich selbst
+    // und verwarf die eben übernommene Schul-Vorlage.
     function writeTplForKlasse(klasse, patch) {
         // Gegen den AKTUELLEN Stand (tplRef) rechnen, nicht gegen das tpl des Renderns: Aufrufer nach
         // await askConfirm (Stadtvorlage, Admin-Vorlage übernehmen, Zurücksetzen) hielten sonst
         // eine Vorlage von vor dem Dialog samt altem updated_at in der Hand (Abschluss-Audit).
         const tpl = tplRef.current;
         const k = klasse || DEFAULT_KLASSE;
+        const tpl = tplRef.current;
         const hasOwn = !!(tpl && tpl.byKlasse && tpl.byKlasse[k]);
         // Erste Änderung an einer Klasse ohne eigene Vorlage: Der geerbte Stand (Klasse B)
         // wird als unabhängige tiefe Kopie übernommen. Spätere Änderungen an B und an
@@ -16462,6 +16468,10 @@ function App() {
     // gemerkt und nur neu berechnet, wenn appts/students sich wirklich \u00E4ndern.
     const STILL_TAGE = 21;
     const pendingCount = React.useMemo(() => (appts || []).filter(a => a.status === "pending" || a.status === "cancel_requested").length, [appts]);
+    // Storno-Anfragen getrennt gezählt: pendingCount enthält sie mit, sie sind aber keine
+    // Terminvorschläge. Startseite UND globaler Hinweisbalken nennen beides getrennt, deshalb
+    // hier einmal zentral statt nur lokal in renderHome.
+    const stornoCount = React.useMemo(() => (appts || []).filter(a => a.status === "cancel_requested").length, [appts]);
     const stillList = React.useMemo(() => {
         const stillVorher = Date.now() - STILL_TAGE * 86400000;
         const letzterTermin = {};
@@ -19097,8 +19107,24 @@ function App() {
             showToast("Für diese Fahrstunde läuft gerade eine Streckenaufzeichnung. Bitte zuerst stoppen (und speichern), bevor der Eintrag gelöscht wird.");
             return;
         }
-        const lessons = (active.lessons || []).filter(l => l.id !== id);
-        updateActive({ lessons });
+        // Läuft nach await askConfirm (Tagebuch-Papierkorb): gegen den AKTUELLEN Stand löschen statt
+        // updateActive mit dem Render-Schnappschuss - ein Fokus-Refetch während der offenen
+        // Rückfrage (z. B. Zahlung einer Kollegin am geteilten Schüler) wäre sonst still
+        // überschrieben worden. Dazu Rückgängig wie bei removeLesson/removePayment: der Eintrag
+        // trägt Bewertungen, Notizen und die aufgezeichnete Strecke.
+        const sid = active && active.id;
+        if (!sid)
+            return;
+        const vorher = ((studentsRef.current || []).find(s => s.id === sid) || {}).lessons || [];
+        const pos = vorher.findIndex(l => l && l.id === id);
+        if (pos < 0)
+            return;
+        const eintrag = vorher[pos];
+        const patched = schuelerAendernUndSpeichern(sid, cur => (cur.lessons || []).some(l => l && l.id === id)
+            ? { ...cur, lessons: cur.lessons.filter(l => !(l && l.id === id)) } : null);
+        if (!patched)
+            return;
+        showUndo("Fahrstunde gelöscht", () => schuelerAendernUndSpeichern(sid, cur => ({ ...cur, lessons: wiederEinfuegen(cur.lessons, eintrag, pos) })));
     }
     function setLessonRating(id, field, val) {
         const l = (active.lessons || []).find(x => x.id === id);
@@ -20007,65 +20033,85 @@ function App() {
         sec.items.forEach(it => { strecken[it.id] = Math.max(0, Math.min(target, effCount(active, it))); });
         updateActive({ strecken });
     }
+    // Die vier Bulk-Funktionen laufen alle erst nach await askConfirm. Sie rechnen deshalb gegen
+    // den AKTUELLEN Schüler (schuelerAendernUndSpeichern) statt updateActive mit dem
+    // Render-Schnappschuss: ein Fokus-Refetch während der offenen Rückfrage (z. B. ADK-Haken
+    // einer Kollegin am geteilten Schüler) wurde sonst mit den alten Werten überschrieben.
     // Bulk: fill or clear a whole ADK section
     function bulkADKSection(sec, fill) {
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        sec.items.forEach(it => {
-            const c = effCount(active, it);
-            items[it.id] = fill ? c : 0;
-            if (fill) {
-                const arr = adkDates[it.id] || [];
-                if (arr.indexOf(today) === -1)
-                    adkDates[it.id] = [...arr, today];
-            }
-        });
-        updateActive({ items, adkDates });
-    }
-    // Bulk: fill or clear ALL ADK
-    function bulkADKAll(fill) {
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        tplFor(active.klasse).adk.forEach(sec => sec.items.forEach(it => {
-            const c = effCount(active, it);
-            items[it.id] = fill ? c : 0;
-            if (fill) {
-                const arr = adkDates[it.id] || [];
-                if (arr.indexOf(today) === -1)
-                    adkDates[it.id] = [...arr, today];
-            }
-        }));
-        updateActive({ items, adkDates });
-    }
-    // Bulk: fill or clear a whole strecken section
-    function bulkStreckenSection(sec, fill) {
-        if (sec.usesAdkStore) { bulkADKSection(sec, fill); return; }
-        const strecken = { ...active.strecken };
-        sec.items.forEach(it => { strecken[it.id] = fill ? effCount(active, it) : 0; });
-        updateActive({ strecken });
-    }
-    // Bulk: fill or clear ALL strecken. Abschnitte mit usesAdkStore (Fahrzeugkunde) schreiben in
-    // active.items statt active.strecken - gleicher Fortschritt wie in der ADK.
-    function bulkStreckenAll(fill) {
-        const strecken = { ...active.strecken };
-        const items = { ...active.items };
-        const today = ymd(new Date());
-        const adkDates = { ...(active.adkDates || {}) };
-        tplFor(active.klasse).strecken.forEach(sec => sec.items.forEach(it => {
-            if (sec.usesAdkStore) {
-                items[it.id] = fill ? effCount(active, it) : 0;
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            sec.items.forEach(it => {
+                const c = effCount(cur, it);
+                items[it.id] = fill ? c : 0;
                 if (fill) {
                     const arr = adkDates[it.id] || [];
                     if (arr.indexOf(today) === -1)
                         adkDates[it.id] = [...arr, today];
                 }
-            }
-            else
-                strecken[it.id] = fill ? effCount(active, it) : 0;
-        }));
-        updateActive({ strecken, items, adkDates });
+            });
+            return { ...cur, items, adkDates };
+        });
+    }
+    // Bulk: fill or clear ALL ADK
+    function bulkADKAll(fill) {
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            tplFor(cur.klasse).adk.forEach(sec => sec.items.forEach(it => {
+                const c = effCount(cur, it);
+                items[it.id] = fill ? c : 0;
+                if (fill) {
+                    const arr = adkDates[it.id] || [];
+                    if (arr.indexOf(today) === -1)
+                        adkDates[it.id] = [...arr, today];
+                }
+            }));
+            return { ...cur, items, adkDates };
+        });
+    }
+    // Bulk: fill or clear a whole strecken section
+    function bulkStreckenSection(sec, fill) {
+        if (sec.usesAdkStore) { bulkADKSection(sec, fill); return; }
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const strecken = { ...cur.strecken };
+            sec.items.forEach(it => { strecken[it.id] = fill ? effCount(cur, it) : 0; });
+            return { ...cur, strecken };
+        });
+    }
+    // Bulk: fill or clear ALL strecken. Abschnitte mit usesAdkStore (Fahrzeugkunde) schreiben in
+    // active.items statt active.strecken - gleicher Fortschritt wie in der ADK.
+    function bulkStreckenAll(fill) {
+        if (!active)
+            return;
+        schuelerAendernUndSpeichern(active.id, cur => {
+            const strecken = { ...cur.strecken };
+            const items = { ...cur.items };
+            const today = ymd(new Date());
+            const adkDates = { ...(cur.adkDates || {}) };
+            tplFor(cur.klasse).strecken.forEach(sec => sec.items.forEach(it => {
+                if (sec.usesAdkStore) {
+                    items[it.id] = fill ? effCount(cur, it) : 0;
+                    if (fill) {
+                        const arr = adkDates[it.id] || [];
+                        if (arr.indexOf(today) === -1)
+                            adkDates[it.id] = [...arr, today];
+                    }
+                }
+                else
+                    strecken[it.id] = fill ? effCount(cur, it) : 0;
+            }));
+            return { ...cur, strecken, items, adkDates };
+        });
     }
     // Is a section fully done?
     function adkSectionFull(sec) { return sec.items.every(it => Math.min(adkDone(active, it), effCount(active, it)) >= effCount(active, it)); }
@@ -20339,7 +20385,7 @@ function App() {
             .map(a => ({ appt: a, stu: apptStudent(a) }));
         // pendingCount enthält auch Storno-Anfragen (status cancel_requested) - die sind keine
         // Terminvorschläge. Banner und Liste nennen sie deshalb getrennt.
-        const stornoAnzahl = pendingList.filter(x => x.appt.status === "cancel_requested").length;
+        const stornoAnzahl = stornoCount;
         const vorschlagAnzahl = pendingCount - stornoAnzahl;
         const anfragenText = [
             vorschlagAnzahl > 0 ? (vorschlagAnzahl === 1 ? "1 offener Terminvorschlag" : vorschlagAnzahl + " offene Terminvorschläge") : null,
@@ -20459,13 +20505,13 @@ function App() {
             // als selbst gebautes SVG: der Auftrag verlangt zwar eigene SVGs, im direkten Vergleich
             // sah die SVG-Variante aber deutlich schlechter aus (Nutzer-Entscheidung 2026-09-13).
             // Die Zeile in "Heute" unten bleibt trotzdem bestehen (vollständige Liste).
-            naechster ? React.createElement("button", { onClick: () => { if (naechsterStu) {
-                        setActiveId(naechsterStu.id);
-                        setView("adk");
-                    }
-                    else {
-                        setView("kalender");
-                    } }, className: "card soft", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
+            // Der Knopf heißt "Zum Termin →", führte mit Schüler aber in dessen ADK-Checkliste und
+            // ohne Schüler in den Kalender auf der gerade eingestellten Woche. Jetzt immer zum Tag
+            // des Termins, wie die Karte "Nächste Fahrstunde" in der Übersicht (Audit H-M4).
+            naechster ? React.createElement("button", { onClick: () => {
+                    zeigeKalenderTag(naechster.start_at, "tag");
+                    setView("kalender");
+                }, className: "card soft", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
                 React.createElement("img", { src: ILLUSTRATION_START, alt: "", "aria-hidden": "true", className: "ill-deko", style: { position: "absolute", right: -26, bottom: -20, width: "62%", maxWidth: 250, pointerEvents: "none" } }),
                 // Textspalte und Illustration teilen sich 347px Kartenbreite - beide können nicht
                 // gleichzeitig großzügig sein. Ursprünglich 58 % Text + 62 % Bild: das überlappte sich
@@ -20722,8 +20768,17 @@ function App() {
             // sonst hieß es "Kein Schüler gefunden", während der Schüler aufgeklappt darunter stand.
             students.length > 0 && (q || listFilter !== "alle") && filtered.filter(s => !s.archived && !s.pending).length === 0 && (() => {
                 const imArchiv = filtered.filter(s => s.archived).length;
-                const kein = imArchiv > 0 ? "Kein aktiver Sch\u00FCler" : "Kein Sch\u00FCler";
-                const archivZusatz = imArchiv > 0 ? " \u2013 " + (imArchiv === 1 ? "1 Treffer" : imArchiv + " Treffer") + " im Archiv." : ".";
+                // Treffer unter den neuen Anmeldungen (Karte oben, pendingList) ebenso nennen: die
+                // Karte wird nicht gefiltert, es stand sonst "Kein Schüler gefunden für „Max“",
+                // während Max oben als neue Anmeldung zu sehen war.
+                const alsAnmeldung = filtered.filter(s => s.pending && !s.archived && s._isMine).length;
+                const kein = (imArchiv > 0 || alsAnmeldung > 0) ? "Kein aktiver Sch\u00FCler" : "Kein Sch\u00FCler";
+                const trefferText = n => n === 1 ? "1 Treffer" : n + " Treffer";
+                const zusatzTeile = [
+                    alsAnmeldung > 0 ? trefferText(alsAnmeldung) + " unter den neuen Anmeldungen oben" : null,
+                    imArchiv > 0 ? trefferText(imArchiv) + " im Archiv" : null,
+                ].filter(Boolean);
+                const archivZusatz = zusatzTeile.length ? " \u2013 " + zusatzTeile.join(", ") + "." : ".";
                 return React.createElement("div", { style: { textAlign: "center", marginTop: 20 } },
                     React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", marginBottom: 10 } },
                         q ? kein + " gefunden f\u00FCr \u201E" + search.trim() + "\u201C" + (listFilter !== "alle" ? " mit diesem Filter" : "") + archivZusatz
@@ -22506,12 +22561,25 @@ function App() {
     // verschickte Erinnerung mit - wer vor Monaten zweimal erinnert wurde und bezahlt hatte, bekam
     // für eine neue Rechnung sofort den schärfsten Text. Zahlt der Schüler (auch teilweise),
     // beginnt die Staffel wieder freundlich.
+    // Neue Erinnerungen merken sich die bis dahin gezahlte Summe (gezahltBis). Sie gelten als
+    // laufend, solange seitdem kein Geld dazugekommen ist. Der reine Tagesvergleich ließ eine
+    // Erinnerung vom Tag einer Teilzahlung nie mitzählen (Zahlung und Erinnerung tragen dasselbe
+    // Datum), die Staffel schickte dann ein zweites Mal Stufe 1. Die Reihenfolge am selben Tag
+    // steht in keinem Datum, die Summe dagegen ist eindeutig. Alte Einträge ohne gezahltBis
+    // behalten den Datumsvergleich.
     function laufendeErinnerungen(stu) {
         const letzteZahlung = (stu.payments || []).reduce((m, pm) => {
             const d = pm && pm.date ? String(pm.date).slice(0, 10) : "";
             return d > m ? d : m;
         }, "");
-        return (stu.reminders || []).filter(r => r && r.date && String(r.date).slice(0, 10) > letzteZahlung);
+        const gezahlt = sumPayments(stu);
+        return (stu.reminders || []).filter(r => {
+            if (!r)
+                return false;
+            if (typeof r.gezahltBis === "number")
+                return gezahlt <= r.gezahltBis + 0.005;
+            return !!r.date && String(r.date).slice(0, 10) > letzteZahlung;
+        });
     }
     function sendReminder() {
         if (!active)
@@ -22535,7 +22603,7 @@ function App() {
         const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
         const text = reminderText(stage, active, open, lastInvoice);
         const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
-        const reminders = [...(active.reminders || []), { date: ymd(new Date()), stage, amount: open }];
+        const reminders = [...(active.reminders || []), { date: ymd(new Date()), stage, amount: open, gezahltBis: Math.round(sumPayments(active) * 100) / 100 }];
         updateActive({ reminders });
         window.open(url, "_blank");
     }
@@ -30503,7 +30571,9 @@ function App() {
                                 secBack(active, sec),
                                 "%)"),
                             sec.items.map(item => {
-                                const done = sec.usesAdkStore ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0);
+                                // Auf die Soll-Anzahl begrenzt wie die ADK-Zeilen oben und die Strecken-Ansicht:
+                                // wurde die Anzahl nachträglich gesenkt, stand im Ausdruck sonst "3 / 2".
+                                const done = Math.min(sec.usesAdkStore ? adkDone(active, item) : ((active.strecken && active.strecken[item.id]) || 0), effCount(active, item));
                                 return React.createElement("div", { key: item.id, className: "ps-row" },
                                     React.createElement("span", { className: "l" }, item.label),
                                     React.createElement("span", { className: "r" },
@@ -31388,7 +31458,12 @@ function App() {
                             background: "var(--field-bg)", border: "1px solid var(--line)", borderRadius: "var(--r-md)", padding: "12px", minHeight: 44, textAlign: "left" } },
                         React.createElement("span", { style: { width: 7, height: 7, borderRadius: "50%", background: "var(--amber)", flexShrink: 0 } }),
                         React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 13.5, fontWeight: 600 } },
-                            pendingCount === 1 ? "1 neuer Terminvorschlag" : pendingCount + " neue Terminvorschl\u00E4ge"),
+                            // Wie anfragenText in renderHome: eine reine Storno-Anfrage stand hier sonst als
+                            // "1 neuer Terminvorschlag".
+                            [
+                                pendingCount - stornoCount > 0 ? (pendingCount - stornoCount === 1 ? "1 neuer Terminvorschlag" : (pendingCount - stornoCount) + " neue Terminvorschl\u00E4ge") : null,
+                                stornoCount > 0 ? (stornoCount === 1 ? "1 Storno-Anfrage" : stornoCount + " Storno-Anfragen") : null,
+                            ].filter(Boolean).join(" \u00B7 ")),
                         React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", flexShrink: 0 } }, "Ansehen \u203A"))),
                 view === "home" && renderHome(),
                 view === "liste" && renderListe(),
