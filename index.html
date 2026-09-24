@@ -5632,7 +5632,10 @@ function clearAccountCaches(uid) {
         // wird - dafür muss sie nicht gelöscht werden.
         [cacheKey(uid), tplKey(uid), schoolKey(uid), recBufferKey(uid),
             "v3_bday_shown_" + uid,
-            "v3_packages_" + uid, "v3_price_hour_" + uid].forEach(k => localStorage.removeItem(k));
+            "v3_packages_" + uid, "v3_price_hour_" + uid,
+            // Buchungslimits sind (noch) geräteweit gespeichert - sonst startete das nächste Konto
+            // auf diesem Gerät mit den Limits des vorherigen, bis der Server-Stand da ist.
+            "v3_day_limit", "v3_week_limit", "v3_student_day_limit", "v3_student_week_limit"].forEach(k => localStorage.removeItem(k));
     }
     catch (e) { }
 }
@@ -9393,6 +9396,9 @@ function downloadApptIcs(a, summary) {
 // ── Eigenes Toast/Bestätigen-System statt window.showToast()/window.confirm() ──
 // Modul-weite Registrierung: welche gemountete <ToastConfirmHost> gerade aktiv ist.
 let _toastSetter = null, _confirmSetter = null, _promptSetter = null;
+// Steht gerade eine Rückfrage (askConfirm/askPrompt) offen? Die Zurück-Wischgeste hängt am
+// document und kennt den Dialog sonst nicht - sie schloss die Seite HINTER der offenen Rückfrage.
+let _rueckfrageOffen = false;
 function showToast(msg, tone) { if (_toastSetter)
     _toastSetter({ msg, tone: tone || "info", key: uniqueId("toast") }); }
 // Übersetzt die rohe Meldung eines fehlgeschlagenen Aufrufs in einen Satz, mit dem der Fahrlehrer
@@ -9491,6 +9497,10 @@ function ToastConfirmHost() {
     function dismiss() { resolve(confirmState && "abortValue" in confirmState ? confirmState.abortValue : false); }
     function resolvePrompt(val) { if (promptState)
         promptState.resolve(val); setPromptState(null); }
+    useEffect(() => {
+        _rueckfrageOffen = !!(confirmState || promptState);
+        return () => { _rueckfrageOffen = false; };
+    }, [confirmState, promptState]);
     useEffect(() => {
         if (!confirmState && !promptState) return;
         function onEsc(e) {
@@ -12647,7 +12657,10 @@ function EntwurfFeld({ wert, parse, onWert, leerWert, anzeige, ...rest }) {
         },
         onBlur: () => {
             fokusRef.current = false;
-            if (!text.trim() || ungueltig) {
+            // Beim Verlassen immer mit dem gültigen Wert abgleichen, nicht nur bei leer/ungültig:
+            // kam während des Tippens ein anderer Wert von außen (Speicherkonflikt lädt die Schule
+            // neu, Limits kommen vom Server nach), stand sonst weiter "25" im Feld, obwohl 20 gilt.
+            if (!text.trim() || ungueltig || zeige(parse(text.trim())) !== zeige(wert)) {
                 setText(zeige(wert));
                 setUngueltig(false);
             }
@@ -14138,14 +14151,20 @@ function App() {
         // die Buchungsseite hätte ihn als ganztägig bzw. nie buchbar gewertet. Der Hinweis steht
         // direkt am Tag; gespeichert wird, sobald alle Tage stimmig sind (Zwischenstände beim
         // Umstellen von Beginn und Ende landen so auch nicht kurz auf der Buchungsseite).
-        if (["mo", "di", "mi", "do", "fr", "sa"].some(k => arbeitszeitProblem(next && next[k]))) {
-            const offen = pendingSavesRef.current.get("workHours");
-            if (offen) {
-                clearTimeout(offen.timer);
-                pendingSavesRef.current.delete("workHours");
-            }
-            return;
-        }
+        // Zurückgehalten wird aber NUR der unstimmige Tag: für ihn geht der zuletzt gespeicherte
+        // Stand mit, alle anderen Tage werden normal gespeichert. Vorher verwarf ein halb
+        // ausgefüllter Montag still auch das Sperren von Samstag - nach dem Neuladen war Samstag
+        // wieder frei und über den Buchungslink buchbar.
+        const gespeichert = workHoursGespeichertRef.current || {};
+        const zuSpeichern = { ...(next || {}) };
+        ["mo", "di", "mi", "do", "fr", "sa"].forEach(k => {
+            if (!arbeitszeitProblem(zuSpeichern[k]))
+                return;
+            if (gespeichert[k] === undefined)
+                delete zuSpeichern[k];
+            else
+                zuSpeichern[k] = gespeichert[k];
+        });
         // Aufschub über planSave (statt eigenem Timer), damit auch das beim Verlassen der Seite
         // und vor dem Abmelden noch gespeichert wird (siehe pendingSavesRef).
         planSave("workHours", () => {
@@ -14154,7 +14173,7 @@ function App() {
             // Eigener Fehlerzustand fürs Speichern (Audit I-M6): vorher landete ein Speicherfehler
             // in workHoursError und hieß "konnten nicht geladen werden", und "Erneut versuchen"
             // lud den Server-Stand neu - die gerade gemachten Änderungen waren damit weg.
-            return saveWorkHoursToProfile(uid, next).then(() => { setWorkHoursSaveError(""); return true; }, e => {
+            return saveWorkHoursToProfile(uid, zuSpeichern).then(() => { workHoursGespeichertRef.current = zuSpeichern; setWorkHoursSaveError(""); return true; }, e => {
                 console.error("Arbeitszeiten speichern fehlgeschlagen:", e);
                 setWorkHoursSaveError(fehlerText(e));
                 return false;
@@ -14667,9 +14686,9 @@ function App() {
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
         else if (invoiceDraft) schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null));
-        // Wie der Tipp daneben mit Rückfrage bei Änderungen (H-N17) - Escape/Zurück-Geste
-        // verwarf die Eingaben sonst weiter ohne Nachfrage.
-        else if (apptForm) apptFormWegtippen();
+        // Wie beim Tipp neben das Blatt: geänderte Eingaben erst nach Rückfrage verwerfen - Escape
+        // bzw. die Zurück-Geste schlossen den Termin bisher ohne jede Prüfung.
+        else if (apptForm) { if (!apptForm.busy) apptFormWegtippen(); }
         else if (qrModal) setQrModal(false);
         // Audit I-M9: diese sieben Dialoge fehlten hier - Escape bzw. die Zurück-Geste schloss
         // dann den Bildschirm DAHINTER, während der Dialog offen stehen blieb. Reihenfolge nach
@@ -14861,7 +14880,9 @@ function App() {
         const drag = { startX: null, startY: null, tracking: false, verschoben: false };
         function onStart(e) {
             const t = e.touches[0];
-            drag.tracking = t.clientX <= EDGE_ZONE;
+            // Bei offener Rückfrage (askConfirm) keine Zurück-Geste - sonst navigierte sie hinter
+            // dem weiter offenen Dialog weg (Escape fängt ToastConfirmHost selbst ab).
+            drag.tracking = !_rueckfrageOffen && t.clientX <= EDGE_ZONE;
             drag.verschoben = false;
             drag.startX = t.clientX;
             drag.startY = t.clientY;
@@ -14922,6 +14943,7 @@ function App() {
             if (!drag.tracking || drag.startX == null) { drag.tracking = false; return; }
             drag.tracking = false;
             drag.verschoben = false;
+            if (_rueckfrageOffen) { settle(0); return; }
             const t = e.changedTouches[0];
             const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
             if (dx < THRESHOLD || Math.abs(dy) > Math.abs(dx)) { settle(0); return; }
@@ -15058,12 +15080,15 @@ function App() {
     const [workHours, setWorkHours] = useState(null); // null solange nicht geladen
     const [workHoursError, setWorkHoursError] = useState("");
     const [workHoursSaveError, setWorkHoursSaveError] = useState(""); // Speichern fehlgeschlagen (nicht Laden)
+    // Zuletzt geladener bzw. gespeicherter Server-Stand: writeWorkHours setzt für einen noch
+    // unstimmigen Tag diesen Stand ein, statt die Änderungen an allen anderen Tagen zu verwerfen.
+    const workHoursGespeichertRef = useRef(null);
     useEffect(() => {
         if (!uid)
             return;
         let cancelled = false; // späte Antwort für ein abgemeldetes Konto verwerfen (C-M8)
         fetchWorkHours(uid).then(h => { if (cancelled)
-            return; setWorkHours(h || {}); setWorkHoursError(""); })
+            return; workHoursGespeichertRef.current = h || {}; setWorkHours(h || {}); setWorkHoursError(""); })
             .catch(e => { console.error(e); if (!cancelled)
             setWorkHoursError(e.message || "Unbekannter Fehler"); });
         return () => { cancelled = true; };
@@ -15207,9 +15232,15 @@ function App() {
     // Server-Stand geladen und lokal übernommen, bevor irgendetwas zurückgeschrieben wird.
     const limitSaveChainRef = useRef(Promise.resolve());
     const limitSyncReady = useRef(false);
+    // Zuletzt vom Server übernommener bzw. erfolgreich gespeicherter Stand der vier Limits (als
+    // JSON), wie beim Anzeigenamen (nameServerStandRef): ohne den Abgleich schrieb der Effekt die
+    // gerade geladenen Werte sofort wieder zurück, sobald sie vom geräteweiten localStorage-Stand
+    // abwichen - überflüssig, und im schreibgeschützten Demo-Konto mit Fehler-Toast.
+    const limitServerStandRef = useRef(null);
     useEffect(() => {
         if (!uid) {
             limitSyncReady.current = false;
+            limitServerStandRef.current = null;
             return;
         }
         if (!limitSyncReady.current) {
@@ -15218,6 +15249,10 @@ function App() {
                 .then(({ data }) => {
                     if (!data)
                         return;
+                    // Genau die Werte, die gleich lokal gelten - null bei day/week_limit heißt
+                    // "nicht gesetzt", der lokale Wert bleibt dann und wird wie bisher gespeichert.
+                    limitServerStandRef.current = JSON.stringify([data.day_limit != null ? data.day_limit : null, data.week_limit != null ? data.week_limit : null,
+                        data.student_day_limit != null ? data.student_day_limit : 0, data.student_week_limit != null ? data.student_week_limit : 0]);
                     if (data.day_limit != null)
                         setDayLimit(data.day_limit);
                     if (data.week_limit != null)
@@ -15232,8 +15267,25 @@ function App() {
         // nach der für "495" an, blieb 49 gespeichert. Jetzt aufgeschoben (planSave: nur der letzte
         // Stand läuft, auch beim Verlassen der Seite) und hintereinander statt gleichzeitig.
         const lim = [dayLimit, weekLimit, studentDayLimit, studentWeekLimit];
+        const limStand = JSON.stringify(lim);
+        if (limStand === limitServerStandRef.current) {
+            // Unverändert gegenüber dem Server (direkt nach dem Laden oder zurückgetippt): nichts
+            // speichern, aber einen noch geplanten Zwischenstand verwerfen.
+            const offen = pendingSavesRef.current.get("limits");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("limits");
+            }
+            return;
+        }
         planSave("limits", () => {
-            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3]));
+            // Stand schon beim Einreihen übernehmen, nicht erst nach Erfolg: sonst galt während der
+            // laufenden Anfrage noch der alte Stand - tippte man in dem Moment auf den alten Wert
+            // zurück, wurde das als "unverändert" übersprungen und danach stand der neue Wert im
+            // Profil, der alte im Feld. Scheitert das Speichern, erzwingt null den nächsten Versuch.
+            limitServerStandRef.current = limStand;
+            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3]))
+                .then(ok => { if (!ok && limitServerStandRef.current === limStand) limitServerStandRef.current = null; return ok; });
             return limitSaveChainRef.current;
         }, 600);
     }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
@@ -15342,6 +15394,7 @@ function App() {
             setProfileData(null);
             setProfileComplete(true);
             setWorkHours(null);
+            workHoursGespeichertRef.current = null;
             setInteressenten([]);
             setInteressentenMissing(false);
             setInteressentenErr(null);
@@ -25707,9 +25760,22 @@ function App() {
         const f = apptForm;
         if (!f || f.busy)
             return;
-        if (f._stand !== undefined && apptFormStand(f) !== f._stand
-            && !await askConfirm({ title: "Änderungen verwerfen?", message: "Deine Eingaben in diesem Termin gehen verloren.", confirmLabel: "Verwerfen" }))
-            return;
+        if (f._stand !== undefined && apptFormStand(f) !== f._stand) {
+            // Dieselbe Sperre wie schliessenNachRueckfrage: Escape/Wischgeste/Tipp daneben laufen
+            // alle hier durch und dürfen keine zweite Rückfrage über die offene stapeln.
+            if (verwerfenFrageRef.current)
+                return;
+            verwerfenFrageRef.current = true;
+            let ok = false;
+            try {
+                ok = await askConfirm({ title: "Änderungen verwerfen?", message: "Deine Eingaben in diesem Termin gehen verloren.", confirmLabel: "Verwerfen" });
+            }
+            finally {
+                verwerfenFrageRef.current = false;
+            }
+            if (!ok)
+                return;
+        }
         setApptForm(null);
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
@@ -28996,7 +29062,9 @@ function App() {
             { id: "loeschprotokoll", section: "fahrschule", cluster: "Recht & Datenschutz", tone: "clay", label: "Löschprotokoll", icon: IC.rechnung, keywords: "löschen dsgvo datenschutz fahrlg protokoll aufbewahrung frist", status: loeschProtokoll.length ? (loeschProtokoll.length + " Löschung" + (loeschProtokoll.length === 1 ? "" : "en")) : "Keine Löschungen" },
             { id: "personalunterlagen", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Personalunterlagen", icon: IC.personal, keywords: "personal unterlagen fahrlehrer dateien", status: staffTeachers ? staffTeachers.length + " Fahrlehrer" : "Nicht geladen" },
             { id: "fuhrpark", section: "fahrschule", cluster: "Geld & Abrechnung", tone: "clay", label: "Fuhrpark & Auswertung", icon: IC.fuhrpark, keywords: "fahrzeug kalender leistungen offene beträge auswertung", status: "Kalender · Leistungen · Beträge" },
-            { id: "konto", section: "konto", tone: "sky", label: "Konto", icon: IC.konto, keywords: "email abmelden konto schüler", status: session.user.email + " · " + myStudents + " Schüler" },
+            // Passwort ändern und Konto löschen stehen nur in der Konto-Unterseite - über die Suche
+            // müssen sie trotzdem auffindbar sein (App Store 5.1.1(v): Löschung leicht zu finden).
+            { id: "konto", section: "konto", tone: "sky", label: "Konto", icon: IC.konto, keywords: "email abmelden konto schüler passwort ändern kennwort konto löschen account löschen dsgvo", status: session.user.email + " · " + myStudents + " Schüler" },
             { id: "abo", section: "konto", tone: "sky", label: "Abonnement", icon: IC.kosten, keywords: "abo abonnement bezahlen monatsbeitrag paypal lifetime zugang freischalten kosten rechnung mitgliedschaft",
                 status: (mySubscription && mySubscription.subscription_lifetime) ? "Lifetime" : ((mySubscription && mySubscription.subscription_active) ? ((mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Aktiv")) : "Kein Abo hinterlegt") },
             nativeApp && { id: "geraet", section: "konto", tone: "sky", label: "Gerät & Benachrichtigungen", icon: IC.geraet, keywords: "push benachrichtigung widget", status: deviceToken ? "Aktiv" : "Nicht aktiv" },
@@ -29136,7 +29204,7 @@ function App() {
                                     "Arbeitszeiten konnten nicht geladen werden: ",
                                     workHoursError,
                                     " ",
-                                    React.createElement("button", { onClick: () => { setWorkHoursError(""); setWorkHours(null); fetchWorkHours(uid).then(h => { setWorkHours(h || {}); setWorkHoursError(""); }).catch(e => setWorkHoursError(e.message || "Unbekannter Fehler")); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut versuchen")),
+                                    React.createElement("button", { onClick: () => { setWorkHoursError(""); setWorkHours(null); fetchWorkHours(uid).then(h => { workHoursGespeichertRef.current = h || {}; setWorkHours(h || {}); setWorkHoursError(""); }).catch(e => setWorkHoursError(e.message || "Unbekannter Fehler")); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut versuchen")),
                                 workHours === null && !workHoursError
                                     ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 2px" } }, "Lädt…")
                                     : workHours !== null && [["mo", "Montag"], ["di", "Dienstag"], ["mi", "Mittwoch"], ["do", "Donnerstag"], ["fr", "Freitag"], ["sa", "Samstag"], ["so", "Sonntag"]].map(([k, label]) => {
@@ -29164,7 +29232,7 @@ function App() {
                                             k === "so"
                                                 ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginLeft: 35, marginTop: 3 } }, "Für Schüler über den Buchungslink immer gesperrt, unabhängig von diesem Schalter.")
                                                 : blocked ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--red)", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar")
-                                                    : arbeitszeitProblem(day) && React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginLeft: 35, marginTop: 3 } }, arbeitszeitProblem(day) + " Noch nicht gespeichert."));
+                                                    : arbeitszeitProblem(day) && React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginLeft: 35, marginTop: 3 } }, arbeitszeitProblem(day) + " Dieser Tag bleibt beim zuletzt gespeicherten Stand, bis er stimmt."));
                                     }))),
                         React.createElement("div", { className: "eyebrow" }, "Mein Ausbildungslimit"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
@@ -30071,6 +30139,12 @@ function App() {
                                     React.createElement("ul", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)", margin: "0 0 12px", paddingLeft: 18 } },
                                         React.createElement("li", null, "Dein Anmelde-Konto (", session.user.email, ") wird gelöscht."),
                                         React.createElement("li", null, "Deine ", myStudents, " eigenen Schüler mit Fahrstunden, Terminen, Unterschriften und Dateien werden gelöscht."),
+                                        // Abschluss-Audit: videos.owner löscht per Kaskade mit - auch schulweit
+                                        // freigegebene Lehrvideos verschwinden damit für Kollegen und Schüler.
+                                        React.createElement("li", null, "Von dir hochgeladene Lehrvideos werden mitgelöscht - auch für Kollegen und Schüler deiner Fahrschule."),
+                                        // Einen neuen Fahrschul-Admin kann nur der Support ernennen (admin_set_teacher_flags);
+                                        // ohne Übergabe käme danach niemand mehr an Kosten, Standorte, Rechnungsdaten.
+                                        isSchoolAdmin && React.createElement("li", null, "Du bist Admin deiner Fahrschule. Arbeiten dort weitere Fahrlehrer, lass die Admin-Rolle vorher über den Support übertragen - sonst kann niemand mehr die Einstellungen der Fahrschule ändern."),
                                         React.createElement("li", null, "Das lässt sich nicht rückgängig machen. Sichere vorher bei Bedarf unter „Daten & Sicherung“ ein Backup."),
                                         React.createElement("li", null, "Gibt es Rechnungen (Aufbewahrungspflicht) oder mit Kollegen geteilte Schüler, wird nichts gelöscht - du bekommst dann eine Erklärung, was vorher zu klären ist.")),
                                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--red)" }, onClick: () => setKontoLoeschen(k => k && ({ ...k, stufe: 2 })) }, "Weiter zur Bestätigung"),
@@ -31511,11 +31585,13 @@ function App() {
                                 ")")))))));
     }
     // Gruppierte Reiter
-    // "pruefungssim"/"schaltkompetenz" sind die laufenden Tests zu den Listen darüber,
-    // "vorlage" ist der ADK-/Strecken-Lehrplan - alle drei leuchteten bisher keinen Reiter an
-    // (Designprüfung 2026-09-14: "man steht im Nirgendwo").
+    // "pruefungssim"/"schaltkompetenz" sind die laufenden Tests zu den Listen darüber - sie
+    // leuchteten bisher keinen Reiter an (Designprüfung 2026-09-14: "man steht im Nirgendwo").
+    // "vorlage" (ADK-/Strecken-Lehrplan) zählt dagegen zu "Mehr": der einzige Einstieg ist
+    // Einstellungen › Arbeit, und "‹ Zurück" bzw. die Wischgeste führen seit I-M11 dorthin zurück.
+    // Markiertes "Ausbildung" widersprach diesem Rückweg.
     const ausbildungViews = ["adk", "strecken", "tagebuch", "pruefungssimliste", "schaltkompetenzliste",
-        "pruefungssim", "schaltkompetenz", "vorlage"];
+        "pruefungssim", "schaltkompetenz"];
     const fahrlehrerViews = ["theoriepilot", "theoriepilot-topic"];
     // "Fahrlehrer" und "Übersicht" stecken auf dem Handy im "Mehr"-Menü, deshalb zählen ihre
     // Views hier mit rein, damit "Mehr" korrekt als aktiv markiert wird, wenn man dort ist.
@@ -31528,7 +31604,7 @@ function App() {
     // leuchtete auf. Beide gehören zum Schüler-Reiter; die Einträge im Mehr-Menü bleiben, sie
     // markieren dann nur den inhaltlich richtigen Reiter.
     const schuelerViews = ["liste", "uebersicht", "daten"];
-    const mehrViews = ["einstellungen", "videos", "auswertung", "tagesgeschaeft", "fuhrpark", "interessenten", "schulboard", "admin", "impressum", "datenschutz", ...fahrlehrerViews];
+    const mehrViews = ["einstellungen", "vorlage", "videos", "auswertung", "tagesgeschaeft", "fuhrpark", "interessenten", "schulboard", "admin", "impressum", "datenschutz", ...fahrlehrerViews];
     const ausbildungActive = ausbildungViews.indexOf(view) >= 0;
     const mehrActive = mehrViews.indexOf(view) >= 0;
     const schuelerActive = schuelerViews.indexOf(view) >= 0;
