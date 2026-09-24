@@ -9421,7 +9421,9 @@ function relTimeLabel(dateISO) {
         return "läuft";
     if (diffMin < 60)
         return "in " + diffMin + " Min";
-    const dayDiff = Math.round((new Date(ymd(d) + "T12:00:00") - new Date(ymd(now) + "T12:00:00")) / 86400000);
+    // ymd() mit ISO-Zeichenkette: ein Date-Objekt auf Gerätemitternacht gälte dort als "nomineller
+    // Tag" - in Istanbul/Moskau stand ein Termin um 22:00 Berlin sonst als "morgen" da.
+    const dayDiff = Math.round((new Date(ymd(isNaN(d.getTime()) ? "" : d.toISOString()) + "T12:00:00") - new Date(ymd(now) + "T12:00:00")) / 86400000);
     if (dayDiff === 0)
         return "heute " + hm(dateISO) + " Uhr";
     if (dayDiff === 1)
@@ -12100,7 +12102,9 @@ function saRelZeit(lang, dateISO) {
         return tt(lang, "rel_laeuft");
     if (diffMin < 60)
         return tt(lang, "rel_in_min", { n: diffMin });
-    const dayDiff = Math.round((new Date(ymd(d) + "T12:00:00") - new Date(ymd(now) + "T12:00:00")) / 86400000);
+    // ymd() mit ISO-Zeichenkette: ein Date-Objekt auf Gerätemitternacht gälte dort als "nomineller
+    // Tag" - in Istanbul/Moskau stand ein Termin um 22:00 Berlin sonst als "morgen" da.
+    const dayDiff = Math.round((new Date(ymd(isNaN(d.getTime()) ? "" : d.toISOString()) + "T12:00:00") - new Date(ymd(now) + "T12:00:00")) / 86400000);
     if (dayDiff === 0)
         return tt(lang, "rel_heute", { zeit: hm(dateISO) });
     if (dayDiff === 1)
@@ -14357,8 +14361,11 @@ function App() {
         if (recRestore) setRecRestore(null);
         // "Fahrlehrer krank" liegt (zIndex 1240) über allen Blättern darunter - Escape/Zurück
         // schloss bisher erst das Fenster DAHINTER, und auch mitten im Absagen (Audit G-M7).
-        else if (sickModal) { if (!sickModal.busy) setSickModal(null); }
-        else if (kiPlan) { if (!kiPlan.uebernehmen) setKiPlan(null); }
+        // Dieselben Sperren wie beim Tipp daneben: Nach dem Absagen (cancelled) bzw. Übernehmen
+        // (fertig) steht die Liste "wen noch benachrichtigen" NUR im State - Escape/Zurück-Geste
+        // warf sie sonst weg, obwohl es laut G-M7 nur über "Fertig" zugeht.
+        else if (sickModal) { if (!sickModal.busy && !sickModal.cancelled) setSickModal(null); }
+        else if (kiPlan) { if (!kiPlan.uebernehmen && !kiPlan.fertig) setKiPlan(null); }
         else if (wegPlan) { if (!wegPlan.uebernehmen) setWegPlan(null); }
         else if (leerlaufPlan) setLeerlaufPlan(null);
         else if (wochePlan) { if (!wochePlan.uebernehmen) setWochePlan(null); }
@@ -14366,7 +14373,9 @@ function App() {
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
         else if (invoiceDraft) schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null));
-        else if (apptForm) { if (!apptForm.busy) setApptForm(null); }
+        // Wie der Tipp daneben mit Rückfrage bei Änderungen (H-N17) - Escape/Zurück-Geste
+        // verwarf die Eingaben sonst weiter ohne Nachfrage.
+        else if (apptForm) apptFormWegtippen();
         else if (qrModal) setQrModal(false);
         // Audit I-M9: diese sieben Dialoge fehlten hier - Escape bzw. die Zurück-Geste schloss
         // dann den Bildschirm DAHINTER, während der Dialog offen stehen blieb. Reihenfolge nach
@@ -16793,6 +16802,9 @@ function App() {
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
         let count = 0, skipped = 0, skippedClash = 0, skippedEnde = 0;
+        // Positionen der Einträge, deren Speichern scheiterte (addAppt -> null, z.B. schlechtes Netz):
+        // Sie zählten bisher nirgends, und die erkannte Liste wurde trotzdem geschlossen.
+        const fehlgeschlagen = new Set();
         // appts ist die beim Render fixierte Konstante und wird waehrend dieser Schleife nicht
         // aktualisiert, obwohl vorherige Durchlaeufe bereits neue Termine per addAppt() angelegt
         // haben (der dortige setAppts() loest zwar einen Re-Render aus, die hier noch laufende
@@ -16850,12 +16862,22 @@ function App() {
                 localAppts = [...localAppts, created];
                 count++;
             }
+            else
+                fehlgeschlagen.add(calImport.items.indexOf(it));
         }
-        setCalImport(null);
-        setView("kalender");
         const reasons = [skipped ? skipped + (skipped === 1 ? " Uhrzeit nicht lesbar" : " Uhrzeit nicht lesbar") : "",
             skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : "",
             skippedEnde ? skippedEnde + " mit Ende vor Beginn" : ""].filter(Boolean).join(", ");
+        if (fehlgeschlagen.size) {
+            // Fenster offen lassen, nur die nicht gespeicherten Einträge angehakt - ein erneuter
+            // Tipp auf "Termine anlegen" versucht genau diese noch einmal, ohne neu auszulesen.
+            setCalImport(c => c ? { ...c, creating: false, items: c.items.map((x, j) => ({ ...x, take: fehlgeschlagen.has(j) })) } : c);
+            showToast(fehlgeschlagen.size + (fehlgeschlagen.size === 1 ? " Termin konnte" : " Termine konnten") + " nicht gespeichert werden"
+                + (count ? " (" + count + " angelegt)" : "") + (reasons ? ", übersprungen: " + reasons : "") + ". Sie sind noch angehakt - bitte erneut \"Termine anlegen\" tippen.", "error");
+            return;
+        }
+        setCalImport(null);
+        setView("kalender");
         showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : ""));
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
@@ -17710,7 +17732,9 @@ function App() {
             // Dieselben zwei Prüfungen wie bei jedem anderen Weg, einen bestätigten Termin
             // anzulegen (saveApptForm/saveApptSerie/confirmAppt) - fehlten hier bisher komplett,
             // der KI-Helfer konnte dadurch stillschweigend Doppelbuchungen anlegen.
-            const lp = limitProblem(ymd(start), minutes, null, stu ? stu.id : null);
+            // ISO statt Date-Objekt: echter Zeitpunkt, kein "nomineller Tag" (siehe ymd()) - sonst
+            // prüfte das Tageslimit östlich von Berlin bei 22:00/23:00-Terminen den Folgetag.
+            const lp = limitProblem(ymd(start.toISOString()), minutes, null, stu ? stu.id : null);
             if (lp) {
                 showToast(lp);
                 return;
@@ -19050,7 +19074,10 @@ function App() {
             // WhatsApp NICHT automatisch öffnen (Handy-Browser blockieren das nach dem Warten auf die Datenbank).
             // Stattdessen fertigen Link bereitstellen, den der Nutzer mit einem Tipp öffnet – das lässt der Browser zu.
             const num = stu.tel ? waNumber(stu.tel) : "";
-            const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(created, stu));
+            const code = await buchungsCodeSichern();
+            if (!code)
+                showToast("Der Buchungslink konnte nicht erzeugt werden - die Nachricht enthält deshalb keinen Link zum Bestätigen.", "error");
+            const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(created, stu, code));
             setProposalForm({ done: true, waUrl: url, count: created.length, studentName });
         }
         else {
@@ -19086,7 +19113,10 @@ function App() {
         const stu = f.student_id ? students.find(s => s.id === f.student_id) : matchStudentByName(f.title || "");
         const num = stu && stu.tel ? waNumber(stu.tel) : "";
         const slot = { start_at: startISO, end_at: endISO, art: f.art };
-        const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(slot, stu || { vorname: f.title }));
+        const code = await buchungsCodeSichern();
+        if (!code)
+            showToast("Der Buchungslink konnte nicht erzeugt werden - die Nachricht enthält deshalb keinen Link zum Bestätigen.", "error");
+        const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(slot, stu || { vorname: f.title }, code));
         setCounterForm({ ...f, busy: false, done: true, waUrl: url });
     }
     async function updateAppt(id, patch) {
@@ -19361,21 +19391,27 @@ function App() {
         setWaPrompt(null);
     }
     // WhatsApp-Text für einen Terminvorschlag vom Fahrlehrer an den Schüler (mit Buchungslink zum Bestätigen)
-    function waProposalText(slots, stu) {
+    // code: vom Aufrufer per buchungsCodeSichern() geholt. bookingURL() ohne Argument läse den
+    // Closure-Stand - nach einem gerade erst erzeugten Code wäre der Link "?buchen=" (wie H-M8).
+    // Ohne Code lassen wir den Link ganz weg statt einen toten Link zu verschicken.
+    function waProposalText(slots, stu, code) {
         const list = Array.isArray(slots) ? slots : [slots];
         const name = (stu && stu.vorname) ? stu.vorname.trim() : "";
         const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
-        const url = bookingURL();
+        const url = code ? bookingURL(code) : "";
+        const bestaetigen = (mehrere) => url
+            ? "Öffne diesen Link, gib deinen Namen ein und bestätige " + (mehrere ? "die Termine" : "den Termin") + ":\n" + url
+            : "Gib mir bitte kurz Bescheid, ob " + (mehrere ? "die Termine passen" : "der Termin passt") + ".";
         if (list.length === 1) {
             const s = list[0];
             const d = new Date(s.start_at);
             const dLong = d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "long" });
             const t = hm(s.start_at) + (s.end_at ? " bis " + hm(s.end_at) : "");
             const artTxt = artLabelPlain(apptArt(s));
-            return greet + "ich schlage dir einen Termin vor:\n\n" + dLong + ", " + t + " Uhr (" + artTxt + ")\n\nÖffne diesen Link, gib deinen Namen ein und bestätige den Termin:\n" + url;
+            return greet + "ich schlage dir einen Termin vor:\n\n" + dLong + ", " + t + " Uhr (" + artTxt + ")\n\n" + bestaetigen(false);
         }
         const zeilen = list.map(s => "• " + new Date(s.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "long" }) + ", " + hm(s.start_at) + (s.end_at ? " bis " + hm(s.end_at) : "") + " Uhr (" + artLabelPlain(apptArt(s)) + ")").join("\n");
-        return greet + "ich schlage dir folgende Termine vor:\n\n" + zeilen + "\n\nÖffne diesen Link, gib deinen Namen ein und bestätige die Termine:\n" + url;
+        return greet + "ich schlage dir folgende Termine vor:\n\n" + zeilen + "\n\n" + bestaetigen(true);
     }
     // Bestätigung erneut per WhatsApp öffnen, gebündelt für alle bestätigten,
     // zukünftigen Termine desselben Schülers (falls man die Nachricht weggedrückt hat)
@@ -19532,6 +19568,24 @@ function App() {
         const base = window.location.origin + window.location.pathname;
         return base + "?buchen=" + (code || bookingCode || "");
     }
+    // Buchungscode sicherstellen und DIREKT zurückgeben - setBookingCode() hilft der laufenden
+    // Funktion nicht (siehe oben). null, wenn keiner geladen/erzeugt werden konnte, z.B. weil
+    // das Laden beim Start schon am Netz scheiterte.
+    async function buchungsCodeSichern() {
+        if (bookingCode)
+            return bookingCode;
+        try {
+            const fresh = await fetchBookingCode(uid);
+            if (fresh) {
+                setBookingCode(fresh);
+                return fresh;
+            }
+        }
+        catch (e) {
+            console.error("Buchungscode:", e);
+        }
+        return null;
+    }
     async function shareBooking() {
         // Sicherheits-Check: niemals einen Link ohne echten Buchungscode teilen
         let code = bookingCode;
@@ -19619,28 +19673,25 @@ function App() {
         return /^\d{4,8}$/.test(p) ? p : "";
     }
     async function shareStudentAccess(s) {
-        if (!bookingCode) {
+        if (!bookingCode)
             showFlash("Erzeuge Buchungscode…");
-            try {
-                const fresh = await fetchBookingCode(uid);
-                if (fresh)
-                    setBookingCode(fresh);
-                else {
-                    showToast("Der Link konnte nicht erzeugt werden.", "error");
-                    return;
-                }
-            }
-            catch (e) {
-                showToast("Der Link konnte nicht erzeugt werden:\n" + (e.message || "unbekannter Fehler"), "error");
-                return;
-            }
+        // Code lokal festhalten: bookingURL() ohne Argument sähe hier noch den alten, leeren
+        // State und verschickte "?buchen=" samt Klartext-PIN (dieselbe Falle wie H-M8).
+        const code = await buchungsCodeSichern();
+        if (!code) {
+            showToast("Der Link konnte nicht erzeugt werden. Bitte kurz erneut versuchen.", "error");
+            return;
         }
         const pinKlar = pinKlartextFuer(s);
         if (!pinKlar) {
             showToast(s.pin ? "Dieser PIN ist aus Sicherheitsgründen nicht mehr einsehbar. Bitte einen neuen erzeugen." : "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.");
             return;
         }
-        const url = bookingURL();
+        const url = bookingURL(code);
+        if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
+            showToast("Der Link ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
+            return;
+        }
         const text = "Hallo " + ((s.vorname || "").trim() || "") + ",\n\n" +
             "hier ist dein persönlicher Zugang zum Fahrschülerbereich. Dort kannst du jederzeit:\n" +
             "• deinen Ausbildungsstand (ADK) und deine Strecken sehen\n" +
@@ -25027,6 +25078,11 @@ function App() {
         const ende = wh ? toMin(wh.bis) : 20 * 60;
         if ((wh || !hatArbeitszeiten) && ab + 45 <= ende)
             return { date: tag, start: fromMin(ab) };
+        // Ausdrücklich gewählter Tag (das "+" an der heutigen Tageskarte bzw. am Spaltenkopf):
+        // Datum behalten, nur die Uhrzeit vorschlagen - der Sprung auf den nächsten Arbeitstag
+        // wechselte sonst abends still auf morgen, z.B. bei einer Nachtfahrt nach Feierabend.
+        if (dateStr)
+            return { date: tag, start: fromMin(Math.min(ab, 23 * 60)) };
         for (let i = 1; i <= 14; i++) {
             const k = ymd(addDays(new Date(tag + "T12:00:00"), i));
             const whK = arbeitszeitAm(k);
@@ -26296,11 +26352,15 @@ function App() {
             }
             catch (e) { schlecht++; }
         }
+        // Code einmal für alle Nachrichten sichern (siehe waProposalText).
+        const code = Object.keys(proSchueler).length ? await buchungsCodeSichern() : null;
+        if (Object.keys(proSchueler).length && !code)
+            showToast("Der Buchungslink konnte nicht erzeugt werden - die Nachrichten enthalten deshalb keinen Link zum Bestätigen.", "error");
         const fertig = Object.keys(proSchueler).map(id => {
             const e = proSchueler[id];
             const num = e.stu.tel ? waNumber(e.stu.tel) : "";
             return { stu: e.stu, appts: e.appts,
-                waUrl: num ? ("https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(e.appts, e.stu))) : "" };
+                waUrl: num ? ("https://wa.me/" + num + "?text=" + encodeURIComponent(waProposalText(e.appts, e.stu, code))) : "" };
         });
         setWochePlan(w => w ? ({ ...w, uebernehmen: false, fertig }) : w);
         if (schlecht)
@@ -26931,7 +26991,9 @@ function App() {
                                 hours.map(h => React.createElement("div", { key: h, style: { position: "absolute", left: 0, right: 0, top: (h - startH) * PXH, borderTop: "1px solid var(--line)", opacity: .5 } })),
                                 nowY != null && nowY >= 0 && nowY <= totalH * PXH &&
                                     React.createElement("div", { style: { position: "absolute", left: 0, right: 0, top: nowY, borderTop: "2px solid #D63A2E", zIndex: 2 } }),
-                                urlaubDay && React.createElement("div", { style: { position: "absolute", left: 2, right: 2, top: 4, background: "var(--amber-bg)", borderRadius: 7, padding: "3px 5px", fontSize: 10, fontWeight: 700, color: "var(--amber-ink)", zIndex: 1 } }, "🌴 Urlaub"),
+                                urlaubDay && React.createElement("div", { style: { position: "absolute", left: 2, right: 2, top: 4, background: "var(--amber-bg)", borderRadius: 7, padding: "3px 5px", fontSize: 10, fontWeight: 700, color: "var(--amber-ink)", zIndex: 1 } },
+                                    // Krank-Sperre ("Fahrlehrer krank") nicht als Urlaub beschriften - wie Karten-/Tagesansicht.
+                                    urlaubTitel(urlaubDay) === "Krank" ? "Krank" : "🌴 Urlaub"),
                                 withRange.map(({ a, s, e }) => {
                                     const top = Math.max(0, yFor(s));
                                     const rawH = yFor(e) - yFor(s);
@@ -31100,7 +31162,9 @@ function App() {
                                 openNewFahrstunde();
                             }
                             else {
-                                openNewAppt(view === "kalender" && calMode === "tag" ? ymd(calDay) : undefined);
+                                // Der allgemeine "+"-Knopf darf nach Feierabend weiter auf den nächsten
+                                // Arbeitstag springen - nur für einen anderen Tag als heute gilt der gewählte Tag.
+                                openNewAppt(view === "kalender" && calMode === "tag" && ymd(calDay) !== ymd(new Date()) ? ymd(calDay) : undefined);
                             } setTabMenu(null); }, "aria-label": (ausbildungActive && active) ? "Neue Fahrstunde für " + dispName(active) : "Neuen Termin eintragen" },
                         React.createElement("span", { className: "tab-fab", "aria-hidden": "true" },
                             React.createElement("svg", { width: "24", height: "24", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round" },
@@ -33664,7 +33728,7 @@ function App() {
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))",
                     maxHeight: "88dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
-                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, apptForm.urlaub ? "Urlaub bearbeiten" : (apptForm.id ? "Termin bearbeiten" : "Neuer Termin")),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, apptForm.urlaub ? (apptForm.note === "Krank" ? "Krank-Sperre bearbeiten" : "Urlaub bearbeiten") : (apptForm.id ? "Termin bearbeiten" : "Neuer Termin")),
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "Datum",
                     React.createElement("input", { type: "date", value: apptForm.date, onChange: e => setApptForm({ ...apptForm, date: e.target.value }) }))),
