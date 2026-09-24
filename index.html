@@ -14907,9 +14907,15 @@ function App() {
     }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
     const nameSaveChainRef = useRef(Promise.resolve());
     const nameSyncReady = useRef(false);
+    // Zuletzt vom Server geladener bzw. erfolgreich gespeicherter Name. Ohne diesen Abgleich
+    // schrieb der Effekt unten direkt nach dem Laden denselben Namen sofort wieder zurück - ein
+    // überflüssiger Schreibzugriff bei jedem Start (im Demo-Konto sogar mit Fehlermeldung, weil
+    // es schreibgeschützt ist).
+    const nameServerStandRef = useRef(null);
     useEffect(() => {
         if (!uid) {
             nameSyncReady.current = false;
+            nameServerStandRef.current = null;
             return;
         }
         if (!nameSyncReady.current) {
@@ -14919,7 +14925,7 @@ function App() {
             // Fahrlehrers stehen, weil "lokal schon ein Name da" fälschlich als "das ist
             // bereits der richtige" gewertet wurde.
             sb.from("profiles").select("display_name").eq("id", uid).maybeSingle()
-                .then(({ data }) => setTeacherName((data && data.display_name) || ""))
+                .then(({ data }) => { const n = (data && data.display_name) || ""; nameServerStandRef.current = n.trim(); setTeacherName(n); })
                 .catch(() => { });
             return;
         }
@@ -14937,8 +14943,19 @@ function App() {
             }
             return;
         }
+        if (name === nameServerStandRef.current) {
+            // Unverändert gegenüber dem Server (z.B. direkt nach dem Laden, oder zurückgetippt):
+            // nichts zu speichern, aber einen noch geplanten Zwischenstand verwerfen.
+            const offen = pendingSavesRef.current.get("teacherName");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("teacherName");
+            }
+            return;
+        }
         planSave("teacherName", () => {
-            nameSaveChainRef.current = nameSaveChainRef.current.then(() => saveTeacherNameToProfile(uid, name));
+            nameSaveChainRef.current = nameSaveChainRef.current.then(() => saveTeacherNameToProfile(uid, name))
+                .then(ok => { if (ok) nameServerStandRef.current = name; return ok; });
             return nameSaveChainRef.current;
         }, 600);
     }, [uid, teacherName]);
