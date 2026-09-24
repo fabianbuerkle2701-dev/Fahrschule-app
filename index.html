@@ -14851,7 +14851,7 @@ function App() {
             return;
         }
         setCalImport(c => c ? { ...c, creating: true } : c);
-        let count = 0, skipped = 0, skippedClash = 0;
+        let count = 0, skipped = 0, skippedClash = 0, skippedEnde = 0;
         // appts ist die beim Render fixierte Konstante und wird waehrend dieser Schleife nicht
         // aktualisiert, obwohl vorherige Durchlaeufe bereits neue Termine per addAppt() angelegt
         // haben (der dortige setAppts() loest zwar einen Re-Render aus, die hier noch laufende
@@ -14875,6 +14875,13 @@ function App() {
             }
             const endHM = normHM(it.end);
             const end = endHM ? new Date(combineDT(it.date, endHM)) : new Date(start.getTime() + 45 * 60000);
+            // Ende nicht nach dem Beginn (Audit H-M7): so ein Termin wurde mit 0 Minuten
+            // gespeichert, die Überschneidungsprüfung griff dann nicht, und er zählte nirgends.
+            // Lieber auslassen und melden als eine Dauer erfinden.
+            if (end.getTime() <= start.getTime()) {
+                skippedEnde++;
+                continue;
+            }
             const stu = it.studentId ? students.find(s => s.id === it.studentId) : null;
             // Dieselben zwei Prüfungen wie bei jedem anderen Weg, mehrere bestätigte Termine auf
             // einmal anzulegen (saveApptSerie() - gleiches Auto-Überspringen-statt-Nachfragen-Muster,
@@ -14882,12 +14889,9 @@ function App() {
             // Bestätigungsdialoge nacheinander keine brauchbare UX wären). Fehlten hier bisher
             // komplett, der Import konnte dadurch stillschweigend Doppelbuchungen anlegen.
             const mins = Math.max(0, Math.round((end.getTime() - start.getTime()) / 60000));
-            // limitProblem() liest appts intern weiter aus der beim Funktionsstart erfassten
-            // Closure (nicht als Parameter) - kann daher Termine, die im selben Importlauf gerade
-            // erst angelegt wurden, für die Tages-/Wochenlimit-Prüfung nicht berücksichtigen.
-            // findOverlaps() bekommt appts dagegen als Parameter und wird deshalb unten bewusst
-            // mit dem mitwachsenden localAppts statt der veralteten Konstante aufgerufen.
-            const lp = limitProblem(it.date, mins, null, stu ? stu.id : null);
+            // Beide Prüfungen bekommen das mitwachsende localAppts, damit auch die in diesem
+            // Importlauf schon angelegten Termine zählen (Audit H-M7, siehe limitProblem()).
+            const lp = limitProblem(it.date, mins, null, stu ? stu.id : null, localAppts);
             const clash = !lp && findOverlaps(localAppts, start.toISOString(), end.toISOString(), null);
             if (lp || (clash && clash.length)) {
                 skippedClash++;
@@ -14909,7 +14913,8 @@ function App() {
         setCalImport(null);
         setView("kalender");
         const reasons = [skipped ? skipped + (skipped === 1 ? " Uhrzeit nicht lesbar" : " Uhrzeit nicht lesbar") : "",
-            skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : ""].filter(Boolean).join(", ");
+            skippedClash ? skippedClash + (skippedClash === 1 ? " Überschneidung/Limit" : " Überschneidungen/Limit") : "",
+            skippedEnde ? skippedEnde + " mit Ende vor Beginn" : ""].filter(Boolean).join(", ");
         showFlash("✓ " + count + (count === 1 ? " Termin" : " Termine") + " angelegt" + (reasons ? " · übersprungen: " + reasons : ""));
     }
     // ADK-Karte per Foto auslesen: erkennt für jeden einzelnen Punkt, ob und wie oft er erledigt ist
@@ -17358,18 +17363,23 @@ function App() {
             await updateAppt(id, { status: "confirmed" });
         }
     }
-    function bookingURL() {
+    // code optional: ein gerade erst erzeugter Code. setBookingCode() wirkt erst beim nächsten
+    // Rendern - bookingCode in dieser Closure bliebe leer, der erste Tipp lieferte "?buchen="
+    // und damit "unvollständig" (Audit H-M8).
+    function bookingURL(code) {
         const base = window.location.origin + window.location.pathname;
-        return base + "?buchen=" + (bookingCode || "");
+        return base + "?buchen=" + (code || bookingCode || "");
     }
     async function shareBooking() {
         // Sicherheits-Check: niemals einen Link ohne echten Buchungscode teilen
-        if (!bookingCode) {
+        let code = bookingCode;
+        if (!code) {
             showFlash("Erzeuge Buchungscode…");
             try {
                 const fresh = await fetchBookingCode(uid);
                 if (fresh) {
                     setBookingCode(fresh);
+                    code = fresh;
                 }
                 else {
                     showToast("Der Buchungslink konnte nicht erzeugt werden. Das ist meist eine Berechtigungsfrage in der Datenbank (fehlende oder zu enge Regel für profiles). Bitte kurz erneut versuchen oder Bescheid geben, damit die Ursache geprüft werden kann.", "error");
@@ -17381,7 +17391,7 @@ function App() {
                 return;
             }
         }
-        const url = bookingURL();
+        const url = bookingURL(code);
         if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
             showToast("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
             return;
@@ -23028,15 +23038,16 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 sickModal.cancelled ? notifyStep : selectStep));
     }
-    // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
-    function confirmedMinutesOnDay(dateKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
+    // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht).
+    // liste optional: statt der Termine aus dem letzten Rendern (siehe limitProblem)
+    function confirmedMinutesOnDay(dateKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Bestätigte praktische Minuten eines einzelnen Schülers an einem Tag bzw. in einer Woche -
     // für das Schüler-Limit (im Unterschied zu confirmedMinutesOnDay, das über alle Schüler summiert).
-    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
+    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
@@ -23915,9 +23926,13 @@ function App() {
             schlecht ? "error" : undefined);
     }
 
-    function limitProblem(dateKey, minutes, exceptId, studentId) {
+    // liste optional: die Termine, gegen die geprüft wird. Wer in einer Schleife mehrere Termine
+    // anlegt (Screenshot-Import), gibt die mitwachsende Liste mit - appts aus dem letzten
+    // Rendern kennt die im selben Lauf angelegten Termine noch nicht, das Limit wurde dann
+    // Termin für Termin gegen denselben alten Stand geprüft und überschritten (Audit H-M7).
+    function limitProblem(dateKey, minutes, exceptId, studentId, liste) {
         if (dayLimit > 0) {
-            const used = confirmedMinutesOnDay(dateKey, exceptId);
+            const used = confirmedMinutesOnDay(dateKey, exceptId, liste);
             if (used + minutes > dayLimit) {
                 return "Tageslimit überschritten.\n\nAn diesem Tag sind bereits " + used + " von " + dayLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (used + minutes) + " Minuten führen.";
             }
@@ -23926,7 +23941,7 @@ function App() {
             const d = new Date(dateKey + "T12:00:00");
             const ws = ymd(startOfWeek(d));
             const we = ymd(addDays(startOfWeek(d), 6));
-            const usedW = (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
+            const usedW = (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
                 .reduce((sum, a) => sum + apptMin(a), 0);
             if (usedW + minutes > weekLimit) {
                 return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits " + usedW + " von " + weekLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (usedW + minutes) + " Minuten führen.";
@@ -23936,7 +23951,7 @@ function App() {
             const stu = students.find(s => s.id === studentId);
             const name = stu ? dispName(stu) : "Dieser Schüler";
             if (studentDayLimit > 0) {
-                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId);
+                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId, liste);
                 if (used + minutes > studentDayLimit) {
                     return name + " hat an diesem Tag bereits " + used + " von " + studentDayLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -23945,7 +23960,7 @@ function App() {
                 const d = new Date(dateKey + "T12:00:00");
                 const ws = ymd(startOfWeek(d));
                 const we = ymd(addDays(startOfWeek(d), 6));
-                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId);
+                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId, liste);
                 if (usedW + minutes > studentWeekLimit) {
                     return name + " hat in dieser Woche bereits " + usedW + " von " + studentWeekLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -24712,10 +24727,15 @@ function App() {
                             let url = bookingURL();
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
                                 showFlash("Erzeuge Buchungscode…");
-                                const fresh = await fetchBookingCode(uid);
+                                // Den frischen Code direkt verwenden (Audit H-M8, siehe bookingURL)
+                                let fresh = null;
+                                try {
+                                    fresh = await fetchBookingCode(uid);
+                                }
+                                catch (e) { /* unten als "unvollständig" gemeldet */ }
                                 if (fresh)
                                     setBookingCode(fresh);
-                                url = bookingURL();
+                                url = bookingURL(fresh);
                             }
                             if (!url.includes("?buchen=") || url.endsWith("?buchen=")) {
                                 showToast("Der Buchungslink ist unvollständig (kein Code). Bitte nochmal versuchen oder Bescheid geben.");
