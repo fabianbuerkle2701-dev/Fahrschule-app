@@ -5600,9 +5600,13 @@ function saveSchoolCache(uid, s) { try {
 }
 catch (e) { } }
 // Map a DB row -> app student object (data holds everything; id/owner/shared come from row)
-function rowToStudent(row) {
+// _isMine kommt aus owner === uid. Früher stand hier pauschal true und jeder Aufrufer musste es
+// selbst überschreiben - wer das vergaß (z.B. die Akte im Schul-Dashboard), bekam für einen
+// fremden Schüler die Besitzer-Knöpfe (Teilen, Archivieren, Löschen) angezeigt. Ohne uid gilt
+// der Schüler deshalb im Zweifel als NICHT eigener.
+function rowToStudent(row, uid) {
     const d = row.data || {};
-    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: true, _createdAt: row.created_at };
+    return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: !!uid && row.owner === uid, _createdAt: row.created_at };
 }
 // Fetch all students visible to me (mine + shared with me)
 async function fetchStudents(uid) {
@@ -5616,7 +5620,7 @@ async function fetchStudents(uid) {
         console.error(error);
         throw new Error("DB-Fehler beim Laden: " + (error.message || JSON.stringify(error)));
     }
-    return (data || []).map(r => ({ ...rowToStudent(r), _isMine: r.owner === uid }));
+    return (data || []).map(r => rowToStudent(r, uid));
 }
 // Strip internal fields before saving data jsonb
 function cleanData(s) {
@@ -5628,13 +5632,13 @@ async function dbInsert(uid, s) {
     // ruft dbInsert() mit dem kompletten Backup inkl. _shared auf und erwartet, dass eine vorher
     // mit Kollegen geteilte Freigabe beim Wiederherstellen erhalten bleibt.
     const sharedWith = s._shared || [];
-    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return { ...rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }), _isMine: true }; }
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: neue Schüler werden nicht gespeichert."); return rowToStudent({ id: "demo_"+Date.now().toString(36), owner: uid, data: cleanData(s), shared_with: sharedWith }, uid); }
     // Vorher lief das über withNetworkRetry, gab bei Fehlern aber null zurück statt zu werfen -
     // die Wiederholung griff dadurch nie. insertEinmal wiederholt echte Netzabbrüche ohne
     // Doppel-Schüler; der Vertrag "null bei Fehler" für die Aufrufer bleibt.
     try {
         const data = await insertEinmal("students", { owner: uid, data: cleanData(s), shared_with: sharedWith }, "Schüler konnte nicht gespeichert werden");
-        return { ...rowToStudent(data), _isMine: true };
+        return rowToStudent(data, uid);
     }
     catch (e) {
         return null;
@@ -11432,6 +11436,194 @@ function systemLeisteFaerben(dunkel) {
     }
     catch (e) { }
 }
+/* ── Schülerdaten: PIN, Freigabe, Stammdaten-Prüfung ──────────────────────────────────────
+   ShareBox, SharedName und PinVergabe stehen bewusst auf oberster Ebene statt innerhalb von
+   App(): dort definiert war jede von ihnen bei jedem Rendern von App() eine NEUE Funktion. React
+   hielt sie damit für einen anderen Komponententyp und baute sie jedes Mal neu auf - Eingabe,
+   Fokus, Meldung und die busy-Sperre gingen verloren, SharedName fragte die E-Mail bei jedem
+   Rendern erneut per RPC ab (Audit G-M5). Alles, was sie aus App() brauchen, kommt als Prop. */
+
+// Plausibilität der Stammdaten beim Verlassen eines Feldes. Liefert eine Meldung oder "".
+// Bewusst großzügig: nur offensichtliche Tippfehler abfangen (Geburtsjahr 0199, Anmeldung im
+// Jahr 2205, Buchstaben in der Telefonnummer), keine Formatvorschriften (Audit G-N14).
+function stammdatenFehler(key, wert, heuteKey) {
+    const w = String(wert == null ? "" : wert).trim();
+    if (!w)
+        return "";
+    const heute = heuteKey || new Date().toISOString().slice(0, 10);
+    const jahr = Number(heute.slice(0, 4));
+    if (key === "geb" || key === "ausbildungsbeginn") {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(w) || isNaN(new Date(w + "T12:00:00").getTime()))
+            return "Das Datum ist ungültig.";
+        const j = Number(w.slice(0, 4));
+        if (key === "geb") {
+            if (w > heute)
+                return "Das Geburtsdatum liegt in der Zukunft.";
+            if (j < jahr - 100)
+                return "Das Geburtsdatum liegt über 100 Jahre zurück – bitte das Jahr prüfen.";
+            if (j > jahr - 14)
+                return "Mit diesem Geburtsdatum wäre der Schüler jünger als 14 – bitte das Jahr prüfen.";
+        }
+        else {
+            if (j < jahr - 15)
+                return "Das Anmeldedatum liegt über 15 Jahre zurück – bitte das Jahr prüfen.";
+            if (j > jahr + 1)
+                return "Das Anmeldedatum liegt mehr als ein Jahr in der Zukunft – bitte das Jahr prüfen.";
+        }
+        return "";
+    }
+    if (key === "tel" || key === "festnetz") {
+        // Erlaubt, was in Telefonnummern üblich ist: Ziffern, Leerzeichen, + / - ( ) und Punkt.
+        if (/[^0-9\s+\/\-().]/.test(w))
+            return "Die Telefonnummer enthält Zeichen, die in keiner Nummer vorkommen.";
+        const ziffern = w.replace(/\D/g, "").length;
+        if (ziffern < 6)
+            return "Die Telefonnummer ist zu kurz.";
+        if (ziffern > 15)
+            return "Die Telefonnummer ist zu lang.";
+    }
+    return "";
+}
+function ShareBox({ student, eigeneEmail, onSharedChange }) {
+    const [email, setEmail] = useState("");
+    const [busy, setBusy] = useState(false);
+    const [msg, setMsg] = useState("");
+    const shared = student._shared || [];
+    async function add() {
+        const e = email.trim().toLowerCase();
+        if (!e || busy) {
+            return;
+        }
+        if (e === String(eigeneEmail || "").toLowerCase()) {
+            setMsg("Das ist deine eigene Adresse.");
+            return;
+        }
+        // busy bleibt bis zum Ende des gesamten Schreibvorgangs aktiv (nicht schon nach
+        // findUserByEmail) - sonst öffnet sich der Button wieder, während dbShare noch läuft,
+        // und ein zweiter Klick kann mit veraltetem "shared" die erste Freigabe überschreiben.
+        setBusy(true);
+        setMsg("");
+        const prof = await findUserByEmail(e);
+        if (!prof) {
+            setBusy(false);
+            setMsg("Kein Konto mit dieser E-Mail gefunden. Die Person muss sich zuerst einmal in der App registrieren.");
+            return;
+        }
+        if (shared.indexOf(prof.id) >= 0) {
+            setBusy(false);
+            setMsg("Schon freigegeben.");
+            return;
+        }
+        const next = [...shared, prof.id];
+        try {
+            await dbShare(student.id, next);
+        }
+        catch (err) {
+            setBusy(false);
+            setMsg("Freigabe fehlgeschlagen: " + err.message);
+            return;
+        }
+        onSharedChange(student.id, next);
+        setBusy(false);
+        setEmail("");
+        setMsg("Freigegeben für " + e);
+    }
+    async function removeShare(uidToRemove) {
+        if (busy)
+            return;
+        // Rückfrage wie beim Zahler-Zugang: ein Fehltipp auf "Entfernen" nahm der Kollegin
+        // sonst sofort und ohne Hinweis den Zugriff auf den Schüler (Audit G-N13).
+        if (!await askConfirm({ title: "Freigabe entfernen?", message: "Diese Person sieht " + ([(student.vorname || "").trim(), (student.name || "").trim()].filter(Boolean).join(" ") || "den Schüler") + " danach nicht mehr und kann nichts mehr eintragen.", confirmLabel: "Entfernen", danger: true }))
+            return;
+        const next = shared.filter(x => x !== uidToRemove);
+        setBusy(true);
+        setMsg("");
+        try {
+            await dbShare(student.id, next);
+        }
+        catch (err) {
+            setBusy(false);
+            setMsg("Entfernen fehlgeschlagen: " + err.message);
+            return;
+        }
+        onSharedChange(student.id, next);
+        setBusy(false);
+    }
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
+        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Mit Kollegin/Kollegen teilen"),
+        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Per E-Mail freigeben. Die Person muss sich einmal in der App registriert haben."),
+        React.createElement("div", { style: { display: "flex", gap: 8 } },
+            React.createElement("input", { type: "email", value: email, onChange: e => setEmail(e.target.value), onKeyDown: e => { if (e.key === "Enter") add(); }, placeholder: "kollege@email.de", "aria-label": "E-Mail der Kollegin oder des Kollegen", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16 } }),
+            React.createElement("button", { className: "btn btn-primary", disabled: busy, onClick: add }, busy ? "…" : "Teilen")),
+        msg && React.createElement("div", { role: "status", style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8 } }, msg),
+        shared.length > 0 && React.createElement("div", { style: { marginTop: 10 } },
+            React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 } },
+                "Freigegeben für ",
+                shared.length),
+            shared.map(id => React.createElement("div", { key: id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", fontSize: 13 } },
+                React.createElement(SharedName, { id: id }),
+                React.createElement("button", { onClick: () => removeShare(id), disabled: busy, style: { color: "var(--red)", fontWeight: 700, fontSize: 13, padding: "2px 6px" } }, "Entfernen")))));
+}
+function SharedName({ id }) {
+    const [email, setEmail] = useState("…");
+    useEffect(() => {
+        let on = true;
+        setEmail("…");
+        // Über eine schmale RPC statt direktem Tabellenzugriff - die geteilte Person kann
+        // einer anderen Fahrschule angehören, profiles ist dafür nicht mehr offen lesbar.
+        // Ohne Treffer nicht ewig "…" stehen lassen, sondern sagen, dass nichts kam.
+        sb.rpc("profile_email_by_id", { p_id: id }).then(({ data, error }) => {
+            if (on)
+                setEmail(data || (error ? "E-Mail nicht abrufbar" : "Konto ohne sichtbare E-Mail"));
+        }, () => { if (on)
+            setEmail("E-Mail nicht abrufbar"); });
+        return () => { on = false; };
+    }, [id]);
+    return React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, email);
+}
+/* PIN für den Fahrschülerbereich vergeben. Früher schrieb jedes getippte Zeichen sofort (500 ms
+   später) in die Datenbank - schon ab der ersten Ziffer, der Server kannte keine Mindestlänge
+   (Audit G-N11). Und ein neuer PIN half dem Schüler gar nicht, sobald er sich einen eigenen
+   gewählt hatte: der Login nimmt zuerst pinCustom, und students_teacher_update schreibt pinCustom
+   immer vom Serverstand zurück - ein Schüler mit vergessenem PIN blieb dauerhaft ausgesperrt
+   (Audit G-H1). Jetzt: Entwurf lokal tippen, erst "PIN speichern" setzt ihn über die RPC
+   teacher_reset_student_pin (prüft 4-8 Ziffern, entfernt pinCustom, hebt die Login-Sperre auf).
+   onSetzen(pin) -> Promise<boolean>; klartext = der in DIESER Sitzung vergebene PIN (sonst leer). */
+function PinVergabe({ student, klartext, onSetzen }) {
+    const [entwurf, setEntwurf] = useState("");
+    const [busy, setBusy] = useState(false);
+    const gueltig = /^\d{4,8}$/.test(entwurf);
+    const bekannt = klartext || ((student.pin && !isPinHash(student.pin)) ? student.pin : "");
+    async function setzen(pin) {
+        if (busy)
+            return;
+        setBusy(true);
+        let ok = false;
+        try {
+            ok = await onSetzen(pin);
+        }
+        finally {
+            setBusy(false);
+        }
+        if (ok)
+            setEntwurf("");
+    }
+    return React.createElement(React.Fragment, null,
+        React.createElement("div", { className: "field", style: { marginBottom: 8 } },
+            React.createElement("label", null, "Neuer PIN (4 bis 8 Ziffern)",
+                React.createElement("input", { type: "text", inputMode: "numeric", autoComplete: "off", maxLength: 8, value: entwurf, disabled: busy,
+                    placeholder: bekannt ? "" : (student.pin ? "PIN gesetzt · nicht mehr einsehbar" : "z.B. 2468"),
+                    onChange: e => setEntwurf(e.target.value.replace(/\D/g, "").slice(0, 8)),
+                    onKeyDown: e => { if (e.key === "Enter" && gueltig) setzen(entwurf); },
+                    style: { letterSpacing: "0.2em", fontFamily: "var(--font-d)", fontWeight: 700 } })),
+            bekannt && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 6 } },
+                "Aktueller Start-PIN: ",
+                React.createElement("strong", { style: { fontFamily: "var(--font-d)", letterSpacing: "0.12em" } }, bekannt)),
+            entwurf && !gueltig && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Mindestens 4 Ziffern.")),
+        React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
+            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: busy, onClick: () => setzen(securePin()) }, "Zufälligen PIN erzeugen"),
+            React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: busy || !gueltig, onClick: () => setzen(entwurf) }, busy ? "Wird gesetzt…" : "PIN speichern")));
+}
 function App() {
     const [session, setSession] = useState(undefined); // undefined=checking, null=logged out, obj=in
     const [students, setStudents] = useState(null);
@@ -12359,6 +12551,10 @@ function App() {
     // Zeitpunkt der letzten lokalen Änderung je Schüler-ID - ein Neuladen, das VOR dieser Änderung
     // gestartet wurde, darf den Schüler nicht mit seinem (älteren) Serverstand überschreiben.
     const studentTouchedRef = useRef(new Map());
+    // Der in DIESER Sitzung vergebene PIN je Schüler-ID, im Klartext nur im Speicher. Lokal im
+    // Schüler steht nach dem Setzen der Hash vom Server - so landet der Klartext-PIN nicht mehr
+    // im localStorage-Cache (Audit G-N11), lässt sich aber direkt danach noch teilen.
+    const pinKlartextRef = useRef({});
     function studentWriteDelta(id, d) {
         const m = studentWritesRef.current;
         const n = (m.get(id) || 0) + d;
@@ -12679,6 +12875,9 @@ function App() {
         // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
         // entscheiden", nicht "verwerfen". Beim nächsten Start wird wieder gefragt.
         if (recRestore) setRecRestore(null);
+        // "Fahrlehrer krank" liegt (zIndex 1240) über allen Blättern darunter - Escape/Zurück
+        // schloss bisher erst das Fenster DAHINTER, und auch mitten im Absagen (Audit G-M7).
+        else if (sickModal) { if (!sickModal.busy) setSickModal(null); }
         else if (kiPlan) { if (!kiPlan.uebernehmen) setKiPlan(null); }
         else if (wegPlan) { if (!wegPlan.uebernehmen) setWegPlan(null); }
         else if (leerlaufPlan) setLeerlaufPlan(null);
@@ -12723,7 +12922,6 @@ function App() {
             setHandoverModal(null); }
         else if (interessentForm) { if (!interessentForm.busy)
             setInteressentForm(null); }
-        else if (sickModal) setSickModal(null);
         else if (theoryGenModal) setTheoryGenModal(null);
         else if (calShare) setCalShare(null);
         else if (paketKnappOpen) setPaketKnappOpen(false);
@@ -13245,6 +13443,7 @@ function App() {
             // 5 s und meldete fälschlich "nicht alles gespeichert").
             studentWritesRef.current.clear();
             studentTouchedRef.current.clear();
+            pinKlartextRef.current = {};
             // Laufende Aufzeichnung hart beenden (C-M7) und die Wiederherstellungs-Prüfung für das
             // nächste Konto wieder scharf schalten (C-N15) - sonst sah Konto B einen eigenen,
             // liegen gebliebenen Aufzeichnungs-Puffer nie.
@@ -16082,8 +16281,12 @@ function App() {
         }
         // Die Frage nennt jetzt, was mit verschwindet - "wirklich löschen?" allein sagt nichts
         // darüber, dass ADK-Fortschritt, Fahrtenbuch und Kosten mitgehen (Designprüfung 2026-09-14).
+        // Und ehrlich, was "Rückgängig" kann: es legt die Karteikarte neu an. Hochgeladene
+        // Dokumente, Rückmeldungen der Schüler zu Fahrstunden und die Theorie-Anwesenheit hängen
+        // per Fremdschlüssel am Schüler und sind mit dem Löschen endgültig weg (Audit G-H3);
+        // exam_slots.student_id wird dabei auf NULL gesetzt und vom Rückgängig nicht wieder verknüpft.
         if (!await askConfirm({ title: dispName(s) + " löschen?",
-            message: "Damit verschwinden auch der ADK- und Streckenfortschritt, das Fahrtenbuch und die erfassten Kosten dieses Schülers.\n\nDu kannst das direkt danach einmal rückgängig machen." }))
+            message: "Damit verschwinden auch der ADK- und Streckenfortschritt, das Fahrtenbuch und die erfassten Kosten dieses Schülers.\n\nEndgültig gelöscht werden außerdem seine hochgeladenen Dokumente, seine Rückmeldungen zu Fahrstunden und die Theorie-Anwesenheit; eingetragene Prüfungsplätze verlieren die Zuordnung.\n\nDirekt danach kannst du das Löschen einmal rückgängig machen – das holt die Karteikarte zurück, die endgültig gelöschten Teile nicht." }))
             return;
         // Schüler mit Rechnungen dürfen aus Revisionssicherheitsgründen nicht gelöscht werden
         // (die Datenbank blockt das serverseitig, siehe trg_prevent_delete_students_with_invoices) –
@@ -16093,32 +16296,146 @@ function App() {
             showToast(dispName(s) + " hat bereits Rechnungen und wurde stattdessen archiviert. Die Rechnungshistorie bleibt erhalten.");
             return;
         }
-        // Daten merken, um sie bei Bedarf wiederherstellen zu können
-        const backup = { ...s };
+        // VOR dem Löschen einsammeln, was am Schüler hängt - danach ist die Zuordnung weg:
+        // - Dateipfade im Bucket student-files: die student_files-Zeilen verschwinden per
+        //   ON DELETE CASCADE, die Dateien selbst blieben sonst verwaist im Speicher liegen.
+        // - Termine: appointments.student_id hat keinen Fremdschlüssel, die Termine zeigten danach
+        //   auf eine ID, die es nicht mehr gibt (ohne Namen im Kalender, und ein Rückgängig mit
+        //   neuer ID fand sie nicht wieder).
+        // Klappt das Einsammeln nicht, lieber gar nicht löschen als halb aufräumen.
+        // Dazu die Rechnungen laut SERVER: die Dateien müssen vor dem Löschen der Zeile weg (siehe
+        // unten), und blockt der Rechnungs-Trigger erst danach, wären sie ohne Not verloren.
+        let dateipfade = [], termine = [], serverRechnungen = 0;
+        if (!IS_DEMO()) {
+            try {
+                const [dateien, tr, row] = await Promise.all([
+                    sb.from("student_files").select("storage_path").eq("student_id", s.id),
+                    sb.from("appointments").select("id,start_at,title,status").eq("student_id", s.id),
+                    sb.from("students").select("inv:data->invoices").eq("id", s.id).single(),
+                ]);
+                if (dateien.error)
+                    throw dateien.error;
+                if (tr.error)
+                    throw tr.error;
+                if (row.error)
+                    throw row.error;
+                dateipfade = (dateien.data || []).map(f => f.storage_path).filter(Boolean);
+                termine = tr.data || [];
+                serverRechnungen = Array.isArray(row.data && row.data.inv) ? row.data.inv.length : 0;
+            }
+            catch (e) {
+                showToast(dispName(s) + " wurde nicht gelöscht: Dokumente und Termine ließen sich nicht ermitteln.\n" + fehlerText(e), "error");
+                return;
+            }
+        }
+        if (serverRechnungen > 0) {
+            // Die lokale Rechnungsliste ist veraltet (Rechnung auf einem anderen Gerät oder von einer
+            // Kollegin erstellt). Hier bewusst NICHT archivieren: students_teacher_update ersetzt
+            // data komplett, ein Speichern mit dem lokalen Stand ohne diese Rechnungen würde sie
+            // auf dem Server überschreiben. Erst neu laden, dann greift der normale Archiv-Weg oben.
+            showToast(dispName(s) + " hat laut Server bereits Rechnungen und wurde nicht gelöscht. Bitte die App neu laden und den Schüler stattdessen archivieren.", "error");
+            return;
+        }
+        const jetzt = Date.now();
+        const kuenftig = termine.filter(a => new Date(a.start_at).getTime() > jetzt);
+        const vergangen = termine.filter(a => !(new Date(a.start_at).getTime() > jetzt));
+        // Künftige Termine: nachfragen. Abbrechen/Danebentippen heißt "behalten" - der sichere
+        // Weg, es wird nichts gelöscht. Vergangene bleiben immer (Statistik, Tagesabschluss) und
+        // werden nur vom Schüler gelöst.
+        let kuenftigLoeschen = false;
+        if (kuenftig.length) {
+            kuenftigLoeschen = await askConfirm({ title: kuenftig.length === 1 ? "1 künftiger Termin" : (kuenftig.length + " künftige Termine"),
+                message: dispName(s) + " hat noch " + (kuenftig.length === 1 ? "einen Termin" : kuenftig.length + " Termine") + " im Kalender. Sollen sie mitgelöscht werden?\n\nBehältst du sie, bleiben sie ohne Schülerzuordnung stehen, mit dem Namen im Titel.",
+                confirmLabel: kuenftig.length === 1 ? "Termin löschen" : "Termine löschen", cancelLabel: "Behalten", danger: true });
+        }
+        // Dateien aus dem Bucket entfernen - und zwar VOR dem Löschen der Zeile: die Storage-Regel
+        // für student-files erlaubt das Löschen nur, solange der Schüler (Ordnername = Schüler-ID)
+        // noch existiert. Danach liefe remove() ohne Fehlermeldung ins Leere und die Dateien lägen
+        // für immer verwaist im Speicher. Klappt es nicht, wird der Schüler gar nicht gelöscht.
+        if (dateipfade.length) {
+            try {
+                const { error: rmErr } = await sb.storage.from("student-files").remove(dateipfade);
+                if (rmErr)
+                    throw rmErr;
+            }
+            catch (e) {
+                console.error("Dateien des Schülers ließen sich nicht entfernen:", e);
+                showToast(dispName(s) + " wurde nicht gelöscht: die hochgeladenen Dokumente ließen sich nicht entfernen.\n" + fehlerText(e), "error");
+                return;
+            }
+        }
+        // Ein noch aufgeschobenes Speichern dieses Schülers liefe gleich gegen eine gelöschte Zeile
+        // und meldete einen Fehler - verwerfen, sein Stand steckt schon in studentsRef (Backup).
+        const saveKey = "stu:" + s.id;
+        const wartend = pendingSavesRef.current.get(saveKey);
+        if (wartend) {
+            clearTimeout(wartend.timer);
+            pendingSavesRef.current.delete(saveKey);
+            studentWriteDelta(s.id, -1);
+        }
+        // Daten merken, um sie bei Bedarf wiederherstellen zu können (aktueller Stand, nicht die
+        // beim Antippen übergebene Kopie).
+        const backup = { ...((studentsRef.current || []).find(x => x.id === s.id) || s) };
         try {
             await dbDelete(s.id);
         }
         catch (e) {
             // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
-            writeStudent({ ...s, archived: true, archivedAt: s.archivedAt || ymd(new Date()) });
-            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message, "error");
+            // Die Dokumente sind zu diesem Zeitpunkt schon entfernt (siehe oben) - das sagen, statt
+            // den Eindruck zu erwecken, es sei nichts passiert.
+            writeStudent({ ...backup, archived: true, archivedAt: backup.archivedAt || ymd(new Date()) });
+            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message + (dateipfade.length ? "\nDie hochgeladenen Dokumente wurden bereits entfernt." : ""), "error");
             return;
         }
-        updateStudents(prev => {
-            const arr = (prev || []).filter(x => x.id !== s.id);
-            saveCache(uid, arr);
-            if (s.id === activeId)
-                setActiveId(arr[0] ? arr[0].id : null);
-            return arr;
-        });
-        showUndo(dispName(s) + " gelöscht", async () => {
-            const created = await dbInsert(uid, backup);
-            if (created) {
-                updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
-                setActiveId(created.id);
-            }
+        const arr = updateStudents(prev => (prev || []).filter(x => x.id !== s.id));
+        saveCache(uid, arr);
+        if (s.id === activeId)
+            setActiveId(arr[0] ? arr[0].id : null);
+        // Termine bereinigen. Beim Lösen den Namen in den Titel schreiben, falls keiner drinsteht -
+        // sonst stünde im Kalender nur noch ein namenloser Block.
+        const name = dispName(s);
+        const geloest = [];
+        let terminFehler = 0, terminWeg = 0;
+        for (const a of (kuenftigLoeschen ? vergangen : termine)) {
+            const titel = (a.title || "").trim() ? a.title : name;
+            if (await updateAppt(a.id, { student_id: null, title: titel }))
+                geloest.push({ id: a.id, title: a.title || "" });
             else
+                terminFehler++;
+        }
+        if (kuenftigLoeschen) {
+            for (const a of kuenftig) {
+                if (await removeAppt(a.id, { noUndo: true }))
+                    terminWeg++;
+                else
+                    terminFehler++;
+            }
+        }
+        if (terminFehler)
+            showToast(terminFehler + (terminFehler === 1 ? " Termin von " : " Termine von ") + name + " konnte" + (terminFehler === 1 ? "" : "n") + " nicht bereinigt werden – bitte im Kalender nachsehen.", "error");
+        showUndo(name + " gelöscht", async () => {
+            const created = await dbInsert(uid, backup);
+            if (!created) {
                 showToast("Wiederherstellen fehlgeschlagen.", "error");
+                return;
+            }
+            const neu = updateStudents(prev => [...(prev || []), created]);
+            saveCache(uid, neu);
+            setActiveId(created.id);
+            // Die eben gelösten Termine wieder an die neue ID hängen (samt ursprünglichem Titel).
+            let nichtZurueck = 0;
+            for (const g of geloest) {
+                if (!await updateAppt(g.id, { student_id: created.id, title: g.title }))
+                    nichtZurueck++;
+            }
+            const weg = [];
+            if (dateipfade.length)
+                weg.push(dateipfade.length === 1 ? "1 Dokument" : dateipfade.length + " Dokumente");
+            if (terminWeg)
+                weg.push(terminWeg === 1 ? "1 gelöschter Termin" : terminWeg + " gelöschte Termine");
+            if (weg.length || nichtZurueck)
+                showToast(name + " ist wieder da." + (weg.length ? " Nicht zurückgeholt: " + weg.join(", ") + "." : "")
+                    + (nichtZurueck ? " " + nichtZurueck + " Termin(e) konnten nicht wieder zugeordnet werden." : ""));
         });
     }
     /* Die Notiz "weitermachen mit" beschreibt, was in der NAECHSTEN Stunde drankommt. Sobald
@@ -16137,6 +16454,91 @@ function App() {
 
     const updateActive = (patch) => { if (active)
         writeStudent({ ...active, ...patch }); };
+    // Freigabe (shared_with) nur lokal nachziehen - dbShare hat sie schon gespeichert, und
+    // _shared gehört nicht in die data-Spalte (cleanData), ein Speichervorgang wäre überflüssig.
+    function freigabeLokalSetzen(sid, next) {
+        const arr = updateStudents(prev => (prev || []).map(x => x.id === sid ? { ...x, _shared: next } : x));
+        if (uid)
+            saveCache(uid, arr);
+    }
+    // Neuen PIN für den Fahrschülerbereich setzen (siehe PinVergabe). Liefert true bei Erfolg.
+    async function studentPinSetzen(stu, pin) {
+        if (IS_DEMO()) {
+            demoBlock("Demo-Ansicht: der PIN wird nicht gespeichert.");
+            return false;
+        }
+        if (!/^\d{4,8}$/.test(pin || "")) {
+            showToast("Der PIN muss aus 4 bis 8 Ziffern bestehen.");
+            return false;
+        }
+        const cur = (studentsRef.current || []).find(x => x.id === stu.id) || stu;
+        const vor = (cur.vorname || "").trim() || "Der Schüler";
+        // Rückfrage nur, wenn schon ein PIN existiert - ein Fehltipp auf "Zufälligen PIN erzeugen"
+        // sperrte den Schüler sonst ohne Warnung aus seinem Zugang aus (Audit G-N13).
+        if (cur.pin || cur.pinCustom) {
+            const ok = await askConfirm({ title: "Neuen PIN vergeben?",
+                message: (cur.pinCustom ? vor + " hat sich inzwischen einen eigenen PIN gewählt. " : "")
+                    + "Der bisherige PIN funktioniert danach nicht mehr. " + vor + " meldet sich mit dem neuen an und legt dabei wieder einen eigenen fest.",
+                confirmLabel: "Neuen PIN setzen" });
+            if (!ok)
+                return false;
+        }
+        // Ein noch aufgeschobenes oder laufendes Speichern dieses Schülers trägt den ALTEN PIN im
+        // Gepäck (students_teacher_update übernimmt data.pin aus dem Client). Käme es nach der RPC
+        // an, wäre der neue PIN gleich wieder überschrieben - deshalb vorher wegschreiben/abwarten.
+        const key = "stu:" + cur.id;
+        // Dasselbe gilt für ein Speichern, das WÄHREND der RPC oder des Hash-Nachladens angestoßen
+        // wird (Fahrlehrer ändert in der Zeit etwas am Schüler): es hält noch den alten Datensatz
+        // und wartet an der Zeilensperre der RPC - landet also danach. Deshalb: vorher alles
+        // wegschreiben, danach prüfen, ob in der Zwischenzeit ein Speichern geplant wurde, und dann
+        // den PIN nach dem erneuten Abwarten noch einmal setzen (höchstens dreimal).
+        let hash = "";
+        for (let versuch = 0; versuch < 3; versuch++) {
+            const wartend = pendingSavesRef.current.get(key);
+            if (wartend) {
+                try {
+                    await wartend.run();
+                }
+                catch (e) { }
+            }
+            for (let i = 0; i < 50 && (studentWritesRef.current.get(cur.id) || 0) > 0; i++)
+                await new Promise(r => setTimeout(r, 100));
+            const rpcStart = Date.now();
+            const { error } = await sb.rpc("teacher_reset_student_pin", { p_student_id: cur.id, p_pin: pin });
+            if (error) {
+                console.error(error);
+                const m = String(error.message || "");
+                showToast("PIN konnte nicht gesetzt werden:\n" + (/PIN muss|Kein Zugriff|Demo-Modus/.test(m) ? m : fehlerText(error)), "error");
+                return false;
+            }
+            // Den Hash, den der Server daraus gemacht hat, nachladen und lokal übernehmen: spätere
+            // Speichervorgänge schicken data.pin wieder mit - der Hash bleibt dabei unverändert
+            // (trg_hash_student_pins hasht nur Klartext), und im Cache steht kein Klartext-PIN.
+            hash = "";
+            try {
+                const { data } = await sb.from("students").select("pin:data->>pin").eq("id", cur.id).single();
+                hash = (data && data.pin) || "";
+            }
+            catch (e) { }
+            if ((studentTouchedRef.current.get(cur.id) || 0) < rpcStart)
+                break;
+        }
+        pinKlartextRef.current[cur.id] = pin;
+        const patched = patchStudentNow(cur.id, x => {
+            const n = { ...x, pin: isPinHash(hash) ? hash : pin, pinChanged: false };
+            delete n.pinCustom;
+            return n;
+        });
+        // Wurde trotz dreier Versuche zuletzt noch ein Speichern eingeplant, hält es den alten
+        // Datensatz fest - durch den gerade gepatchten ersetzen (gleicher Schlüssel, planSave
+        // verwirft den alten Auftrag).
+        if (patched && hasPendingSave(key))
+            scheduleSave(patched);
+        if (uid)
+            saveCache(uid, studentsRef.current || []);
+        showToast("Neuer PIN für " + vor + ": " + pin + (cur.pinCustom ? "\nDer selbst gewählte PIN gilt nicht mehr." : ""));
+        return true;
+    }
     // Archivieren/Zurückholen. Beim Archivieren (= Prüfung bestanden) wird gefragt, ob die Bitte
     // um eine Bewertung verschickt werden soll - nur wenn ein Bewertungslink hinterlegt ist.
     async function archivierenUmschalten(s) {
@@ -17193,18 +17595,28 @@ function App() {
         return ok;
     }
     // Vorschlag bestätigen / ablehnen
-    async function confirmAppt(id) {
-        const appt = (appts || []).find(a => a.id === id);
+    // Liefert { appt, stu } bei Erfolg, sonst null (Limit, abgebrochene Rückfrage, Speicherfehler) -
+    // die Sammel-Übernahme zählte einen Abbruch früher als Erfolg (Audit G-M9).
+    // opts.liste: Terminstand für Limit-/Überschneidungsprüfung (Standard: appts dieses Renderns).
+    // opts.sammel: in einer Schleife - keine Einzel-WhatsApp (die Schleife bündelt selbst), das
+    // Limit-Problem nicht als Toast, sondern in opts.gruende ablegen.
+    async function confirmAppt(id, opts) {
+        const o = opts || {};
+        const liste = o.liste || appts || [];
+        const appt = liste.find(a => a.id === id);
         if (appt) {
             // Limit-Prüfung beim Bestätigen (nur bestätigte zählen, dieser kommt dazu)
             const dKey = ymd(appt.start_at);
             const mins = apptMin(appt);
-            const lp = limitProblem(dKey, mins, id, appt.student_id);
+            const lp = limitProblem(dKey, mins, id, appt.student_id, liste);
             if (lp) {
-                showToast(lp + "\n\nDieser Vorschlag kann nicht bestätigt werden. Lehne ihn ab oder passe einen anderen Termin an.");
-                return;
+                if (o.sammel && o.gruende)
+                    o.gruende.push((apptStudentName(appt) || appt.title || "Termin") + " (" + fmtD(appt.start_at) + ", " + hm(appt.start_at) + "): " + lp.split("\n")[0]);
+                else
+                    showToast(lp + "\n\nDieser Vorschlag kann nicht bestätigt werden. Lehne ihn ab oder passe einen anderen Termin an.");
+                return null;
             }
-            const clash = findOverlaps(appts, appt.start_at, appt.end_at, id);
+            const clash = findOverlaps(liste, appt.start_at, appt.end_at, id);
             if (clash.length) {
                 const c = clash[0];
                 const cname = apptStudentName(c) || c.title || "Termin";
@@ -17212,7 +17624,7 @@ function App() {
                     + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
                     + "\n\nTrotzdem bestätigen?";
                 if (!await askConfirm({ message: txt }))
-                    return;
+                    return null;
             }
         }
         // Automatische Zuordnung: Vorschlag-Name eindeutig zu einem Schüler?
@@ -17226,7 +17638,11 @@ function App() {
         // Bestätigen fehlgeschlagen (Fehler zeigt updateAppt schon an): keine WhatsApp-Bestätigung
         // für einen Termin anbieten, der in der Datenbank weiterhin offen ist.
         if (!await updateAppt(id, patch))
-            return;
+            return null;
+        if (o.sammel) {
+            const stuS = matchedStu || (appt && appt.student_id ? (studentsRef.current || []).find(x => x.id === appt.student_id) : null) || null;
+            return { appt: appt ? { ...appt, ...patch } : null, stu: stuS };
+        }
         // WhatsApp-Bestätigung anbieten, gebündelt für alle Termine dieses Schülers. students/appts
         // frisch aus den Refs lesen statt der vor dem await eingefangenen Closure-Werte, damit ein
         // zwischenzeitliches Update (z.B. neuer Schüler, geänderter Terminstatus) nicht zu einer
@@ -17254,7 +17670,9 @@ function App() {
             });
             const allAppts = [thisAppt, ...related].sort((a, b) => a.start_at.localeCompare(b.start_at));
             setWaPrompt({ appts: allAppts, stu: stu || null });
+            return { appt: thisAppt, stu: stu || null };
         }
+        return { appt: null, stu: matchedStu };
     }
     // Levenshtein-Distanz: Anzahl der Buchstaben-Änderungen, um von a zu b zu kommen (Maß für Tippfehler-Ähnlichkeit)
     function editDistance(a, b) {
@@ -17591,6 +18009,14 @@ function App() {
             showToast("Kein Telefon hinterlegt \u2013 Link wurde in die Zwischenablage kopiert.");
         }
     }
+    // Klartext-PIN zum Weitergeben: der in dieser Sitzung vergebene, sonst ein (alter) lokal noch
+    // im Klartext stehender. Ein Hash lässt sich nicht zurückrechnen - dann gibt es nichts zu teilen.
+    function pinKlartextFuer(s) {
+        if (!s)
+            return "";
+        const p = pinKlartextRef.current[s.id] || ((s.pin && !isPinHash(s.pin)) ? s.pin : "");
+        return /^\d{4,8}$/.test(p) ? p : "";
+    }
     async function shareStudentAccess(s) {
         if (!bookingCode) {
             showFlash("Erzeuge Buchungscode…");
@@ -17608,8 +18034,9 @@ function App() {
                 return;
             }
         }
-        if (!(s.pin && s.pin.length >= 4) || isPinHash(s.pin)) {
-            showToast(isPinHash(s.pin) ? "Dieser PIN ist aus Sicherheitsgründen nicht mehr einsehbar. Bitte einen neuen erzeugen." : "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.");
+        const pinKlar = pinKlartextFuer(s);
+        if (!pinKlar) {
+            showToast(s.pin ? "Dieser PIN ist aus Sicherheitsgründen nicht mehr einsehbar. Bitte einen neuen erzeugen." : "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben.");
             return;
         }
         const url = bookingURL();
@@ -17625,7 +18052,7 @@ function App() {
             "2. unten auf \"Fortschritt\" tippen\n" +
             "3. Vorname (" + ((s.vorname || "").trim()) + ") und Nachname (" + ((s.name || "").trim()) + ") eingeben\n" +
             "4. deinen PIN eingeben\n\n" +
-            "Dein persönlicher PIN: " + s.pin + "\n\n" +
+            "Dein persönlicher PIN: " + pinKlar + "\n\n" +
             "Beim ersten Login legst du einen eigenen PIN fest, den nur du kennst. Bitte gib deinen Zugang nicht weiter.";
         try {
             if (navigator.share) {
@@ -22178,7 +22605,7 @@ function App() {
                 React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 10, lineHeight: 1.5 } }, "KI schlägt eine kurze WhatsApp-Nachricht mit dem aktuellen Ausbildungsstand und einer passenden gemeinsamen Übung vor - du prüfst den Text und öffnest WhatsApp erst per Antippen."),
                 React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                     React.createElement("label", null, "Telefonnummer Eltern/Begleitperson (optional)",
-                    React.createElement("input", { type: "tel", defaultValue: active.elternTel || "", placeholder: "sonst wird die Nummer des Schülers verwendet",
+                    React.createElement("input", { key: "elternTel|" + (active.elternTel || ""), type: "tel", defaultValue: active.elternTel || "", placeholder: "sonst wird die Nummer des Schülers verwendet",
                         onBlur: e => { if (e.target.value !== (active.elternTel || ""))
                             updateActive({ elternTel: e.target.value }); } }))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => generateElternUpdate(active) }, "✨ Eltern-Update erstellen")),
@@ -22208,10 +22635,29 @@ function App() {
             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } }, "Grundlage: Begleitetes Fahren ab 17 (§ 48a FeV). Die Kilometerstufen orientieren sich am Entwurf der Fahrpraxisanleitungs-Verordnung und gelten erst, sobald diese Erprobung in Kraft ist."));
     }
     function renderDaten() {
+        // Die Felder sind ungesteuert (defaultValue) und hingen bisher nur an active.id. Kam ein
+        // neuerer Stand vom Server (Kollege hat bei einem geteilten Schüler etwas geändert), zeigte
+        // das Feld weiter den alten Wert - und schon das Verlassen des Feldes schrieb ihn zurück,
+        // weil er sich vom neuen unterschied (Audit G-M4). stammKey hängt deshalb den aktuellen
+        // Wert an den key: ändert er sich von außen, wird das Feld mit dem neuen Wert neu aufgebaut.
+        const stammKey = (key) => key + "|" + (active[key] || "");
+        const stammBlur = (key, e, wert) => {
+            const neu = wert === undefined ? e.target.value : wert;
+            if (neu === (active[key] || ""))
+                return;
+            const fehler = stammdatenFehler(key, neu, ymd(new Date()));
+            if (fehler) {
+                // Nicht speichern, alten Wert zurück ins Feld - sonst stünde im Feld etwas anderes
+                // als im Datensatz (Audit G-N14).
+                e.target.value = active[key] || "";
+                showToast(fehler + " Nicht gespeichert.", "error");
+                return;
+            }
+            updateActive({ [key]: neu });
+        };
         const f = (key, label, type) => React.createElement("div", { className: "field", key: key },
             React.createElement("label", null, label,
-            React.createElement("input", { type: type || "text", defaultValue: active[key] || "", onBlur: e => { if (e.target.value !== (active[key] || ""))
-                    updateActive({ [key]: e.target.value }); } })));
+            React.createElement("input", { key: stammKey(key), type: type || "text", defaultValue: active[key] || "", onBlur: e => stammBlur(key, e) })));
         const vk = active.klasse || DEFAULT_KLASSE;
         const tpl = tplFor(vk);
         const amp = ampel(active, tpl.adk, tpl.strecken, sonderfahrtenSoll);
@@ -22367,30 +22813,30 @@ function App() {
                 active.istFirmenkunde && React.createElement("div", { className: "card", style: { padding: "12px 13px", marginBottom: 12 } },
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Firmenname",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaName || "", placeholder: "z.B. Spedition Muster GmbH",
-                            onBlur: e => { if (e.target.value !== (active.firmaName || "")) updateActive({ firmaName: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaName"), defaultValue: active.firmaName || "", placeholder: "z.B. Spedition Muster GmbH",
+                            onBlur: e => stammBlur("firmaName", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Straße und Hausnummer",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaStrasse || "",
-                            onBlur: e => { if (e.target.value !== (active.firmaStrasse || "")) updateActive({ firmaStrasse: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaStrasse"), defaultValue: active.firmaStrasse || "",
+                            onBlur: e => stammBlur("firmaStrasse", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "PLZ und Ort",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
-                            onBlur: e => { if (e.target.value !== (active.firmaPlzOrt || "")) updateActive({ firmaPlzOrt: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaPlzOrt"), defaultValue: active.firmaPlzOrt || "", placeholder: "79100 Freiburg",
+                            onBlur: e => stammBlur("firmaPlzOrt", e) }))),
                     // Pflicht für die XRechnung (BT-49, elektronische Adresse des Käufers) -
                     // die Schüler-Daten haben sonst keine E-Mail-Adresse der Firma.
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "E-Mail für Rechnungen (für E-Rechnung nötig)",
-                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
-                            onBlur: e => { if (e.target.value.trim() !== (active.firmaEmail || "")) updateActive({ firmaEmail: e.target.value.trim() }); } }))),
+                        React.createElement("input", { type: "email", inputMode: "email", autoComplete: "off", key: stammKey("firmaEmail"), defaultValue: active.firmaEmail || "", placeholder: "rechnung@firma.de",
+                            onBlur: e => stammBlur("firmaEmail", e, e.target.value.trim()) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "USt-IdNr. (optional)",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
-                            onBlur: e => { if (e.target.value !== (active.firmaUstId || "")) updateActive({ firmaUstId: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaUstId"), defaultValue: active.firmaUstId || "", placeholder: "DE123456789",
+                            onBlur: e => stammBlur("firmaUstId", e) }))),
                     React.createElement("div", { className: "field" },
                         React.createElement("label", null, "Bestellnummer / Referenz des Kunden (optional)",
-                        React.createElement("input", { type: "text", defaultValue: active.firmaReferenz || "",
-                            onBlur: e => { if (e.target.value !== (active.firmaReferenz || "")) updateActive({ firmaReferenz: e.target.value }); } }))),
+                        React.createElement("input", { type: "text", key: stammKey("firmaReferenz"), defaultValue: active.firmaReferenz || "",
+                            onBlur: e => stammBlur("firmaReferenz", e) }))),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.45, margin: "2px 2px 0" } },
                         "Bei einer Rechnung an diesen Schüler kannst du zusätzlich eine XRechnung-Datei erzeugen.")),
                 React.createElement("div", { className: "field" },
@@ -22398,8 +22844,7 @@ function App() {
                     React.createElement("input", { type: "date", value: active.theorie || "", onChange: e => updateActive({ theorie: e.target.value }) }))),
                 React.createElement("div", { className: "field" },
                     React.createElement("label", null, "Bemerkungen",
-                    React.createElement("textarea", { rows: 3, defaultValue: active.bemerkungen || "", onBlur: e => { if (e.target.value !== (active.bemerkungen || ""))
-                            updateActive({ bemerkungen: e.target.value }); } }))),
+                    React.createElement("textarea", { key: stammKey("bemerkungen"), rows: 3, defaultValue: active.bemerkungen || "", onBlur: e => stammBlur("bemerkungen", e) }))),
                 // Kurzüberblick hier in den Schülerdaten, damit er sofort sichtbar ist, ohne extra
                 // in "Ausbildung" nachschauen zu müssen - die ausführliche, interaktive Ansicht (mit
                 // dem Hinweis zur Doppelstunden-Pflicht) bleibt bewusst NUR in Ausbildung › Reife
@@ -22423,9 +22868,9 @@ function App() {
                         "Vergib einen persönlichen PIN. Damit kann ",
                         dispName(active),
                         " im Fahrschülerbereich (Reiter Mein Fortschritt) den eigenen ADK-Stand, die Strecken und den Terminverlauf ansehen, Termine anfragen und stornieren sowie Lernvideos ansehen. Ohne PIN ist der Zugang gesperrt. Für die Anmeldung in der App „Allindrive für Fahrschüler“ braucht er beides: den Fahrschul-Code und seinen PIN."),
-                    React.createElement("div", { className: "field", style: { marginBottom: 10 } },
-                        React.createElement("label", null, "PIN (4 bis 8 Ziffern)",
-                        React.createElement("input", { type: "text", inputMode: "numeric", maxLength: 8, value: isPinHash(active.pin) ? "" : (active.pin || ""), placeholder: isPinHash(active.pin) ? "PIN gesetzt · nicht mehr einsehbar" : "z.B. 2468", onChange: e => updateActive({ pin: e.target.value.replace(/\D/g, "").slice(0, 8), pinCustom: "", pinChanged: false }), style: { letterSpacing: "0.2em", fontFamily: "var(--font-d)", fontWeight: 700 } }))),
+                    // key je Schüler: der getippte Entwurf gehört nie zu einem anderen Schüler.
+                    React.createElement(PinVergabe, { key: active.id, student: active, klartext: pinKlartextRef.current[active.id] || "",
+                        onSetzen: pin => studentPinSetzen(active, pin) }),
                     // Der Fahrschul-Code steht hier, weil hier der Moment ist, in dem man ihn
                     // braucht: der Schueler bekommt Code + Name + PIN, sonst kommt er in der
                     // Fahrschueler-App nicht hinein. Frueher lag er am unteren Ende von
@@ -22445,15 +22890,15 @@ function App() {
                                         showToast("Konnte nicht kopiert werden. Du kannst den Code auch antippen und von Hand kopieren.", "error");
                                     }
                                 } }, "Kopieren"))),
-                    React.createElement("div", { style: { display: "flex", gap: 8 } },
-                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, justifyContent: "center", gap: 8 }, onClick: () => updateActive({ pin: securePin(), pinCustom: "", pinChanged: false }) }, "Zufälligen PIN erzeugen"),
-                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1, justifyContent: "center", gap: 8 }, disabled: !(active.pin && active.pin.length >= 4 && !isPinHash(active.pin)), onClick: () => shareStudentAccess(active) }, "Fahrschülerbereich teilen")),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { justifyContent: "center", gap: 8 }, disabled: !pinKlartextFuer(active), onClick: () => shareStudentAccess(active) }, "Fahrschülerbereich teilen"),
                     !active.pin &&
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8 } }, "Bitte zuerst einen PIN mit mindestens 4 Ziffern vergeben."),
-                    isPinHash(active.pin) &&
+                    active.pin && !pinKlartextFuer(active) &&
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Ein PIN ist bereits vergeben, aber aus Sicherheitsgründen nicht mehr im Klartext einsehbar. Erzeuge bei Bedarf einen neuen, um ihn erneut zu teilen – der bisherige funktioniert für " + dispName(active) + " weiterhin, bis du ihn überschreibst."),
-                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinChanged
-                        ? "Der Schüler hat den PIN inzwischen selbst geändert. Du siehst hier nur noch den Start-PIN. Vergibst du einen neuen PIN, wird der selbst gewählte des Schülers überschrieben und er legt beim nächsten Login wieder einen eigenen fest."
+                    // pinCustom statt pinChanged: pinChanged setzt niemand (Audit G-H1), pinCustom
+                    // dagegen legt die Fahrschüler-App an, sobald der Schüler einen eigenen PIN wählt.
+                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, active.pinCustom
+                        ? "Der Schüler hat sich inzwischen einen eigenen PIN gewählt, den nur er kennt. Hat er ihn vergessen, vergib hier einen neuen: der selbst gewählte gilt dann nicht mehr, und er legt beim nächsten Login wieder einen eigenen fest."
                         : "Beim ersten Login wird der Schüler aufgefordert, aus diesem Start-PIN einen eigenen zu machen, den nur er kennt.")),
                 React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 12, marginBottom: 4 } },
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Zahler-Zugang"),
@@ -22497,97 +22942,13 @@ function App() {
                                 React.createElement("input", { type: "text", value: referralRedeemCode, onChange: e => setReferralRedeemCode(e.target.value.toUpperCase()), placeholder: "z.B. CLAR482" }))),
                             React.createElement("button", { className: "btn btn-primary btn-block", disabled: !referralRedeemCode.trim(), onClick: () => redeemReferral(active, referralRedeemCode) }, "Bonus gutschreiben"))),
                 active._isMine
-                    ? React.createElement(ShareBox, null)
+                    ? React.createElement(ShareBox, { key: active.id, student: active, eigeneEmail: (session && session.user && session.user.email) || "", onSharedChange: freigabeLokalSetzen })
                     : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, fontSize: 13, color: "var(--muted)" } }, "Dieser Schüler wurde mit dir geteilt. Du kannst Einträge bearbeiten, aber die Freigabe verwaltet der Besitzer.")),
             sel && React.createElement("div", { className: "station-panel" },
                 React.createElement("div", { className: "station-title" },
                     React.createElement("span", null, sel.icon + " " + STATION_TITLES[sel.key]),
                     React.createElement("span", { style: { marginLeft: "auto", fontSize: 12.5, fontWeight: 700, color: toneColors(sel.tone).fg } }, sel.chip)),
                 stationBody(sel.key)));
-    }
-    /* ── Teilen ── */
-    function ShareBox() {
-        const [email, setEmail] = useState("");
-        const [busy, setBusy] = useState(false);
-        const [msg, setMsg] = useState("");
-        const shared = active._shared || [];
-        async function add() {
-            const e = email.trim().toLowerCase();
-            if (!e) {
-                return;
-            }
-            if (e === session.user.email.toLowerCase()) {
-                setMsg("Das ist deine eigene Adresse.");
-                return;
-            }
-            // busy bleibt bis zum Ende des gesamten Schreibvorgangs aktiv (nicht schon nach
-            // findUserByEmail) - sonst öffnet sich der Button wieder, während dbShare/writeStudent
-            // noch laufen, und ein zweiter Klick kann mit veraltetem "shared" die erste Freigabe überschreiben.
-            setBusy(true);
-            setMsg("");
-            const prof = await findUserByEmail(e);
-            if (!prof) {
-                setBusy(false);
-                setMsg("Kein Konto mit dieser E-Mail gefunden. Die Person muss sich zuerst einmal in der App registrieren.");
-                return;
-            }
-            if (shared.indexOf(prof.id) >= 0) {
-                setBusy(false);
-                setMsg("Schon freigegeben.");
-                return;
-            }
-            const next = [...shared, prof.id];
-            try {
-                await dbShare(active.id, next);
-            }
-            catch (err) {
-                setBusy(false);
-                setMsg("Freigabe fehlgeschlagen: " + err.message);
-                return;
-            }
-            writeStudent({ ...active, _shared: next });
-            setBusy(false);
-            setEmail("");
-            setMsg("Freigegeben für " + e);
-        }
-        async function removeShare(uidToRemove) {
-            const next = shared.filter(x => x !== uidToRemove);
-            try {
-                await dbShare(active.id, next);
-            }
-            catch (err) {
-                setMsg("Entfernen fehlgeschlagen: " + err.message);
-                return;
-            }
-            writeStudent({ ...active, _shared: next });
-        }
-        return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 6 } },
-            React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Mit Kollegin/Kollegen teilen"),
-            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "Per E-Mail freigeben. Die Person muss sich einmal in der App registriert haben."),
-            React.createElement("div", { style: { display: "flex", gap: 8 } },
-                React.createElement("input", { type: "email", value: email, onChange: e => setEmail(e.target.value), placeholder: "kollege@email.de", style: { flex: 1, border: "1.5px solid var(--line)", borderRadius: 11, padding: "10px 12px", fontSize: 16 } }),
-                React.createElement("button", { className: "btn btn-primary", disabled: busy, onClick: add }, busy ? "…" : "Teilen")),
-            msg && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 8 } }, msg),
-            shared.length > 0 && React.createElement("div", { style: { marginTop: 10 } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 } },
-                    "Freigegeben f\u00FCr ",
-                    shared.length),
-                shared.map(id => React.createElement("div", { key: id, style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 0", fontSize: 13 } },
-                    React.createElement(SharedName, { id: id }),
-                    React.createElement("button", { onClick: () => removeShare(id), style: { color: "var(--red)", fontWeight: 700, fontSize: 13, padding: "2px 6px" } }, "Entfernen")))));
-    }
-    // Aufklappbarer Abschnitt (für den Adminbereich). Standardmäßig zu.
-    function SharedName({ id }) {
-        const [email, setEmail] = useState("…");
-        useEffect(() => {
-            let on = true;
-            // Über eine schmale RPC statt direktem Tabellenzugriff - die geteilte Person kann
-            // einer anderen Fahrschule angehören, profiles ist dafür nicht mehr offen lesbar.
-            sb.rpc("profile_email_by_id", { p_id: id }).then(({ data }) => { if (on && data)
-                setEmail(data); });
-            return () => { on = false; };
-        }, [id]);
-        return React.createElement("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, email);
     }
     /* ── Vorlagen-Editor ── */
     /* ── Einstellungen ── */
@@ -23134,6 +23495,9 @@ function App() {
     // ggf. eingeschränkt), der die Zeit für Buchungen blockiert, aber nirgends als Unterrichtszeit zählt.
     const URLAUB_MARK = "\u00A7URLAUB\u00A7";
     function isUrlaub(a) { return !!(a && typeof a.note === "string" && a.note.indexOf(URLAUB_MARK) === 0); }
+    // Anzeigename eines Urlaubsblocks - "Fahrlehrer krank" sperrt den Tag über denselben Marker,
+    // im Kalender soll dort aber nicht "Urlaub" stehen.
+    function urlaubTitel(a) { return (a && a.note === URLAUB_MARK + "Krank") ? "Krank" : "Urlaub"; }
     // Illustration für Terminarten ohne Schülerbezug (2026-09-13) - liefert null, wenn der Termin
     // zu einem Schüler gehört, dann zeigt die Zeile stattdessen dessen Profilbild.
     // "Sonstige Tätigkeiten" deckt beides ab: die per Notiz markierten (isSonstige) und die
@@ -23257,49 +23621,102 @@ function App() {
             return false;
         return (stu.drivenLessons || []).some(l => l.leistung && l.apptId === a.id);
     }
-    // "Fahrlehrer krank": bestätigte Fahrstunden eines Tages, die bei Absage einen Schüler
-    // betreffen würden (Sonstige Tätigkeit und Urlaub zählen nicht als "Ausfall für jemanden").
+    // "Fahrlehrer krank": alle noch bevorstehenden Termine eines Tages, die bei einer Absage
+    // jemanden betreffen. Nicht nur bestätigte: offene Anfragen/Vorschläge (pending), Warteliste-
+    // Angebote (offered) und Stornoanfragen blieben sonst stehen und ließen sich weiter annehmen,
+    // obwohl der Fahrlehrer krank ist (Audit G-M6). Urlaub und per Notiz markierte sonstige
+    // Tätigkeiten zählen nicht. Nur bevorstehende - vergangene Fahrstunden desselben Tages haben
+    // stattgefunden, removeAppt löscht wirklich.
+    const SICK_STATUS = ["confirmed", "pending", "offered", "cancel_requested"];
     function sickDayAppts(dateKey) {
         const jetzt = new Date();
-        // Nur noch bevorstehende Termine des Tages - sonst würden beim "Fahrlehrer krank"-Sammelabsagen
-        // auch bereits gegebene (vergangene) Fahrstunden desselben Tages endgültig gelöscht (removeAppt
-        // löscht wirklich, siehe cancelSickDay mit noUndo:true), obwohl die Stunde real stattgefunden hat.
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey && new Date(a.start_at) > jetzt)
+        return (appts || []).filter(a => SICK_STATUS.includes(a.status) && !isSonstige(a) && !isUrlaub(a) && ymd(a.start_at) === dateKey && new Date(a.start_at) > jetzt)
             .sort((a, b) => a.start_at.localeCompare(b.start_at));
+    }
+    // Vorauswahl: Fahrstunden ja; private Termine, Theorieunterricht und sonstige Tätigkeiten
+    // (ST/STI) nein - die hängen nicht zwingend am Fahrlehrer-Auto und wurden bisher ohne
+    // Abwahl und ohne Rückgängig mitgelöscht (Audit G-M6). Jede Zeile lässt sich umstellen.
+    function sickStandardAuswahl(a) {
+        const art = apptArt(a);
+        return !(art === "PRIVAT" || art === "TH" || art === "ST" || art === "STI");
+    }
+    function sickAusgewaehlt(modal, a) {
+        const u = (modal && modal.umgestellt) || {};
+        return Object.prototype.hasOwnProperty.call(u, a.id) ? !!u[a.id] : sickStandardAuswahl(a);
     }
     // WhatsApp-Text für eine krankheitsbedingte Absage - ohne Ersatztermin, der wird separat
     // vereinbart (Fahrlehrer weiß bei der Absage selbst oft noch nicht, wann Ersatz möglich ist).
     function waSickCancelText(appt, stu) {
         const name = (stu && stu.vorname) ? stu.vorname : (apptStudentName(appt) || appt.title || "");
         const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
-        return greet + "leider muss deine Fahrstunde am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
+        const was = appt.status === "confirmed" ? "deine Fahrstunde" : "der Termin";
+        return greet + "leider muss " + was + " am " + fmtDLong(appt.start_at) + " um " + hm(appt.start_at) + " Uhr krankheitsbedingt ausfallen. Tut mir leid für die kurzfristige Absage! Ich melde mich, sobald ich einen neuen Termin für dich habe.";
     }
-    // Bestätigte Termine eines Tages absagen (Fahrlehrer krank). Gibt die abgesagten Termine
+    // Das zu sperrende Zeitfenster: heute ab jetzt (auf 5 Min abgerundet), sonst der ganze Tag.
+    // null, wenn heute nichts mehr übrig ist.
+    function sickFenster(dateKey) {
+        let vonZeit = "00:00";
+        if (dateKey === ymd(new Date())) {
+            const p = berlinParts(new Date());
+            const min = p.hour * 60 + p.minute - ((p.hour * 60 + p.minute) % 5);
+            if (min >= 23 * 60 + 55)
+                return null;
+            vonZeit = String(Math.floor(min / 60)).padStart(2, "0") + ":" + String(min % 60).padStart(2, "0");
+        }
+        const startISO = combineDT(dateKey, vonZeit), endISO = combineDT(dateKey, "23:59");
+        return { startISO, endISO, s: new Date(startISO).getTime(), e: new Date(endISO).getTime() };
+    }
+    // Ist das Fenster schon komplett durch EINEN Urlaubs-/Krank-Block abgedeckt? Nur überlappen
+    // reicht nicht: ein Teil-Urlaub am Abend (z.B. 18-20 Uhr) ließ sonst den Nachmittag offen,
+    // während das Fenster "für Buchungen gesperrt" meldete.
+    function sickTagGesperrt(dateKey, liste) {
+        const f = sickFenster(dateKey);
+        return !!f && (liste || []).some(a => isUrlaub(a) && new Date(a.start_at).getTime() <= f.s && new Date(a.end_at || a.start_at).getTime() >= f.e);
+    }
+    // Den (Rest-)Tag als "Krank" sperren - über die vorhandene Urlaub-Logik (URLAUB_MARK), damit
+    // ihn Buchungslink, Lücken-Radar und Terminvorschläge als belegt sehen. Heute ab jetzt (die
+    // schon gefahrenen Stunden des Vormittags bleiben unberührt), sonst ganztägig. Liegt dort
+    // bereits ein Urlaub über das ganze Fenster, wird nichts doppelt angelegt. Liefert true, wenn der Tag danach gesperrt ist.
+    async function sickTagSperren(dateKey) {
+        const f = sickFenster(dateKey);
+        if (!f)
+            return false;
+        if (sickTagGesperrt(dateKey, apptsRef.current))
+            return true;
+        const startISO = f.startISO, endISO = f.endISO;
+        const c = await addAppt({ title: "Krank", start_at: startISO, end_at: endISO, status: "confirmed", note: URLAUB_MARK + "Krank", art: "" });
+        return !!c;
+    }
+    // Ausgewählte Termine eines Tages absagen (Fahrlehrer krank). Gibt die abgesagten Termine
     // samt Schüler zurück, damit die Benachrichtigungsliste danach angezeigt werden kann - die
     // Termine selbst sind zu diesem Zeitpunkt bereits aus appts entfernt (removeAppt).
-    async function cancelSickDay(dateKey) {
-        const list = sickDayAppts(dateKey);
+    // Bewusst KEIN Warteliste-Angebot mehr: die frei gewordenen Zeiten gibt es nicht, der
+    // Fahrlehrer ist ja krank. Früher bot maybeOfferWaitlist() genau diese Stunden anderen
+    // Schülern an (Audit G-H2).
+    async function cancelSickDay(dateKey, ids, sperren) {
+        const list = sickDayAppts(dateKey).filter(a => ids.includes(a.id));
         const cancelled = [];
         const failed = [];
         for (const a of list) {
+            // Schüler VOR dem Löschen bestimmen, und über apptStudent(): Buchungslink-Termine
+            // tragen oft nur den Namen im Titel, student_id ist leer - sie landeten sonst ohne
+            // Nummer in der Benachrichtigungsliste (Audit G-M8).
+            const stu = apptStudent(a);
             // Nur tatsächlich erfolgreich gelöschte Termine als "abgesagt" zählen - sonst hätte eine
             // fehlgeschlagene Einzellöschung (z.B. Netzwerkfehler) die WhatsApp-Benachrichtigung fürs
-            // Kind trotzdem als erledigt angezeigt, obwohl der Termin in der DB noch bestätigt ist.
+            // Kind trotzdem als erledigt angezeigt, obwohl der Termin in der DB noch besteht.
             const ok = await removeAppt(a.id, { noUndo: true, label: "Termin krankheitsbedingt abgesagt" });
             if (ok)
-                cancelled.push({ appt: a, stu: a.student_id ? students.find(s => s.id === a.student_id) : null });
+                cancelled.push({ appt: a, stu });
             else
                 failed.push(a);
         }
         if (failed.length)
-            showToast((failed.length === 1 ? "1 Termin konnte" : (failed.length + " Termine konnten")) + " nicht abgesagt werden und " + (failed.length === 1 ? "bleibt" : "bleiben") + " weiterhin bestätigt - bitte erneut versuchen.");
-        if (cancelled.length) {
-            // sickDayAppts() liefert nur status:"confirmed"-Termine, ein erneutes Erzwingen des
-            // Status ist hier anders als bei confirmCancel() nicht nötig.
-            const [first, ...rest] = cancelled.map(c => c.appt);
-            maybeOfferWaitlist(first, rest);
-        }
-        return cancelled;
+            showToast((failed.length === 1 ? "1 Termin konnte" : (failed.length + " Termine konnten")) + " nicht abgesagt werden und " + (failed.length === 1 ? "bleibt" : "bleiben") + " weiterhin bestehen - bitte erneut versuchen.");
+        const gesperrt = sperren ? await sickTagSperren(dateKey) : false;
+        if (sperren && !gesperrt)
+            showToast("Der Tag konnte nicht als „Krank“ im Kalender gesperrt werden. Bitte bei Bedarf von Hand als Urlaub eintragen.", "error");
+        return { cancelled, gesperrt };
     }
     // "Fahrlehrer krank"-Modal: eigene Funktion statt inline in der großen JSX-Rückgabe von
     // App(), damit die Verschachtelung überschaubar bleibt (siehe Changelog-Fehler durch
@@ -23307,63 +23724,90 @@ function App() {
     function renderSickModal() {
         const busy = !!sickModal.busy;
         const list = sickModal.cancelled ? [] : sickDayAppts(sickModal.date);
+        const gewaehlt = list.filter(a => sickAusgewaehlt(sickModal, a));
+        const sperren = sickModal.sperren !== false;
+        const schonGesperrt = sickTagGesperrt(sickModal.date, appts);
         async function doCancelAll() {
+            if (sickModal.busy)
+                return;
             setSickModal({ ...sickModal, busy: true });
-            const cancelled = await cancelSickDay(sickModal.date);
-            setSickModal({ date: sickModal.date, cancelled });
+            const r = await cancelSickDay(sickModal.date, gewaehlt.map(a => a.id), sperren);
+            setSickModal({ date: sickModal.date, cancelled: r.cancelled, gesperrt: r.gesperrt });
         }
+        const umstellen = (a) => setSickModal(m => m && !m.busy ? ({ ...m, umgestellt: { ...(m.umgestellt || {}), [a.id]: !sickAusgewaehlt(m, a) } }) : m);
+        const statusText = { pending: "Anfrage", offered: "Angebot", cancel_requested: "Storno angefragt" };
         const selectStep = React.createElement(React.Fragment, null,
             React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Fahrlehrer krank"),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
-                "Sagt alle bestätigten Fahrstunden des gewählten Tages auf einmal ab. Für jeden betroffenen Schüler öffnet sich danach eine fertige WhatsApp-Nachricht zum Verschicken - du siehst sie vor dem Senden und tippst sie einzeln durch."),
+                "Sagt die angehakten Termine des gewählten Tages auf einmal ab. Für jeden betroffenen Schüler bekommst du danach eine fertige WhatsApp-Nachricht - du siehst sie vor dem Senden und tippst sie einzeln durch. Die frei werdenden Zeiten werden niemandem angeboten."),
             React.createElement("div", { className: "field", style: { marginBottom: 14 } },
                 React.createElement("label", null, "Tag",
-                React.createElement("input", { type: "date", value: sickModal.date, onChange: e => setSickModal({ ...sickModal, date: e.target.value }) }))),
+                React.createElement("input", { type: "date", value: sickModal.date, disabled: busy, onChange: e => setSickModal({ ...sickModal, date: e.target.value, umgestellt: {} }) }))),
             list.length === 0
-                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Keine bestätigten Fahrstunden an diesem Tag.")
-                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
-                    list.map((a, i) => React.createElement("div", { key: a.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
-                        terminBild(a, apptStudent(a), { px: 36 }),
-                        React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 600 } }, apptStudentName(a) || a.title || "Termin"),
-                        React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, hm(a.start_at) + " Uhr")))),
-            list.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doCancelAll },
-                busy ? "Sagt ab…" : ("Alle " + list.length + (list.length === 1 ? " Fahrstunde absagen" : " Fahrstunden absagen"))),
-            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setSickModal(null) }, "Abbrechen"));
+                ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 16 } }, "Keine bevorstehenden Termine an diesem Tag.")
+                : React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 12 } },
+                    list.map((a, i) => {
+                        const an = sickAusgewaehlt(sickModal, a);
+                        const stu = apptStudent(a);
+                        return React.createElement("label", { key: a.id, className: "check", style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", margin: 0, cursor: busy ? "default" : "pointer", borderTop: i > 0 ? "1px solid var(--line)" : "none", opacity: an ? 1 : 0.6 } },
+                            React.createElement("input", { type: "checkbox", checked: an, disabled: busy, onChange: () => umstellen(a) }),
+                            terminBild(a, stu, { px: 36 }),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14, fontWeight: 600, overflowWrap: "anywhere" } }, (stu ? dispName(stu) : "") || a.title || artLabelPlain(apptArt(a)) || "Termin"),
+                                (statusText[a.status] || !sickStandardAuswahl(a)) && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
+                                    [statusText[a.status], !sickStandardAuswahl(a) ? artLabelPlain(apptArt(a)) : ""].filter(Boolean).join(" · "))),
+                            React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", flexShrink: 0 } }, hm(a.start_at) + " Uhr"));
+                    })),
+            !schonGesperrt && React.createElement("label", { className: "check", style: { display: "flex", margin: "0 2px 14px", fontSize: 13, lineHeight: 1.45 } },
+                React.createElement("input", { type: "checkbox", checked: sperren, disabled: busy, onChange: e => setSickModal({ ...sickModal, sperren: e.target.checked }) }),
+                "Tag im Kalender als „Krank“ sperren – dann bucht niemand über den Buchungslink hinein"),
+            (gewaehlt.length > 0 || (sperren && !schonGesperrt)) && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: busy ? 0.6 : 1 }, disabled: busy, onClick: doCancelAll },
+                busy ? "Sagt ab…"
+                    : gewaehlt.length === 0 ? "Nur den Tag sperren"
+                        : ((gewaehlt.length === 1 ? "1 Termin absagen" : ("Alle " + gewaehlt.length + " Termine absagen")) + ((sperren && !schonGesperrt) ? " und Tag sperren" : ""))),
+            React.createElement("button", { className: "btn btn-ghost btn-block", disabled: busy, onClick: () => setSickModal(null) }, "Abbrechen"));
         const notifyRows = sickModal.cancelled ? sickModal.cancelled.map((c, i) => {
             const num = c.stu ? waNumber(c.stu.tel) : "";
             const waLink = num ? React.createElement("a", { href: "https://wa.me/" + num + "?text=" + encodeURIComponent(waSickCancelText(c.appt, c.stu)), target: "_blank", rel: "noopener noreferrer",
                     className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: "#128C3E" } }, "WhatsApp")
-                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, "keine Nummer");
+                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, c.stu ? "keine Nummer" : "kein Schüler");
             return React.createElement("div", { key: c.appt.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
                 React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, apptStudentName(c.appt) || c.appt.title || "Schüler"),
+                    React.createElement("div", { style: { fontSize: 14, fontWeight: 600 } }, (c.stu ? dispName(c.stu) : "") || c.appt.title || "Termin"),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, hm(c.appt.start_at) + " Uhr")),
                 waLink);
         }) : [];
+        const anzahl = sickModal.cancelled ? sickModal.cancelled.length : 0;
         const notifyStep = React.createElement(React.Fragment, null,
             React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } },
-                "✓ " + (sickModal.cancelled ? sickModal.cancelled.length : 0) + ((sickModal.cancelled && sickModal.cancelled.length === 1) ? " Fahrstunde abgesagt" : " Fahrstunden abgesagt")),
+                "✓ " + (anzahl === 1 ? "1 Termin abgesagt" : anzahl + " Termine abgesagt")),
+            sickModal.gesperrt && React.createElement("p", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 8 } },
+                "Der Tag steht jetzt als „Krank“ im Kalender und ist für Buchungen gesperrt."),
             notifyRows.length > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 14 } },
                 "Jetzt noch Bescheid geben - ein Tipp öffnet WhatsApp mit fertigem Text, du siehst ihn vor dem Senden."),
             React.createElement("div", { className: "card", style: { padding: "6px 14px", marginBottom: 16 } },
                 notifyRows.length === 0 ? React.createElement("div", { style: { padding: "10px 0", fontSize: 13.5, color: "var(--muted)" } }, "Keine Schüler zu benachrichtigen.") : notifyRows),
             React.createElement("button", { className: "btn btn-primary btn-block", onClick: () => setSickModal(null) }, "Fertig"));
-        return React.createElement("div", { onClick: () => { if (!busy)
-                    setSickModal(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        // Tipp daneben schließt nur die Auswahl, nicht die Benachrichtigungsliste: die Termine sind
+        // dann schon gelöscht, und wer sie versehentlich wegtippt, weiß nicht mehr, wen er noch
+        // anschreiben muss (Audit G-M7). Dort geht es nur über "Fertig" zu.
+        return React.createElement("div", { onClick: () => { if (!busy && !sickModal.cancelled)
+                    setSickModal(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Fahrlehrer krank", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "88dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 sickModal.cancelled ? notifyStep : selectStep));
     }
     // Bestätigte praktische Minuten an einem Tag (sonstige Tätigkeiten zählen nicht)
-    function confirmedMinutesOnDay(dateKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
+    // liste: optional ein anderer Terminstand als appts (Sammel-Übernahme, siehe kiPlanUebernehmen).
+    function confirmedMinutesOnDay(dateKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) === dateKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Bestätigte praktische Minuten eines einzelnen Schülers an einem Tag bzw. in einer Woche -
     // für das Schüler-Limit (im Unterschied zu confirmedMinutesOnDay, das über alle Schüler summiert).
-    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId) {
-        return (appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
+    function confirmedMinutesForStudent(studentId, fromKey, toKey, exceptId, liste) {
+        return (liste || appts || []).filter(a => a.status === "confirmed" && a.student_id === studentId && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= fromKey && ymd(a.start_at) <= toKey)
             .reduce((sum, a) => sum + apptMin(a), 0);
     }
     // Prüft, ob ein neuer/bearbeiteter Termin die Limits sprengt. Gibt Fehlermeldung oder "" zurück.
@@ -23725,30 +24169,59 @@ function App() {
             showToast("Es ist kein Termin ausgewählt.");
             return;
         }
+        // Erneut prüfen: zwischen dem Erstellen des Plans und dem Übernehmen kann sich der
+        // Kalender geändert haben (neue Buchung, anderer Termin verschoben) - geprüft wurde bisher
+        // nur einmal beim Erstellen (Audit G-N12). Fällt jetzt etwas durch, nichts anlegen und die
+        // Liste mit den neuen Gründen zeigen, damit der Fahrlehrer neu entscheidet.
+        const frisch = wegPlanPruefen(nehmen, plan.stuId);
+        const durchgefallen = frisch.filter(t => t.problem);
+        if (durchgefallen.length) {
+            setWegPlan(w => {
+                if (!w || w.stuId !== plan.stuId)
+                    return w;
+                const auswahl = new Set(w.auswahl);
+                const termine = w.termine.map((t, i) => {
+                    const j = nehmen.indexOf(t);
+                    if (j < 0 || !frisch[j].problem)
+                        return t;
+                    auswahl.delete(i);
+                    return { ...t, problem: frisch[j].problem };
+                });
+                return { ...w, termine, auswahl };
+            });
+            showToast((durchgefallen.length === 1 ? "1 Termin passt" : durchgefallen.length + " Termine passen") + " inzwischen nicht mehr in den Kalender und " + (durchgefallen.length === 1 ? "wurde" : "wurden") + " abgewählt. Bitte die Auswahl prüfen und erneut übernehmen.", "error");
+            return;
+        }
         const stu = (students || []).find(x => x.id === plan.stuId);
+        // Früher: "Die Fahrschüler bekommen darüber wie gewohnt Bescheid" - von allein bekommt
+        // niemand Bescheid. Jetzt steht danach eine fertige WhatsApp-Nachricht bereit.
         const ok = await askConfirm({
             title: "Termine anlegen?",
             message: nehmen.length + (nehmen.length === 1 ? " Termin wird" : " Termine werden") + " für "
-                + (stu ? dispName(stu) : "den Schüler") + " fest im Kalender angelegt.\n\nDie Fahrschüler bekommen darüber wie gewohnt Bescheid.",
+                + (stu ? dispName(stu) : "den Schüler") + " fest im Kalender angelegt.\n\nDanach bekommst du eine fertige WhatsApp-Nachricht mit den Terminen zum Verschicken.",
             confirmLabel: "Anlegen",
         });
         if (!ok)
             return;
         setWegPlan(w => w ? ({ ...w, uebernehmen: true }) : w);
         let gut = 0, schlecht = 0;
-        for (const t of nehmen) {
+        const angelegte = [];
+        for (const t of frisch) {
             try {
                 const angelegt = await addAppt({ start_at: t.start, end_at: t.ende, student_id: plan.stuId,
                     note: t.inhalt || "", title: "", status: "confirmed", art: t.art || "ÜST" });
-                if (angelegt) gut++; else schlecht++;
+                if (angelegt) { gut++; angelegte.push(angelegt); } else schlecht++;
             }
             catch (e) { schlecht++; }
         }
         setWegPlan(null);
-        showToast(schlecht
-            ? (gut + " angelegt, " + schlecht + " nicht - bitte im Kalender nachsehen.")
-            : ("Fertig: " + gut + (gut === 1 ? " Termin angelegt." : " Termine angelegt.")),
-            schlecht ? "error" : undefined);
+        if (schlecht || !gut)
+            showToast(schlecht
+                ? (gut + " angelegt, " + schlecht + " nicht - bitte im Kalender nachsehen.")
+                : "Es wurde kein Termin angelegt.", "error");
+        // Dasselbe Fenster wie nach dem Bestätigen eines Vorschlags: Text sehen, dann WhatsApp.
+        if (angelegte.length)
+            setWaPrompt({ appts: angelegte.slice().sort((a, b) => a.start_at.localeCompare(b.start_at)), stu: stu || null });
     }
 
     /* ── Leerlauf verdichten ─────────────────────────────────────────────────────────
@@ -24219,32 +24692,66 @@ function App() {
         if (!plan || !plan.termine.length) return;
         const annehmen = plan.termine.filter(t => plan.auswahl.has(t.id));
         const ablehnen = plan.termine.filter(t => !plan.auswahl.has(t.id));
+        // Der Text versprach früher "Die Fahrschüler bekommen darüber wie gewohnt Bescheid" - von
+        // allein bekommt aber niemand Bescheid. Jetzt ehrlich, und danach eine WhatsApp je Schüler.
         const ok = await askConfirm({
             title: "Vorschlag übernehmen?",
             message: annehmen.length + (annehmen.length === 1 ? " Termin wird bestätigt" : " Termine werden bestätigt")
-                + (ablehnen.length ? (", " + ablehnen.length + (ablehnen.length === 1 ? " wird abgelehnt" : " werden abgelehnt")) : "")
-                + ".\n\nDie Fahrschüler bekommen darüber wie gewohnt Bescheid.",
+                + (ablehnen.length ? (", " + ablehnen.length + (ablehnen.length === 1 ? " wird abgelehnt und gelöscht" : " werden abgelehnt und gelöscht")) : "")
+                + ".\n\nDanach bekommst du für jeden Schüler eine fertige WhatsApp-Nachricht mit seinen bestätigten Terminen.",
             confirmLabel: "Übernehmen",
         });
         if (!ok) return;
         setKiPlan(k => k ? ({ ...k, uebernehmen: true }) : k);
-        let gut = 0, schlecht = 0;
+        // Mitwachsender Terminstand: jede Bestätigung zählt für die Limit- und
+        // Überschneidungsprüfung der folgenden mit (Audit G-M9). appts aus diesem Rendern kennt die
+        // eben bestätigten nicht, apptsRef erst nach dem nächsten Rendern.
+        let liste = (apptsRef.current || appts || []).slice();
+        const gruende = [];
+        const bestaetigt = [];
+        let nichtBestaetigt = 0, nichtAbgelehnt = 0, abgelehnt = 0;
         for (const t of annehmen) {
-            try { await confirmAppt(t.id); gut++; } catch (e) { schlecht++; }
+            const r = await confirmAppt(t.id, { liste, sammel: true, gruende });
+            if (!r) { nichtBestaetigt++; continue; }
+            if (r.appt) {
+                liste = liste.map(a => a.id === t.id ? { ...a, ...r.appt } : a);
+                bestaetigt.push(r);
+            }
         }
+        // Ablehnen ohne Einzel-Rückfrage (die Sammel-Rückfrage oben deckt es ab - rejectAppt()
+        // fragte jeden Termin noch einmal einzeln) und ohne Einzel-Rückgängig: davon bliebe
+        // ohnehin nur das letzte stehen.
         for (const t of ablehnen) {
-            try { await rejectAppt(t.id); gut++; } catch (e) { schlecht++; }
+            if (await removeAppt(t.id, { noUndo: true }))
+                abgelehnt++;
+            else
+                nichtAbgelehnt++;
         }
-        setKiPlan(null);
-        showToast(schlecht
-            ? (gut + " übernommen, " + schlecht + " nicht - bitte im Kalender nachsehen.")
-            : ("Fertig: " + annehmen.length + " bestätigt" + (ablehnen.length ? ", " + ablehnen.length + " abgelehnt" : "") + "."),
-            schlecht ? "error" : undefined);
+        // WhatsApp je Schüler bündeln - früher überschrieb jede Bestätigung das Fenster der
+        // vorigen, übrig blieb nur die Nachricht an den letzten Schüler.
+        const gruppen = new Map();
+        bestaetigt.forEach(({ appt, stu }) => {
+            const k = stu ? ("s:" + stu.id) : ("t:" + (appt.title || "").toLowerCase().trim() + "|" + appt.id);
+            const g = gruppen.get(k) || { key: k, stu, name: stu ? dispName(stu) : (appt.title || "Termin"), appts: [] };
+            g.appts.push(appt);
+            gruppen.set(k, g);
+        });
+        const nachrichten = Array.from(gruppen.values()).map(g => {
+            g.appts.sort((a, b) => a.start_at.localeCompare(b.start_at));
+            const num = g.stu && g.stu.tel ? waNumber(g.stu.tel) : "";
+            return { ...g, waUrl: num ? ("https://wa.me/" + num + "?text=" + encodeURIComponent(waConfirmText(g.appts, g.stu))) : "" };
+        });
+        setKiPlan(k => k ? ({ ...k, uebernehmen: false, fertig: { bestaetigt: bestaetigt.length, abgelehnt, nichtBestaetigt, nichtAbgelehnt, gruende, nachrichten } }) : k);
+        if (nichtAbgelehnt)
+            showToast(nichtAbgelehnt + (nichtAbgelehnt === 1 ? " Vorschlag konnte" : " Vorschläge konnten") + " nicht abgelehnt werden - bitte im Kalender nachsehen.", "error");
     }
 
-    function limitProblem(dateKey, minutes, exceptId, studentId) {
+    // liste: optional der Terminstand, gegen den geprüft wird (Standard: appts aus diesem Rendern).
+    // Eine Schleife, die mehrere Termine nacheinander bestätigt, übergibt hier ihren mitwachsenden
+    // Stand - sonst sähe jede Prüfung nur die Termine von VOR der Schleife (Audit G-M9).
+    function limitProblem(dateKey, minutes, exceptId, studentId, liste) {
         if (dayLimit > 0) {
-            const used = confirmedMinutesOnDay(dateKey, exceptId);
+            const used = confirmedMinutesOnDay(dateKey, exceptId, liste);
             if (used + minutes > dayLimit) {
                 return "Tageslimit überschritten.\n\nAn diesem Tag sind bereits " + used + " von " + dayLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (used + minutes) + " Minuten führen.";
             }
@@ -24253,7 +24760,7 @@ function App() {
             const d = new Date(dateKey + "T12:00:00");
             const ws = ymd(startOfWeek(d));
             const we = ymd(addDays(startOfWeek(d), 6));
-            const usedW = (appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
+            const usedW = (liste || appts || []).filter(a => a.status === "confirmed" && !isSonstige(a) && !isUrlaub(a) && artCounts(apptArt(a)) && a.id !== exceptId && ymd(a.start_at) >= ws && ymd(a.start_at) <= we)
                 .reduce((sum, a) => sum + apptMin(a), 0);
             if (usedW + minutes > weekLimit) {
                 return "Wochenlimit überschritten.\n\nIn dieser Woche sind bereits " + usedW + " von " + weekLimit + " Minuten bestätigt. Dieser Termin (" + minutes + " Min) würde auf " + (usedW + minutes) + " Minuten führen.";
@@ -24263,7 +24770,7 @@ function App() {
             const stu = students.find(s => s.id === studentId);
             const name = stu ? dispName(stu) : "Dieser Schüler";
             if (studentDayLimit > 0) {
-                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId);
+                const used = confirmedMinutesForStudent(studentId, dateKey, dateKey, exceptId, liste);
                 if (used + minutes > studentDayLimit) {
                     return name + " hat an diesem Tag bereits " + used + " von " + studentDayLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -24272,7 +24779,7 @@ function App() {
                 const d = new Date(dateKey + "T12:00:00");
                 const ws = ymd(startOfWeek(d));
                 const we = ymd(addDays(startOfWeek(d), 6));
-                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId);
+                const usedW = confirmedMinutesForStudent(studentId, ws, we, exceptId, liste);
                 if (usedW + minutes > studentWeekLimit) {
                     return name + " hat in dieser Woche bereits " + usedW + " von " + studentWeekLimit + " Minuten Fahrstunden bestätigt (Limit je Schüler). Dieser Termin (" + minutes + " Min) würde das überschreiten.";
                 }
@@ -24496,7 +25003,7 @@ function App() {
                             return React.createElement("button", { key: a.id, onClick: () => handleApptTap(a), style: { width: "100%", display: "flex", alignItems: "center", gap: 11, padding: "11px 12px", textAlign: "left",
                                     borderRadius: 12, marginTop: 4, background: "var(--amber-bg)" } },
                                 React.createElement("img", { src: TERMINBILD_URLAUB, alt: "", "aria-hidden": "true", style: { width: TERMIN_BILD_PX, height: TERMIN_BILD_PX, borderRadius: "50%", flexShrink: 0, objectFit: "contain", background: "var(--surface)", padding: 2 } }),
-                                React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, "Urlaub"),
+                                React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, urlaubTitel(a)),
                                 React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(a)));
                         }
                         const pend = a.status === "pending";
@@ -24593,7 +25100,7 @@ function App() {
                 urlaubDay && React.createElement("button", { onClick: () => openEditAppt(urlaubDay), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", textAlign: "left",
                         borderBottom: "1px solid var(--line)", borderLeft: "4px solid var(--amber)", background: "var(--amber-bg)" } },
                     React.createElement("span", { style: { fontSize: 17 } }, "\uD83C\uDF34"),
-                    React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, "Urlaub"),
+                    React.createElement("span", { style: { flex: 1, fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, color: "var(--amber)" } }, urlaubTitel(urlaubDay)),
                     React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em" } }, urlaubLabel(urlaubDay))),
                 React.createElement("div", { onClick: e => {
                         // Tipp auf eine freie Stelle legt einen Termin zur angetippten Uhrzeit an (15-Min-Raster).
@@ -30872,7 +31379,9 @@ function App() {
                             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 6 }, disabled: !!wegPlan.uebernehmen || !wegPlan.auswahl.size, onClick: wegPlanUebernehmen },
                                 wegPlan.uebernehmen ? "Wird angelegt…" : (wegPlan.auswahl.size + (wegPlan.auswahl.size === 1 ? " Termin anlegen" : " Termine anlegen"))),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: !!wegPlan.uebernehmen, onClick: () => setWegPlan(null) }, "Abbrechen")))),
-        kiPlan && React.createElement("div", { onClick: () => { if (!kiPlan.uebernehmen) setKiPlan(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
+        // Tipp daneben schließt die Ergebnisliste nicht - dort stehen die noch zu verschickenden
+        // WhatsApp-Nachrichten (wie bei "Fahrlehrer krank", Audit G-M7).
+        kiPlan && React.createElement("div", { onClick: () => { if (!kiPlan.uebernehmen && !kiPlan.fertig) setKiPlan(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 170, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
@@ -30882,7 +31391,27 @@ function App() {
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.1", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1" }))),
                     React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 19 } }, "Vorschlag für deine Woche")),
-                kiPlan.busy
+                kiPlan.fertig
+                    ? React.createElement(React.Fragment, null,
+                        React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.55, marginBottom: 10 } },
+                            [kiPlan.fertig.bestaetigt === 1 ? "1 Termin bestätigt" : kiPlan.fertig.bestaetigt + " Termine bestätigt",
+                                kiPlan.fertig.abgelehnt ? (kiPlan.fertig.abgelehnt + " abgelehnt") : "",
+                                kiPlan.fertig.nichtBestaetigt ? (kiPlan.fertig.nichtBestaetigt + " nicht bestätigt") : ""].filter(Boolean).join(", ") + "."),
+                        kiPlan.fertig.gruende.length > 0 && React.createElement("div", { style: { background: "var(--amber-bg)", borderRadius: 10, padding: "10px 12px", fontSize: 12.5, lineHeight: 1.5, marginBottom: 12 } },
+                            React.createElement("div", { style: { fontWeight: 700, marginBottom: 4 } }, "Wegen der Limits nicht bestätigt (bleiben als Vorschlag offen):"),
+                            kiPlan.fertig.gruende.map((g, i) => React.createElement("div", { key: i }, g))),
+                        kiPlan.fertig.nachrichten.length > 0 && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 6 } },
+                            "Jetzt noch Bescheid geben – je Schüler eine Nachricht mit allen seinen bestätigten Terminen. Du siehst sie vor dem Senden."),
+                        kiPlan.fertig.nachrichten.map(n => React.createElement("div", { key: n.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "10px 0", borderTop: "1px solid var(--line)" } },
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, overflowWrap: "anywhere" } }, n.name),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, n.appts.length === 1 ? "1 Termin" : n.appts.length + " Termine")),
+                            n.waUrl
+                                ? React.createElement("a", { href: n.waUrl, target: "_blank", rel: "noopener noreferrer",
+                                        style: { flexShrink: 0, padding: "9px 14px", borderRadius: 99, background: "#25D366", color: "#fff", fontSize: 12.5, fontWeight: 700, textDecoration: "none", minHeight: 44, display: "flex", alignItems: "center" } }, "WhatsApp")
+                                : React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)", flexShrink: 0 } }, n.stu ? "keine Nummer" : "kein Schüler"))),
+                        React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14 }, onClick: () => setKiPlan(null) }, "Fertig"))
+                : kiPlan.busy
                     ? React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.5, padding: "18px 0" } },
                         "Die Termine werden geprüft – Überschneidungen, Limits, Arbeitszeiten und Leerlauf dazwischen…")
                     : kiPlan.error
