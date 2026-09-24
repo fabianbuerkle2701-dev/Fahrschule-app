@@ -9009,6 +9009,16 @@ function parseKontoauszug(text) {
 // andere auf der Bank - vorher liefen auch Bargeld und Gutscheine über die Bank, der Kontostand
 // laut Buchhaltung stimmte dann nie mit dem Kontoauszug überein (F-M4). Was nicht exportiert
 // werden kann (kein Datum, Betrag nicht positiv), wird gezählt statt still verworfen (F-N12).
+// Steuerstatus (§19 UStG ja/nein) einer Rechnung: das eigene Feld, bei Altrechnungen ohne Feld der
+// heutige Stand der Fahrschule (fallback). Eine Stornorechnung übernimmt IMMER den aufgelösten
+// Status ihrer Originalrechnung: cancel_invoice setzt bei einer Altrechnung ohne Feld fest
+// "kleinunternehmer: false" - bei einer §19-Fahrschule wies das Storno dann 19 % USt aus und
+// buchte im DATEV auf erloes_19 gegen, das Original aber auf erloes_frei (Abschluss-Audit).
+function rechnungKleinunternehmer(s, inv, fallback) {
+    const orig = inv && inv.stornoOf ? ((s && s.invoices) || []).find(x => x && x.number === inv.stornoOf) : null;
+    const quelle = orig || inv;
+    return quelle && quelle.kleinunternehmer != null ? !!quelle.kleinunternehmer : !!fallback;
+}
 function datevZahlungsart(method) {
     const m = String(method || "").trim();
     if (/^gutschein/i.test(m))
@@ -9028,7 +9038,7 @@ function datevBuchungsliste(stuList, jahr, monat, k, nameOf) {
             if (!inMonat(inv.date)) return;
             const brutto = Math.round((Number(inv.total) || 0) * 100) / 100;
             if (Math.abs(brutto) <= 0.005) return;
-            const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : k.kUntFallback;
+            const kUnt = rechnungKleinunternehmer(s, inv, k.kUntFallback);
             if (kUnt) out.brauchtFrei = true;
             out.buchungen.push({ umsatz: Math.abs(brutto), sh: brutto > 0 ? "S" : "H", konto: k.debitor,
                 gegenkonto: kUnt ? k.erloesFrei : k.erloes19, bu: "",
@@ -29798,7 +29808,7 @@ function App() {
             const rows = [];
             students.filter(s => s._isMine).forEach(s => {
                 (s.invoices || []).forEach(inv => {
-                    const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : kUntFallback;
+                    const kUnt = rechnungKleinunternehmer(s, inv, kUntFallback);
                     const total = Number(inv.total) || 0;
                     const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
                     const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -30754,7 +30764,7 @@ function App() {
         // nicht den heutigen Stand der Fahrschule - sonst würde ein späterer Wechsel §19 UStG <->
         // Regelbesteuerung alle bereits gestellten Rechnungen rückwirkend falsch ausweisen. Nur
         // bei Altrechnungen von vor diesem Fix (Feld fehlt) auf den aktuellen Stand zurückfallen.
-        const kUnt = inv.kleinunternehmer != null ? !!inv.kleinunternehmer : !!iv.kleinunternehmer;
+        const kUnt = rechnungKleinunternehmer(active, inv, !!iv.kleinunternehmer);
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
