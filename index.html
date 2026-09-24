@@ -34245,6 +34245,13 @@ function BookingPage({ code, appMode, onLogout }) {
     // Aktueller Stand für Rechnungen außerhalb des Renders (Abgleich nach dem Laden der Belegung,
     // Merken nach dem Senden) - der Wert wird vorher berechnet und dann gesetzt, nie im Updater.
     const mineRef = React.useRef(mineSlots);
+    // Die beim Laden bereinigte Liste (Vergangenes weg, alte Formate umgewandelt) einmal
+    // zurückschreiben - sonst blieb der Altbestand im Gerätespeicher liegen, bis zufällig
+    // wieder ein Termin gesendet oder verworfen wurde.
+    React.useEffect(() => {
+        try { localStorage.setItem("v3_mine_" + code, JSON.stringify(mineRef.current || [])); }
+        catch (e) { /* Speicher nicht verfügbar - nur Aufräumen, nichts geht verloren */ }
+    }, [code]);
     function mineSetzen(list) {
         mineRef.current = list;
         setMineSlots(list);
@@ -34307,8 +34314,11 @@ function BookingPage({ code, appMode, onLogout }) {
     function formSchliessen() {
         if (sending)
             return;
-        if (form && (form.gesendet || []).length)
+        if (form && (form.gesendet || []).length) {
             setDone({ zeilen: form.gesendet });
+            // Wie nach vollem Erfolg: die Bestätigung steht oben, also dorthin scrollen.
+            try { window.scrollTo({ top: 0, behavior: "smooth" }); } catch (e) { window.scrollTo(0, 0); }
+        }
         setForm(null);
     }
     const [howtoOpen, setHowtoOpen] = React.useState(false); // Anleitung auf-/zuklappbar
@@ -35784,12 +35794,17 @@ function SchulDashboard({ schoolId, stdPreis }) {
         }
 
         // Prüfungen: exams ist ein Array je Schüler, jeder Eintrag {art, date, passed}.
+        // Ein Versuch ab heute ohne "bestanden" ist ein angesetzter Termin, kein Durchfallen -
+        // dieselbe Lesart wie in der Schülerliste ("date >= heute && !passed" = anstehend).
+        // Sonst zählte jede eingetragene künftige Prüfung im laufenden Monat als nicht bestanden.
+        const heuteKey = ymd(new Date());
         const pruefProLehrer = {};
         let bestGes = 0, durchGes = 0;
         (daten.pruefungen || []).forEach(p => {
             const k = p.teacher_email || "(unbekannt)";
             (Array.isArray(p.exams) ? p.exams : []).forEach(e => {
                 if (!e || !e.date || e.date < gr.von || e.date > gr.bis) return;
+                if (!e.passed && e.date >= heuteKey) return;
                 pruefProLehrer[k] = pruefProLehrer[k] || { best: 0, durch: 0 };
                 if (e.passed) { pruefProLehrer[k].best++; bestGes++; } else { pruefProLehrer[k].durch++; durchGes++; }
             });
@@ -35857,12 +35872,18 @@ function SchulDashboard({ schoolId, stdPreis }) {
         } catch (e) { showToast(fehlerText(e), "error"); }
         finally { setAktion(""); }
     }
+    // Die Antwort nur übernehmen, wenn noch genau diese Akte ladend offen ist (N14): wurde sie
+    // inzwischen geschlossen oder eine andere geöffnet, würde eine späte Antwort sonst die Akte
+    // ungefragt wieder aufmachen bzw. die falsche Person zeigen.
     async function akteOeffnen(stud) {
-        setAkte({ busy: true, meta: stud });
+        const anfrage = { busy: true, meta: stud };
+        setAkte(anfrage);
+        let neu;
         try {
             const s = await fetchSchoolStudentAkte(stud.id);
-            setAkte({ busy: false, student: s, meta: stud });
-        } catch (e) { setAkte({ busy: false, error: fehlerText(e), meta: stud }); }
+            neu = { busy: false, student: s, meta: stud };
+        } catch (e) { neu = { busy: false, error: fehlerText(e), meta: stud }; }
+        setAkte(cur => cur === anfrage ? neu : cur);
     }
 
     // Beim Öffnen eines Sheets die Zurück-Geste/Escape abfangen, wie überall sonst in der App.
@@ -36197,7 +36218,9 @@ function SchulDashboard({ schoolId, stdPreis }) {
                                     (s.exams || []).map((e, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, padding: "6px 0", fontSize: 13.5, borderTop: "1px solid var(--line)" } },
                                         React.createElement("span", { style: { minWidth: 92, color: "var(--muted)", flexShrink: 0 } }, dashDatum(e.date)),
                                         React.createElement("span", { style: { flex: 1 } }, e.art || "Prüfung"),
-                                        React.createElement("span", { style: { fontWeight: 800, color: e.passed ? "var(--green-ink)" : "var(--red-ink)", flexShrink: 0 } }, e.passed ? "bestanden" : "nicht bestanden")))),
+                                        // Künftiger Versuch ohne Ergebnis = angesetzt, nicht "nicht bestanden" (wie N13 in der Statistik).
+                                        (() => { const offen = !!(e && !e.passed && e.date && e.date >= ymd(new Date()));
+                                            return React.createElement("span", { style: { fontWeight: 800, color: e.passed ? "var(--green-ink)" : offen ? "var(--muted)" : "var(--red-ink)", flexShrink: 0 } }, e.passed ? "bestanden" : offen ? "angesetzt" : "nicht bestanden"); })()))),
                                 fahrten.length > 0 && React.createElement(React.Fragment, null,
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } },
                                         "Fahrstunden (" + fahrten.length + ")"),
