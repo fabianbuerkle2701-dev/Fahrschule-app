@@ -6998,7 +6998,7 @@ const xrR2 = (n) => Math.round((Number(n) || 0) * 100) / 100;
 const xrF2 = (n) => xrR2(n).toFixed(2);
 
 function buildXRechnung(o) {
-  const { inv, seller, buyer, zahlungszielTage, kUntFallback } = o;
+  const { inv, seller, buyer, zahlungszielTage, kUntFallback, leistung } = o;
   // Altrechnungen von vor Einführung des kleinunternehmer-Felds besitzen es nicht (undefined) -
   // dann auf die aktuelle Fahrschul-Einstellung zurückfallen, wie bei exportDatev()/exportRechnungen()/
   // invoiceSheet(), statt sie fälschlich als regelbesteuert (19% USt) zu behandeln.
@@ -7069,6 +7069,16 @@ function buildXRechnung(o) {
   L.push('  <cbc:DocumentCurrencyCode>EUR</cbc:DocumentCurrencyCode>');
   // BT-10 ist in XRechnung Pflicht; ohne eigene Referenz des Kunden die Rechnungsnummer.
   L.push(`  <cbc:BuyerReference>${xrEsc(buyer.referenz || inv.number)}</cbc:BuyerReference>`);
+  // Leistungszeitpunkt bzw. -zeitraum (§14 Abs. 4 Nr. 6 UStG, F-M11): stand bisher nur auf dem
+  // Ausdruck, bei B2B ist aber die E-Rechnung das maßgebliche Original. Zeitraum als
+  // InvoicePeriod (BG-14, UBL-Reihenfolge: direkt nach BuyerReference), ein einzelner Tag als
+  // Delivery/ActualDeliveryDate (BT-72, weiter unten nach dem Käufer).
+  const isoTag = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || ""));
+  // Ohne datierte Fahrstunden gilt wie auf dem Ausdruck "Leistungsdatum entspricht dem Rechnungsdatum".
+  const zeitraum = leistung && isoTag(leistung.von) && isoTag(leistung.bis) ? leistung
+    : (isoTag(inv.date) ? { von: inv.date, bis: inv.date } : null);
+  if (zeitraum && zeitraum.von !== zeitraum.bis)
+    L.push(`  <cac:InvoicePeriod><cbc:StartDate>${xrEsc(zeitraum.von)}</cbc:StartDate><cbc:EndDate>${xrEsc(zeitraum.bis)}</cbc:EndDate></cac:InvoicePeriod>`);
   // Verkaeufer
   L.push('  <cac:AccountingSupplierParty><cac:Party>');
   if (seller.email) L.push(`    <cbc:EndpointID schemeID="EM">${xrEsc(seller.email)}</cbc:EndpointID>`);
@@ -7098,6 +7108,8 @@ function buildXRechnung(o) {
   if (buyer.ustId) L.push(`    <cac:PartyTaxScheme><cbc:CompanyID>${xrEsc(buyer.ustId)}</cbc:CompanyID><cac:TaxScheme><cbc:ID>VAT</cbc:ID></cac:TaxScheme></cac:PartyTaxScheme>`);
   L.push(`    <cac:PartyLegalEntity><cbc:RegistrationName>${xrEsc(buyer.name)}</cbc:RegistrationName></cac:PartyLegalEntity>`);
   L.push('  </cac:Party></cac:AccountingCustomerParty>');
+  if (zeitraum && zeitraum.von === zeitraum.bis)
+    L.push(`  <cac:Delivery><cbc:ActualDeliveryDate>${xrEsc(zeitraum.von)}</cbc:ActualDeliveryDate></cac:Delivery>`);
   // Immer ausgeben: die IBAN ist oben Pflicht (BR-DE-1), 58 = SEPA-Ueberweisung.
   L.push('  <cac:PaymentMeans><cbc:PaymentMeansCode>58</cbc:PaymentMeansCode>');
   L.push(`    <cac:PayeeFinancialAccount><cbc:ID>${xrEsc(seller.iban.replace(/\s+/g, ""))}</cbc:ID></cac:PayeeFinancialAccount>`);
@@ -17336,6 +17348,13 @@ function App() {
     // XRechnung-XML zu einer Rechnung erzeugen und herunterladen. Firmenkundendaten stehen am
     // Schueler (firmaName/firmaUstId/...), Verkaeuferdaten in den Rechnungsdaten der Fahrschule.
     function xrechnungHerunterladen(inv, stu) {
+        // Eine stornierte Rechnung (oder die Stornorechnung selbst) wäre als XRechnung eine
+        // zahlbare Rechnung (Typ 380, Fälligkeit, IBAN, voller Betrag) ohne Stornohinweis - wie
+        // beim Girocode gesperrt (F-M5, Abschluss-Audit).
+        if (!inv || inv.cancelledBy || inv.stornoOf) {
+            showToast("Für eine stornierte Rechnung gibt es keine E-Rechnung.");
+            return;
+        }
         try {
             const iv = (school && school.invoice_settings) || {};
             if (!iv.ustId && !iv.steuernummer) {
@@ -17380,6 +17399,7 @@ function App() {
             const kd = teile(stu.firmaPlzOrt || "");
             const out = buildXRechnung({
                 inv,
+                leistung: rechnungsLeistungszeitraum(stu, inv),
                 seller: { name: iv.firma || (school && school.name) || "Fahrschule", strasse: iv.strasse || "",
                     plz: vk.plz, ort: vk.ort, ustId: iv.ustId || "", steuernummer: iv.steuernummer || "",
                     iban: ibanPruefung.iban, tel: vkTel, email: vkMail },
@@ -22325,7 +22345,11 @@ function App() {
             return;
         }
         const stage = laufendeErinnerungen(active).length + 1;
-        const lastInvoice = (active.invoices && active.invoices.length) ? active.invoices[active.invoices.length - 1] : null;
+        // Die jüngste GÜLTIGE, noch offene Rechnung nennen - nicht einfach das letzte Element:
+        // cancel_invoice hängt die Stornorechnung hinten an, die Erinnerung nannte dann die Nummer
+        // der Gutschrift, und eine Überweisung mit dieser Nummer konnte der Kontoauszug-Abgleich
+        // nicht zuordnen (Abschluss-Audit). Gibt es keine offene Rechnung, keine Nummer nennen.
+        const lastInvoice = (active.invoices || []).filter(iv => iv && !iv.cancelledBy && !iv.stornoOf && invoiceOpen(active, iv) > 0.005).slice(-1)[0] || null;
         const text = reminderText(stage, active, open, lastInvoice);
         const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(text);
         const reminders = [...(active.reminders || []), { date: ymd(new Date()), stage, amount: open }];
@@ -22685,7 +22709,7 @@ function App() {
                         React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(inv.total))),
                     // XRechnung nur bei Firmenkunden anbieten - fuer Privatkunden gibt es weder
                     // eine Pflicht noch einen Empfaenger, der etwas damit anfangen kann.
-                    active.istFirmenkunde && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
+                    active.istFirmenkunde && !inv.stornoOf && !inv.cancelledBy && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
                     !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); cancelInvoice(inv); }, "aria-label": "Rechnung stornieren", title: "Rechnung stornieren", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", fontSize: 12, flexShrink: 0 } }, "Stornieren")))),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Ausbildungsvertrag"),
