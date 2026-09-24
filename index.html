@@ -12495,7 +12495,10 @@ function App() {
     }, [school && school.id]);
 
 
-    const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort}
+    const [examSlotForm, setExamSlotForm] = useState(null); // null | {art, datum, zeit, ort, busy}
+    // Sperre gegen Doppeltipp/Enter beim Speichern eines Prüfplatzes - der State allein reicht nicht,
+    // weil der zweite Tipp noch vor dem nächsten Render kommt (Audit F-N14: zwei gleiche Prüfplätze).
+    const examSlotSavingRef = useRef(false);
     const [examSlotAssign, setExamSlotAssign] = useState(null); // null | {slot, assignedTo}
     // Unterrichtsnachweis des gerade geoeffneten Schuelers: null = noch nicht geladen,
     // "error" = Laden fehlgeschlagen, sonst die Anwesenheitszeilen. Wird beim Oeffnen der
@@ -20807,7 +20810,13 @@ function App() {
                 upcoming.push({ stu: s, exam: e });
         }));
         upcoming.sort((a, b) => a.exam.date.localeCompare(b.exam.date));
-        const hasFuturePraxis = (s) => (s.exams || []).some(e => e.art === "praxis" && e.date >= todayStr && !e.passed);
+        // Auch ein zugeteilter Praxis-Prüfplatz zählt als "angemeldet" - assignExamSlot() setzt
+        // weder exams noch licenseSteps, der Schüler stand sonst trotz Platz weiter unter "Bereit,
+        // nicht angemeldet" (Audit F-N16).
+        const hatPraxisPlatz = new Set((examSlots || [])
+            .filter(x => x.art === "praxis" && x.status === "vergeben" && x.student_id && x.datum && x.datum >= todayStr)
+            .map(x => x.student_id));
+        const hasFuturePraxis = (s) => hatPraxisPlatz.has(s.id) || (s.exams || []).some(e => e.art === "praxis" && e.date >= todayStr && !e.passed);
         const readyNotRegistered = own.filter(s => {
             const vk = s.klasse || DEFAULT_KLASSE;
             const a = ampel(s, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
@@ -20908,8 +20917,10 @@ function App() {
     }
     async function addExamSlotSubmit() {
         const f = examSlotForm;
-        if (!f || !f.datum)
+        if (!f || !f.datum || examSlotSavingRef.current)
             return;
+        examSlotSavingRef.current = true;
+        setExamSlotForm(prev => prev && ({ ...prev, busy: true }));
         try {
             const created = await dbInsertExamSlot(uid, { art: f.art, datum: f.datum, zeit: f.zeit, ort: f.ort });
             setExamSlots(prev => [...prev, created].sort((a, b) => a.datum.localeCompare(b.datum)));
@@ -20917,7 +20928,11 @@ function App() {
             showToast("Prüfplatz erfasst.");
         }
         catch (e) {
+            setExamSlotForm(prev => prev && ({ ...prev, busy: false }));
             showToast("Konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+        }
+        finally {
+            examSlotSavingRef.current = false;
         }
     }
     async function assignExamSlot(slot, student) {
@@ -21258,11 +21273,23 @@ function App() {
         const steps = active.licenseSteps || {};
         const doneCount = LICENSE_STEPS.filter(st => licenseStepDone(active, st.key)).length;
         const pct = Math.round((doneCount / LICENSE_STEPS.length) * 100);
-        function toggleStep(key) {
+        async function toggleStep(key) {
             if (key === "theorie_bestanden") {
                 // active.theorie ist selbst schon das Datum (siehe LICENSE_STEPS-Kommentar) - Toggle
                 // setzt/löscht direkt dieses eine geteilte Feld statt eines eigenen steps-Eintrags.
-                updateActive({ theorie: active.theorie ? "" : ymd(new Date()) });
+                // Anders als bei den übrigen Schritten bleibt das Datum beim Abhaken also NICHT
+                // erhalten - deshalb vorher fragen, sonst ist ein echtes Prüfungsdatum durch einen
+                // Fehltipp weg (Audit F-N15).
+                if (active.theorie) {
+                    const datum = /^\d{4}-\d{2}-\d{2}$/.test(active.theorie) ? new Date(active.theorie + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : active.theorie;
+                    if (!(await askConfirm({ title: "Theorie wieder offen?", message: "Die Theorieprüfung ist als bestanden am " + datum + " eingetragen. Wirklich zurücksetzen? Das Datum wird dabei gelöscht." })))
+                        return;
+                    const cur = (studentsRef.current || []).find(s => s.id === active.id);
+                    if (cur)
+                        writeStudent({ ...cur, theorie: "" });
+                    return;
+                }
+                updateActive({ theorie: ymd(new Date()) });
                 return;
             }
             const cur = steps[key] || {};
@@ -21349,8 +21376,17 @@ function App() {
         function patchExam(id, patch) {
             updateActive({ exams: (active.exams || []).map(e => e.id === id ? { ...e, ...patch } : e) });
         }
-        function removeExam(id) {
-            updateActive({ exams: (active.exams || []).filter(e => e.id !== id) });
+        // Mit Rückfrage (Audit F-N15): ein Versuch ist Grundlage der Erfolgsquote, ein
+        // versehentlich getroffenes × war bisher sofort und ohne Rückweg weg.
+        async function removeExam(ex) {
+            const wann = ex.date ? " vom " + new Date(ex.date + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : "";
+            if (!(await askConfirm({ title: "Versuch löschen?", message: (ex.art === "theorie" ? "Theorie" : "Praxis") + "-Versuch" + wann + " wirklich löschen? Er zählt dann nicht mehr zur Erfolgsquote." })))
+                return;
+            // Nach dem Dialog gegen den AKTUELLEN Stand rechnen, nicht gegen das beim Klick
+            // eingefangene active.
+            const cur = (studentsRef.current || []).find(s => s.id === active.id);
+            if (cur)
+                writeStudent({ ...cur, exams: (cur.exams || []).filter(e => e.id !== ex.id) });
         }
         return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 3 } },
@@ -21372,7 +21408,7 @@ function App() {
                         React.createElement("input", { type: "checkbox", checked: !!e.passed, onChange: () => patchExam(e.id, { passed: !e.passed }) }),
                         React.createElement("span", { style: e.passed ? { color: "var(--green)", fontWeight: 600 } : null }, "bestanden")),
                     React.createElement("span", { style: { flex: 1 } }),
-                    React.createElement("button", { className: "icon-x", onClick: () => removeExam(e.id), "aria-label": "Versuch entfernen",
+                    React.createElement("button", { className: "icon-x", onClick: () => removeExam(e), "aria-label": "Versuch entfernen",
                         style: { color: "var(--red)", fontSize: 17, lineHeight: 1, padding: "2px 6px" } }, "×"))),
             React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
                 React.createElement("button", { className: "btn btn-ghost", style: { flex: 1, padding: "9px", fontSize: 13.5 }, onClick: () => addExam("theorie") }, "+ Theorie"),
@@ -29066,7 +29102,7 @@ function App() {
                     React.createElement("label", null, "Ort (optional)",
                     React.createElement("input", { type: "text", value: examSlotForm.ort, placeholder: "z.B. Prüfstelle Musterstadt", onChange: e => setExamSlotForm({ ...examSlotForm, ort: e.target.value }), onKeyDown: e => { if (e.key === "Enter")
                                 addExamSlotSubmit(); } }))),
-                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: !examSlotForm.datum, onClick: addExamSlotSubmit }, "Speichern"),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, disabled: !examSlotForm.datum || !!examSlotForm.busy, onClick: addExamSlotSubmit }, examSlotForm.busy ? "Speichert\u2026" : "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setExamSlotForm(null) }, "Abbrechen"))),
         examSlotAssign && React.createElement("div", { onClick: () => setExamSlotAssign(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "85dvh", overflowY: "auto" } },
