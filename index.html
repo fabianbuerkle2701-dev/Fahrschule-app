@@ -6238,6 +6238,16 @@ async function fetchMySchool(uid) {
     // ohnehin schon zugeordneten, gesunden Konto darf ebenfalls nicht sofort als "keine Fahrschule"
     // gewertet werden - sonst zeigt App() ihren Wiederherstellungs-Screen fälschlich für ein völlig
     // intaktes Konto. Beide Fehlerfälle bekommen deshalb dieselben Retries wie das reine Timing-Problem.
+    // Bleibt der Lesefehler nach allen Versuchen bestehen, WIRFT die Funktion: null heißt nur noch
+    // "Profil hat nachweislich keine school_id". Vorher kam bei Funkloch/Supabase-Ausfall ebenfalls
+    // null zurück - App() hat daraus eine Fahrschule ohne id gemacht, den guten Schul-Cache damit
+    // überschrieben und die Maske "Keine Fahrschule zugeordnet" gezeigt; "Fahrschule anlegen"
+    // hätte das Profil dann an eine neue, leere Fahrschule umgehängt (Abschluss-Audit).
+    const ladeFehler = (e) => {
+        const err = new Error("Fahrschule konnte nicht geladen werden: " + ((e && e.message) || "Verbindung?"));
+        err.cause = e;
+        return err;
+    };
     for (let attempt = 0; attempt < 5; attempt++) {
         const { data: prof, error: pe } = await sb.from("profiles").select("school_id").eq("id", uid).maybeSingle();
         if (pe) {
@@ -6246,7 +6256,7 @@ async function fetchMySchool(uid) {
                 await new Promise(r => setTimeout(r, 500));
                 continue;
             }
-            return null;
+            throw ladeFehler(pe);
         }
         const sid = prof && prof.school_id;
         if (sid) {
@@ -6257,7 +6267,7 @@ async function fetchMySchool(uid) {
                     await new Promise(r => setTimeout(r, 500));
                     continue;
                 }
-                return null;
+                throw ladeFehler(error);
             }
             return data;
         }
@@ -13053,6 +13063,11 @@ function App() {
     // hängen (school ohne id, siehe DEFAULT_SCHOOL-Fallback unten), nichts ließ sich speichern und
     // es gab nirgends im Loggedin-Bereich eine Möglichkeit, einen Code erneut einzugeben.
     const [schoolRecovery, setSchoolRecovery] = useState({ code: "", newName: "", busy: false, err: "" });
+    // true nur, wenn fetchMySchool in DIESER Sitzung nachweislich "keine school_id" geliefert hat.
+    // Die Wiederherstellungs-Maske hängt daran statt allein an "school ohne id": eine id-lose
+    // Fahrschule kann auch aus einem alten Cache stammen, und bei einem bloßen Ladefehler darf die
+    // Maske ("Fahrschule anlegen" hängt das Profil um) nie erscheinen (Abschluss-Audit).
+    const [schoolFehlt, setSchoolFehlt] = useState(false);
     const [isSchoolAdmin, setIsSchoolAdmin] = useState(false); // darf Fahrschul-Einstellungen ändern
     const [isModerator, setIsModerator] = useState(false); // App-Moderator: darf Beiträge freigeben, alle Fahrschulen einsehen/bearbeiten
     const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
@@ -14966,6 +14981,7 @@ function App() {
             updateStudents(null);
             putTpl(null);
             putSchool(null);
+            setSchoolFehlt(false);
             setAppts([]);
             // Ohne diesen Reset überlebte eine laufende Prüfungssimulation/Schaltkompetenz-Sitzung
             // einen Kontowechsel (App() bleibt beim Sign-out gemountet) - das Live-Banner zeigte
@@ -15082,12 +15098,35 @@ function App() {
         touchLastSeen(uid); // letzten Zugriff merken
         // Zuerst Fahrschule holen, damit die Vorlage (V3 vs. BVF) richtig gewählt wird
         let myRights = false; // wird gleich befüllt, für die spätere Admin-Vorlage-Prüfung ohne Race Condition
-        fetchMySchool(uid).then(schoolData => {
+        setSchoolFehlt(false);
+        fetchMySchool(uid).catch(err => {
+            // Ladefehler ist NICHT "keine Fahrschule": mit einer echten Fahrschule im Cache damit
+            // weitermachen (Schüler/Termine laden trotzdem), Cache unangetastet lassen und nur
+            // den Fehler zeigen. Ohne brauchbaren Cache bricht das Laden ab (unten .catch:
+            // loadErr, bisheriger Stand bleibt) - nie eine id-lose Ersatz-Fahrschule einsetzen.
+            if (cachedSchool && cachedSchool.id) {
+                if (!cancelled)
+                    setLoadErr(String(err && err.message ? err.message : err));
+                return cachedSchool;
+            }
+            throw err;
+        }).then(schoolData => {
             if (cancelled)
                 return null;
             const sc = schoolData || { ...DEFAULT_SCHOOL };
             putSchool(sc);
-            saveSchoolCache(uid, sc);
+            if (sc.id) {
+                saveSchoolCache(uid, sc);
+            }
+            else {
+                // Nachweislich keine school_id: Maske zeigen, aber keine id-lose Fahrschule in den
+                // Cache legen - sonst startete die App beim nächsten Mal mit diesem Platzhalter.
+                setSchoolFehlt(true);
+                try {
+                    localStorage.removeItem(schoolKey(uid));
+                }
+                catch (e) { }
+            }
             applySchoolColor(sc.color);
             fetchIsModerator(uid).then(v => { if (!cancelled)
                 setIsModerator(v); }).catch(() => { });
@@ -15449,10 +15488,13 @@ function App() {
         setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
         try {
             await joinSchoolByCode(schoolRecovery.code);
-            const fresh = await fetchMySchool(uid);
+            // Beitritt ist durch - ein Ladefehler danach landet im "noch nicht geladen"-Hinweis
+            // unten, nicht im catch (der meldete sonst den Beitritt als gescheitert).
+            const fresh = await fetchMySchool(uid).catch(() => null);
             if (fresh) {
                 putSchool(fresh);
                 saveSchoolCache(uid, fresh);
+                setSchoolFehlt(false);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
             else {
@@ -15469,10 +15511,13 @@ function App() {
         setSchoolRecovery(r => ({ ...r, busy: true, err: "" }));
         try {
             await createAndAssignSchool(schoolRecovery.newName);
-            const fresh = await fetchMySchool(uid);
+            // Anlegen ist durch - ein Ladefehler danach darf nicht als Fehlschlag erscheinen,
+            // sonst tippt der Nutzer erneut und legt eine zweite Fahrschule an.
+            const fresh = await fetchMySchool(uid).catch(() => null);
             if (fresh) {
                 putSchool(fresh);
                 saveSchoolCache(uid, fresh);
+                setSchoolFehlt(false);
                 setSchoolRecovery({ code: "", newName: "", busy: false, err: "" });
             }
             else {
@@ -31986,7 +32031,7 @@ function App() {
         })(),
         // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
         // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
-        !IS_DEMO() && school && !school.id && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 400,
+        !IS_DEMO() && schoolFehlt && school && !school.id && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(0,0,0,.85)", zIndex: 400,
                 display: "flex", alignItems: "center", justifyContent: "center", padding: 20 } },
             React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "26px 22px" } },
                 React.createElement("div", { style: { fontSize: 32, marginBottom: 10 } }, "🏫"),
