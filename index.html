@@ -6349,10 +6349,12 @@ async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentW
             student_day_limit: studentDayLim, student_week_limit: studentWeekLim }, { onConflict: "id" });
         if (error)
             throw new Error(error.message || "Limits konnten nicht gespeichert werden");
+        return true;
     }
     catch (e) {
         console.error("Limits speichern fehlgeschlagen:", e);
         showToast("Deine Buchungslimits konnten nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
+        return false;
     }
 }
 // Anzeigename des Fahrlehrers speichern (für den Fahrzeug-Kalender).
@@ -6365,10 +6367,12 @@ async function saveTeacherNameToProfile(uid, name) {
         const { error } = await sb.from("profiles").upsert({ id: uid, email, display_name: name || null }, { onConflict: "id" });
         if (error)
             throw new Error(error.message || "Anzeigename konnte nicht gespeichert werden");
+        return true;
     }
     catch (e) {
         console.error("Anzeigename speichern fehlgeschlagen:", e);
         showToast("Dein Anzeigename konnte nicht gespeichert werden:\n" + (e.message || "unbekannter Fehler"), "error");
+        return false;
     }
 }
 // Eigener Text für die WhatsApp-Nachricht beim Verschicken des Buchungslinks. Leer = Standardtext.
@@ -10897,6 +10901,86 @@ function SettingsScreen({ title, onBack, children }) {
 function clusterLabel(text, tone) {
     return React.createElement("div", { className: "eyebrow", style: { color: "var(--" + tone + "-deep)", marginTop: 18, marginBottom: 2 } }, text);
 }
+// Zahlenfeld mit eigenem Entwurfstext (Audit I-M4/I-M7/I-N25). Vorher hing value direkt an der
+// gespeicherten Zahl: "7," wurde sofort zu 7 (7,50 war nicht eingebbar), ein geleertes Feld
+// sprang auf den Standardwert zurück (20 € bzw. 14 Tage/6 Wochen/Stückzahl 1), und "5a" landete
+// als NaN in der Fahrschule - referral_reward ist NOT NULL, danach scheiterte jedes weitere
+// Schul-Speichern. Hier wird nur ein gültiger Wert weitergereicht (onWert); Leeres oder
+// Ungültiges bleibt Entwurf, wird rot markiert und beim Verlassen des Feldes auf den
+// gespeicherten Wert zurückgesetzt. leerWert !== undefined: leeres Feld ist ein echter Wert
+// (z.B. null = "nichts eingestellt") und wird sofort weitergereicht.
+function EntwurfFeld({ wert, parse, onWert, leerWert, anzeige, ...rest }) {
+    const zeige = v => (v == null || v === "") ? "" : (anzeige ? anzeige(v) : String(v));
+    const [text, setText] = useState(() => zeige(wert));
+    const [ungueltig, setUngueltig] = useState(false);
+    const fokusRef = useRef(false);
+    // Von außen geänderter Wert (Neuladen, andere Sitzung) übernehmen - aber nie mitten ins Tippen.
+    useEffect(() => { if (!fokusRef.current) {
+        setText(zeige(wert));
+        setUngueltig(false);
+    } }, [wert]);
+    return React.createElement("input", { ...rest, type: "text", value: text, "aria-invalid": ungueltig ? "true" : undefined,
+        style: { ...(rest.style || {}), ...(ungueltig ? { borderColor: "var(--red)" } : null) },
+        onFocus: () => { fokusRef.current = true; },
+        onChange: e => {
+            const t = e.target.value;
+            setText(t);
+            if (!t.trim()) {
+                setUngueltig(false);
+                if (leerWert !== undefined)
+                    onWert(leerWert);
+                return;
+            }
+            const n = parse(t.trim());
+            if (n == null || Number.isNaN(n)) {
+                setUngueltig(true);
+                return;
+            }
+            setUngueltig(false);
+            onWert(n);
+        },
+        onBlur: () => {
+            fokusRef.current = false;
+            if (!text.trim() || ungueltig) {
+                setText(zeige(wert));
+                setUngueltig(false);
+            }
+        } });
+}
+// Parser für EntwurfFeld: Beträge im deutschen Format (nie negativ) und ganze Zahlen ab min.
+function parseBetragFeld(t) {
+    const n = parseBetrag(t);
+    return n >= 0 ? n : NaN;
+}
+function parseGanzzahlAb(min) {
+    return t => (/^\d+$/.test(t) && parseInt(t, 10) >= min) ? parseInt(t, 10) : NaN;
+}
+function betragAnzeige(v) { return String(v).replace(".", ","); }
+// Arbeitszeit eines Tages prüfen (Audit I-M5). Die Buchungsseite (withinWorkHours) wertet einen
+// Tag nur mit Beginn UND Ende als Zeitfenster - nur "von" hieß still "ganztägig buchbar", und
+// "von" nach "bis" hieß "nie buchbar". Liefert einen Hinweistext oder "".
+function arbeitszeitProblem(day) {
+    if (!day || day.blocked)
+        return "";
+    const von = day.von || "", bis = day.bis || "";
+    if (von && !bis)
+        return "Bitte auch das Ende eintragen - nur mit Beginn und Ende gilt das Zeitfenster.";
+    if (!von && bis)
+        return "Bitte auch den Beginn eintragen - nur mit Beginn und Ende gilt das Zeitfenster.";
+    if (von && bis && von >= bis)
+        return "Das Ende muss nach dem Beginn liegen - so wäre der Tag nie buchbar.";
+    return "";
+}
+// Vergleichbarer Stand eines Formular-Objekts (Audit I-M8): busy/error sind Zustand des Dialogs,
+// keine Eingabe. null = nicht vergleichbar, dann lieber nachfragen.
+function formSchnappschuss(obj) {
+    try {
+        return JSON.stringify(obj, (k, v) => (k === "busy" || k === "error") ? undefined : v);
+    }
+    catch (e) {
+        return null;
+    }
+}
 // Welche Einstellungs-Zeilen nur für einen Fahrschul-Admin bzw. den zentralen App-Admin sichtbar/
 // erreichbar sind - ersetzt die alte settingsTab==="admin"-Prüfung, jetzt pro Zeile statt pro Tab.
 const ADMIN_ONLY_SETTINGS = new Set(["meine-fahrschule", "team-einladung", "standorte", "klassen", "arten", "sonderfahrten-soll", "reform", "fuhrpark", "kosten", "rechnungsdaten", "datev", "gutscheine", "loeschprotokoll", "personalunterlagen"]);
@@ -11737,13 +11821,15 @@ function App() {
     // reicht den Stand aus schoolRef herein) statt {...school, ...} aus dem Render einzufangen -
     // sonst setzte z.B. ein Aufruf nach einem Bestätigungsdialog (Standort löschen) oder zwei
     // schnelle Änderungen vor dem nächsten Render andere, eben geänderte Felder wieder zurück.
-    function saveReferralReward(v) { if (school)
-        writeSchool(s => s && ({ ...s, referral_reward: (v === "" ? 20 : Number(v)) })); }
+    // Nur endliche Zahlen speichern (Audit I-M4): NaN landete sonst in referral_reward (NOT NULL)
+    // und ließ danach jedes Schul-Speichern scheitern.
+    function saveReferralReward(v) { if (school && v !== "" && v != null && Number.isFinite(Number(v)))
+        writeSchool(s => s && ({ ...s, referral_reward: Number(v) })); }
     // Standard-Ausfallgebühr: null heißt "nichts eingestellt" - reportNoShow() schlägt dann
     // weiterhin die Hälfte des UE-Preises vor (bisheriges Verhalten), statt einer erzwungenen Zahl.
     const noShowFeeDefault = (school && school.no_show_fee_default != null) ? Number(school.no_show_fee_default) : null;
     function saveNoShowFeeDefault(v) { if (school)
-        writeSchool(s => s && ({ ...s, no_show_fee_default: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, no_show_fee_default: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     // Stornofrist für kurzfristige Absagen im Schülerportal: null heißt "keine Frist eingestellt"
     // (keine Warnung, keine Gebührenfrage) - bewusst wie noShowFeeDefault standardmäßig aus, damit
     // sich am Verhalten für Fahrschulen ohne eigene Regelung dazu nichts ändert.
@@ -11755,13 +11841,13 @@ function App() {
     // der Standardwert, damit sich am Verhalten ohne eigene Einstellung nichts ändert.
     const zahlungszielTage = (school && school.zahlungsziel_tage != null) ? Number(school.zahlungsziel_tage) : 14;
     function saveZahlungszielTage(v) { if (school)
-        writeSchool(s => s && ({ ...s, zahlungsziel_tage: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, zahlungsziel_tage: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     // Puffer für den Rückwärts-Fahrplan (Behördenbearbeitung + Prüfungstermin-Wartezeit), oben auf
     // die reine Fahrstundenzeit gerechnet - 6 Wochen als vorsichtiger Standard (siehe Marktstudie:
     // Behördenstau bis zu 3 Monate in Einzelfällen, hier bewusst konservativ statt spekulativ hoch).
     const planungPufferWochen = (school && school.planung_puffer_wochen != null) ? Number(school.planung_puffer_wochen) : 6;
     function savePlanungPufferWochen(v) { if (school)
-        writeSchool(s => s && ({ ...s, planung_puffer_wochen: (v === "" ? null : Number(v)) })); }
+        writeSchool(s => s && ({ ...s, planung_puffer_wochen: ((v === "" || v == null || !Number.isFinite(Number(v))) ? null : Number(v)) })); }
     function savePricePerHour(v) { if (school)
         writeSchool(s => s && ({ ...s, price_hour: (v === "" ? "" : v) })); }
     function savePackages(list) { if (school)
@@ -12072,14 +12158,29 @@ function App() {
     const [workHoursOpen, setWorkHoursOpen] = useState(false);
     function writeWorkHours(next) {
         setWorkHours(next);
+        // Audit I-M5: ein Tag mit nur Beginn/nur Ende oder Ende vor Beginn wird NICHT gespeichert -
+        // die Buchungsseite hätte ihn als ganztägig bzw. nie buchbar gewertet. Der Hinweis steht
+        // direkt am Tag; gespeichert wird, sobald alle Tage stimmig sind (Zwischenstände beim
+        // Umstellen von Beginn und Ende landen so auch nicht kurz auf der Buchungsseite).
+        if (["mo", "di", "mi", "do", "fr", "sa"].some(k => arbeitszeitProblem(next && next[k]))) {
+            const offen = pendingSavesRef.current.get("workHours");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("workHours");
+            }
+            return;
+        }
         // Aufschub über planSave (statt eigenem Timer), damit auch das beim Verlassen der Seite
         // und vor dem Abmelden noch gespeichert wird (siehe pendingSavesRef).
         planSave("workHours", () => {
             if (!uid)
                 return true;
-            return saveWorkHoursToProfile(uid, next).then(() => true, e => {
+            // Eigener Fehlerzustand fürs Speichern (Audit I-M6): vorher landete ein Speicherfehler
+            // in workHoursError und hieß "konnten nicht geladen werden", und "Erneut versuchen"
+            // lud den Server-Stand neu - die gerade gemachten Änderungen waren damit weg.
+            return saveWorkHoursToProfile(uid, next).then(() => { setWorkHoursSaveError(""); return true; }, e => {
                 console.error("Arbeitszeiten speichern fehlgeschlagen:", e);
-                setWorkHoursError("Speichern fehlgeschlagen: " + (e.message || "unbekannter Fehler") + ". Bitte erneut versuchen.");
+                setWorkHoursSaveError(fehlerText(e));
                 return false;
             });
         }, 500);
@@ -12483,6 +12584,43 @@ function App() {
     // (nächster useEffect) gemeinsam genutzt, damit beide Wege nie auseinanderlaufen können.
     // Gibt true zurück, wenn eine Ebene "getroffen" wurde (auch wenn sie wegen .busy gerade nicht
     // schließbar ist - dann soll weder Escape noch der Wisch tiefer durchgreifen).
+    // Audit I-M8: Fahrstunde/Posten/Zahlung/Leistung/Rechnungsentwurf schlossen bei einem Tipp
+    // daneben oder Escape kommentarlos - die Eingaben (bei der Leistung sogar die Unterschrift)
+    // waren weg. Der Stand beim Öffnen wird hier gemerkt; weicht er beim Schließen ab, wird erst
+    // nachgefragt. Die ausdrücklichen "Abbrechen"-Knöpfe bleiben ohne Rückfrage.
+    const formStartRef = useRef({});
+    useEffect(() => {
+        const jetzt = { lesson: lessonForm, item: itemForm, payment: paymentForm, leistung: leistungForm, invoice: invoiceDraft };
+        Object.keys(jetzt).forEach(k => {
+            if (!jetzt[k])
+                delete formStartRef.current[k];
+            else if (!(k in formStartRef.current))
+                formStartRef.current[k] = formSchnappschuss(jetzt[k]);
+        });
+    }, [lessonForm, itemForm, paymentForm, leistungForm, invoiceDraft]);
+    // Sperre, damit Wischgeste/Escape/Tipp während der offenen Rückfrage keine zweite stapeln.
+    const verwerfenFrageRef = useRef(false);
+    // key: Eintrag in formStartRef; obj: aktueller Formularstand; geaendert: fester Wert statt des
+    // Vergleichs (KI-Ergebnisse: vorhanden = würde verloren gehen).
+    function schliessenNachRueckfrage(key, obj, schliessen, geaendert) {
+        if (obj && obj.busy)
+            return;
+        if (geaendert === undefined) {
+            const start = formStartRef.current[key];
+            const nun = formSchnappschuss(obj);
+            geaendert = start === undefined ? false : (start === null || nun === null || start !== nun);
+        }
+        if (!geaendert) {
+            schliessen();
+            return;
+        }
+        if (verwerfenFrageRef.current)
+            return;
+        verwerfenFrageRef.current = true;
+        askConfirm({ message: "Deine Eingaben in diesem Fenster gehen verloren. Wirklich verwerfen?", confirmLabel: "Verwerfen", cancelLabel: "Weiter bearbeiten", danger: true })
+            .then(ok => { verwerfenFrageRef.current = false; if (ok)
+            schliessen(); });
+    }
     function closeTopOverlay() {
         if (cmdOpen) return false;
         // Bewusst ganz oben und bewusst OHNE den Puffer zu löschen: Wegtippen heißt "später
@@ -12495,16 +12633,26 @@ function App() {
         else if (apptChoice) setApptChoice(null);
         else if (counterForm) { if (!counterForm.busy) setCounterForm(null); }
         else if (theoryForm) { if (!theoryForm.busy) setTheoryForm(null); }
-        else if (invoiceDraft) setInvoiceDraft(null);
+        else if (invoiceDraft) schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null));
         else if (apptForm) { if (!apptForm.busy) setApptForm(null); }
         else if (qrModal) setQrModal(false);
-        else if (calImport) { if (!calImport.busy) setCalImport(null); }
-        else if (adkImport) { if (!adkImport.busy) setAdkImport(null); }
+        // Audit I-M9: diese sieben Dialoge fehlten hier - Escape bzw. die Zurück-Geste schloss
+        // dann den Bildschirm DAHINTER, während der Dialog offen stehen blieb. Reihenfolge nach
+        // zIndex (185/175/170, dann die 160er vor den übrigen 160er-Formularen).
+        else if (loeschDialog) { if (!loeschDialog.busy) setLoeschDialog(null); }
+        else if (voucherForm) { if (!voucherForm.busy) setVoucherForm(null); }
+        else if (voucherRedeem) { if (!voucherRedeem.busy) setVoucherRedeem(null); }
+        else if (csvImport) { if (!csvImport.busy) setCsvImport(null); }
+        else if (calImport) schliessenNachRueckfrage("calImport", calImport, () => setCalImport(null), !!(calImport.items && calImport.items.length));
+        else if (adkImport) schliessenNachRueckfrage("adkImport", adkImport, () => setAdkImport(null), !!(adkImport.results && adkImport.results.length));
+        else if (theoryCheckinModal) setTheoryCheckinModal(null);
+        else if (examSlotAssign) setExamSlotAssign(null);
+        else if (examSlotForm) setExamSlotForm(null);
         else if (assistant) { if (!assistant.busy) setAssistant(null); }
-        else if (lessonForm) setLessonForm(null);
-        else if (itemForm) setItemForm(null);
-        else if (paymentForm) setPaymentForm(null);
-        else if (leistungForm) setLeistungForm(null);
+        else if (lessonForm) schliessenNachRueckfrage("lesson", lessonForm, () => setLessonForm(null));
+        else if (itemForm) schliessenNachRueckfrage("item", itemForm, () => setItemForm(null));
+        else if (paymentForm) schliessenNachRueckfrage("payment", paymentForm, () => setPaymentForm(null));
+        else if (leistungForm) schliessenNachRueckfrage("leistung", leistungForm, () => setLeistungForm(null));
         else if (importState) setImportState(null);
         else if (interessentImport) setInteressentImport(null);
         else if (proposeForm) setProposeForm(null);
@@ -12554,7 +12702,31 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen]);
+    // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
+    // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
+    // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
+    // sie wieder offen, und Escape/Zurück-Geste "schlossen" sie unsichtbar auf einer anderen Seite.
+    // Ausnahme "vorlage": der Vorlagen-Editor wird aus Einstellungen › Arbeit geöffnet und kehrt
+    // dorthin zurück.
+    useEffect(() => {
+        try { window.scrollTo(0, 0); } catch (e) { }
+        if (view !== "einstellungen" && view !== "vorlage")
+            setSettingsScreen(null);
+    }, [view]);
+    useEffect(() => {
+        // Mobil ist die Unterseite eine eigene fixierte Scroll-Ebene, am PC scrollt das Fenster.
+        // Nur beim Öffnen zurücksetzen - beim Schließen gleitet die alte Seite noch sichtbar
+        // hinaus und soll dabei nicht nach oben springen.
+        const el = settingsScreen ? document.querySelector(".settings-content") : null;
+        if (el)
+            el.scrollTop = 0;
+        try {
+            if (settingsScreen && window.matchMedia && window.matchMedia("(min-width: 900px)").matches)
+                window.scrollTo(0, 0);
+        }
+        catch (e) { }
+    }, [settingsScreen]);
     const viewSlideRef = useRef(null);
     // Leichtes Einblenden bei jedem Screen-/Reiter-Wechsel (Tap UND Wisch-Geste treffen das
     // gleichermaßen, da beide letztlich view/studentTab/settingsScreen ändern) - bewusst
@@ -12716,7 +12888,7 @@ function App() {
             document.removeEventListener("touchmove", onMove);
             document.removeEventListener("touchend", onEnd);
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -12801,6 +12973,7 @@ function App() {
     // Arbeitszeiten je Wochentag (mo,di,mi,do,fr,sa,so), jeweils {von,bis} oder leer = an diesem Tag nicht buchbar
     const [workHours, setWorkHours] = useState(null); // null solange nicht geladen
     const [workHoursError, setWorkHoursError] = useState("");
+    const [workHoursSaveError, setWorkHoursSaveError] = useState(""); // Speichern fehlgeschlagen (nicht Laden)
     useEffect(() => {
         if (!uid)
             return;
@@ -12942,6 +13115,7 @@ function App() {
     // änderungsbedingte Schreibvorgang übernahm den fremden Wert dadurch unbemerkt ins Profil
     // des jetzt aktiven Kontos. Jetzt wird beim ersten Durchlauf nach Login immer der echte
     // Server-Stand geladen und lokal übernommen, bevor irgendetwas zurückgeschrieben wird.
+    const limitSaveChainRef = useRef(Promise.resolve());
     const limitSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
@@ -12964,8 +13138,16 @@ function App() {
                 .catch(() => { });
             return;
         }
-        saveLimitsToProfile(uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit);
+        // Audit I-M7: vorher ein upsert pro Tastendruck, alle parallel - kam die Antwort für "49"
+        // nach der für "495" an, blieb 49 gespeichert. Jetzt aufgeschoben (planSave: nur der letzte
+        // Stand läuft, auch beim Verlassen der Seite) und hintereinander statt gleichzeitig.
+        const lim = [dayLimit, weekLimit, studentDayLimit, studentWeekLimit];
+        planSave("limits", () => {
+            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3]));
+            return limitSaveChainRef.current;
+        }, 600);
     }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
+    const nameSaveChainRef = useRef(Promise.resolve());
     const nameSyncReady = useRef(false);
     useEffect(() => {
         if (!uid) {
@@ -12983,7 +13165,24 @@ function App() {
                 .catch(() => { });
             return;
         }
-        saveTeacherNameToProfile(uid, teacherName);
+        // Ein leerer Name wird nicht gespeichert (Audit I-M7): display_name ist Pflichtangabe des
+        // Profils - ein kurz geleertes Feld öffnete sonst beim nächsten Start den Pflichtdialog.
+        // Aufgeschoben wie die Limits oben, damit nicht jeder Tastendruck einzeln (parallel) läuft.
+        const name = teacherName.trim();
+        if (!name) {
+            // Auch einen noch geplanten Zwischenstand ("F" beim Löschen Buchstabe für Buchstabe)
+            // verwerfen - sonst landete genau der als Name im Profil.
+            const offen = pendingSavesRef.current.get("teacherName");
+            if (offen) {
+                clearTimeout(offen.timer);
+                pendingSavesRef.current.delete("teacherName");
+            }
+            return;
+        }
+        planSave("teacherName", () => {
+            nameSaveChainRef.current = nameSaveChainRef.current.then(() => saveTeacherNameToProfile(uid, name));
+            return nameSaveChainRef.current;
+        }, 600);
     }, [uid, teacherName]);
     const [loadErr, setLoadErr] = useState("");
     // Load students + template + school when logged in: cache first, then cloud
@@ -25455,7 +25654,24 @@ function App() {
         }
         const nativeApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
         // ── Live-Status je Zeile: echte aktuelle Werte statt nur ein Titel ──
-        const workDaysCount = workHours ? Object.keys(workHours).filter(k => workHours[k] && !workHours[k].blocked && (workHours[k].von || workHours[k].bis)).length : 0;
+        // Audit I-N14: vorher zählte jeder Tag mit irgendeiner Zeit als "eingerichtet", und ohne
+        // Zeiten hieß es "rund um die Uhr buchbar" - auch wenn alle Tage gesperrt waren oder die
+        // Arbeitszeiten noch gar nicht geladen. Jetzt so gezählt, wie die Buchungsseite
+        // (withinWorkHours) Mo-Sa wirklich wertet; Sonntag ist für Schüler immer gesperrt.
+        const whStand = workHours ? ["mo", "di", "mi", "do", "fr", "sa"].reduce((acc, k) => {
+            const d = workHours[k];
+            if (d && d.blocked)
+                acc.gesperrt++;
+            else if (d && d.von && d.bis)
+                acc[arbeitszeitProblem(d) ? "gesperrt" : "fenster"]++;
+            else
+                acc.ganz++;
+            return acc;
+        }, { fenster: 0, ganz: 0, gesperrt: 0 }) : null;
+        const whStatusText = !whStand ? "Arbeitszeiten, Limits, Buchungslink"
+            : (whStand.fenster === 0 && whStand.ganz === 0) ? "Für Schüler nicht buchbar"
+                : [whStand.fenster > 0 && (whStand.fenster + (whStand.fenster === 1 ? " Tag" : " Tage") + " mit Zeitfenster"),
+                    whStand.ganz > 0 && (whStand.ganz + (whStand.ganz === 1 ? " Tag" : " Tage") + " ganztägig buchbar")].filter(Boolean).join(" · ");
         const invoiceInv = (school && school.invoice_settings) || {};
         const invoiceIv = key => invoiceInv[key] || "";
         const invoicePct = Math.round(100 * ["firma", "strasse", "plzOrt", "iban"].filter(k => invoiceIv(k)).length / 4);
@@ -25486,7 +25702,7 @@ function App() {
         };
         const settingsRows = [
             { id: "profil", section: "mein-bereich", tone: "sage", label: "Profil", icon: IC.profil, keywords: "profil name foto standort geburtstag benachrichtigung", status: teacherName || "Kein Name hinterlegt" },
-            { id: "arbeit", section: "mein-bereich", tone: "sage", label: "Arbeit & Ausbildung", icon: IC.arbeit, keywords: "arbeitszeiten limit buchungslink erinnerung bewertung sortierung adk strecken", status: workDaysCount === 0 ? "Keine Arbeitszeiten – rund um die Uhr buchbar" : workDaysCount + " Tage" + (dayLimit > 0 ? " · " + dayLimit + " Min/Tag" : "") },
+            { id: "arbeit", section: "mein-bereich", tone: "sage", label: "Arbeit & Ausbildung", icon: IC.arbeit, keywords: "arbeitszeiten limit buchungslink erinnerung bewertung sortierung adk strecken", status: whStatusText + (dayLimit > 0 ? " · " + dayLimit + " Min/Tag" : "") },
             { id: "unterlagen", section: "mein-bereich", tone: "sage", label: "Meine Unterlagen", icon: IC.unterlagen, keywords: "unterlagen dokumente lohn vertrag zertifikat", status: myStaffFiles ? myStaffFiles.length + (myStaffFiles.length === 1 ? " Datei" : " Dateien") : "Zum Ansehen öffnen" },
             { id: "konto-daten", section: "mein-bereich", tone: "sage", label: "Daten & Sicherung", icon: IC.konto_daten, keywords: "sicherung backup export fahrtenbuch csv kalender abonnieren ics", status: "Backup, Export, Kalender" },
             { id: "meine-fahrschule", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Meine Fahrschule", icon: IC.fahrschule, keywords: "name logo farbe schule", status: (school && school.name) || "Fahrschule" },
@@ -25574,7 +25790,9 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Anzeigename (z.B. Fabian Bürkle)",
                                 React.createElement("input", { type: "text", value: teacherName, placeholder: "Vor- und Nachname", onChange: e => setTeacherName(e.target.value) })),
-                                React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, wenn du ein Fahrzeug buchst. Ohne Eintrag bleibt das Feld beim Buchen leer."))),
+                                !teacherName.trim()
+                                    ? React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginTop: 6, lineHeight: 1.5 } }, "Der Name ist Pflicht und wird erst gespeichert, wenn hier wieder etwas steht.")
+                                    : React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.5 } }, "Dieser Name wird im Fahrzeug-Kalender als Fahrlehrer vorausgefüllt, wenn du ein Fahrzeug buchst."))),
                         React.createElement("div", { className: "eyebrow" }, "Profilbild"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
                             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
@@ -25620,14 +25838,21 @@ function App() {
                             React.createElement("button", { onClick: () => setWorkHoursOpen(o => !o), style: { width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 14px", background: "transparent" } },
                                 React.createElement("span", { style: { fontSize: 14.5, fontWeight: 700 } }, "Wochentage & Zeiten"),
                                 React.createElement("span", { style: { display: "flex", alignItems: "center", gap: 8 } },
-                                    workHours && Object.keys(workHours).some(k => workHours[k] && (workHours[k].blocked || (workHours[k].von && workHours[k].bis))) &&
+                                    whStand && whStand.ganz < 6 &&
                                         React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--orange-deep)", background: "var(--orange-soft)", borderRadius: 99, padding: "3px 9px" } }, "eingerichtet"),
-                                    workHours && workDaysCount === 0 &&
-                                        React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--red-ink)", background: "var(--danger-bg)", borderRadius: 99, padding: "3px 9px" } }, "rund um die Uhr buchbar"),
+                                    whStand && whStand.ganz === 6 &&
+                                        React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--red-ink)", background: "var(--danger-bg)", borderRadius: 99, padding: "3px 9px" } }, "Mo–Sa ganztägig buchbar"),
                                     React.createElement("svg", { width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round", strokeLinejoin: "round", style: { transform: workHoursOpen ? "rotate(180deg)" : "none", transition: "transform .15s", color: "var(--muted)" } },
                                         React.createElement("polyline", { points: "6 9 12 15 18 9" })))),
                             workHoursOpen && React.createElement("div", { style: { padding: "0 14px 14px" } },
                                 React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Schüler können über deinen Buchungslink Termine vorschlagen. Ohne Zeitangabe ist ein Tag ganztägig buchbar. Trägst du eine Zeit ein, sind nur Termine in diesem Fenster möglich. Mit dem Kreuz nimmst du einen Tag komplett aus der Buchbarkeit heraus. Für dich selbst gilt keine dieser Einschränkungen. Sonntag ist für Schüler immer gesperrt, unabhängig von der letzten Zeile - die steuert nur, ob Sonntag in deinem eigenen Kalender auftaucht."),
+                                workHoursSaveError && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12, whiteSpace: "pre-line" } },
+                                    "Arbeitszeiten konnten nicht gespeichert werden: ",
+                                    workHoursSaveError,
+                                    " ",
+                                    // Erneut mit dem Stand auf dem Bildschirm speichern - nicht neu laden.
+                                    React.createElement("button", { onClick: () => { setWorkHoursSaveError(""); if (workHours)
+                                            writeWorkHours(workHours); }, style: { textDecoration: "underline", fontWeight: 700 } }, "Erneut speichern")),
                                 workHoursError && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 12 } },
                                     "Arbeitszeiten konnten nicht geladen werden: ",
                                     workHoursError,
@@ -25659,19 +25884,22 @@ function App() {
                                                         !blocked && (day.von || day.bis) && React.createElement("button", { onClick: () => writeWorkHours({ ...workHours, [k]: { ...day, von: "", bis: "" } }), style: { color: "var(--muted)", fontSize: 12, flexShrink: 0, padding: "4px 2px" } }, "Leeren"))),
                                             k === "so"
                                                 ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginLeft: 35, marginTop: 3 } }, "Für Schüler über den Buchungslink immer gesperrt, unabhängig von diesem Schalter.")
-                                                : blocked && React.createElement("div", { style: { fontSize: 11.5, color: "var(--red)", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar"));
+                                                : blocked ? React.createElement("div", { style: { fontSize: 11.5, color: "var(--red)", marginLeft: 35, marginTop: 3 } }, "Nicht buchbar")
+                                                    : arbeitszeitProblem(day) && React.createElement("div", { role: "alert", style: { fontSize: 11.5, color: "var(--red-ink)", fontWeight: 600, marginLeft: 35, marginTop: 3 } }, arbeitszeitProblem(day) + " Noch nicht gespeichert."));
                                     }))),
                         React.createElement("div", { className: "eyebrow" }, "Mein Ausbildungslimit"),
                         React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
+                            // Limits als EntwurfFeld (Audit I-M7): ein geleertes Feld war sofort "0 = kein Limit"
+                            // und wurde so gespeichert; jetzt zählt nur eine eingegebene Zahl.
                             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 12px" } }, "Lege fest, wie viele Minuten praktische Ausbildung du pro Tag und pro Woche höchstens leisten darfst. Termine, die dein Limit überschreiten würden, lassen sich nicht bestätigen. 0 bedeutet kein Limit. Es zählen nur bestätigte Termine."),
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Tageslimit in Minuten (z.B. 495)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: dayLimit, onChange: e => setDayLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: dayLimit, parse: parseGanzzahlAb(0), onWert: setDayLimit })),
                                 dayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (dayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag.")),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: weekLimit, onChange: e => setWeekLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: weekLimit, parse: parseGanzzahlAb(0), onWert: setWeekLimit })),
                                 weekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (weekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Woche."))),
                         React.createElement("div", { className: "eyebrow" }, "Limit je Fahrschüler"),
@@ -25680,12 +25908,12 @@ function App() {
                                 "Begrenzt, wie viele Minuten Fahrstunden sich ein einzelner Schüler höchstens pro Tag bzw. Woche sichern kann - über den Buchungslink oder wenn du selbst einen Termin für ihn anlegst. Verhindert, dass ein Schüler versehentlich (oder absichtlich) zu viele Termine auf einmal blockt, während andere leer ausgehen. 0 bedeutet kein Limit."),
                             React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                                 React.createElement("label", null, "Tageslimit je Schüler in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentDayLimit, onChange: e => setStudentDayLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: studentDayLimit, parse: parseGanzzahlAb(0), onWert: setStudentDayLimit })),
                                 studentDayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (studentDayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag und Schüler.")),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit je Schüler in Minuten (0 = aus)",
-                                React.createElement("input", { type: "number", inputMode: "numeric", min: "0", step: "15", value: studentWeekLimit, onChange: e => setStudentWeekLimit(Math.max(0, parseInt(e.target.value, 10) || 0)) })),
+                                React.createElement(EntwurfFeld, { inputMode: "numeric", wert: studentWeekLimit, parse: parseGanzzahlAb(0), onWert: setStudentWeekLimit })),
                                 studentWeekLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
                                     "Entspricht ", (studentWeekLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Woche und Schüler."))),
                         React.createElement("div", { className: "eyebrow" }, "Übungs-Verlauf ADK/Strecken"),
@@ -26269,13 +26497,14 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-empfehlungsbonus" }, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-empfehlungsbonus", type: "text", inputMode: "decimal", value: referralReward, onChange: e => saveReferralReward(normDecimal(e.target.value)), style: { flex: 1 } }),
+                                    // EntwurfFeld (Audit I-M4): Komma bleibt stehen, leer/ungültig wird nicht gespeichert.
+                                    React.createElement(EntwurfFeld, { id: "field-empfehlungsbonus", inputMode: "decimal", wert: referralReward, parse: parseBetragFeld, anzeige: betragAnzeige, onWert: saveReferralReward, style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Betrag, den Werber und geworbener Schüler je als Gutschrift bekommen, wenn eine Empfehlung im Schülerprofil oder bei der Selbstanmeldung eingelöst wird."),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-ausfallgebuehr-standard" }, "Standard-Ausfallgebühr (optional)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-ausfallgebuehr-standard", type: "text", inputMode: "decimal", value: noShowFeeDefault != null ? String(noShowFeeDefault) : "", onChange: e => saveNoShowFeeDefault(normDecimal(e.target.value)), placeholder: "z.B. 30", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-ausfallgebuehr-standard", inputMode: "decimal", wert: noShowFeeDefault, parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: saveNoShowFeeDefault, placeholder: "z.B. 30", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Vorgeschlagener Betrag beim Melden eines Nichterscheinens (Schülerseite, „Zuverlässigkeit\"). Leer lassen für automatisch die Hälfte des UE-Preises - in beiden Fällen frei anpassbar, bevor die Gebühr gebucht wird."),
                             React.createElement("div", { className: "field" },
@@ -26287,13 +26516,13 @@ function App() {
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-zahlungsziel" }, "Zahlungsziel"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-zahlungsziel", type: "text", inputMode: "numeric", value: String(zahlungszielTage), onChange: e => saveZahlungszielTage(e.target.value.replace(/\D/g, "")), placeholder: "14", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-zahlungsziel", inputMode: "numeric", wert: zahlungszielTage, parse: parseGanzzahlAb(1), leerWert: null, onWert: saveZahlungszielTage, placeholder: "14", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Tage"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Ab wie vielen Tagen nach dem Rechnungsdatum eine unbezahlte Rechnung im Mahnungen-Cockpit und in der Abrechnung als überfällig gilt. Standard 14 Tage."),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-planung-puffer" }, "Planungspuffer (Rückwärts-Fahrplan)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement("input", { id: "field-planung-puffer", type: "text", inputMode: "numeric", value: String(planungPufferWochen), onChange: e => savePlanungPufferWochen(e.target.value.replace(/\D/g, "")), placeholder: "6", style: { flex: 1 } }),
+                                    React.createElement(EntwurfFeld, { id: "field-planung-puffer", inputMode: "numeric", wert: planungPufferWochen, parse: parseGanzzahlAb(0), leerWert: null, onWert: savePlanungPufferWochen, placeholder: "6", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "Wochen"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Zeit, die der Rückwärts-Fahrplan je Schüler zusätzlich zur reinen Fahrstundenzeit einplant - für Bearbeitungszeit bei der Führerscheinstelle und die Wartezeit auf einen Prüfungstermin. Standard 6 Wochen, im Einzelfall regional sehr unterschiedlich."),
                             React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Pakete"),
@@ -26305,7 +26534,17 @@ function App() {
                                         Number(p.includedUE) > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } },
                                             ueFmt(p.includedUE), " UE enthalten")),
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14 } }, eurFmt(p.amount)),
-                                    React.createElement("button", { className: "icon-x", onClick: () => savePackages(packages.filter((_, i) => i !== idx)), "aria-label": "Paket entfernen", style: { border: "none", background: "none", color: "var(--red)", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "×")))),
+                                    React.createElement("button", { className: "icon-x", onClick: async () => {
+                                            // Audit I-N15: ein Tipp entfernte das Paket sofort. Nach der Rückfrage gegen den
+                                            // AKTUELLEN Stand filtern (Objekt-Identität, ersatzweise gleicher Inhalt), nicht
+                                            // per Index aus dem Render davor.
+                                            if (!await askConfirm({ message: "Paket \"" + p.name + "\" entfernen? Schüler, die es schon übernommen haben, behalten ihren Posten." }))
+                                                return;
+                                            const inhalt = JSON.stringify(p);
+                                            writeSchool(sc => { if (!sc)
+                                                return sc; const liste = sc.packages || []; let i = liste.indexOf(p); if (i < 0)
+                                                i = liste.findIndex(x => JSON.stringify(x) === inhalt); return i < 0 ? sc : { ...sc, packages: liste.filter((_, j) => j !== i) }; });
+                                        }, "aria-label": "Paket " + p.name + " entfernen", style: { border: "none", background: "none", color: "var(--red)", fontSize: 18, padding: "2px 4px", lineHeight: 1 } }, "×")))),
                             packageEdit ? React.createElement("div", { style: { marginTop: 10, paddingTop: 14, borderTop: "1px solid var(--line)" } },
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10 } }, "Neues Paket"),
                                 React.createElement("div", { className: "field", style: { marginBottom: 8 } },
@@ -26319,17 +26558,24 @@ function App() {
                                             React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, color: "var(--muted)" } }, "€"))),
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
                                         React.createElement("label", null, "Enthaltene UE",
-                                        React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: normDecimal(e.target.value) })), placeholder: "0" })))),
+                                        React.createElement("input", { type: "text", inputMode: "decimal", value: packageEdit.ue, onChange: e => setPackageEdit(f => ({ ...f, ue: normDecimal(e.target.value), error: "" })), placeholder: "0" })))),
                                 packageEdit.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red)", marginBottom: 8 } }, packageEdit.error),
                                 React.createElement("div", { style: { display: "flex", gap: 8 } },
                                     React.createElement("button", { className: "btn btn-primary", onClick: () => {
-                                            const amount = parseFloat((packageEdit.amount || "").replace(",", "."));
-                                            if (isNaN(amount)) {
-                                                setPackageEdit(f => ({ ...f, error: "Bitte einen gültigen Preis eingeben." }));
+                                            // parseBetrag statt parseFloat (Audit I-N15): "-50" und "1.000" (= 1 €)
+                                            // gingen vorher durch; negative Preise/UE ergeben keinen Sinn.
+                                            const amount = parseBetrag(packageEdit.amount || "");
+                                            if (!(amount >= 0)) {
+                                                setPackageEdit(f => ({ ...f, error: "Bitte einen gültigen Preis eingeben (0 oder mehr)." }));
                                                 return;
                                             }
-                                            const includedUE = (packageEdit.ue || "").trim() === "" ? 0 : parseFloat((packageEdit.ue || "").replace(",", "."));
-                                            savePackages([...packages, { name: packageEdit.name.trim() || "Paket", amount, includedUE: isNaN(includedUE) ? 0 : includedUE }]);
+                                            const includedUE = (packageEdit.ue || "").trim() === "" ? 0 : parseBetrag(packageEdit.ue);
+                                            if (!(includedUE >= 0)) {
+                                                setPackageEdit(f => ({ ...f, error: "Bitte bei den enthaltenen UE eine Zahl ab 0 eingeben." }));
+                                                return;
+                                            }
+                                            const neu = { name: packageEdit.name.trim() || "Paket", amount, includedUE };
+                                            writeSchool(sc => sc && ({ ...sc, packages: [...(sc.packages || []), neu] }));
                                             setPackageEdit(null);
                                         } }, "Hinzufügen"),
                                     React.createElement("button", { className: "btn btn-ghost", onClick: () => setPackageEdit(null) }, "Abbrechen"))) : React.createElement("button", { className: "btn btn-ghost btn-block", style: { color: "var(--orange-deep)" }, onClick: () => setPackageEdit({ name: "", amount: "", ue: "", error: "" }) }, "+ Paket hinzufügen"),
@@ -28272,7 +28518,7 @@ function App() {
                             React.createElement(IcSettings, null),
                             React.createElement("span", null, "Mehr")))))),
         calImport && React.createElement("div", { onClick: () => { if (!calImport.busy)
-                setCalImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                schliessenNachRueckfrage("calImport", calImport, () => setCalImport(null), !!(calImport.items && calImport.items.length)); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(18px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -28311,7 +28557,7 @@ function App() {
                             " Termine anlegen"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setCalImport(null) }, "Abbrechen"))))),
         adkImport && React.createElement("div", { onClick: () => { if (!adkImport.busy)
-                setAdkImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                schliessenNachRueckfrage("adkImport", adkImport, () => setAdkImport(null), !!(adkImport.results && adkImport.results.length)); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 165, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(18px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -28730,7 +28976,7 @@ function App() {
                 interessentImport.busy && React.createElement("div", { style: { padding: "30px 10px", textAlign: "center" } },
                     React.createElement("div", { style: { fontSize: 14, color: "var(--muted)" } }, "Screenshot wird ausgelesen\u2026"),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 6 } }, "Das dauert ein paar Sekunden.")))),
-        lessonForm && React.createElement("div", { onClick: () => setLessonForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        lessonForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("lesson", lessonForm, () => setLessonForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, lessonForm.id ? "Fahrstunde bearbeiten" : "Fahrstunde erfassen"),
                 React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
@@ -28771,7 +29017,7 @@ function App() {
                         " \u20AC")),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10, marginBottom: 8 }, onClick: saveLessonForm }, "Speichern"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setLessonForm(null) }, "Abbrechen"))),
-        itemForm && React.createElement("div", { onClick: () => setItemForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        itemForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("item", itemForm, () => setItemForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, "Posten hinzufügen"),
                 itemForm.busy
@@ -28789,7 +29035,7 @@ function App() {
                         itemForm.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red)", marginTop: 8, whiteSpace: "pre-wrap" } }, itemForm.error),
                         React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, onClick: saveItemForm }, "Hinzufügen")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!itemForm.busy, onClick: () => setItemForm(null) }, "Abbrechen"))),
-        paymentForm && React.createElement("div", { onClick: () => setPaymentForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+        paymentForm && React.createElement("div", { onClick: () => schliessenNachRueckfrage("payment", paymentForm, () => setPaymentForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px" } },
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: paymentForm.invoiceNumber ? 4 : 16 } }, "Zahlung erfassen"),
                 paymentForm.invoiceNumber && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
@@ -28918,7 +29164,7 @@ function App() {
         leistungForm && leistungForm.step === "form" && (() => {
             const stu = students.find(s => s.id === leistungForm.studentId);
             const autoPrice = leistungPriceAuto(leistungForm);
-            return React.createElement("div", { onClick: () => setLeistungForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            return React.createElement("div", { onClick: () => schliessenNachRueckfrage("leistung", leistungForm, () => setLeistungForm(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
                 React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 440, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Leistung erstellen"),
                     React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, stu ? dispName(stu) : ""),
@@ -30893,7 +31139,7 @@ function App() {
                 theoryForm.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red)", marginBottom: 12 } }, theoryForm.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: theoryForm.busy, onClick: submitTheoryForm }, theoryForm.busy ? "Wird gesendet\u2026" : "Einreichen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: theoryForm.busy, onClick: () => setTheoryForm(null) }, "Abbrechen"))),
-        invoiceDraft && React.createElement("div", { onClick: () => setInvoiceDraft(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
+        invoiceDraft && React.createElement("div", { onClick: () => schliessenNachRueckfrage("invoice", invoiceDraft, () => setInvoiceDraft(null)), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "85dvh", overflowY: "auto" } },
