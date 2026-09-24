@@ -16084,8 +16084,12 @@ function App() {
         }
         // Die Frage nennt jetzt, was mit verschwindet - "wirklich löschen?" allein sagt nichts
         // darüber, dass ADK-Fortschritt, Fahrtenbuch und Kosten mitgehen (Designprüfung 2026-09-14).
+        // Und ehrlich, was "Rückgängig" kann: es legt die Karteikarte neu an. Hochgeladene
+        // Dokumente, Rückmeldungen der Schüler zu Fahrstunden und die Theorie-Anwesenheit hängen
+        // per Fremdschlüssel am Schüler und sind mit dem Löschen endgültig weg (Audit G-H3);
+        // exam_slots.student_id wird dabei auf NULL gesetzt und vom Rückgängig nicht wieder verknüpft.
         if (!await askConfirm({ title: dispName(s) + " löschen?",
-            message: "Damit verschwinden auch der ADK- und Streckenfortschritt, das Fahrtenbuch und die erfassten Kosten dieses Schülers.\n\nDu kannst das direkt danach einmal rückgängig machen." }))
+            message: "Damit verschwinden auch der ADK- und Streckenfortschritt, das Fahrtenbuch und die erfassten Kosten dieses Schülers.\n\nEndgültig gelöscht werden außerdem seine hochgeladenen Dokumente, seine Rückmeldungen zu Fahrstunden und die Theorie-Anwesenheit; eingetragene Prüfungsplätze verlieren die Zuordnung.\n\nDirekt danach kannst du das Löschen einmal rückgängig machen – das holt die Karteikarte zurück, die endgültig gelöschten Teile nicht." }))
             return;
         // Schüler mit Rechnungen dürfen aus Revisionssicherheitsgründen nicht gelöscht werden
         // (die Datenbank blockt das serverseitig, siehe trg_prevent_delete_students_with_invoices) –
@@ -16095,32 +16099,146 @@ function App() {
             showToast(dispName(s) + " hat bereits Rechnungen und wurde stattdessen archiviert. Die Rechnungshistorie bleibt erhalten.");
             return;
         }
-        // Daten merken, um sie bei Bedarf wiederherstellen zu können
-        const backup = { ...s };
+        // VOR dem Löschen einsammeln, was am Schüler hängt - danach ist die Zuordnung weg:
+        // - Dateipfade im Bucket student-files: die student_files-Zeilen verschwinden per
+        //   ON DELETE CASCADE, die Dateien selbst blieben sonst verwaist im Speicher liegen.
+        // - Termine: appointments.student_id hat keinen Fremdschlüssel, die Termine zeigten danach
+        //   auf eine ID, die es nicht mehr gibt (ohne Namen im Kalender, und ein Rückgängig mit
+        //   neuer ID fand sie nicht wieder).
+        // Klappt das Einsammeln nicht, lieber gar nicht löschen als halb aufräumen.
+        // Dazu die Rechnungen laut SERVER: die Dateien müssen vor dem Löschen der Zeile weg (siehe
+        // unten), und blockt der Rechnungs-Trigger erst danach, wären sie ohne Not verloren.
+        let dateipfade = [], termine = [], serverRechnungen = 0;
+        if (!IS_DEMO()) {
+            try {
+                const [dateien, tr, row] = await Promise.all([
+                    sb.from("student_files").select("storage_path").eq("student_id", s.id),
+                    sb.from("appointments").select("id,start_at,title,status").eq("student_id", s.id),
+                    sb.from("students").select("inv:data->invoices").eq("id", s.id).single(),
+                ]);
+                if (dateien.error)
+                    throw dateien.error;
+                if (tr.error)
+                    throw tr.error;
+                if (row.error)
+                    throw row.error;
+                dateipfade = (dateien.data || []).map(f => f.storage_path).filter(Boolean);
+                termine = tr.data || [];
+                serverRechnungen = Array.isArray(row.data && row.data.inv) ? row.data.inv.length : 0;
+            }
+            catch (e) {
+                showToast(dispName(s) + " wurde nicht gelöscht: Dokumente und Termine ließen sich nicht ermitteln.\n" + fehlerText(e), "error");
+                return;
+            }
+        }
+        if (serverRechnungen > 0) {
+            // Die lokale Rechnungsliste ist veraltet (Rechnung auf einem anderen Gerät oder von einer
+            // Kollegin erstellt). Hier bewusst NICHT archivieren: students_teacher_update ersetzt
+            // data komplett, ein Speichern mit dem lokalen Stand ohne diese Rechnungen würde sie
+            // auf dem Server überschreiben. Erst neu laden, dann greift der normale Archiv-Weg oben.
+            showToast(dispName(s) + " hat laut Server bereits Rechnungen und wurde nicht gelöscht. Bitte die App neu laden und den Schüler stattdessen archivieren.", "error");
+            return;
+        }
+        const jetzt = Date.now();
+        const kuenftig = termine.filter(a => new Date(a.start_at).getTime() > jetzt);
+        const vergangen = termine.filter(a => !(new Date(a.start_at).getTime() > jetzt));
+        // Künftige Termine: nachfragen. Abbrechen/Danebentippen heißt "behalten" - der sichere
+        // Weg, es wird nichts gelöscht. Vergangene bleiben immer (Statistik, Tagesabschluss) und
+        // werden nur vom Schüler gelöst.
+        let kuenftigLoeschen = false;
+        if (kuenftig.length) {
+            kuenftigLoeschen = await askConfirm({ title: kuenftig.length === 1 ? "1 künftiger Termin" : (kuenftig.length + " künftige Termine"),
+                message: dispName(s) + " hat noch " + (kuenftig.length === 1 ? "einen Termin" : kuenftig.length + " Termine") + " im Kalender. Sollen sie mitgelöscht werden?\n\nBehältst du sie, bleiben sie ohne Schülerzuordnung stehen, mit dem Namen im Titel.",
+                confirmLabel: kuenftig.length === 1 ? "Termin löschen" : "Termine löschen", cancelLabel: "Behalten", danger: true });
+        }
+        // Dateien aus dem Bucket entfernen - und zwar VOR dem Löschen der Zeile: die Storage-Regel
+        // für student-files erlaubt das Löschen nur, solange der Schüler (Ordnername = Schüler-ID)
+        // noch existiert. Danach liefe remove() ohne Fehlermeldung ins Leere und die Dateien lägen
+        // für immer verwaist im Speicher. Klappt es nicht, wird der Schüler gar nicht gelöscht.
+        if (dateipfade.length) {
+            try {
+                const { error: rmErr } = await sb.storage.from("student-files").remove(dateipfade);
+                if (rmErr)
+                    throw rmErr;
+            }
+            catch (e) {
+                console.error("Dateien des Schülers ließen sich nicht entfernen:", e);
+                showToast(dispName(s) + " wurde nicht gelöscht: die hochgeladenen Dokumente ließen sich nicht entfernen.\n" + fehlerText(e), "error");
+                return;
+            }
+        }
+        // Ein noch aufgeschobenes Speichern dieses Schülers liefe gleich gegen eine gelöschte Zeile
+        // und meldete einen Fehler - verwerfen, sein Stand steckt schon in studentsRef (Backup).
+        const saveKey = "stu:" + s.id;
+        const wartend = pendingSavesRef.current.get(saveKey);
+        if (wartend) {
+            clearTimeout(wartend.timer);
+            pendingSavesRef.current.delete(saveKey);
+            studentWriteDelta(s.id, -1);
+        }
+        // Daten merken, um sie bei Bedarf wiederherstellen zu können (aktueller Stand, nicht die
+        // beim Antippen übergebene Kopie).
+        const backup = { ...((studentsRef.current || []).find(x => x.id === s.id) || s) };
         try {
             await dbDelete(s.id);
         }
         catch (e) {
             // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
-            writeStudent({ ...s, archived: true, archivedAt: s.archivedAt || ymd(new Date()) });
-            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message, "error");
+            // Die Dokumente sind zu diesem Zeitpunkt schon entfernt (siehe oben) - das sagen, statt
+            // den Eindruck zu erwecken, es sei nichts passiert.
+            writeStudent({ ...backup, archived: true, archivedAt: backup.archivedAt || ymd(new Date()) });
+            showToast(dispName(s) + " konnte nicht gelöscht werden und wurde stattdessen archiviert:\n" + e.message + (dateipfade.length ? "\nDie hochgeladenen Dokumente wurden bereits entfernt." : ""), "error");
             return;
         }
-        updateStudents(prev => {
-            const arr = (prev || []).filter(x => x.id !== s.id);
-            saveCache(uid, arr);
-            if (s.id === activeId)
-                setActiveId(arr[0] ? arr[0].id : null);
-            return arr;
-        });
-        showUndo(dispName(s) + " gelöscht", async () => {
-            const created = await dbInsert(uid, backup);
-            if (created) {
-                updateStudents(prev => { const arr = [...(prev || []), created]; saveCache(uid, arr); return arr; });
-                setActiveId(created.id);
-            }
+        const arr = updateStudents(prev => (prev || []).filter(x => x.id !== s.id));
+        saveCache(uid, arr);
+        if (s.id === activeId)
+            setActiveId(arr[0] ? arr[0].id : null);
+        // Termine bereinigen. Beim Lösen den Namen in den Titel schreiben, falls keiner drinsteht -
+        // sonst stünde im Kalender nur noch ein namenloser Block.
+        const name = dispName(s);
+        const geloest = [];
+        let terminFehler = 0, terminWeg = 0;
+        for (const a of (kuenftigLoeschen ? vergangen : termine)) {
+            const titel = (a.title || "").trim() ? a.title : name;
+            if (await updateAppt(a.id, { student_id: null, title: titel }))
+                geloest.push({ id: a.id, title: a.title || "" });
             else
+                terminFehler++;
+        }
+        if (kuenftigLoeschen) {
+            for (const a of kuenftig) {
+                if (await removeAppt(a.id, { noUndo: true }))
+                    terminWeg++;
+                else
+                    terminFehler++;
+            }
+        }
+        if (terminFehler)
+            showToast(terminFehler + (terminFehler === 1 ? " Termin von " : " Termine von ") + name + " konnte" + (terminFehler === 1 ? "" : "n") + " nicht bereinigt werden – bitte im Kalender nachsehen.", "error");
+        showUndo(name + " gelöscht", async () => {
+            const created = await dbInsert(uid, backup);
+            if (!created) {
                 showToast("Wiederherstellen fehlgeschlagen.", "error");
+                return;
+            }
+            const neu = updateStudents(prev => [...(prev || []), created]);
+            saveCache(uid, neu);
+            setActiveId(created.id);
+            // Die eben gelösten Termine wieder an die neue ID hängen (samt ursprünglichem Titel).
+            let nichtZurueck = 0;
+            for (const g of geloest) {
+                if (!await updateAppt(g.id, { student_id: created.id, title: g.title }))
+                    nichtZurueck++;
+            }
+            const weg = [];
+            if (dateipfade.length)
+                weg.push(dateipfade.length === 1 ? "1 Dokument" : dateipfade.length + " Dokumente");
+            if (terminWeg)
+                weg.push(terminWeg === 1 ? "1 gelöschter Termin" : terminWeg + " gelöschte Termine");
+            if (weg.length || nichtZurueck)
+                showToast(name + " ist wieder da." + (weg.length ? " Nicht zurückgeholt: " + weg.join(", ") + "." : "")
+                    + (nichtZurueck ? " " + nichtZurueck + " Termin(e) konnten nicht wieder zugeordnet werden." : ""));
         });
     }
     /* Die Notiz "weitermachen mit" beschreibt, was in der NAECHSTEN Stunde drankommt. Sobald
