@@ -24,8 +24,8 @@
 //     kämen bis dahin nicht mehr an Standorte, Preise, Rechnungsdaten und Einladungen.
 //   - letztes Mitglied: die Fahrschule wird nach dem Konto mitgelöscht. Bewusst NICHT abgelehnt:
 //     die Konto-Löschung muss in der App selbst möglich sein (Art. 17, App Store), und niemand
-//     sonst braucht die Schule noch. Hängen noch Videos anderer Besitzer an ihr (würden per
-//     CASCADE mitgehen), bleibt sie stehen und die Reste stehen im Log.
+//     sonst braucht die Schule noch. Hängen noch Videos oder Gutscheine anderer Konten an ihr
+//     (würden per CASCADE mitgehen), bleibt sie stehen und die Reste stehen im Log.
 
 const { SUPABASE_URL, pruefeBlocker, sammleDateipfade, loescheAuthKonto, loescheDateien, loescheLeereSchule } = require("./lib/konto-loeschen");
 
@@ -128,8 +128,9 @@ exports.handler = async function (event) {
     // ist das Konto trotzdem weg - die Schule bleibt dann wie bisher stehen und steht im Log.
     let schuleGeloescht = false;
     if (schule && schule.andereMitglieder === 0) {
-      if (schule.fremdeVideos > 0) {
-        console.error("delete-own-account: Fahrschule " + schule.id + " bleibt stehen - es hängen noch Videos anderer Besitzer daran.");
+      if (schule.fremdeVideos > 0 || schule.fremdeGutscheine > 0) {
+        console.error("delete-own-account: Fahrschule " + schule.id + " bleibt stehen - es hängen noch " +
+          (schule.fremdeVideos > 0 ? "Videos" : "Gutscheine") + " anderer Konten daran.");
       } else {
         const sd = await loescheLeereSchule(serviceKey, schule.id);
         if (sd.ok) schuleGeloescht = true;

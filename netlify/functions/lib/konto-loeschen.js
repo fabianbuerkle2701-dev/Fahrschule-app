@@ -20,7 +20,7 @@ function restFetch(serviceKey) {
 // Schritt 2: alles einsammeln, was eine Löschung blockieren würde - nur lesen.
 // Ergebnis: { fehler } bei einem HTTP-Fehler, sonst { students, withInvoices, shared, otherRefs, schule }.
 // schule (Abschluss-Audit 2026-09): null ohne Fahrschule, sonst { id, name, istAdmin,
-// andereMitglieder, andereAdmins, fremdeVideos } - damit der Aufrufer erkennt, ob die Fahrschule
+// andereMitglieder, andereAdmins, fremdeVideos, fremdeGutscheine } - damit der Aufrufer erkennt, ob die Fahrschule
 // ohne Admin bzw. verwaist zurückbliebe (schools hängt an keinem Konto, nichts kaskadiert).
 async function pruefeBlocker(serviceKey, targetUid) {
   const sbFetch = restFetch(serviceKey);
@@ -52,19 +52,23 @@ async function pruefeBlocker(serviceKey, targetUid) {
 
 // Fahrschul-Lage des Kontos (nur lesen). fremdeVideos: Videos ANDERER Besitzer, die noch an
 // dieser Schule hängen - videos.school_id kaskadiert beim Löschen der Schule, deshalb wird eine
-// Schule mit solchen Videos nie automatisch mitgelöscht.
+// Schule mit solchen Videos nie automatisch mitgelöscht. fremdeGutscheine: dasselbe für Gutscheine,
+// die ein inzwischen ausgetretenes Mitglied angelegt hat - vouchers.school_id kaskadiert ebenfalls,
+// und verkaufte Gutscheine sind eine Verbindlichkeit mit Aufbewahrungspflicht (eigene Gutscheine
+// blockieren die Löschung ohnehin schon über otherRefs).
 async function pruefeSchule(sbFetch, uid) {
   const profResp = await sbFetch("profiles?id=eq." + uid + "&select=school_id,school_admin");
   if (!profResp.ok) return { fehler: "Vorab-Prüfung fehlgeschlagen (Profil): " + profResp.status };
   const prof = ((await profResp.json()) || [])[0];
   if (!prof || !prof.school_id) return null;
   const sid = encodeURIComponent(prof.school_id);
-  const [mitResp, vidResp, schulResp] = await Promise.all([
+  const [mitResp, vidResp, schulResp, gutResp] = await Promise.all([
     sbFetch("profiles?school_id=eq." + sid + "&id=neq." + uid + "&select=id,school_admin"),
     sbFetch("videos?school_id=eq." + sid + "&owner=neq." + uid + "&select=id&limit=1"),
     sbFetch("schools?id=eq." + sid + "&select=name"),
+    sbFetch("vouchers?school_id=eq." + sid + "&created_by=neq." + uid + "&select=id&limit=1"),
   ]);
-  for (const [name, r] of [["Kollegen", mitResp], ["Schulvideos", vidResp], ["Fahrschule", schulResp]]) {
+  for (const [name, r] of [["Kollegen", mitResp], ["Schulvideos", vidResp], ["Fahrschule", schulResp], ["Schulgutscheine", gutResp]]) {
     if (!r.ok) return { fehler: "Vorab-Prüfung fehlgeschlagen (" + name + "): " + r.status };
   }
   const andere = (await mitResp.json()) || [];
@@ -76,6 +80,7 @@ async function pruefeSchule(sbFetch, uid) {
     andereMitglieder: andere.length,
     andereAdmins: andere.filter((p) => p.school_admin).length,
     fremdeVideos: ((await vidResp.json()) || []).length,
+    fremdeGutscheine: ((await gutResp.json()) || []).length,
   };
 }
 
