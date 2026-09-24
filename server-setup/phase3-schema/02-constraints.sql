@@ -54,7 +54,8 @@ ALTER TABLE ONLY public.profiles ADD CONSTRAINT profiles_school_id_fkey FOREIGN 
 ALTER TABLE ONLY public.route_templates ADD CONSTRAINT route_templates_proposed_by_fkey FOREIGN KEY (proposed_by) REFERENCES auth.users(id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.staff_files ADD CONSTRAINT staff_files_instructor_uid_fkey FOREIGN KEY (instructor_uid) REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.staff_files ADD CONSTRAINT staff_files_uploaded_by_fkey FOREIGN KEY (uploaded_by) REFERENCES auth.users(id) ON DELETE SET NULL;
-ALTER TABLE ONLY public.student_files ADD CONSTRAINT student_files_owner_fkey FOREIGN KEY (owner) REFERENCES profiles(id) ON DELETE CASCADE;
+-- Abschluss-Audit 2026-09: SET NULL statt CASCADE - Dokumente gehören dem Schüler, nicht dem Hochladenden.
+ALTER TABLE ONLY public.student_files ADD CONSTRAINT student_files_owner_fkey FOREIGN KEY (owner) REFERENCES profiles(id) ON DELETE SET NULL;
 ALTER TABLE ONLY public.student_files ADD CONSTRAINT student_files_student_id_fkey FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.students ADD CONSTRAINT students_owner_fkey FOREIGN KEY (owner) REFERENCES auth.users(id) ON DELETE CASCADE;
 ALTER TABLE ONLY public.templates ADD CONSTRAINT templates_owner_fkey FOREIGN KEY (owner) REFERENCES auth.users(id) ON DELETE CASCADE;
