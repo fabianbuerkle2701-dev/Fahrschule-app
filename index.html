@@ -14053,6 +14053,11 @@ function App() {
     // Zeitpunkt der letzten lokalen Änderung je Schüler-ID - ein Neuladen, das VOR dieser Änderung
     // gestartet wurde, darf den Schüler nicht mit seinem (älteren) Serverstand überschreiben.
     const studentTouchedRef = useRef(new Map());
+    // Zählt fehlgeschlagene Schüler-Speichervorgänge (nur hochgezählt). doSignOut vergleicht den
+    // Stand vor und nach dem Warten: ein schon LAUFENDES Speichern, das währenddessen scheitert,
+    // fiel sonst durch - flushPendingSaves sah es nicht mehr, und das Abmelden löschte den Cache
+    // ohne Rückfrage "Nicht alles gespeichert" (Abschluss-Audit).
+    const studentSaveFailsRef = useRef(0);
     // Der in DIESER Sitzung vergebene PIN je Schüler-ID, im Klartext nur im Speicher. Lokal im
     // Schüler steht nach dem Setzen der Hash vom Server - so landet der Klartext-PIN nicht mehr
     // im localStorage-Cache (Audit G-N11), lässt sich aber direkt danach noch teilen.
@@ -15937,6 +15942,7 @@ function App() {
                     dirty.forEach(k => jetzt.add(k));
                     dirtyKeysRef.current[stu.id] = jetzt;
                 }
+                studentSaveFailsRef.current++;
                 setSaveError(stu.id);
                 showToast("Änderungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
                 return false;
@@ -28335,12 +28341,16 @@ function App() {
                 if (stu)
                     scheduleSave(stu);
             }
+            const fehlerVorher = studentSaveFailsRef.current;
             let alles = await flushPendingSaves();
-            // Bereits laufende Speichervorgänge (Timer schon abgelaufen) ebenfalls abwarten.
-            await Promise.all([schoolSaveChainRef.current, tplSaveChainRef.current]).catch(() => { });
+            // Bereits laufende Speichervorgänge (Timer schon abgelaufen) ebenfalls abwarten - und
+            // ihr Ergebnis auswerten: runSchoolSave/runTplSave liefern false bei einem Fehlschlag.
+            const ketten = await Promise.all([schoolSaveChainRef.current, tplSaveChainRef.current]).catch(() => [false]);
+            if (ketten.some(x => x === false))
+                alles = false;
             for (let i = 0; i < 50 && studentWritesRef.current.size > 0; i++)
                 await new Promise(r => setTimeout(r, 100));
-            if (studentWritesRef.current.size > 0)
+            if (studentWritesRef.current.size > 0 || studentSaveFailsRef.current !== fehlerVorher)
                 alles = false;
             if (!alles && !await askConfirm({ title: "Nicht alles gespeichert", message: "Einige Änderungen konnten nicht gespeichert werden und gehen beim Abmelden verloren. Trotzdem abmelden?", confirmLabel: "Trotzdem abmelden", danger: true }))
                 return;
