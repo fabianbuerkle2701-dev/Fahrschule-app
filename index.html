@@ -5469,8 +5469,10 @@ const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFz
 const PW_RECOVERY_AUS_URL = /(^#|&)type=recovery(&|$)/.test(window.location.hash || "");
 // Abgelaufener oder schon benutzter Link: Supabase leitet mit #error_code=otp_expired zurück.
 // Die Meldung wird der Anmeldemaske mitgegeben, der Hash entfernt, damit sie nach einem Neuladen
-// nicht erneut erscheint.
-const AUTH_LINK_FEHLER = (() => {
+// nicht erneut erscheint. Bewusst "let": Auth() verbraucht die Meldung beim ersten Anzeigen
+// (setzt sie auf ""), sonst stand sie nach jedem Abmelden ohne Neuladen wieder rot in der
+// Anmeldemaske, obwohl gar kein Link mehr im Spiel war.
+let authLinkFehler = (() => {
     try {
         const h = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
         if (!h.get("error_code") && !h.get("error"))
@@ -10219,7 +10221,8 @@ function paypalZiel(roh) {
 // Zeigt entweder die Zustimmungs-Ansicht (7 Tage kostenlos testen) oder den Sperr-Bildschirm
 // nach abgelaufener Probezeit. Ersetzt in beiden Fällen die normale App-Oberfläche komplett,
 // die eigenen Daten (Schüler, Termine usw.) bleiben davon unberührt und sind sofort wieder da.
-function SubscriptionGate({ kind, sub, paypalLink, onAccept, onPaid, onLogout }) {
+// paypalLink: null = lädt noch, false = Ladefehler, sonst der hinterlegte Text ("" = keiner).
+function SubscriptionGate({ kind, sub, paypalLink, onRetryPaypal, onAccept, onPaid, onLogout }) {
     const pp = paypalZiel(paypalLink);
     const amount = sub && sub.subscription_amount != null ? Number(sub.subscription_amount).toFixed(2).replace(".", ",") + " €" : null;
     return React.createElement("div", { style: { minHeight: "100vh", background: "var(--paper)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 } },
@@ -10245,7 +10248,13 @@ function SubscriptionGate({ kind, sub, paypalLink, onAccept, onPaid, onLogout })
                 pp && pp.href && React.createElement("a", { href: pp.href, target: "_blank", rel: "noopener noreferrer", className: "btn btn-primary btn-block", style: { marginBottom: 10 } }, "Jetzt mit PayPal bezahlen"),
                 pp && pp.email && React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 10, fontSize: 13, lineHeight: 1.5, textAlign: "left" } },
                     "Bitte den Betrag in der PayPal-App über „Geld senden“ an ", React.createElement("b", { style: { wordBreak: "break-all" } }, pp.email), " schicken."),
-                paypalLink !== null && !pp && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
+                typeof paypalLink === "string" && !pp && React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 10 } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung."),
+                // Ladefehler (z.B. kurz kein Netz beim Start) NICHT als "kein Zahlungsempfänger"
+                // ausgeben - das schickte gesperrte Nutzer grundlos zur Betreuung, und ohne
+                // Neuladen der Seite kam der PayPal-Knopf nicht wieder.
+                paypalLink === false && React.createElement(React.Fragment, null,
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 8 } }, "Die Zahlungsdaten konnten nicht geladen werden. Bitte Verbindung prüfen."),
+                    onRetryPaypal && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: onRetryPaypal }, "Erneut versuchen")),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => { if (await askConfirm({ message: "Zahlung als erledigt markieren? Das solltest du erst tun, nachdem die Zahlung wirklich abgeschickt wurde." }))
                         onPaid(); } }, "Ich habe bezahlt")),
             onLogout && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8, color: "var(--muted)" }, onClick: onLogout }, "Abmelden")),
@@ -10363,7 +10372,7 @@ function Auth() {
     const [pw, setPw] = useState("");
     const [pw2, setPw2] = useState(""); // Passwort-Wiederholung, nur bei der Registrierung
     const [busy, setBusy] = useState(false);
-    const [err, setErr] = useState(AUTH_LINK_FEHLER);
+    const [err, setErr] = useState(() => { const m = authLinkFehler; authLinkFehler = ""; return m; });
     const [info, setInfo] = useState("");
     const [newSchoolName, setNewSchoolName] = useState(""); // falls neue angelegt wird
     const [joinMode, setJoinMode] = useState("invite"); // "new" | "invite" ("list" entfernt aus Datenschutzgründen)
@@ -12623,7 +12632,9 @@ function KarteLaedtHinweis({ fehler, nochmal, style, texte }) {
 }
 // Alle jemals gefahrenen Strecken eines Schuelers uebereinandergelegt – reine Anzeige
 // (kein Aufzeichnen, keine Stecknadeln), fuer Fahrlehrer UND Fahrschueler.
-function AllRoutesMap({ routes, color }) {
+// lang: nur aus der mehrsprachigen Schueler-Ansicht (BegleitFahrten) gesetzt - sonst standen
+// Lade-/Fehlertext der Karte dort immer auf Deutsch. Ohne lang bleibt es beim deutschen Standard.
+function AllRoutesMap({ routes, color, lang }) {
     const lineColor = color || "#FF9300";
     const elRef = useRef(null), mapRef = useRef(null), layerRef = useRef(null);
     const [ready, ladeFehler, nochmal] = useLeafletBereit();
@@ -12664,7 +12675,8 @@ function AllRoutesMap({ routes, color }) {
     }, [routesSig, ready, lineColor]);
     return React.createElement("div", { className: "rmap-wrap", style: { height: 260, position: "relative" } },
         React.createElement("div", { ref: elRef, style: { width: "100%", height: "100%" } }),
-        !ready && React.createElement(KarteLaedtHinweis, { fehler: ladeFehler, nochmal: nochmal, style: { position: "absolute", inset: 0 } }));
+        !ready && React.createElement(KarteLaedtHinweis, { fehler: ladeFehler, nochmal: nochmal, style: { position: "absolute", inset: 0 },
+            texte: lang ? { laedt: tt(lang, "sa_karte_laedt"), fehler: tt(lang, "sa_karte_fehler"), nochmal: tt(lang, "erneut_versuchen") } : undefined }));
 }
 function LessonMap({ route, pins, recActive, recTick, recPts, recDist, recDur, otherRecording, onStart, onStop, onDeleteRoute, onSavePin, onDeletePin, color }) {
     const lineColor = color || "#FF9300";
@@ -13513,6 +13525,7 @@ function App() {
     const [showNachweisModal, setShowNachweisModal] = useState(false); // Unterschriften-Modal vor dem Druck
     const [contractSignId, setContractSignId] = useState(null); // id des Vertrags, der gerade digital unterschrieben wird
     const [contractStuSig, setContractStuSig] = useState(null); // Schüler-Unterschrift, transient während des Signierens
+    const [contractInstrSig, setContractInstrSig] = useState(null); // Fahrlehrer-Unterschrift für diesen Vertrag, transient bis "PDF erstellen"
     // Unterschriften als Data-URL (PNG), persistent für Fahrlehrer, temporär für Schüler
     const [instrSig, setInstrSig] = useState(() => { try {
         return localStorage.getItem("v3_instr_sig") || null;
@@ -14744,7 +14757,13 @@ function App() {
     }, [uid]);
     // Eigener Abo-Status (nur relevant, falls der zentrale Admin dieses Konto zahlungspflichtig gemacht hat)
     const [mySubscription, setMySubscription] = useState(null); // null solange nicht geladen
-    const [paypalLink, setPaypalLink] = useState(null); // zentraler Zahlungsempfänger, für alle gleich
+    const [paypalLink, setPaypalLink] = useState(null); // zentraler Zahlungsempfänger, für alle gleich; null = lädt, false = Ladefehler
+    // Ladefehler bekommt einen eigenen Zustand (false) statt "": sonst meldeten Sperrbildschirm und
+    // Einstellungen "kein Zahlungsempfänger hinterlegt", obwohl nur das Netz kurz weg war.
+    function ladePaypalLink() {
+        setPaypalLink(null);
+        fetchAppSettings().then(s => setPaypalLink(s ? (s.paypal_link || "") : false)).catch(() => setPaypalLink(false));
+    }
     useEffect(() => {
         if (!uid)
             return;
@@ -14756,7 +14775,7 @@ function App() {
             setMySubscription(s || { subscription_active: false }); })
             .catch(e => { console.error("Abo-Status konnte nicht geladen werden:", e); if (!cancelled)
             setMySubscription({ subscription_active: false }); });
-        fetchAppSettings().then(s => setPaypalLink((s && s.paypal_link) || "")).catch(() => setPaypalLink(""));
+        ladePaypalLink();
         return () => { cancelled = true; };
     }, [uid]);
     // Wenn die App wieder in den Vordergrund kommt: Abo-Status neu laden - ohne diesen Refresh
@@ -16425,7 +16444,7 @@ function App() {
                 }
             } });
     if (gate === "locked")
-        return React.createElement(SubscriptionGate, { kind: "locked", sub: mySubscription, paypalLink: paypalLink, onLogout: gateAbmelden, onPaid: async () => {
+        return React.createElement(SubscriptionGate, { kind: "locked", sub: mySubscription, paypalLink: paypalLink, onRetryPaypal: ladePaypalLink, onLogout: gateAbmelden, onPaid: async () => {
                 try {
                     const d = await markOwnPaymentDone(uid);
                     setMySubscription(s => ({ ...s, subscription_last_paid: d }));
@@ -22089,18 +22108,53 @@ function App() {
     // Digitale Unterschrift des Ausbildungsvertrags – wie schon beim Ausbildungsnachweis, nur
     // werden die Unterschriften HIER am jeweiligen Vertrags-Datensatz gespeichert (nicht nur
     // transient), damit sie beim erneuten Ansehen/Drucken später wieder erscheinen.
+    // Während das Modal offen ist, liegen beide Unterschriften aber NUR im lokalen State und
+    // werden erst mit "PDF erstellen" in den Vertrag geschrieben. Vorher schrieb das autoSave-Pad
+    // jeden einzelnen Strich sofort in den Vertrag, und "Löschen" im Pad nahm ihn dort nicht
+    // wieder heraus: ein verworfener Kritzel-Ansatz landete im Druck, der Vertrag galt als
+    // "unterschrieben" und liess sich weder neu unterschreiben noch löschen. "Später" verwirft
+    // jetzt schlicht alles nicht Bestätigte.
+    // Die Fahrlehrer-Unterschrift startet mit der am Vertrag gespeicherten, sonst mit der
+    // kontoweit gemerkten (instrSig). Das Pad zeigt sie dann als fertiges Bild an - früher kam
+    // sie aber nie im Vertrag an, solange der Fahrlehrer nicht neu zeichnete, und das PDF hatte
+    // trotz sichtbarer Unterschrift im Modal ein leeres Feld "Unterschrift Fahrschule".
     function openContractSign(c) {
         setContractPreview(c);
         setContractStuSig(c.studentSignature || null);
+        setContractInstrSig(c.instrSignature || instrSig || null);
         setContractSignId(c.id);
     }
-    function saveContractSignature(field, url) {
-        const next = (active.contracts || []).map(c => c.id === contractSignId ? { ...c, [field]: url } : c);
-        updateActive({ contracts: next });
-        setContractPreview(prev => prev && prev.id === contractSignId ? { ...prev, [field]: url } : prev);
-    }
-    function finishContractSign() {
+    async function finishContractSign() {
+        const sid = active && active.id;
+        const cid = contractSignId;
+        const iSig = contractInstrSig || null;
+        const sSig = contractStuSig || null;
+        if (!sid || !cid)
+            return;
+        // Ein Vertrag ohne beide Unterschriften ist nicht verbindlich - vorher wurde das PDF
+        // trotzdem kommentarlos erstellt. Bewusst nur eine Rückfrage, keine Sperre: ein
+        // Ausdruck zum Unterschreiben auf Papier muss weiter möglich sein.
+        const fehlt = [!iSig && "Fahrschule", !sSig && "Fahrschüler"].filter(Boolean);
+        if (fehlt.length && !await askConfirm({ title: "Unterschrift fehlt", message: "Im Vertrag fehlt die Unterschrift " + (fehlt.length > 1 ? "von Fahrschule und Fahrschüler" : (fehlt[0] === "Fahrschule" ? "der Fahrschule" : "des Fahrschülers")) + ". Trotzdem PDF erstellen?", confirmLabel: "Trotzdem erstellen", danger: false }))
+            return;
+        // Funktional gegen den aktuellen Datensatz (wie createContract): "active" kann nach der
+        // Rückfrage veraltet sein. Geschrieben wird genau das, was das Modal gerade zeigt - auch
+        // null, wenn eine Unterschrift per "Löschen" verworfen wurde.
+        let c = null;
+        const patched = patchStudentNow(sid, s => {
+            const alt = (s.contracts || []).find(x => x.id === cid);
+            if (!alt)
+                return null;
+            c = { ...alt, instrSignature: iSig, studentSignature: sSig };
+            return { ...s, contracts: s.contracts.map(x => x.id === cid ? c : x) };
+        });
         setContractSignId(null);
+        if (!patched || !c) {
+            showToast("Der Vertrag wurde inzwischen gelöscht.");
+            return;
+        }
+        scheduleSave(patched);
+        setContractPreview(c);
         doPrint("contract");
     }
     // Anders als Rechnungen/Kostenposten/Fahrstunden gab es für Verträge bisher keinerlei
@@ -28647,6 +28701,13 @@ function App() {
                                             if (pp && pp.email)
                                                 return React.createElement("div", { style: { background: "var(--orange-soft)", borderRadius: 10, padding: "10px 12px", marginBottom: 9, fontSize: 13, lineHeight: 1.5 } },
                                                     "Bitte den Betrag in der PayPal-App über „Geld senden“ an ", React.createElement("b", { style: { wordBreak: "break-all" } }, pp.email), " schicken.");
+                                            // Ladefehler/Laden nicht als "kein Zahlungsempfänger" ausgeben (wie im Sperrbildschirm).
+                                            if (paypalLink === false)
+                                                return React.createElement("div", { style: { marginBottom: 9 } },
+                                                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 8px" } }, "Die Zahlungsdaten konnten nicht geladen werden. Bitte Verbindung prüfen."),
+                                                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: ladePaypalLink }, "Erneut versuchen"));
+                                            if (paypalLink === null)
+                                                return React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Zahlungsdaten werden geladen…");
                                             return React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Es ist noch kein Zahlungsempfänger hinterlegt. Melde dich bei deiner Fahrschul-Betreuung.");
                                         })(),
                                         React.createElement("button", { className: "btn btn-ghost btn-block", onClick: async () => {
@@ -33835,14 +33896,14 @@ function App() {
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ausbildungsvertrag unterschreiben"),
                 React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16, lineHeight: 1.5 } }, "Unterschreibe zuerst selbst, dann gib dem Sch\u00FCler das Handy zum Unterschreiben."),
-                React.createElement(SignaturePad, { autoSave: true, label: "Fahrlehrer (du)", existing: instrSig, onSave: url => { setInstrSig(url); saveContractSignature("instrSignature", url); try {
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrlehrer (du)", existing: contractInstrSig, onSave: url => { setContractInstrSig(url); setInstrSig(url); try {
                         localStorage.setItem("v3_instr_sig_" + uid, url); // kontogebunden, nicht geräteweit (Signatur sonst über Konten hinweg sichtbar)
                     }
-                    catch (e) { } }, onClear: () => { setInstrSig(null); try {
+                    catch (e) { } }, onClear: () => { setContractInstrSig(null); setInstrSig(null); try {
                         localStorage.removeItem("v3_instr_sig_" + uid);
                     }
                     catch (e) { } } }),
-                React.createElement(SignaturePad, { autoSave: true, label: "Fahrsch\u00FCler \u00B7 " + (active ? dispName(active) : "\u2013"), existing: contractStuSig, onSave: url => { setContractStuSig(url); saveContractSignature("studentSignature", url); }, onClear: () => setContractStuSig(null) }),
+                React.createElement(SignaturePad, { autoSave: true, label: "Fahrsch\u00FCler \u00B7 " + (active ? dispName(active) : "\u2013"), existing: contractStuSig, onSave: url => setContractStuSig(url), onClear: () => setContractStuSig(null) }),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 }, onClick: finishContractSign }, "PDF erstellen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setContractSignId(null) }, "Sp\u00E4ter"))),
         theoryForm && React.createElement("div", { onClick: () => !theoryForm.busy && setTheoryForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1245, display: "flex",
@@ -35058,7 +35119,7 @@ function BegleitFahrten({ code }) {
                         React.createElement("button", { onClick: () => setForm(f => ({ ...f, route: null })), style: { background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--red)", padding: "0 4px", minHeight: 44, cursor: "pointer" } }, t("bf_entfernen"))),
                     // Leaflet zeichnet die Linie als SVG-Attribut - dort greifen CSS-Variablen nicht,
                     // deshalb hier die feste Markenfarbe statt var(--orange).
-                    React.createElement(AllRoutesMap, { routes: [form.route.pts], color: "#E8871E" })),
+                    React.createElement(AllRoutesMap, { routes: [form.route.pts], color: "#E8871E", lang: lang })),
                 // Bei einer geführten Fahrt steht die Übung schon fest - die Chip-Wand mit allen
                 // 16 Übungen erscheint nur im aufgeklappten Zustand (von Hand / Bearbeiten / Anpassen).
                 formDetails && React.createElement(React.Fragment, null,
@@ -35293,7 +35354,7 @@ function BegleitFahrten({ code }) {
                                 React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0 } }, bfIcon(["M9 18l6-6-6-6"], 16))))),
                     loggedIn && React.createElement("button", { onClick: () => neueFahrt(null, []), style: { display: "block", width: "100%", marginTop: 8, background: "none", border: "none", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", padding: "6px 0", borderTop: liste.length > 0 ? "1px solid var(--line)" : "none", cursor: "pointer", textAlign: "center" } }, t("bf_von_hand")))),
             alleStrecken.length > 0 && klappe("karte", t("bf_strecken"), alleStrecken.length === 1 ? t("bf_aufz_1") : t("bf_aufz_n", { n: alleStrecken.length }), "orange", ["M1 6v16l7-4 8 4 7-4V2l-7 4-8-4-7 4z", "M8 2v16M16 6v16"],
-                React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E" })),
+                React.createElement(AllRoutesMap, { routes: alleStrecken, color: "#E8871E", lang: lang })),
             klappe("check", t("bf_check"), t("bf_check_unter"), "sage", ["M9 11l3 3L22 4", "M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"],
                 React.createElement("ul", { style: { margin: 0, paddingLeft: 18 } }, BEGLEIT_CHECK.map((c, i) => React.createElement("li", { key: i, style: { marginBottom: 6 } }, c)))),
             klappe("regeln", t("bf_regeln"), t("bf_regeln_unter"), "sky", ["M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2", "M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"],
