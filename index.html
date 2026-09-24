@@ -14028,6 +14028,27 @@ function App() {
         else
             m.delete(id);
     }
+    // Eine frisch geladene Schülerliste einspielen, ohne laufende lokale Änderungen zu überfahren.
+    // "Beschäftigt" = Speichern läuft/wartet noch ODER lokal geändert, nachdem der Abruf gestartet
+    // wurde - dessen Serverstand ist für diesen Schüler schon veraltet und bleibt lokal. Alle
+    // anderen kommen auf den Serverstand; wer serverseitig fehlt (gelöscht, Freigabe entzogen),
+    // fliegt raus. Vorher hatte nur das Fokus-Neuladen diesen Schutz - das erste Laden nach dem
+    // Start und der Warteliste-Abgleich ersetzten die Liste blind: ein ADK-Haken, während das
+    // Laden lief, verschwand lokal, und die nächste Änderung schrieb ihn auch in der DB weg
+    // (Abschluss-Audit). Liefert die neue Liste; Cache schreibt der Aufrufer.
+    function schuelerListeEinspielen(list, startedAt) {
+        const writes = studentWritesRef.current, touched = studentTouchedRef.current;
+        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
+        const byId = new Map((list || []).map(s => [s.id, s]));
+        return updateStudents(prev => {
+            const merged = (prev || [])
+                .filter(s => busy(s.id) || byId.has(s.id))
+                .map(s => busy(s.id) ? s : byId.get(s.id));
+            const knownIds = new Set(merged.map(s => s.id));
+            const added = (list || []).filter(s => !knownIds.has(s.id));
+            return [...merged, ...added];
+        });
+    }
     function planSave(key, fn, ms) {
         const m = pendingSavesRef.current;
         const prev = m.get(key);
@@ -15066,6 +15087,8 @@ function App() {
         }
         // Antworten, die erst nach Abmelden/Kontowechsel eintreffen, verwerfen (Audit C-M8).
         let cancelled = false;
+        // Startzeit des Ladens: lokale Änderungen am Cache-Stand danach überleben die Serverantwort.
+        const ladeStart = Date.now();
         const cached = loadCache(uid);
         if (cached && cached.length) {
             updateStudents(cached);
@@ -15192,8 +15215,7 @@ function App() {
             const [list, tplData, apptData, code, rights, sc] = res;
             myRights = rights;
             setSyncing(false);
-            updateStudents(list || []);
-            saveCache(uid, list || []);
+            saveCache(uid, schuelerListeEinspielen(list || [], ladeStart));
             setActiveId(a => {
                 const currentStuId = findCurrentApptStudentId(apptData);
                 if (currentStuId && list.find(s => s.id === currentStuId))
@@ -15294,23 +15316,7 @@ function App() {
             fetchStudents(uid).then(list => {
                 if (cancelled)
                     return;
-                const writes = studentWritesRef.current, touched = studentTouchedRef.current;
-                // "Beschäftigt" = Speichern läuft/wartet noch ODER lokal geändert, nachdem dieses
-                // Neuladen gestartet wurde - dann ist die Serverantwort für ihn schon veraltet.
-                const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
-                const byId = new Map((list || []).map(s => [s.id, s]));
-                // Schüler mit gerade laufendem lokalem Speichervorgang unverändert lassen,
-                // alle anderen auf den frisch geladenen Serverstand bringen - taucht ein
-                // nicht gerade speichernder Schüler serverseitig nicht mehr auf (gelöscht
-                // oder die Freigabe wurde entzogen), gehört er entfernt statt stehen zu bleiben.
-                const arr = updateStudents(prev => {
-                    const merged = (prev || [])
-                        .filter(s => busy(s.id) || byId.has(s.id))
-                        .map(s => busy(s.id) ? s : byId.get(s.id));
-                    const knownIds = new Set(merged.map(s => s.id));
-                    const added = (list || []).filter(s => !knownIds.has(s.id));
-                    return [...merged, ...added];
-                });
+                const arr = schuelerListeEinspielen(list, startedAt);
                 saveCache(uid, arr);
             }).catch(() => { });
         }
@@ -24716,8 +24722,13 @@ function App() {
         let aktuelleSchueler = students;
         if (uid) {
             try {
-                aktuelleSchueler = await fetchStudents(uid);
-                updateStudents(aktuelleSchueler);
+                const startedAt = Date.now();
+                const frisch = await fetchStudents(uid);
+                // Nicht blind ersetzen: eine gerade gebuchte Ausfallgebühr o. Ä. (Speichern noch
+                // offen) bliebe sonst lokal auf der Strecke (Abschluss-Audit).
+                aktuelleSchueler = schuelerListeEinspielen(frisch, startedAt);
+                if (uid)
+                    saveCache(uid, aktuelleSchueler);
             }
             catch (e) {
                 console.error("Schüler für Warteliste-Abgleich konnten nicht aktualisiert werden:", e);
