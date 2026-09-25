@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.13.0";
+const APP_VERSION = "2.13.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -15072,17 +15072,25 @@ function App() {
     // der Inhalt fertig aus dem Bild gezogen ist (übernommen: erst dann die Navigation ausführen,
     // der neue Screen blendet sich dank .view-slide-Keyframe-Animation beim Einhängen selbst ein).
     useEffect(() => {
-        const EDGE_ZONE = 32, THRESHOLD = 55;
+        // Nur ein eindeutig seitliches Wischen vom äußersten Rand ist die Zurück-Geste (Meldung
+        // Fabian 2026-09-26, Video "Kalender schwimmt"): Vorher zählte jede Berührung in den linken
+        // 32px, der Inhalt folgte dem Finger sofort, und schon eine flache Schräge (mehr seitlich als
+        // hoch) sprang aus dem Kalender zur Startseite - beim Scrollen einer langen Liste mit dem
+        // Daumen passierte das ständig. Jetzt: 20px Randzone wie iOS selbst, erst nach 12px
+        // Bewegung wird entschieden, und nur "mindestens doppelt so weit seitlich wie senkrecht"
+        // gilt als Wischen; alles andere bleibt für diese Berührung Scrollen.
+        const EDGE_ZONE = 20, THRESHOLD = 55, ENTSCHEIDUNG_PX = 12;
         // verschoben: onMove hat schon ein transform auf .view-slide geschrieben. Wer die Geste
         // abbricht, ohne dass onEnd settle() erreicht, muss es selbst zurücknehmen - sonst klebt
         // der Inhalt seitlich verschoben bis zum nächsten Ansichtswechsel ("App schwimmt").
-        const drag = { startX: null, startY: null, tracking: false, verschoben: false };
+        const drag = { startX: null, startY: null, tracking: false, verschoben: false, entschieden: false };
         function onStart(e) {
             const t = e.touches[0];
             // Bei offener Rückfrage (askConfirm) keine Zurück-Geste - sonst navigierte sie hinter
             // dem weiter offenen Dialog weg (Escape fängt ToastConfirmHost selbst ab).
             drag.tracking = !_rueckfrageOffen && t.clientX <= EDGE_ZONE;
             drag.verschoben = false;
+            drag.entschieden = false;
             drag.startX = t.clientX;
             drag.startY = t.clientY;
         }
@@ -15090,6 +15098,18 @@ function App() {
             if (!drag.tracking) return;
             const t = e.touches[0];
             const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
+            if (!drag.entschieden) {
+                // Noch nichts bewegen, bis klar ist, was der Finger will.
+                if (Math.abs(dx) < ENTSCHEIDUNG_PX && Math.abs(dy) < ENTSCHEIDUNG_PX)
+                    return;
+                if (dx > 0 && dx >= 2 * Math.abs(dy)) {
+                    drag.entschieden = true;
+                }
+                else {
+                    drag.tracking = false;
+                    return;
+                }
+            }
             if (Math.abs(dy) > Math.abs(dx) + 10) {
                 drag.tracking = false;
                 // Doch senkrecht gewischt: onEnd kehrt dann früh zurück, das schon gesetzte
@@ -15145,7 +15165,7 @@ function App() {
             if (_rueckfrageOffen) { settle(0); return; }
             const t = e.changedTouches[0];
             const dx = t.clientX - drag.startX, dy = t.clientY - drag.startY;
-            if (dx < THRESHOLD || Math.abs(dy) > Math.abs(dx)) { settle(0); return; }
+            if (!drag.entschieden || dx < THRESHOLD || 2 * Math.abs(dy) > dx) { settle(0); return; }
             if (closeTopOverlay()) { settle(0); return; }
             const activeNow = (students || []).find(s => s.id === activeId) || (students || [])[0] || null;
             const imSchueler = SCHUELER_KONTEXT_VIEWS.indexOf(view) >= 0 && activeNow;
