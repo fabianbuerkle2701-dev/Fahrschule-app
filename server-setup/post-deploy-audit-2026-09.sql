@@ -1,3 +1,5 @@
+-- ANGEWANDT am 2026-09-25 nach dem Deploy von v2.12.0 (Migration post_deploy_audit_2026_09_chat_limit_revoke).
+-- Live geprüft: anon -> permission denied; booking-chat, explain-theory-question, morning-briefing antworten weiter (Service-Role-Key).
 -- Audit 2026-09 (Server & DB): Schritte, die erst NACH dem Deploy der Netlify-Functions laufen
 -- dürfen. Vorher würden sie die Live-App v2.9.33 bzw. die noch alten Functions brechen.
 --
