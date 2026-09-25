@@ -200,6 +200,7 @@ CREATE TABLE public.schools (
   price_sonderfahrt numeric,
   price_pruefungsvorstellung numeric,
   preismeldung_letzte date,
+  preisliste jsonb NOT NULL DEFAULT '{}'::jsonb,
   updated_at timestamp with time zone DEFAULT now() NOT NULL,
   storno_frist_stunden integer,
   zahlungsziel_tage integer,

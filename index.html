@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.12.2";
+const APP_VERSION = "2.13.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -6722,6 +6722,8 @@ async function saveSchool(school) {
         price_grundgebuehr: numOrNull(school.price_grundgebuehr), price_lehrmaterial: numOrNull(school.price_lehrmaterial),
         price_sonderfahrt: numOrNull(school.price_sonderfahrt), price_pruefungsvorstellung: numOrNull(school.price_pruefungsvorstellung),
         preismeldung_letzte: school.preismeldung_letzte || null,
+        // Preisliste nach § 32 (13 Posten je Klasse, Gültig-ab, gemeldeter Stand) - siehe PREISPOSTEN_32
+        preisliste: (school.preisliste && typeof school.preisliste === "object") ? school.preisliste : {},
         // no_show_fee_default fehlte hier bisher komplett (nur lokal übernommen, nie tatsächlich
         // gespeichert) - die Standard-Ausfallgebühr wirkte in derselben Sitzung, ging aber nach
         // einem Neuladen wieder verloren. storno_frist_stunden ist neu, braucht dieselbe Behandlung.
@@ -8449,21 +8451,60 @@ function neueRegelnGelten(stu, school) {
         return false;
     return stu.ausbildungsbeginn >= school.reform_stichtag;
 }
-// Erinnerung an die geplante quartalsweise Preismeldung (siehe preismeldungSheet()) - nur relevant,
-// sobald die Fahrschule mindestens eine der 4 neuen Preisfelder überhaupt gepflegt hat (sonst hat
-// sie sich noch nicht mit dieser Reform-Vorbereitung befasst, keine Erinnerung nötig). ~90 Tage als
-// einfache Quartals-Näherung.
+// Preisliste nach § 32 Abs. 2 FahrlG in der Fassung des Regierungsentwurfs (BT-Drs. 21/7404, S. 25 f.,
+// noch nicht in Kraft): 13 Posten, je Fahrerlaubnisklasse zu melden - und zwar jede Änderung VOR ihrer
+// Anwendung (§ 32 Abs. 1 Satz 2), nicht vierteljährlich, wie es die erste Fassung dieser Funktion und
+// mehrere Branchenvorträge annahmen. Verstöße sind eine Ordnungswidrigkeit (§ 56), Bestandsschulen
+// melden erstmals bis 01.10.2027 (§ 69 Abs. 14). pflicht = ohne "sofern angeboten" im Gesetzestext.
+const TEILPRUEFUNG_KLASSEN = ["BE", "C1", "C1E", "C", "CE", "D1", "D1E", "D", "DE", "T"];
+const PREISPOSTEN_32 = [
+    { key: "grundbetrag", nr: "1", label: "Grundbetrag (allgemeine Aufwendungen des Fahrschulbetriebs)", pflicht: true },
+    { key: "theorie", nr: "2", label: "Theoretischer Unterricht, gesamt (pauschal)" },
+    { key: "theorieWeiter", nr: "3", label: "Weitere Ausbildung nach nicht bestandener Theorieprüfung (pauschal)" },
+    { key: "vorstellungTheorie", nr: "4", label: "Vorstellung zur theoretischen Prüfung" },
+    { key: "fahrstunde", nr: "5", label: "Fahrstunde (einschließlich Unterweisung am Fahrzeug)", pflicht: true },
+    { key: "simulator", nr: "6", label: "Fahrstunde am Simulator" },
+    { key: "pruefungsreife", nr: "7", label: "Feststellung der Prüfungsreife für die praktische Prüfung", pflicht: true },
+    { key: "begleitungPraxis", nr: "8", label: "Begleitung zur praktischen Prüfung" },
+    { key: "teilFahren", nr: "9a", label: "Teilprüfung: nur praktisches Fahren und Grundfahraufgaben", nurKlassen: TEILPRUEFUNG_KLASSEN },
+    { key: "teilAbfahrt", nr: "9b", label: "Teilprüfung: nur Abfahrtkontrolle und Handfertigkeiten", nurKlassen: TEILPRUEFUNG_KLASSEN },
+    { key: "teilVerbinden", nr: "9c", label: "Teilprüfung: nur Verbinden und Trennen", nurKlassen: TEILPRUEFUNG_KLASSEN },
+    { key: "mofa", nr: "10", label: "Mofa-/Kleinkraftrad-Ausbildung (pauschal)" },
+    { key: "laienEinweisung", nr: "11", label: "Einweisung und Beobachtungsfahrt (Fahrpraxis unter Anleitung)" },
+    { key: "aufbauseminar", nr: "12", label: "Aufbauseminar (§ 2a StVG)" },
+    { key: "fahreignungsseminar", nr: "13", label: "Fahreignungsseminar (§ 4a StVG)" },
+];
+function preispostenFuer(klasse) {
+    return PREISPOSTEN_32.filter(p => !p.nurKlassen || p.nurKlassen.indexOf(klasse) >= 0);
+}
+function preislisteKlassen(school) {
+    const pl = school && school.preisliste;
+    return (pl && pl.klassen && typeof pl.klassen === "object") ? pl.klassen : {};
+}
+// Klassen, für die mindestens ein Preis gepflegt ist
+function preislisteBelegteKlassen(school) {
+    const kl = preislisteKlassen(school);
+    return Object.keys(kl).filter(k => kl[k] && Object.keys(kl[k]).some(p => kl[k][p] != null && kl[k][p] !== ""));
+}
+// Reihenfolgeunabhängiger Vergleich der Preisstände (JSON.stringify hängt an der Schlüsselreihenfolge)
+function preislisteSignatur(klassen, gueltigAb) {
+    const kl = klassen || {};
+    return JSON.stringify([gueltigAb || "", Object.keys(kl).sort().map(k => [k, Object.keys(kl[k] || {}).sort()
+        .filter(p => kl[k][p] != null && kl[k][p] !== "").map(p => [p, Number(kl[k][p])])])]
+        .filter(x => !Array.isArray(x) || x.length));
+}
+// Stand der Meldung: null = nichts zu tun, sonst ein kurzer Hinweistext für Startseite/Einstellungen.
+function preismeldungHinweis(school) {
+    if (!school || !preislisteBelegteKlassen(school).length)
+        return null;
+    const pl = school.preisliste || {};
+    if (!pl.gemeldet || !pl.gemeldet.stand)
+        return "Preisliste noch nicht gemeldet";
+    return preislisteSignatur(pl.klassen, pl.gueltigAb) === preislisteSignatur(pl.gemeldet.stand, pl.gemeldet.gueltigAb)
+        ? null : "Preisliste geändert – vor Anwendung melden";
+}
 function preismeldungFaellig(school) {
-    if (!school)
-        return false;
-    const hatPreis = school.price_grundgebuehr != null || school.price_lehrmaterial != null
-        || school.price_sonderfahrt != null || school.price_pruefungsvorstellung != null;
-    if (!hatPreis)
-        return false;
-    if (!school.preismeldung_letzte)
-        return true;
-    const tage = Math.floor((Date.now() - new Date(school.preismeldung_letzte + "T00:00:00").getTime()) / 86400000);
-    return tage >= 90;
+    return !!preismeldungHinweis(school);
 }
 /* ════════ Prüfungssimulation ════════ */
 // Struktur wie im amtlichen Beobachtungsbogen der praktischen Fahrprüfung: Fahraufgabe
@@ -13544,6 +13585,7 @@ function App() {
     const [statBriefing, setStatBriefing] = useState(null); // { busy, text, err } | null - KI-Einordnung in der Statistik
     const [pruefungBriefing, setPruefungBriefing] = useState(null); // { busy, text, err } | null - KI-Einschätzung in der Prüfungsplanung
     const [abrechnungBriefing, setAbrechnungBriefing] = useState(null); // { busy, text, err } | null - KI-Einordnung in der Abrechnung
+    const [preisKlasse, setPreisKlasse] = useState(null); // Einstellungen › Kosten: gerade bearbeitete Klasse der Preisliste nach § 32
     const [reformBriefing, setReformBriefing] = useState(null); // { busy, text, err } | null - KI-Erklärung der Führerschein-Reform 2027
     // Tages-Briefing: schickt die im Dashboard ohnehin schon berechneten Zahlen an die KI, die
     // daraus einen kurzen Fließtext macht. Erzeugt selbst keine Daten, nur eine Zusammenfassung.
@@ -13918,7 +13960,7 @@ function App() {
     const [invoicePreview, setInvoicePreview] = useState(null); // die zuletzt erstellte/angesehene Rechnung (Snapshot), fürs Drucken
     const [receiptPreview, setReceiptPreview] = useState(null); // {payment, idx} – die Zahlung, für die gerade ein Beleg gedruckt wird
     const [contractPreview, setContractPreview] = useState(null); // der zuletzt erstellte/angesehene Ausbildungsvertrag (Snapshot), fürs Drucken
-    const [preismeldungPreview, setPreismeldungPreview] = useState(null); // Snapshot der 5 Standard-Preispositionen, fürs Drucken
+    const [preismeldungPreview, setPreismeldungPreview] = useState(null); // Snapshot der Preisliste nach § 32 für den Druck (klassen, reihenfolge, gueltigAb, datum)
     const [showNachweisModal, setShowNachweisModal] = useState(false); // Unterschriften-Modal vor dem Druck
     const [contractSignId, setContractSignId] = useState(null); // id des Vertrags, der gerade digital unterschrieben wird
     const [contractStuSig, setContractStuSig] = useState(null); // Schüler-Unterschrift, transient während des Signierens
@@ -13991,29 +14033,43 @@ function App() {
     function saveReformStichtag(v) { if (school)
         writeSchool(s => s && ({ ...s, reform_stichtag: v || null })); }
     // Standardisierte Preismeldung - siehe preismeldungSheet().
-    function savePreismeldungPreis(field, v) { if (school)
-        writeSchool(s => s && ({ ...s, [field]: (v === "" || v == null ? null : v) })); }
+    function savePreisPosten(klasse, key, v) { if (school)
+        writeSchool(s => {
+            if (!s)
+                return s;
+            const pl = { ...(s.preisliste || {}) };
+            const kl = { ...(pl.klassen || {}) };
+            const posten = { ...(kl[klasse] || {}) };
+            if (v === "" || v == null)
+                delete posten[key];
+            else
+                posten[key] = v;
+            if (Object.keys(posten).length)
+                kl[klasse] = posten;
+            else
+                delete kl[klasse];
+            return { ...s, preisliste: { ...pl, klassen: kl } };
+        }); }
+    function savePreislisteGueltigAb(v) { if (school)
+        writeSchool(s => s && ({ ...s, preisliste: { ...(s.preisliste || {}), gueltigAb: v || null } })); }
     async function openPreismeldung() {
         if (!school)
             return;
+        const klassenMitPreis = preislisteBelegteKlassen(school);
+        if (!klassenMitPreis.length) {
+            showToast("Trage zuerst Preise für mindestens eine Führerscheinklasse ein.", "error");
+            return;
+        }
         const datum = new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" });
-        setPreismeldungPreview({
-            datum,
-            grundgebuehr: school.price_grundgebuehr != null ? Number(school.price_grundgebuehr) : null,
-            lehrmaterial: school.price_lehrmaterial != null ? Number(school.price_lehrmaterial) : null,
-            hour: school.price_hour != null ? Number(school.price_hour) : null,
-            sonderfahrt: school.price_sonderfahrt != null ? Number(school.price_sonderfahrt) : null,
-            pruefungsvorstellung: school.price_pruefungsvorstellung != null ? Number(school.price_pruefungsvorstellung) : null,
-        });
+        const pl = school.preisliste || {};
+        setPreismeldungPreview({ datum, klassen: deepCopy(preislisteKlassen(school)), reihenfolge: klassenMitPreis, gueltigAb: pl.gueltigAb || null });
         doPrint("preismeldung");
-        // preismeldung_letzte erst nach expliziter Nutzer-Bestätigung setzen, nicht schon vor dem
-        // Druckversuch - weder Browser- noch WKWebView-Druck melden zuverlässig Erfolg/Abbruch zurück,
-        // ein abgebrochener Druck darf die Meldung nicht fälschlich als abgegeben markieren.
-        // Funktional (prev => ...) statt {...school, ...} - der Confirm-Dialog kann durch Zögern
-        // offen bleiben, in der Zeit an anderer Stelle geänderte Preisfelder würden mit dem vor
-        // dem Dialog eingefangenen "school" sonst stillschweigend zurückgesetzt.
-        if (await askConfirm({ message: "Wurde die Preismeldung als PDF erstellt und (per Post/E-Mail) an die zuständige Stelle übermittelt? Nur dann als erledigt markieren." }))
-            writeSchool(prev => ({ ...prev, preismeldung_letzte: ymd(new Date()) }));
+        // Erst nach ausdrücklicher Bestätigung als gemeldet markieren - Druck/PDF melden keinen
+        // verlässlichen Erfolg zurück. Der gemeldete Stand wird als Kopie festgehalten: Ändert sich
+        // danach ein Preis, erinnert die App wieder (Meldung VOR jeder Anwendung, § 32 Abs. 1 S. 2).
+        if (await askConfirm({ message: "Hast du diese Preise an das Transparenzregister des Bundesverkehrsministeriums übermittelt? Nur dann als gemeldet markieren. (Das elektronische Meldeverfahren wird erst mit dem Gesetz eingerichtet - bis dahin dient das PDF zur Vorbereitung.)", confirmLabel: "Als gemeldet markieren" }))
+            writeSchool(prev => prev && ({ ...prev, preismeldung_letzte: ymd(new Date()),
+                preisliste: { ...(prev.preisliste || {}), gemeldet: { am: ymd(new Date()), stand: deepCopy(preislisteKlassen(prev)), gueltigAb: (prev.preisliste || {}).gueltigAb || null } } }));
     }
     function saveArtEdit() {
         const f = artEdit;
@@ -20829,7 +20885,7 @@ function App() {
         // direkt nach der Nächster-Termin-Karte (siehe 1c) - hier bewusst NICHT mehr zusätzlich
         // in "Diese Woche" pushen, sonst stünde derselbe Hinweis auf dem Handy zweimal.
         if ((isAdmin(session) || isSchoolAdmin) && preismeldungFaellig(school))
-            weekItems.push({ key: "preis", icon: icClock, onClick: () => { setView("einstellungen"); setSettingsScreen("kosten"); }, text: "Preismeldung fällig" });
+            weekItems.push({ key: "preis", icon: icClock, onClick: () => { setView("einstellungen"); setSettingsScreen("kosten"); }, text: preismeldungHinweis(school) || "Preismeldung fällig" });
 
         /* ── Redesign (zweiter Anlauf): die Startseite wirkte trotz der ersten Konsolidierung
            weiterhin "überlaufen", weil bis zu sechs eigenständig gerahmte Alarm-Karten (Briefing,
@@ -29975,7 +30031,7 @@ function App() {
                     settingsScreen === "reform" && React.createElement(SettingsScreen, { title: "Führerschein-Reform 2027", onBack: closeScreen },
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } },
-                                "Der Regierungsentwurf zur Modernisierung der Fahrschulausbildung (Bundestag-Drucksache 21/7404, Kabinettsbeschluss Juni 2026) liegt seit dem 29.7.2026 im Bundestag, Inkrafttreten wird für Anfang 2027 erwartet. Er sieht eine Übergangsregel vor: laufende Ausbildungen dürfen nach den bisherigen Regeln zu Ende geführt werden. Trage hier optional einen Stichtag ein, ab dem NEU begonnene Ausbildungen (Ausbildungsbeginn ab diesem Datum) in dieser App als \"neue Regeln\" behandelt werden - z.B. eine flexiblere Auslegung der Sonderfahrten-Vorgaben. Ohne Eintrag ändert sich nichts."),
+                                "Der Regierungsentwurf zur Modernisierung der Fahrschulausbildung (Bundestag-Drucksache 21/7404, Kabinettsbeschluss 20.05.2026) liegt seit dem 29.07.2026 im Bundestag, erste Lesung war am 24.09.2026; die Verordnung (BR-Drs. 365/26) braucht die Zustimmung des Bundesrats. Geplant: neue Ausbildungsregeln ab 01.01.2027, Transparenzregister, Aufzeichnungs- und Prüfungsregeln ab 01.07.2027. Er sieht eine Übergangsregel vor: laufende Ausbildungen dürfen nach den bisherigen Regeln zu Ende geführt werden. Trage hier optional einen Stichtag ein, ab dem NEU begonnene Ausbildungen (Ausbildungsbeginn ab diesem Datum) in dieser App als \"neue Regeln\" behandelt werden - z.B. eine flexiblere Auslegung der Sonderfahrten-Vorgaben. Ohne Eintrag ändert sich nichts."),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-reform-stichtag" }, "Stichtag (Ausbildungsbeginn ab diesem Datum = neue Regeln)"),
                                 React.createElement("div", { style: { display: "flex", gap: 8 } },
@@ -30029,14 +30085,35 @@ function App() {
                                     React.createElement(EntwurfFeld, { id: "field-preis-pro-ue", inputMode: "decimal", wert: (school && school.price_hour != null) ? school.price_hour : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: "", onWert: savePricePerHour, placeholder: "z.B. 55", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Dieser Preis gilt pro UE (45 Minuten). Die App rechnet die gefahrenen Minuten in UE um und multipliziert sie mit diesem Preis. Eine 60-Minuten-Fahrstunde sind zum Beispiel 1,33 UE."),
-                            React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8, marginTop: 6 } }, "Standardisierte Preismeldung (geplante Reform)"),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 } }, "Der Reformentwurf ersetzt die bisherige Preisaushang-Pflicht durch eine regelmäßige, standardisierte Meldung dieser 5 Positionen (Fahrstunde = Preis pro UE oben). Trage die übrigen vier ein, um die Preismeldung automatisch erzeugen zu können."),
-                            [["price_grundgebuehr", "Grundgebühr"], ["price_lehrmaterial", "Lehrmaterial"], ["price_sonderfahrt", "Sonderfahrt (je UE)"], ["price_pruefungsvorstellung", "Prüfungsvorstellung"]].map(([field, label]) => React.createElement("div", { key: field, className: "field", style: { marginBottom: 10 } },
-                                React.createElement("label", { htmlFor: "field-preismeldung-" + field }, label),
-                                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
-                                    React.createElement(EntwurfFeld, { id: "field-preismeldung-" + field, inputMode: "decimal", wert: (school && school[field] != null) ? school[field] : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: v => savePreismeldungPreis(field, v), placeholder: "z.B. 50", style: { flex: 1 } }),
-                                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€")))),
-                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 16 }, onClick: openPreismeldung }, "Preismeldung als PDF erstellen"),
+                            // Preisliste nach § 32 (Reformentwurf) - ersetzt die frühere "standardisierte Preismeldung"
+                            // mit 5 selbst gewählten Positionen, die so nicht im Entwurf stehen.
+                            (() => {
+                                const aktiv = (preisKlasse && klassen.indexOf(preisKlasse) >= 0) ? preisKlasse : (klassen.indexOf(DEFAULT_KLASSE) >= 0 ? DEFAULT_KLASSE : klassen[0]);
+                                const belegt = preislisteBelegteKlassen(school);
+                                const werte = preislisteKlassen(school)[aktiv] || {};
+                                const pl = (school && school.preisliste) || {};
+                                const hinweis = preismeldungHinweis(school);
+                                const ueberschrift = { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8, marginTop: 6 };
+                                return React.createElement("div", { style: { marginBottom: 16 } },
+                                    React.createElement("div", { style: ueberschrift }, "Preisliste nach § 32 (Reformentwurf)"),
+                                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 } },
+                                        "Nach dem Gesetzentwurf (BT-Drs. 21/7404, noch nicht in Kraft) meldet jede Fahrschule ihre Preise je Führerscheinklasse in 13 festen Posten elektronisch an das Bundesverkehrsministerium – und zwar jede Änderung vor ihrer Anwendung. Verstöße sind bußgeldbewehrt, bestehende Fahrschulen melden erstmals bis 01.10.2027. Das Meldeverfahren selbst gibt es noch nicht; die Liste bereitet dich darauf vor. Allindrive unterstützt die Meldung, ersetzt aber keine rechtliche Prüfung."),
+                                    React.createElement("div", { className: "stud-seg", role: "group", "aria-label": "Führerscheinklasse", style: { marginBottom: 12, overflowX: "auto" } },
+                                        klassen.map(k => React.createElement("button", { key: k, className: "stud-seg-btn" + (aktiv === k ? " on" : ""), "aria-pressed": aktiv === k, onClick: () => setPreisKlasse(k) },
+                                            k, belegt.indexOf(k) >= 0 ? " ✓" : ""))),
+                                    preispostenFuer(aktiv).map(p => React.createElement("div", { key: aktiv + ":" + p.key, className: "field", style: { marginBottom: 10 } },
+                                        React.createElement("label", { htmlFor: "field-preis32-" + p.key }, p.nr + ". " + p.label + (p.pflicht ? " *" : "")),
+                                        React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                                            React.createElement(EntwurfFeld, { id: "field-preis32-" + p.key, inputMode: "decimal", wert: werte[p.key] != null ? werte[p.key] : "", parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: v => savePreisPosten(aktiv, p.key, v), placeholder: p.pflicht ? "Pflichtangabe" : "nur falls angeboten", style: { flex: 1 } }),
+                                            React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€")))),
+                                    React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "* ohne „sofern angeboten“ im Gesetzestext – für jede angebotene Klasse anzugeben. Leere Felder erscheinen in der Meldung als „nicht angeboten“."),
+                                    React.createElement("div", { className: "field" },
+                                        React.createElement("label", { htmlFor: "field-preisliste-gueltig" }, "Preise gültig ab"),
+                                        React.createElement("input", { id: "field-preisliste-gueltig", type: "date", value: pl.gueltigAb || "", onChange: e => savePreislisteGueltigAb(e.target.value) })),
+                                    React.createElement("div", { role: "status", style: { fontSize: 12.5, fontWeight: 700, margin: "4px 0 10px", color: hinweis ? "var(--amber-ink)" : "var(--green-ink)" } },
+                                        hinweis ? ("⚠ " + hinweis) : (pl.gemeldet && pl.gemeldet.am ? ("✓ Stand vom " + fmtD(pl.gemeldet.am) + " als gemeldet markiert") : "Noch keine Preise eingetragen")),
+                                    React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !belegt.length, onClick: openPreismeldung }, "Preisliste als PDF erstellen (" + (belegt.length === 1 ? "1 Klasse" : belegt.length + " Klassen") + ")"));
+                            })(),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-empfehlungsbonus" }, "Empfehlungsbonus (\"Freund wirbt Freund\")"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -31362,39 +31439,34 @@ function App() {
     }
     function preismeldungSheet() {
         const p = preismeldungPreview;
-        if (!p)
+        if (!p || !p.klassen)
             return null;
-        const rows = [
-            ["Grundgebühr", p.grundgebuehr],
-            ["Lehrmaterial", p.lehrmaterial],
-            ["Fahrstunde (je UE, 45 Min.)", p.hour],
-            ["Sonderfahrt (je UE, 45 Min.)", p.sonderfahrt],
-            ["Prüfungsvorstellung", p.pruefungsvorstellung],
-        ];
-        return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10.5pt", lineHeight: 1.5 } },
-            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "2px solid #000", paddingBottom: 10, marginBottom: 18 } },
+        const zelle = { padding: "5px 6px", borderBottom: "1px solid #ccc" };
+        return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10pt", lineHeight: 1.45 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "2px solid #000", paddingBottom: 10, marginBottom: 14 } },
                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
                     React.createElement("img", { src: logoFor(school), alt: "", style: { width: 52, height: 52, objectFit: "cover", borderRadius: 8 } }),
                     React.createElement("div", null,
                         React.createElement("div", { style: { fontSize: "13pt", fontWeight: "bold" } }, (school && school.name) || "Fahrschule"),
                         React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, (school && school.subtitle) || ""))),
                 React.createElement("div", { style: { textAlign: "right" } },
-                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, "PREISMELDUNG"),
-                    React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "Stand: " + p.datum))),
-            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "10.5pt", marginBottom: 20 } },
-                React.createElement("thead", null,
-                    React.createElement("tr", null,
-                        React.createElement("th", { style: { textAlign: "left", padding: "6px 6px", borderBottom: "1.5px solid #000" } }, "Position"),
-                        React.createElement("th", { style: { textAlign: "right", padding: "6px 6px", borderBottom: "1.5px solid #000" } }, "Preis"))),
-                React.createElement("tbody", null, rows.map(([label, val]) => React.createElement("tr", { key: label, style: { borderBottom: "1px solid #ccc" } },
-                    React.createElement("td", { style: { padding: "7px 6px" } }, label),
-                    React.createElement("td", { style: { padding: "7px 6px", textAlign: "right", fontVariantNumeric: "tabular-nums" } }, val != null ? eurFmt(val) : "noch nicht hinterlegt"))))),
-            React.createElement("div", { style: { fontSize: "8.5pt", color: "#777", lineHeight: 1.6 } },
-                "Alle Preise verstehen sich als Angaben der Fahrschule zum Stand des Meldezeitpunkts. Diese standardisierte Meldung orientiert sich am Regierungsentwurf zur Modernisierung der Fahrschulausbildung (Bundestag-Drucksache 21/7404, Stand August 2026, Inkrafttreten voraussichtlich Anfang 2027) und dessen vorgesehener quartalsweiser Preismeldung anstelle des bisherigen Preisaushangs. Rechtsverbindlich ist die endgültige Gesetzesfassung."),
-            React.createElement("div", { style: { marginTop: 24, paddingTop: 14, borderTop: "1px solid #ccc", fontSize: "8pt", color: "#999", textAlign: "center" } },
-                (school && school.name) || "Allindrive",
-                " · ",
-                p.datum));
+                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, "PREISLISTE"),
+                    React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "nach § 32 FahrlG (Entwurf)"),
+                    React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "Stand: " + p.datum + (p.gueltigAb ? " · gültig ab " + fmtD(p.gueltigAb) : "")))),
+            (p.reihenfolge || Object.keys(p.klassen)).map(k => React.createElement("div", { key: k, style: { marginBottom: 16, breakInside: "avoid" } },
+                React.createElement("div", { style: { fontSize: "11.5pt", fontWeight: "bold", marginBottom: 4 } }, "Klasse " + k),
+                React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "9.5pt" } },
+                    React.createElement("tbody", null, preispostenFuer(k).map(pp => {
+                        const v = (p.klassen[k] || {})[pp.key];
+                        return React.createElement("tr", { key: pp.key },
+                            React.createElement("td", { style: { ...zelle, width: 34, color: "#555" } }, pp.nr),
+                            React.createElement("td", { style: zelle }, pp.label),
+                            React.createElement("td", { style: { ...zelle, textAlign: "right", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap" } }, v != null && v !== "" ? eurFmt(Number(v)) : (pp.pflicht ? "fehlt" : "nicht angeboten")));
+                    }))))),
+            React.createElement("div", { style: { fontSize: "8pt", color: "#666", lineHeight: 1.55, marginTop: 8 } },
+                "Gliederung nach § 32 Absatz 2 FahrlG in der Fassung des Regierungsentwurfs (BT-Drucksache 21/7404), noch nicht in Kraft. Das Entgelt nach Nr. 5 umfasst auch die Unterweisung am Fahrzeug. Die Übermittlung an das Transparenzregister erfolgt elektronisch vor Anwendung der Entgelte (§ 32 Abs. 1 Satz 2); diese Übersicht dient der Vorbereitung und als Beleg. Angaben der Fahrschule ohne Gewähr."),
+            React.createElement("div", { style: { marginTop: 18, paddingTop: 10, borderTop: "1px solid #ccc", fontSize: "8pt", color: "#999", textAlign: "center" } },
+                (school && school.name) || "Allindrive", " · ", p.datum));
     }
     function contractSheet() {
         const c = contractPreview;
