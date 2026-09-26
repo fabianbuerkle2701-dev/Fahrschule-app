@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.14.0";
+const APP_VERSION = "2.14.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.14.1", date: "September 2026", changes: [
+            "Quotenpilot zeigt jetzt zusätzlich die eigene Wiederholungsprüfungs-Quote je Klasse/Zeitraum an (Anteil bestandener Zweit- und Drittversuche) - direkt unter der normalen Bestehensquote von Theorie und Praxis",
+        ] },
     { v: "2.6.5", date: "September 2026", changes: [
             "Best\u00E4tigungsdialoge nachjustiert: \u201EStornierung ablehnen\u201C und \u201EAbmelden\u201C waren f\u00E4lschlich als L\u00F6schvorgang rot markiert, obwohl dabei nichts verschwindet. Umgekehrt warnen das Abbrechen einer Pr\u00FCfungssimulation und eines Schaltkompetenz-Tests jetzt richtig, weil dort wirklich Eintr\u00E4ge verloren gehen",
         ] },
@@ -8780,6 +8783,34 @@ function quotenpilotQuote(rows, art, vonISO, bisISO, klasse) {
 }
 // Monatsverlauf der letzten n Monate (Standard 12), je Monat dieselbe Erster-Versuch-Metrik -
 // für die kleine Balkenübersicht im Cockpit.
+// Zweite, vom Reformentwurf getrennt geforderte Kennzahl (§ 59 Abs. 4 Nr. 6 FahrlG-E): nicht der
+// Erstversuch, sondern alle WEITEREN Versuche je Schüler - wie viele davon wurden bestanden.
+// Jeder Wiederholungsversuch zählt in dem Zeitraum, in dem er selbst stattfand (anders als beim
+// Erstversuch oben geht es hier nicht um Schüler-Zuordnung, sondern um die Versuche selbst).
+function quotenpilotWiederholungsQuote(rows, art, vonISO, bisISO, klasse) {
+    const jeSchueler = {};
+    rows.forEach(r => {
+        if (r.art !== art)
+            return;
+        if (klasse && klasse !== "alle" && r.klasse !== klasse)
+            return;
+        (jeSchueler[r.studentId] || (jeSchueler[r.studentId] = [])).push(r);
+    });
+    let bestanden = 0, versuche = 0;
+    Object.keys(jeSchueler).forEach(sid => {
+        const liste = jeSchueler[sid].slice().sort((a, b) => a.date.localeCompare(b.date));
+        liste.slice(1).forEach(v => {
+            if (vonISO && v.date < vonISO)
+                return;
+            if (bisISO && v.date > bisISO)
+                return;
+            versuche++;
+            if (v.passed)
+                bestanden++;
+        });
+    });
+    return { pct: versuche ? Math.round(bestanden / versuche * 100) : null, versuche };
+}
 function quotenpilotMonatsverlauf(rows, art, klasse, monate) {
     const heute = new Date();
     const out = [];
@@ -33746,6 +33777,8 @@ function App() {
                                 const qP = quotenpilotQuote(rows, "praxis", zr.von, zr.bis, quotenpilot.klasse);
                                 const vorQT = zr.vorVon ? quotenpilotQuote(rows, "theorie", zr.vorVon, zr.vorBis, quotenpilot.klasse) : null;
                                 const vorQP = zr.vorVon ? quotenpilotQuote(rows, "praxis", zr.vorVon, zr.vorBis, quotenpilot.klasse) : null;
+                                const wqT = quotenpilotWiederholungsQuote(rows, "theorie", zr.von, zr.bis, quotenpilot.klasse);
+                                const wqP = quotenpilotWiederholungsQuote(rows, "praxis", zr.von, zr.bis, quotenpilot.klasse);
                                 const monateT = quotenpilotMonatsverlauf(rows, "theorie", quotenpilot.klasse, 12);
                                 const monateP = quotenpilotMonatsverlauf(rows, "praxis", quotenpilot.klasse, 12);
                                 const lehrer = quotenpilot.soloMode ? [] : Array.from(new Set(rows.map(r => r.teacher).filter(Boolean))).sort();
@@ -33760,7 +33793,7 @@ function App() {
                                     return React.createElement("span", { style: { fontSize: 11.5, color: hoch ? "var(--sage-deep)" : "var(--red)", fontWeight: 700 } },
                                         (hoch ? "\u25B2 +" : "\u25BC ") + delta + " Pp. zur Vorperiode");
                                 }
-                                function quoteCard(lbl, q, vorQ) {
+                                function quoteCard(lbl, q, vorQ, wq) {
                                     return React.createElement("div", { className: "card", style: { padding: "14px 15px" } },
                                         React.createElement("div", { className: "home-num", style: { fontSize: 28, lineHeight: 1.1 } }, q.pct === null ? "\u2013" : q.pct + "%"),
                                         React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", marginTop: 2 } }, lbl + " \u00B7 1. Versuch"),
@@ -33768,7 +33801,11 @@ function App() {
                                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.4 } },
                                             q.schueler === 0 ? "keine Daten in diesem Zeitraum" : (q.schueler + (q.schueler === 1 ? " Sch\u00FCler \u00B7 " : " Sch\u00FCler \u00B7 ") + q.schnitt.toFixed(1).replace(".", ",") + " Versuche im Schnitt")),
                                         q.schueler > 0 && q.schueler < MIN_FALLZAHL && React.createElement("div", { style: { fontSize: 11, color: "var(--orange-deep)", marginTop: 5, lineHeight: 1.4 } },
-                                            "Nur " + q.schueler + " F\u00E4lle \u2013 noch keine verl\u00E4ssliche Aussage."));
+                                            "Nur " + q.schueler + " F\u00E4lle \u2013 noch keine verl\u00E4ssliche Aussage."),
+                                        // Vom Reformentwurf getrennt gefordert (§ 59 Abs. 4 Nr. 6 FahrlG-E): nicht nur der
+                                        // Erstversuch oben, sondern eigens die Bestehensquote der Wiederholungsprüfungen.
+                                        wq && wq.versuche > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--ink-2)", marginTop: 6, paddingTop: 6, borderTop: "1px solid var(--line)", lineHeight: 1.4 } },
+                                            React.createElement("b", null, wq.pct + "%"), " Wiederholungspr\u00FCfung \u00B7 " + wq.versuche + (wq.versuche === 1 ? " Versuch" : " Versuche")));
                                 }
                                 function balken(monate) {
                                     const maxH = 34;
@@ -33798,8 +33835,8 @@ function App() {
                                                         background: quotenpilot.klasse === k ? "var(--sky-bg)" : "var(--field-bg)", color: quotenpilot.klasse === k ? "var(--sky-deep)" : "var(--muted)",
                                                         border: "1.5px solid " + (quotenpilot.klasse === k ? "var(--sky-deep)" : "var(--line)") } }, l))),
                                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 16 } },
-                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Theorie", qT, vorQT)),
-                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Praxis", qP, vorQP))),
+                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Theorie", qT, vorQT, wqT)),
+                                        React.createElement("div", { style: { flex: 1 } }, quoteCard("Praxis", qP, vorQP, wqP))),
                                     React.createElement("div", { style: { fontSize: 11, fontWeight: 800, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", margin: "0 2px 8px" } }, "Verlauf \u00B7 letzte 12 Monate"),
                                     React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
                                         React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 4 } }, "Theorie"),
