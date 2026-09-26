@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.13.1";
+const APP_VERSION = "2.14.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -13961,6 +13961,8 @@ function App() {
     const [receiptPreview, setReceiptPreview] = useState(null); // {payment, idx} – die Zahlung, für die gerade ein Beleg gedruckt wird
     const [contractPreview, setContractPreview] = useState(null); // der zuletzt erstellte/angesehene Ausbildungsvertrag (Snapshot), fürs Drucken
     const [preismeldungPreview, setPreismeldungPreview] = useState(null); // Snapshot der Preisliste nach § 32 für den Druck (klassen, reihenfolge, gueltigAb, datum)
+    const [reifeForm, setReifeForm] = useState(null); // Formular "Prüfungsreife amtlich feststellen" (§ 11 FahrschAusbV-E) | null
+    const [reifePreview, setReifePreview] = useState(null); // Snapshot der Bestätigung für den Druck
     const [showNachweisModal, setShowNachweisModal] = useState(false); // Unterschriften-Modal vor dem Druck
     const [contractSignId, setContractSignId] = useState(null); // id des Vertrags, der gerade digital unterschrieben wird
     const [contractStuSig, setContractStuSig] = useState(null); // Schüler-Unterschrift, transient während des Signierens
@@ -14070,6 +14072,49 @@ function App() {
         if (await askConfirm({ message: "Hast du diese Preise an das Transparenzregister des Bundesverkehrsministeriums übermittelt? Nur dann als gemeldet markieren. (Das elektronische Meldeverfahren wird erst mit dem Gesetz eingerichtet - bis dahin dient das PDF zur Vorbereitung.)", confirmLabel: "Als gemeldet markieren" }))
             writeSchool(prev => prev && ({ ...prev, preismeldung_letzte: ymd(new Date()),
                 preisliste: { ...(prev.preisliste || {}), gemeldet: { am: ymd(new Date()), stand: deepCopy(preislisteKlassen(prev)), gueltigAb: (prev.preisliste || {}).gueltigAb || null } } }));
+    }
+    // Prüfungsreife amtlich feststellen (§ 11 FahrschAusbV-E, Entwurf): anders als die Ampel oben
+    // (ein rein rechnerischer Hinweis ab 90 % Gesamtfortschritt) ist das hier ein bewusst vom
+    // Fahrlehrer gesetzter Datensatz - der Entwurf verlangt mindestens einen prüfungsähnlichen Test
+    // im Realverkehr in voller Prüfungsdauer, bevor die Prüfungsreife bescheinigt werden darf.
+    function oeffneReifeForm(vorschlagSim) {
+        if (!active)
+            return;
+        setReifeForm(vorschlagSim ? {
+            simId: vorschlagSim.id, datum: vorschlagSim.date || ymd(new Date()),
+            dauerMin: vorschlagSim.durationSec ? String(Math.round(vorschlagSim.durationSec / 60)) : "",
+            strecke: "", ergebnis: "bestanden", bemerkung: "",
+        } : { simId: null, datum: ymd(new Date()), dauerMin: "", strecke: "", ergebnis: "bestanden", bemerkung: "" });
+    }
+    function saveReifeForm() {
+        const f = reifeForm;
+        if (!active || !f)
+            return;
+        if (!f.datum || !f.dauerMin || !String(f.dauerMin).trim()) {
+            setReifeForm(g => g && ({ ...g, error: "Bitte Datum und Dauer des Tests angeben." }));
+            return;
+        }
+        writeStudent({ ...active, examReadiness: {
+            simId: f.simId || null, datum: f.datum, dauerMin: Math.max(0, Math.round(Number(f.dauerMin) || 0)),
+            strecke: (f.strecke || "").trim(), ergebnis: f.ergebnis === "nicht_bestanden" ? "nicht_bestanden" : "bestanden",
+            bemerkung: (f.bemerkung || "").trim(), festgestelltAm: ymd(new Date()), festgestelltVon: teacherName || "",
+        } });
+        setReifeForm(null);
+        showToast("Prüfungsreife festgehalten.");
+    }
+    async function reifeZuruecknehmen() {
+        if (!active || !active.examReadiness)
+            return;
+        if (await askConfirm({ message: "Die festgestellte Prüfungsreife wieder zurücknehmen? Das ändert nichts an bereits ausgehändigten Bestätigungen.", confirmLabel: "Zurücknehmen", danger: true }))
+            writeStudent({ ...active, examReadiness: null });
+    }
+    function druckeReifeBestaetigung() {
+        if (!active || !active.examReadiness)
+            return;
+        setReifePreview({ stu: active, r: active.examReadiness, datum: new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) });
+        // Teilt sich den bestehenden "handover"-Druckmodus (kein neuer Modus, kein Anfassen der
+        // Print-Matrix in @media print) - siehe printSheet().
+        doPrint("handover");
     }
     function saveArtEdit() {
         const f = artEdit;
@@ -17906,7 +17951,7 @@ function App() {
             // Lokalen Stand nachziehen: dieselben Felder entfernen, die der Server entfernt hat.
             const weg = ["adkDates","adkLog","adkNotes","items","customCounts","strecken","streckenLog",
                 "streckenNotes","routes","drivenLessons","lessons","manualHours","noShows","exams",
-                "schaltkompetenzTests","examSims","licenseSteps","begleitfahrten","begleitplan",
+                "schaltkompetenzTests","examSims","examReadiness","licenseSteps","begleitfahrten","begleitplan",
                 "begleitEinweisung","elternTel","theorie","theoryProgress","theoryMockExams",
                 "bemerkungen","lastNote","messages","avatarUrl",
                 "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
@@ -22362,6 +22407,29 @@ function App() {
             ready && r.total > 0 && React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 14, color: "var(--ink-2)", textAlign: "center" } },
                 "Gesamtfortschritt \u00FCber 90 %, Theorie bestanden, Sonderfahrten erf\u00FCllt. Noch " + offenText + " zum \u00DCben, siehe unten."),
             ready && r.total === 0 && React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 14, color: "var(--green)", fontWeight: 600, textAlign: "center" } }, "Alle ADK-Punkte beherrscht, alle Strecken vollst\u00E4ndig, Theorie bestanden, alle Sonderfahrten erf\u00FCllt. Der Sch\u00FCler ist bereit f\u00FCr die Pr\u00FCfung."),
+            // Prüfungsreife amtlich feststellen (Reformentwurf, § 11 FahrschAusbV-E): bewusst
+            // unabhängig von "ready" oben anzeigbar - der Fahrlehrer kann den Test schon gemacht
+            // haben, auch wenn die App den Gesamtfortschritt noch unter 90 % misst.
+            active.examReadiness
+                ? React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, borderLeft: "5px solid var(--green)" } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" } },
+                        React.createElement("span", { style: { color: "var(--green)", fontWeight: 800, fontSize: 14 } }, "✓ Prüfungsreife amtlich festgestellt"),
+                        active.examReadiness.ergebnis === "nicht_bestanden" && React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 99, padding: "2px 8px" } }, "Test nicht bestanden")),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.6 } },
+                        "Test am " + fmtD(active.examReadiness.datum) + new Date(active.examReadiness.datum).getFullYear() + " · " + active.examReadiness.dauerMin + " Min." + (active.examReadiness.strecke ? " · " + active.examReadiness.strecke : ""),
+                        React.createElement("br", null),
+                        "Festgestellt am " + fmtD(active.examReadiness.festgestelltAm) + new Date(active.examReadiness.festgestelltAm).getFullYear() + (active.examReadiness.festgestelltVon ? " von " + active.examReadiness.festgestelltVon : "")),
+                    active.examReadiness.bemerkung && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", marginTop: 6, fontStyle: "italic" } }, active.examReadiness.bemerkung),
+                    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } },
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: druckeReifeBestaetigung }, "Bestätigung als PDF"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { color: "var(--red-ink)" }, onClick: reifeZuruecknehmen }, "Zurücknehmen")))
+                : React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
+                    React.createElement("div", { style: { fontSize: 13, color: "var(--ink-2)", marginBottom: 10, lineHeight: 1.5 } },
+                        "Der Reformentwurf verlangt vor der Bescheinigung mindestens einen prüfungsähnlichen Test im Realverkehr in voller Prüfungsdauer (§ 11 FahrschAusbV-E, noch nicht in Kraft)."),
+                    (active.examSims || []).length > 0 && React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 } },
+                        active.examSims.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 3).map(sim => React.createElement("button", { key: sim.id, className: "btn btn-ghost", style: { textAlign: "left", justifyContent: "flex-start" }, onClick: () => oeffneReifeForm(sim) },
+                            "Test vom " + fmtD(sim.date) + new Date(sim.date).getFullYear() + (sim.durationSec ? " · " + Math.round(sim.durationSec / 60) + " Min." : "") + " übernehmen"))),
+                    React.createElement("button", { className: "btn btn-block", onClick: () => oeffneReifeForm(null) }, "Prüfungsreife amtlich feststellen")),
             r.theorieOffen && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
                 React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Theoriepr\u00FCfung"),
                 " noch nicht bestanden"),
@@ -31169,7 +31237,7 @@ function App() {
             React.createElement("div", { className: "ps-receipt" }, receiptSheet()),
             React.createElement("div", { className: "ps-contract" }, contractSheet()),
             React.createElement("div", { className: "ps-schaltkompetenz" }, schaltkompetenzSheet()),
-            React.createElement("div", { className: "ps-handover" }, handoverSheet()),
+            React.createElement("div", { className: "ps-handover" }, reifePreview ? reifeSheet() : handoverSheet()),
             React.createElement("div", { className: "ps-preismeldung" }, preismeldungSheet()),
             React.createElement("div", { className: "ps-gutschein" }, gutscheinSheet()));
     }
@@ -31395,6 +31463,45 @@ function App() {
                 (school && school.name) || "der Fahrschule",
                 " erstellt · ",
                 heute));
+    }
+    // Formale Bestätigung der Prüfungsreife (§ 12 FahrlG-E, § 17 Abs. 5 FeV-E: elektronisch
+    // möglich) - eigenständiges Dokument, nicht zu verwechseln mit der freien KI-Einschätzung
+    // (handoverModal kind "pruefreife"), die kein amtlicher Nachweis ist.
+    function reifeSheet() {
+        const p = reifePreview;
+        if (!p || !p.stu || !p.r)
+            return null;
+        const stu = p.stu, r = p.r;
+        return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10.5pt", lineHeight: 1.55 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "2px solid #000", paddingBottom: 10, marginBottom: 18 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+                    React.createElement("img", { src: logoFor(school), alt: "", style: { width: 52, height: 52, objectFit: "cover", borderRadius: 8 } }),
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: "13pt", fontWeight: "bold" } }, (school && school.name) || "Fahrschule"),
+                        React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, (school && school.subtitle) || ""))),
+                React.createElement("div", { style: { textAlign: "right" } },
+                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, "BESTÄTIGUNG DER PRÜFUNGSREIFE"),
+                    React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "Ausgestellt am: " + p.datum))),
+            React.createElement("div", { style: { marginBottom: 16 } },
+                React.createElement("div", { style: { fontSize: "9pt", color: "#777", marginBottom: 2 } }, "Fahrschüler(in)"),
+                React.createElement("div", { style: { fontWeight: "bold" } }, dispName(stu)),
+                stu.geb && React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, "geb. " + fmtD(stu.geb) + new Date(stu.geb).getFullYear()),
+                React.createElement("div", { style: { fontSize: "9.5pt", color: "#444" } }, "Führerscheinklasse " + (stu.klasse || DEFAULT_KLASSE))),
+            React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "10pt", marginBottom: 18 } },
+                React.createElement("tbody", null,
+                    [["Test im Realverkehr am", fmtD(r.datum) + new Date(r.datum).getFullYear()],
+                     ["Dauer", r.dauerMin + " Minuten"],
+                     ["Strecke", r.strecke || "–"],
+                     ["Ergebnis", r.ergebnis === "nicht_bestanden" ? "nicht bestanden" : "bestanden"],
+                     ["Bemerkung", r.bemerkung || "–"],
+                     ["Festgestellt am", fmtD(r.festgestelltAm) + new Date(r.festgestelltAm).getFullYear() + (r.festgestelltVon ? " von " + r.festgestelltVon : "")]]
+                        .map(([label, wert]) => React.createElement("tr", { key: label, style: { borderBottom: "1px solid #ccc" } },
+                            React.createElement("td", { style: { padding: "6px 6px", color: "#555", width: "38%" } }, label),
+                            React.createElement("td", { style: { padding: "6px 6px" } }, wert))))),
+            React.createElement("div", { style: { fontSize: "8.5pt", color: "#777", lineHeight: 1.6 } },
+                "Diese Bestätigung bescheinigt, dass für " + dispName(stu) + " am " + fmtD(r.datum) + new Date(r.datum).getFullYear() + " ein prüfungsähnlicher Test im Realverkehr in voller Prüfungsdauer durchgeführt wurde. Grundlage ist § 11 Absatz 1 und § 12 der Fahrschul-Ausbildungsordnung in der Fassung des Regierungsentwurfs zur Modernisierung der Fahrschulausbildung (BT-Drucksache 21/7404), Stand 20.05.2026, noch nicht in Kraft. Eine elektronische Ausstellung ist nach § 17 Absatz 5 FeV-E vorgesehen."),
+            React.createElement("div", { style: { marginTop: 24, paddingTop: 14, borderTop: "1px solid #ccc", fontSize: "8pt", color: "#999", textAlign: "center" } },
+                (school && school.name) || "Allindrive", " · ", p.datum));
     }
     function handoverSheet() {
         if (!handoverModal || !handoverModal.text || !handoverModal.stu)
@@ -32548,6 +32655,31 @@ function App() {
                                 disabled: !!loeschDialog.busy, onClick: ausbildungsdatenLoeschen },
                             loeschDialog.busy ? "Wird gelöscht…" : "Endgültig löschen"),
                         React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!loeschDialog.busy, onClick: () => setLoeschDialog(null) }, "Abbrechen")))),
+        reifeForm && React.createElement("div", { onClick: () => setReifeForm(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Prüfungsreife feststellen",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 175, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px", maxHeight: "88dvh", overflowY: "auto" } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 6 } }, "Prüfungsreife feststellen"),
+                React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 14px", lineHeight: 1.5 } }, "Mindestens ein prüfungsähnlicher Test im Realverkehr, in voller Prüfungsdauer (§ 11 FahrschAusbV-E, Entwurf)."),
+                reifeForm.error && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 10, padding: "8px 10px", marginBottom: 12 } }, reifeForm.error),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", { htmlFor: "field-reife-datum" }, "Datum des Tests"),
+                    React.createElement("input", { id: "field-reife-datum", type: "date", value: reifeForm.datum, onChange: e => setReifeForm({ ...reifeForm, datum: e.target.value, error: "" }) })),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", { htmlFor: "field-reife-dauer" }, "Dauer (Minuten)"),
+                    React.createElement("input", { id: "field-reife-dauer", type: "text", inputMode: "numeric", value: reifeForm.dauerMin, onChange: e => setReifeForm({ ...reifeForm, dauerMin: e.target.value.replace(/[^0-9]/g, ""), error: "" }) })),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", { htmlFor: "field-reife-strecke" }, "Strecke (optional)"),
+                    React.createElement("input", { id: "field-reife-strecke", type: "text", value: reifeForm.strecke, placeholder: "z.B. Innenstadt, Landstraße, Autobahn", onChange: e => setReifeForm({ ...reifeForm, strecke: e.target.value }) })),
+                React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 8 } }, "Ergebnis"),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 12 } },
+                    React.createElement("button", { className: "btn" + (reifeForm.ergebnis !== "nicht_bestanden" ? "" : " btn-ghost"), style: { flex: 1, background: reifeForm.ergebnis !== "nicht_bestanden" ? "var(--green)" : undefined, color: reifeForm.ergebnis !== "nicht_bestanden" ? "#fff" : undefined }, onClick: () => setReifeForm({ ...reifeForm, ergebnis: "bestanden" }) }, "Bestanden"),
+                    React.createElement("button", { className: "btn" + (reifeForm.ergebnis === "nicht_bestanden" ? "" : " btn-ghost"), style: { flex: 1, background: reifeForm.ergebnis === "nicht_bestanden" ? "var(--red)" : undefined, color: reifeForm.ergebnis === "nicht_bestanden" ? "#fff" : undefined }, onClick: () => setReifeForm({ ...reifeForm, ergebnis: "nicht_bestanden" }) }, "Nicht bestanden")),
+                React.createElement("div", { className: "field", style: { marginBottom: 16 } },
+                    React.createElement("label", { htmlFor: "field-reife-bemerkung" }, "Bemerkung (optional)"),
+                    React.createElement("textarea", { id: "field-reife-bemerkung", rows: 2, value: reifeForm.bemerkung, onChange: e => setReifeForm({ ...reifeForm, bemerkung: e.target.value }) })),
+                React.createElement("div", { style: { display: "flex", gap: 10 } },
+                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setReifeForm(null) }, "Abbrechen"),
+                    React.createElement("button", { className: "btn btn-block", style: { flex: 1 }, onClick: saveReifeForm }, "Feststellen")))),
         voucherForm && React.createElement("div", { onClick: () => { if (!voucherForm.busy) setVoucherForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 175, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },
@@ -33897,7 +34029,7 @@ function App() {
                             catch (e) {
                                 showToast("Kopieren nicht m\u00F6glich - bitte Text von Hand markieren.");
                             } } }, "Text kopieren")),
-                !handoverModal.busy && !handoverModal.error && handoverModal.text && handoverModal.kind !== "eltern" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => doPrint("handover") }, "Als PDF drucken"),
+                !handoverModal.busy && !handoverModal.error && handoverModal.text && handoverModal.kind !== "eltern" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => { setReifePreview(null); doPrint("handover"); } }, "Als PDF drucken"),
                 !handoverModal.busy && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setHandoverModal(null) }, "Schlie\u00DFen"))),
         interessentForm && React.createElement("div", { onClick: () => { if (!interessentForm.busy)
                     setInteressentForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1240, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
