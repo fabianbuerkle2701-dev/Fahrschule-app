@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.28.0";
+const APP_VERSION = "2.29.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.29.0", date: "September 2026", changes: [
+        "Schnellsuche: findet jetzt auch Rechnungen per Nummer (öffnet die Kosten des Schülers), Interessenten per Name und Schüler wie Interessenten per Telefonnummer (ab 4 Ziffern, auch mit 0 statt +49).",
+    ] },
     { v: "2.28.0", date: "September 2026", changes: [
         "Kontoauszug-Abgleich: Zeilen ohne Rechnungsnummer werden jetzt zuerst per Name und Betrag zugeordnet – ohne KI, wenn Vor- und Nachname genau eines Schülers in der Zeile stehen (auch in Bank-Schreibweise wie „MUELLER“) und der Betrag genau einer offenen Rechnung entspricht. Mehrdeutiges bleibt für die KI; gebucht wird weiterhin erst auf Tipp.",
     ] },
@@ -21207,10 +21210,25 @@ function App() {
             { id: "set-hilfe", label: "Hilfe & FAQ", group: "Einstellungen", action: () => goSetting("hilfe") },
             { id: "set-info", label: "Info", group: "Einstellungen", action: () => goSetting("info") },
         ].filter(Boolean);
+        // Telefonnummer mitdurchsuchen (Büro-Alltag: "wer hat gerade angerufen?") - nur Ziffern
+        // vergleichen, ab 4 Ziffern, damit "0" nicht jeden Schüler findet.
+        const qZiffern = q.replace(/\D/g, "");
+        const telTrifft = t => qZiffern.length >= 4 && String(t || "").replace(/\D/g, "").includes(qZiffern.replace(/^0/, ""));
         const studentItems = (students || []).filter(s => !s.archived).map(s => ({
-            id: "stu-" + s.id, label: dispName(s), group: "Schüler", sub: s.klasse || "",
+            id: "stu-" + s.id, label: dispName(s), group: "Schüler", sub: s.klasse || "", tel: s.tel,
             action: () => { setActiveId(s.id); setView("adk"); }
         }));
+        // Rechnungen per Nummer (Produktplan #24): Treffer öffnet die Kosten des Schülers.
+        const rechnungItems = q.length >= 2 ? (students || []).filter(s => s._isMine).flatMap(s => (s.invoices || [])
+            .filter(inv => inv.number && String(inv.number).toLowerCase().includes(q))
+            .map(inv => ({ id: "inv-" + inv.id, label: "Rechnung " + inv.number, group: "Rechnung",
+                sub: dispName(s) + " · " + eurFmt(Number(inv.total) || 0) + (invoiceOpen(s, inv) > 0.005 ? " · offen " + eurFmt(invoiceOpen(s, inv)) : " · bezahlt"),
+                action: () => oeffneSchuelerReiter(s.id, "fahrten") }))).slice(0, 4) : [];
+        // Interessenten (noch keine Schüler): öffnet das Bearbeiten-Fenster auf der Interessenten-Seite.
+        const interessentItems = q.length >= 2 ? (interessenten || [])
+            .filter(i => ((i.vorname || "") + " " + (i.name || "")).toLowerCase().includes(q) || telTrifft(i.tel))
+            .map(i => ({ id: "int-" + i.id, label: ((i.vorname || "") + " " + (i.name || "")).trim() || "Interessent", group: "Interessent", sub: "Interessent" + (i.klasse ? " · Klasse " + i.klasse : ""),
+                action: () => { setView("interessenten"); openInteressentForm(i); } })).slice(0, 3) : [];
         const all = [...pages, ...settingItems, ...studentItems];
         let filtered;
         if (!q) {
@@ -21225,13 +21243,15 @@ function App() {
             const trifft = it => (it.label + " " + (it.keywords || "")).toLowerCase().includes(q);
             const matchedPages = pages.filter(trifft);
             const matchedSettings = settingItems.filter(trifft);
-            const matchedStudents = studentItems.filter(it => it.label.toLowerCase().includes(q));
+            const matchedStudents = studentItems.filter(it => it.label.toLowerCase().includes(q) || telTrifft(it.tel));
             // Nur den Sockel (max. 4) der Schüler-Treffer nehmen, nicht slice(0,n) UND
             // slice(n) - aneinandergehängt ergab das wieder das komplette matchedStudents-Array,
             // wodurch bei >4 Treffern nie Platz für Seiten/Einstellungen blieb (siehe Kommentar
             // oben, der genau das verhindern sollte).
             const studentSlots = Math.min(matchedStudents.length, 4);
-            filtered = [...matchedStudents.slice(0, studentSlots), ...matchedPages, ...matchedSettings].slice(0, 8);
+            // Rechnungen und Interessenten stehen direkt hinter den Schülern: wer eine Nummer oder
+            // einen Namen tippt, sucht meist genau das, nicht eine Seite.
+            filtered = [...matchedStudents.slice(0, studentSlots), ...rechnungItems, ...interessentItems, ...matchedPages, ...matchedSettings].slice(0, 10);
         }
         const idx = Math.min(cmdIndex, Math.max(0, filtered.length - 1));
         function choose(it) {
@@ -21242,7 +21262,7 @@ function App() {
         }
         return React.createElement("div", { className: "modal-overlay cmdk-overlay", role: "dialog", "aria-modal": "true", onClick: () => setCmdOpen(false) },
             React.createElement("div", { className: "cmdk-box", onClick: e => e.stopPropagation() },
-                React.createElement("input", { autoFocus: true, value: cmdQuery, placeholder: "Schüler oder Bereich suchen…", onChange: e => { setCmdQuery(e.target.value); setCmdIndex(0); },
+                React.createElement("input", { autoFocus: true, value: cmdQuery, placeholder: "Schüler, Rechnung, Telefon oder Bereich suchen…", onChange: e => { setCmdQuery(e.target.value); setCmdIndex(0); },
                         onKeyDown: e => {
                             if (e.key === "ArrowDown") {
                                 e.preventDefault();
