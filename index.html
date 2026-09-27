@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.21.0";
+const APP_VERSION = "2.22.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.22.0", date: "September 2026", changes: [
+        "Kosten: Beim Hinzufügen eines Postens lassen sich Pauschalen (Grundbetrag, Theorie, Vorstellung zur Theorieprüfung, Prüfungsreife, Begleitung zur Prüfung) mit einem Tipp aus der Preisliste übernehmen. Schon gebuchte Pauschalen sind markiert.",
+    ] },
     { v: "2.21.0", date: "September 2026", changes: [
         "Prüfungsreife: Die Voraussetzungen zur Prüfungsanmeldung (Theorie, Sonderfahrten, Unterlagen, Konto, festgestellte Reife) stehen jetzt als Checkliste auf einen Blick beisammen.",
         "Prüfungsreife: Feststellen und Zurücknehmen werden jetzt mit Datum und Fahrlehrer im Verlauf festgehalten, statt beim Zurücknehmen spurlos zu verschwinden.",
@@ -8523,6 +8526,23 @@ function preisAusPreisliste(school, klasse, art, heuteKey) {
     const v = posten ? posten.fahrstunde : null;
     const n = typeof v === "number" ? v : parseFloat(String(v == null ? "" : v).replace(",", "."));
     return Number.isFinite(n) && n > 0 ? n : null;
+}
+// Pauschalen der § 32-Preisliste, die als Kostenposten gebucht werden (Fahrstunden laufen über
+// preisAusPreisliste). Nur Posten mit eingetragenem Betrag; vor "Gültig ab" gar keine.
+const PAUSCHAL_KURZ = { grundbetrag: "Grundbetrag", theorie: "Theoretischer Unterricht (pauschal)", theorieWeiter: "Weitere Theorieausbildung",
+    vorstellungTheorie: "Vorstellung zur Theorieprüfung", pruefungsreife: "Feststellung der Prüfungsreife", begleitungPraxis: "Begleitung zur praktischen Prüfung" };
+function pauschalenAusPreisliste(school, klasse, heuteKey) {
+    const pl = school && school.preisliste;
+    if (!pl || !pl.klassen || typeof pl.klassen !== "object")
+        return [];
+    if (pl.gueltigAb && heuteKey && pl.gueltigAb > heuteKey)
+        return [];
+    const posten = pl.klassen[klasse || DEFAULT_KLASSE] || {};
+    return Object.keys(PAUSCHAL_KURZ).map(key => {
+        const v = posten[key];
+        const n = typeof v === "number" ? v : parseFloat(String(v == null ? "" : v).replace(",", "."));
+        return Number.isFinite(n) && n > 0 ? { key, label: PAUSCHAL_KURZ[key], betrag: n } : null;
+    }).filter(Boolean);
 }
 function preispostenFuer(klasse) {
     return PREISPOSTEN_32.filter(p => !p.nurKlassen || p.nurKlassen.indexOf(klasse) >= 0);
@@ -17106,7 +17126,7 @@ function App() {
         const stu = students.find(s => s.id === activeId) || active;
         if (!stu)
             return;
-        writeStudent({ ...stu, costItems: [...(stu.costItems || []), neuerKostenposten({ label: f.label.trim(), amount })] });
+        writeStudent({ ...stu, costItems: [...(stu.costItems || []), neuerKostenposten({ label: f.label.trim(), amount, ...(f.preisposten ? { preisposten: f.preisposten } : {}) })] });
         setItemForm(null);
     }
     // Zahlung beim aktiven Schüler speichern. Gleicher Bugfix wie saveItemForm oben: das paymentForm-
@@ -33193,9 +33213,26 @@ function App() {
                 itemForm.busy
                     ? React.createElement("div", { style: { padding: "24px 0", textAlign: "center", color: "var(--muted)", fontSize: 14 } }, "Liest Beleg…")
                     : React.createElement(React.Fragment, null,
+                        // Schnellwahl aus der § 32-Preisliste: berechnet wird, was gemeldet ist.
+                        (() => {
+                            const pauschalen = active ? pauschalenAusPreisliste(school, active.klasse, ymd(new Date())) : [];
+                            if (!pauschalen.length)
+                                return null;
+                            const gebucht = new Set((active.costItems || []).map(it => it.preisposten).filter(Boolean));
+                            return React.createElement("div", { style: { marginBottom: 14 } },
+                                React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } }, "Aus der Preisliste (Klasse " + (active.klasse || DEFAULT_KLASSE) + ")"),
+                                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, pauschalen.map(p => {
+                                    const gewaehlt = itemForm.preisposten === p.key;
+                                    return React.createElement("button", { key: p.key, type: "button", "aria-pressed": gewaehlt,
+                                        onClick: () => setItemForm({ ...itemForm, label: p.label, amount: p.betrag.toLocaleString("de-DE", { useGrouping: false, maximumFractionDigits: 2 }), preisposten: p.key, error: "" }),
+                                        style: { border: "1.5px solid " + (gewaehlt ? "var(--orange)" : "var(--line)"), background: gewaehlt ? "var(--orange-soft, var(--paper))" : "var(--paper)", color: "var(--ink)",
+                                            borderRadius: 99, padding: "6px 11px", fontSize: 12.5, fontWeight: 600, cursor: "pointer", textAlign: "left" } },
+                                        p.label + " · " + eurFmt(p.betrag), gebucht.has(p.key) && React.createElement("span", { style: { color: "var(--green)", marginLeft: 5 }, title: "schon gebucht" }, "✓ gebucht"));
+                                })));
+                        })(),
                         React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                             React.createElement("label", null, "Bezeichnung",
-                            React.createElement("input", { type: "text", value: itemForm.label, onChange: e => setItemForm({ ...itemForm, label: e.target.value, error: "" }), placeholder: "z.B. Grundgebühr, Lernmaterial", autoFocus: true }))),
+                            React.createElement("input", { type: "text", value: itemForm.label, onChange: e => setItemForm({ ...itemForm, label: e.target.value, preisposten: null, error: "" }), placeholder: "z.B. Grundgebühr, Lernmaterial", autoFocus: true }))),
                         React.createElement("div", { className: "field" },
                             React.createElement("label", { htmlFor: "field-itemform-betrag" }, "Betrag"),
                             React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
