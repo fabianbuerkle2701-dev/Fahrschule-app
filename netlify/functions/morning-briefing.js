@@ -80,6 +80,12 @@ exports.handler = async function (event, context) {
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Unbekannter Buchungslink" }) };
   }
 
+  // KI-Schalter der Fahrschule (v2.38.0): hat der Admin KI ausgeschaltet, gar nicht erst zählen oder
+  // an Anthropic schicken. Nur ein explizites false sperrt - Lesefehler zählen hier nicht.
+  if ((await rpc("public_ki_erlaubt", { code })) === false) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: "KI-Funktionen sind für diese Fahrschule ausgeschaltet." }) };
+  }
+
   // Eigenes, niedrigeres Limit als der Buchungs-Chat: ein Fahrlehrer öffnet sein Dashboard
   // öfter am Tag als ein Interessent chattet, aber ein Briefing braucht nicht bei jedem
   // Öffnen neu erzeugt zu werden - der Client ruft das ohnehin nur auf Knopfdruck ab.

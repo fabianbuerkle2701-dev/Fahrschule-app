@@ -95,6 +95,12 @@ exports.handler = async function (event, context) {
     return { statusCode: 404, headers, body: JSON.stringify({ error: "Unbekannter Buchungslink" }) };
   }
 
+  // KI-Schalter der Fahrschule (v2.38.0): hat der Admin KI ausgeschaltet, gar nicht erst zählen oder
+  // an Anthropic schicken. Nur ein explizites false sperrt - Lesefehler zählen hier nicht.
+  if ((await rpc("public_ki_erlaubt", { code })) === false) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: "KI-Funktionen sind für diese Fahrschule ausgeschaltet." }) };
+  }
+
   // Zweite, an den Aufrufer gebundene Zähldimension. Vorher hing das Tageslimit allein am
   // Buchungscode, und der ist kein Geheimnis (er steht in jedem verschickten Buchungslink):
   // eine curl-Schleife von einem einzigen Rechner konnte damit in Sekunden das gesamte

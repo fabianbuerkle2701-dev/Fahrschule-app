@@ -3477,7 +3477,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.37.0";
+const APP_VERSION = "2.38.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3621,6 +3621,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.38.0", date: "September 2026", changes: [
+            "Neu: KI-Schalter je Fahrschule (Einstellungen, nur für Fahrschul-Admins). Ausgeschaltet sind KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen für alle Konten der Fahrschule gesperrt, und es gehen keine Daten an den KI-Anbieter. Die Sperre gilt auf dem Server, nicht nur in der Anzeige. Voreinstellung bleibt „an“",
+        ] },
     { v: "2.37.0", date: "September 2026", changes: [
         "Einstellungen › Daten & Sicherung: Neuer Bereich „Für Excel exportieren“ – Schülerliste mit Stammdaten, Lebensphase, Fahrstunden und offenem Betrag, Rechnungen, Zahlungen und Termine jeweils als Tabelle, die sich direkt in Excel, Numbers oder LibreOffice öffnet.",
     ] },
@@ -6849,6 +6852,9 @@ async function saveSchool(school) {
         // Wie oben: jedes neue Fahrschul-Feld MUSS hier explizit auftauchen, sonst wirkt es nur
         // lokal und ist nach dem naechsten Laden wieder weg.
         datev_settings: school.datev_settings || {},
+        // KI-Schalter (v2.38.0): nur mitschicken, wenn der Wert geladen ist - sonst würde ein alter
+        // Stand ohne das Feld die Einstellung still auf "an" zurücksetzen.
+        ...(typeof school.ki_aus === "boolean" ? { ki_aus: school.ki_aus } : {}),
         zahlungsziel_tage: numOrNull(school.zahlungsziel_tage), planung_puffer_wochen: numOrNull(school.planung_puffer_wochen),
         bundesland: school.bundesland || null };
     // Unlesbare Zahl (NaN) nicht mitschicken: JSON machte daraus null und löschte den gespeicherten
@@ -14136,6 +14142,7 @@ function App() {
     // Zahlen in einen kurzen KI-Text verwandeln kann, ohne die Logik zu duplizieren.
     async function ladeBriefing(setter, facts, kind) {
         if (IS_DEMO()) { setter({ busy:false, text:null, err:"Im Demo-Modus ist der KI-Tagesbriefing deaktiviert." }); return; }
+        if (kiAus) { setter({ busy:false, text:null, err:"KI-Funktionen sind für deine Fahrschule ausgeschaltet." }); return; }
         setter({ busy: true, text: null, err: null });
         try {
             let code = bookingCode;
@@ -14548,6 +14555,10 @@ function App() {
     // (keine Warnung, keine Gebührenfrage) - bewusst wie noShowFeeDefault standardmäßig aus, damit
     // sich am Verhalten für Fahrschulen ohne eigene Regelung dazu nichts ändert.
     const stornoFristStunden = (school && school.storno_frist_stunden != null) ? Number(school.storno_frist_stunden) : null;
+    // KI-Schalter je Fahrschule (v2.38.0): durchgesetzt wird serverseitig (ki-guard + öffentliche
+    // KI-Functions), hier nur Anzeige und Einstiege ausblenden.
+    const kiAus = !!(school && school.ki_aus === true);
+    function saveKiAus(aus) { if (school) writeSchool(s => s && ({ ...s, ki_aus: !!aus })); }
     function saveStornoFristStunden(v) { if (school)
         writeSchool(s => s && ({ ...s, storno_frist_stunden: (v === "" ? null : Number(v)) })); }
     // Zahlungsziel für "überfällig" (Mahnungen-Cockpit, Abrechnung): war an zwei Stellen fest auf
@@ -31129,6 +31140,13 @@ function App() {
                                     React.createElement(EntwurfFeld, { id: "field-ausfallgebuehr-standard", inputMode: "decimal", wert: noShowFeeDefault, parse: parseBetragFeld, anzeige: betragAnzeige, leerWert: null, onWert: saveNoShowFeeDefault, placeholder: "z.B. 30", style: { flex: 1 } }),
                                     React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, color: "var(--muted)" } }, "€"))),
                             React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "10px 0 14px", lineHeight: 1.5 } }, "Vorgeschlagener Betrag beim Melden eines Nichterscheinens (Schülerseite, „Zuverlässigkeit\"). Leer lassen für automatisch die Hälfte des UE-Preises - in beiden Fällen frei anpassbar, bevor die Gebühr gebucht wird."),
+                            isSchoolAdmin && React.createElement("div", { className: "field" },
+                                React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 10, cursor: "pointer" } },
+                                    React.createElement("input", { type: "checkbox", checked: !kiAus, onChange: e => saveKiAus(!e.target.checked), style: { width: 20, height: 20, flexShrink: 0 } }),
+                                    React.createElement("span", { style: { fontWeight: 700 } }, "KI-Funktionen für die Fahrschule")),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 0 14px", lineHeight: 1.5 } },
+                                    kiAus ? "Aus: KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen sind für alle Konten deiner Fahrschule gesperrt. Es gehen keine Daten an den KI-Anbieter."
+                                          : "An: KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen nutzen einen externen KI-Anbieter (Anthropic). Ausschalten sperrt sie für alle Konten deiner Fahrschule.")),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", { htmlFor: "field-storno-frist" }, "Stornofrist (optional)"),
                                 React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
@@ -33132,7 +33150,7 @@ function App() {
                 // zuklappte (Audit I-N19).
                 tabMenu && tabMenu.indexOf("sb-") !== 0 && React.createElement("div", { onClick: () => setTabMenu(null), className: "modal-overlay", style: { position: "fixed", inset: 0, zIndex: 46 } }),
                 cmdOpen && renderCommandPalette(),
-                React.createElement("button", { onClick: () => setAssistant({ open: true, busy: false, error: "", input: "", proposal: null }), "aria-label": "KI-Helfer", className: "fab-assistant", style: { position: "fixed", right: 16, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 47,
+                !kiAus && React.createElement("button", { onClick: () => setAssistant({ open: true, busy: false, error: "", input: "", proposal: null }), "aria-label": "KI-Helfer", className: "fab-assistant", style: { position: "fixed", right: 16, bottom: "calc(76px + env(safe-area-inset-bottom))", zIndex: 47,
                         width: 54, height: 54, borderRadius: "50%", border: "none", background: "var(--orange)", color: "#fff",
                         boxShadow: "0 6px 18px rgba(0,0,0,.28)", display: "flex", alignItems: "center", justifyContent: "center" } },
                     React.createElement("svg", { width: "26", height: "26", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
