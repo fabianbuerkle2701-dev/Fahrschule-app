@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.22.0";
+const APP_VERSION = "2.22.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.22.1", date: "September 2026", changes: [
+        "Terminanfragen: Auf der Buchungsseite sind belegte oder schon angefragte Zeiten jetzt gesperrt und als „belegt“ markiert; überschneidende Wunschtermine werden vor dem Absenden abgefangen.",
+        "Startseite: Ein Tipp auf „Nächster Termin“ wählt wieder den Schüler dieses Termins aus und öffnet seine Ausbildung.",
+        "Beim Öffnen der App ist der Schüler schon ausgewählt, wenn seine Fahrstunde in den nächsten 10 Minuten beginnt (bisher erst, wenn sie schon lief).",
+    ] },
     { v: "2.22.0", date: "September 2026", changes: [
         "Kosten: Beim Hinzufügen eines Postens lassen sich Pauschalen (Grundbetrag, Theorie, Vorstellung zur Theorieprüfung, Prüfungsreife, Begleitung zur Prüfung) mit einem Tipp aus der Preisliste übernehmen. Schon gebuchte Pauschalen sind markiert.",
     ] },
@@ -13127,6 +13132,9 @@ function rmapFmtDur(sec) { const m = Math.round(sec / 60); if (m < 60)
 // das hier greift nur bei der Ausgangsauswahl.
 function findCurrentApptStudentId(appts) {
     const now = Date.now();
+    // Wer die App kurz vor der Fahrstunde öffnet, soll den Schüler schon vorfinden: Termine, die in
+    // den nächsten 10 Minuten beginnen, zählen mit - ein gerade laufender geht aber vor.
+    const vorlauf = 10 * 60000;
     // Fehlende Endzeit wie überall sonst im File mit +45 Min annehmen (z.B. findOverlaps,
     // apptMin) - sonst liefert new Date(null).getTime() den Unix-Epoch (0) und ein wirklich
     // gerade laufender Termin ohne end_at wird nie als "aktuell" erkannt.
@@ -13136,7 +13144,8 @@ function findCurrentApptStudentId(appts) {
         const start = new Date(a.start_at).getTime();
         const end = a.end_at ? new Date(a.end_at).getTime() : start + 45 * 60000;
         return start <= now && now <= end;
-    });
+    }) || (appts || []).filter(a => a.status === "confirmed" && a.student_id && new Date(a.start_at).getTime() > now
+        && new Date(a.start_at).getTime() - vorlauf <= now).sort((a, b) => new Date(a.start_at) - new Date(b.start_at))[0];
     return current ? current.student_id : null;
 }
 // Läuft diese Seite in der nativen Fahrlehrer-App (Capacitor)? Nur dort existiert das
@@ -21304,10 +21313,16 @@ function App() {
             // als selbst gebautes SVG: der Auftrag verlangt zwar eigene SVGs, im direkten Vergleich
             // sah die SVG-Variante aber deutlich schlechter aus (Nutzer-Entscheidung 2026-09-13).
             // Die Zeile in "Heute" unten bleibt trotzdem bestehen (vollständige Liste).
-            // Der Knopf heißt "Zum Termin →", führte mit Schüler aber in dessen ADK-Checkliste und
-            // ohne Schüler in den Kalender auf der gerade eingestellten Woche. Jetzt immer zum Tag
-            // des Termins, wie die Karte "Nächste Fahrstunde" in der Übersicht (Audit H-M4).
+            // Mit Schüler: dessen Ausbildung öffnen und ihn damit auswählen - so war die Karte von
+            // Fabian gedacht; das Audit (H-M4) hatte das auf "immer Kalender" umgestellt, danach war
+            // der Schüler des nächsten Termins nicht mehr per Tipp gewählt (Meldung 2026-09-27).
+            // Ohne Schüler (privater Termin o. ä.): zum Tag des Termins im Kalender.
             naechster ? React.createElement("button", { onClick: () => {
+                    if (naechsterStu) {
+                        setActiveId(naechsterStu.id);
+                        setView("adk");
+                        return;
+                    }
                     zeigeKalenderTag(naechster.start_at, "tag");
                     setView("kalender");
                 }, className: "card soft", style: { width: "100%", textAlign: "left", padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
@@ -39823,6 +39838,17 @@ function BookingPage({ code, appMode, onLogout }) {
                 setErr("Die Endzeit (" + (s.end || "–") + " Uhr) muss nach der Startzeit (" + s.start + " Uhr) liegen. Bitte korrigieren.");
                 return;
             }
+            // Terminanfragen dürfen sich nicht überschneiden (Vorgabe Fabian, 2026-09-27) - weder mit
+            // bestehenden Terminen noch mit offenen Anfragen anderer, noch untereinander im selben
+            // Formular. Der Server prüft dasselbe noch einmal (OVERLAP).
+            if (kollidiert(s.date, s.start, hmZuMin(s.end) - hmZuMin(s.start))) {
+                setErr(s.start + "–" + s.end + " Uhr am " + dTxt + " ist schon belegt oder angefragt. Bitte eine andere Zeit wählen.");
+                return;
+            }
+            if (plan.some(o => o !== s && o.date === s.date && o.start && o.end && o.start < s.end && s.start < o.end)) {
+                setErr("Zwei deiner Wunschtermine am " + dTxt + " überschneiden sich. Bitte einen davon ändern.");
+                return;
+            }
             // Fahrlehrer-Limit (M5): gleiche Sperre wie "Ausgebucht" in der Tageskarte, auch
             // wenn der Tag über "+ Termin vorschlagen" oder den runden Knopf gewählt wurde.
             const voll = tagVoll(s.date);
@@ -40343,10 +40369,19 @@ function BookingPage({ code, appMode, onLogout }) {
                             return React.createElement(React.Fragment, null,
                                 React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                                     React.createElement("label", { htmlFor: "slot-von-" + i }, "Von"),
-                                    React.createElement("select", { id: "slot-von-" + i, value: effStart, onChange: e => updateSlot(i, { start: e.target.value }) }, startOpts.map(t => React.createElement("option", { key: t, value: t }, t + " Uhr")))),
+                                    React.createElement("select", { id: "slot-von-" + i, value: effStart, onChange: e => updateSlot(i, { start: e.target.value }) }, startOpts.map(t => {
+                                        // Belegt/angefragt: schon die erste Viertelstunde ab hier ist vergeben.
+                                        const belegt = t !== effStart && kollidiert(s.date, t, 15);
+                                        return React.createElement("option", { key: t, value: t, disabled: belegt }, t + " Uhr" + (belegt ? " (belegt)" : ""));
+                                    }))),
                                 React.createElement("div", { className: "field", style: { marginBottom: 0 } },
                                     React.createElement("label", { htmlFor: "slot-bis-" + i }, "Bis"),
-                                    React.createElement("select", { id: "slot-bis-" + i, value: effEnd, onChange: e => updateSlot(i, { end: e.target.value }) }, endOpts.map(t => React.createElement("option", { key: t, value: t }, endLabel(t))))),
+                                    React.createElement("select", { id: "slot-bis-" + i, value: effEnd, onChange: e => updateSlot(i, { end: e.target.value }) }, endOpts.map(t => {
+                                        const belegt = t !== effEnd && kollidiert(s.date, effStart, toMin(t) - toMin(effStart));
+                                        return React.createElement("option", { key: t, value: t, disabled: belegt }, endLabel(t) + (belegt ? " (belegt)" : ""));
+                                    }))),
+                                effStart && effEnd && kollidiert(s.date, effStart, toMin(effEnd) - toMin(effStart)) && React.createElement("div", { role: "alert", style: { background: "var(--danger-bg)", color: "var(--red-ink)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, fontWeight: 700, lineHeight: 1.5 } },
+                                    "Diese Zeit ist schon belegt oder angefragt. Bitte eine andere Zeit wählen."),
                                 dauer > 0 && (dauer < 45
                                     ? React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 9, padding: "9px 11px", marginTop: 8, fontSize: 12.5, lineHeight: 1.5 } },
                                         "Nur " + dauer + " Minuten - das ist k\u00FCrzer als eine Fahrstunde (45 Minuten). Bitte nur so vorschlagen, wenn du es mit deinem Fahrlehrer so besprochen hast.")

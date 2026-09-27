@@ -165,3 +165,16 @@ test("Unterlagen-Schritt: Theorie kommt aus dem Theorie-Feld", () => {
 test("ymd: lokales Datum ohne Zeitzonen-Versatz", () => {
     assert.equal(app.ymd(new Date(2026, 8, 27)), "2026-09-27");
 });
+
+test("Schüler-Vorauswahl beim Start: laufender Termin, sonst einer in den nächsten 10 Minuten", () => {
+    const { findCurrentApptStudentId: f } = require("./lade-app")(["findCurrentApptStudentId"]);
+    const iso = (minVonJetzt) => new Date(Date.now() + minVonJetzt * 60000).toISOString();
+    const laufend = { status: "confirmed", student_id: "A", start_at: iso(-20), end_at: iso(25) };
+    const gleich = { status: "confirmed", student_id: "B", start_at: iso(8), end_at: iso(53) };
+    const spaeter = { status: "confirmed", student_id: "C", start_at: iso(30), end_at: iso(75) };
+    const anfrage = { status: "pending", student_id: "D", start_at: iso(5), end_at: iso(50) };
+    assert.equal(f([gleich, laufend]), "A", "laufender Termin geht vor");
+    assert.equal(f([spaeter, gleich]), "B");
+    assert.equal(f([spaeter]), null, "mehr als 10 Minuten entfernt: keine Vorauswahl");
+    assert.equal(f([anfrage]), null, "offene Anfragen zählen nicht");
+});
