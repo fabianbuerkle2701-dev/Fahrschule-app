@@ -12,6 +12,7 @@ const app = require("./lade-app")([
     "preisAusPreisliste", "pauschalenAusPreisliste", "PREISPOSTEN_32",
     "fahrtenbuchAusAbschluss", "letzteBewertungen", "licenseStepDone",
     "APP_VERSION", "CHANGELOG",
+    "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -394,4 +395,26 @@ test("CSV für Excel: Semikolon, Dezimalkomma, BOM, Schutz gegen Formel-Injektio
     assert.equal(z[1], "\"'=HYPERLINK(\"\"x\"\")\";1234,5;ja", "Formel wird entschärft und gequotet");
     assert.equal(z[2], "\"Müller; Anna\";'-10;nein".replace("'-10", "-10"), "Semikolon im Text wird gequotet, Zahl bleibt Zahl");
     assert.equal(z[3], "\"  Leer \";;nein");
+});
+
+test("Offline-Warteschlange: Felder sammeln, ganzer Datensatz schluckt Feldlisten", () => {
+    let ws = app.warteschlangeVormerken({}, "s1", ["items"], 100);
+    ws = app.warteschlangeVormerken(ws, "s1", ["lessons", "items"], 200);
+    assert.deepEqual(rein(ws.s1), { keys: ["items", "lessons"], seit: 100, n: 2 });
+    ws = app.warteschlangeVormerken(ws, "s1", null, 300);
+    assert.equal(ws.s1.keys, null);
+    ws = app.warteschlangeVormerken(ws, "s1", ["tel"], 400);
+    assert.equal(ws.s1.keys, null, "einmal ganzer Datensatz bleibt ganzer Datensatz");
+    assert.equal(app.warteschlangeVormerken({}, "s2", [], 1).s2.keys, null, "leere Feldliste = ganzer Datensatz");
+});
+
+test("Offline-Warteschlange: erledigt nur, wenn seitdem nichts Neues dazukam", () => {
+    let ws = app.warteschlangeVormerken({}, "s1", ["items"], 1);
+    const nr = ws.s1.n;
+    ws = app.warteschlangeVormerken(ws, "s1", ["lessons"], 2); // Änderung während des Speicherns
+    assert.ok(app.warteschlangeErledigt(ws, "s1", nr).s1, "neuere Änderung darf nicht verschwinden");
+    assert.equal(app.warteschlangeErledigt(ws, "s1", ws.s1.n).s1, undefined);
+    assert.equal(app.warteschlangeErledigt(ws, "s1").s1, undefined, "ohne Nummer: immer entfernen (verwaist)");
+    ws = { a: { keys: null, n: 1, netz: true }, b: { keys: null, n: 1, netz: false }, c: { keys: null, n: 1 } };
+    assert.equal(app.warteschlangeOffline(ws), 1);
 });

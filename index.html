@@ -43,6 +43,15 @@
       if (m) m.setAttribute("content", "width=device-width, initial-scale=1.0, viewport-fit=cover");
     } catch (e) { /* im Zweifel gesperrt lassen - das ist der harmlosere Fehler */ }
   })();
+  // Offline-Start (v2.39.0, siehe sw.js): nur im Browser über https. In der nativen App lädt die
+  // WebView die Seite selbst; dort hilft der Service Worker nicht zuverlässig und bleibt aus.
+  (function () {
+    try {
+      var nativ = window.Capacitor && typeof window.Capacitor.isNativePlatform === "function" && window.Capacitor.isNativePlatform();
+      if (nativ || !("serviceWorker" in navigator) || location.protocol !== "https:") return;
+      window.addEventListener("load", function () { navigator.serviceWorker.register("/sw.js").catch(function () {}); });
+    } catch (e) { }
+  })();
 
   // ── Tastaturhoehe als --kb bereitstellen ───────────────────────────────────────────────
   // iOS verkleinert beim Aufklappen der Tastatur NICHT das Layout-Viewport, sondern schiebt nur
@@ -371,6 +380,7 @@
   .save-pill{display:block;font-size:10.5px;font-weight:700;background:transparent;color:var(--muted);
     border-radius:99px;padding:4px 0;white-space:nowrap;text-align:right;border:none}
   .save-pill.err{color:var(--red-ink);text-decoration:underline;min-height:44px;padding:0 6px}
+  .save-pill.off{color:var(--amber-ink);min-height:44px;padding:0 6px;cursor:pointer}
   /* Handy-Kopfzeile (375px): "✓ Gespeichert" brauchte ~75px - der Fahrschulname daneben wurde
      auf "Fa…" gekürzt. Unter 480px daher nur ein Symbol; der Text bleibt für Screenreader im
      DOM (role=status/aria-live liest ihn weiter vor). Der Fehlerzustand bleibt ein
@@ -382,10 +392,12 @@
     .save-pill.err{min-width:44px}
     .save-pill.err .save-pill-err-lang{display:none}
     .save-pill.err .save-pill-err-kurz{display:inline}
-    .save-pill:not(.err){display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0}
-    .save-pill:not(.err) .save-pill-ico{display:block}
-    .save-pill:not(.err) .save-pill-ico.dreht{animation:save-pill-dreh 1s linear infinite}
-    .save-pill:not(.err) .save-pill-text{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+    .save-pill.off .save-pill-err-lang{display:none}
+    .save-pill.off .save-pill-err-kurz{display:inline}
+    .save-pill:not(.err):not(.off){display:flex;align-items:center;justify-content:center;width:24px;height:24px;padding:0}
+    .save-pill:not(.err):not(.off) .save-pill-ico{display:block}
+    .save-pill:not(.err):not(.off) .save-pill-ico.dreht{animation:save-pill-dreh 1s linear infinite}
+    .save-pill:not(.err):not(.off) .save-pill-text{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
       clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap;border:0}
   }
   /* Kompaktes Wetter-Pill oben rechts in der Kopfzeile (Redesign 2026) - nur Icon + aktuelle
@@ -3477,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.38.0";
+const APP_VERSION = "2.39.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3621,6 +3633,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.39.0", date: "September 2026", changes: [
+            "Neu: Offline-Speicherung. Fahrstunden-Einträge, ADK-Haken, Bewertungen, Zahlungen und alle anderen Schülerdaten werden zuerst auf dem Gerät und dann online gespeichert. Ohne Netz bleiben sie sicher auf dem Gerät (auch wenn die App geschlossen wird) und gehen automatisch raus, sobald wieder Verbindung da ist. Die Kopfzeile zeigt „Offline gespeichert · N wartet“; Antippen versucht es sofort erneut",
+            "Termine werden auf dem Gerät gespiegelt und sind ohne Netz weiter sichtbar. Anlegen und Ändern von Terminen braucht weiterhin Internet, weil Schüler gleichzeitig online buchen - die Meldung sagt das jetzt klar statt eines technischen Netzwerkfehlers",
+            "Im Browser startet die App jetzt auch ohne Netz (zuletzt geladener Stand)",
+        ] },
     { v: "2.38.0", date: "September 2026", changes: [
             "Neu: KI-Schalter je Fahrschule (Einstellungen, nur für Fahrschul-Admins). Ausgeschaltet sind KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen für alle Konten der Fahrschule gesperrt, und es gehen keine Daten an den KI-Anbieter. Die Sperre gilt auf dem Server, nicht nur in der Anzeige. Voreinstellung bleibt „an“",
         ] },
@@ -5737,6 +5754,63 @@ function saveTplCache(uid, tpl) { try {
     localStorage.setItem(tplKey(uid), JSON.stringify(tpl));
 }
 catch (e) { } }
+/* ════════ Offline-Warteschlange + Terminspiegel (v2.39.0) ════════
+   Schüler-Änderungen (Fahrstunden, ADK, Zahlungen, Bewertungen …) landen zuerst im lokalen
+   Zwischenspeicher (v3_cache_<uid>) und dann beim Server. Scheiterte der Server, lebte die Änderung
+   bisher nur noch im Arbeitsspeicher - startete die App danach (z.B. im Funkloch) neu, überschrieb
+   der erste erfolgreiche Abruf den lokalen Stand und die Änderung war weg. Die Warteschlange merkt
+   sich dauerhaft, welche Schüler (und welche Felder) noch nicht beim Server sind. Diese Schüler
+   behalten beim Laden ihren lokalen Stand und werden nachgesendet, sobald wieder Netz da ist.
+   Eintrag je Schüler-ID: { keys: [Feldnamen] | null (= ganzer Datensatz), seit, n, netz }.
+   n zählt Vormerkungen: ein erfolgreiches Speichern entfernt den Eintrag nur, wenn seitdem keine
+   neue Änderung dazukam. netz: letzter Fehlschlag war ein Verbindungsproblem (automatisch
+   nachsenden) - bei echten Serverfehlern bleibt der Eintrag, wird aber nicht endlos wiederholt. */
+function outboxKey(uid) { return "v3_outbox_" + uid; }
+function ladeWarteschlange(uid) { try {
+    const r = localStorage.getItem(outboxKey(uid));
+    const o = r ? JSON.parse(r) : null;
+    if (o && typeof o === "object" && !Array.isArray(o))
+        return o;
+}
+catch (e) { } return {}; }
+function speichereWarteschlange(uid, ws) { try {
+    if (ws && Object.keys(ws).length)
+        localStorage.setItem(outboxKey(uid), JSON.stringify(ws));
+    else
+        localStorage.removeItem(outboxKey(uid));
+}
+catch (e) { } }
+function warteschlangeVormerken(ws, id, keys, jetzt) {
+    const alt = ws[id];
+    const ganz = !keys || !keys.length || (alt && alt.keys === null);
+    const k = ganz ? null : Array.from(new Set([...(alt ? alt.keys : []), ...keys]));
+    return { ...ws, [id]: { keys: k, seit: alt ? alt.seit : jetzt, n: (alt ? alt.n : 0) + 1, netz: alt ? alt.netz : undefined } };
+}
+function warteschlangeErledigt(ws, id, n) {
+    if (!ws[id] || (n !== undefined && ws[id].n !== n))
+        return ws;
+    const rest = { ...ws };
+    delete rest[id];
+    return rest;
+}
+function warteschlangeOffline(ws) { return Object.keys(ws || {}).filter(id => ws[id] && ws[id].netz === true).length; }
+// Offline oder Verbindungsabbruch - im Gegensatz zu einem echten Serverfehler (Rechte, Prüfung).
+function istOfflineFehler(e) {
+    return (typeof navigator !== "undefined" && navigator.onLine === false) || isTransientNetworkError(e);
+}
+// Eigene Termine als lokaler Spiegel: ohne Netz bleibt der Kalender lesbar statt leer.
+function apptCacheKey(uid) { return "v3_appts_" + uid; }
+function ladeTerminCache(uid) { try {
+    const r = localStorage.getItem(apptCacheKey(uid));
+    const a = r ? JSON.parse(r) : null;
+    if (Array.isArray(a))
+        return a;
+}
+catch (e) { } return null; }
+function speichereTerminCache(uid, list) { try {
+    localStorage.setItem(apptCacheKey(uid), JSON.stringify((list || []).filter(a => a && a.owner === uid)));
+}
+catch (e) { } }
 function schoolKey(uid) { return "v3_school_" + uid; }
 // Alle kontobezogenen Zwischenspeicher dieses Geraets loeschen. Wird beim Abmelden gerufen:
 // v3_cache_<uid> enthaelt die vollstaendige Schuelerkartei im Klartext (Namen, Anschriften,
@@ -5757,7 +5831,7 @@ function clearAccountCaches(uid) {
         // aufzubewahrenden Ausbildungsnachweises. Der eigene Schlüssel je Konto (uid-gebunden)
         // verhindert ohnehin schon, dass sie einem zweiten Fahrlehrer auf demselben Gerät angezeigt
         // wird - dafür muss sie nicht gelöscht werden.
-        [cacheKey(uid), tplKey(uid), schoolKey(uid), recBufferKey(uid),
+        [cacheKey(uid), tplKey(uid), schoolKey(uid), recBufferKey(uid), outboxKey(uid), apptCacheKey(uid),
             "v3_bday_shown_" + uid,
             "v3_packages_" + uid, "v3_price_hour_" + uid,
             // Buchungslimits sind (noch) geräteweit gespeichert - sonst startete das nächste Konto
@@ -9767,6 +9841,15 @@ function showToast(msg, tone) { if (_toastSetter)
 // "new row violates row-level security policy for table students". Genau die drei Fälle, in denen
 // eine gute Meldung eine konkrete Handlung auslöst (kein Netz / neu anmelden / keine Berechtigung),
 // kamen als Text an, der nur beunruhigt. (Designprüfung 2026-09-14)
+// Termine bewusst NICHT offline vormerken: Schüler buchen gleichzeitig online, ein später
+// nachgesendeter Termin könnte eine inzwischen vergebene Zeit doppelt belegen. Stattdessen eine
+// klare Meldung statt eines technischen Netzwerkfehlers.
+const OFFLINE_LADEHINWEIS = "Keine Verbindung – du siehst den zuletzt auf diesem Gerät gespeicherten Stand. Fahrstunden, ADK und Zahlungen kannst du trotzdem eintragen, sie werden automatisch übertragen, sobald wieder Netz da ist.";
+function terminFehlerText(titel, e) {
+    if (istOfflineFehler(e))
+        return titel + ":\nKeine Verbindung. Termine lassen sich nur mit Internet anlegen oder ändern, weil Schüler gleichzeitig online buchen. Fahrstunden-Einträge, ADK und Zahlungen werden dagegen auch offline gespeichert.";
+    return titel + ":\n" + fehlerText(e);
+}
 function fehlerText(e) {
     const m = String((e && e.message) || e || "");
     if (/Failed to fetch|NetworkError|Load failed|ERR_INTERNET|offline/i.test(m))
@@ -15114,7 +15197,8 @@ function App() {
     // (Abschluss-Audit). Liefert die neue Liste; Cache schreibt der Aufrufer.
     function schuelerListeEinspielen(list, startedAt) {
         const writes = studentWritesRef.current, touched = studentTouchedRef.current;
-        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt;
+        const ws = warteschlangeRef.current;
+        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt || !!ws[id];
         const byId = new Map((list || []).map(s => [s.id, s]));
         return updateStudents(prev => {
             const merged = (prev || [])
@@ -15216,6 +15300,53 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    // Offline-Warteschlange (siehe warteschlangeVormerken): Stand im Speicher + Anzeige-Zähler.
+    const warteschlangeRef = useRef({});
+    const uidRef = useRef(uid);
+    uidRef.current = uid;
+    const [offlineWartend, setOfflineWartend] = useState(0);
+    const [offline, setOffline] = useState(() => typeof navigator !== "undefined" && navigator.onLine === false);
+    const nachsendenRef = useRef(null);
+    // Vor dem Lade-Effekt deklariert: der liest warteschlangeRef beim Einspielen der Serverliste.
+    useEffect(() => {
+        warteschlangeRef.current = uid && !IS_DEMO() ? ladeWarteschlange(uid) : {};
+        setOfflineWartend(warteschlangeOffline(warteschlangeRef.current));
+        if (!uid)
+            return;
+        const nachsenden = () => { if (nachsendenRef.current) nachsendenRef.current(false); };
+        // Wieder online: nachsenden und die vorhandenen Fokus-Neulader (Schüler, Termine) anstoßen -
+        // nach einem Offline-Start stand sonst bis zum nächsten App-Wechsel der alte Stand da.
+        const an = () => {
+            setOffline(false);
+            setLoadErr(e => e === OFFLINE_LADEHINWEIS ? "" : e);
+            nachsenden();
+            try { window.dispatchEvent(new Event("focus")); } catch (e) { }
+        };
+        const aus = () => setOffline(true);
+        const sichtbar = () => { if (document.visibilityState === "visible" && navigator.onLine !== false) nachsenden(); };
+        window.addEventListener("online", an);
+        window.addEventListener("offline", aus);
+        document.addEventListener("visibilitychange", sichtbar);
+        // Sicherheitsnetz: "online" feuert nicht zuverlässig (WLAN ohne Internet, Funkloch im Auto).
+        const t = setInterval(() => {
+            const ws = warteschlangeRef.current;
+            if (Object.keys(ws).some(id => ws[id] && ws[id].netz !== false))
+                nachsenden();
+        }, 30000);
+        return () => {
+            window.removeEventListener("online", an);
+            window.removeEventListener("offline", aus);
+            document.removeEventListener("visibilitychange", sichtbar);
+            clearInterval(t);
+        };
+    }, [uid]);
+    // Terminspiegel schreiben (gebündelt), nur eigene Termine des angemeldeten Kontos.
+    useEffect(() => {
+        if (!uid || IS_DEMO())
+            return;
+        const t = setTimeout(() => speichereTerminCache(uid, appts), 800);
+        return () => clearTimeout(t);
+    }, [uid, appts]);
     const [deviceToken, setDeviceToken] = useState(null); // aktueller APNs-Token dieses Geräts (nur nativ)
     // Muss hier (vor den frühen Returns für session===undefined/null unten) stehen, nicht erst
     // bei generateHandoverSummary weiter unten - sonst wird dieser Hook nur aufgerufen, wenn
@@ -16285,6 +16416,9 @@ function App() {
             updateStudents(cached);
             setActiveId(a => a || cached[0].id);
         }
+        const cachedAppts = IS_DEMO() ? null : ladeTerminCache(uid);
+        if (cachedAppts && cachedAppts.length)
+            setAppts(cachedAppts);
         const cachedTpl = loadTplCache(uid);
         if (cachedTpl)
             putTpl(cachedTpl);
@@ -16342,7 +16476,7 @@ function App() {
             // loadErr, bisheriger Stand bleibt) - nie eine id-lose Ersatz-Fahrschule einsetzen.
             if (cachedSchool && cachedSchool.id) {
                 if (!cancelled)
-                    setLoadErr(String(err && err.message ? err.message : err));
+                    setLoadErr(istOfflineFehler(err) ? OFFLINE_LADEHINWEIS : String(err && err.message ? err.message : err));
                 // Den aktuellen Stand statt des Cache-Objekts zurückgeben: die Retries dauern
                 // Sekunden, eine in der Zeit gemachte Einstellungs-Änderung (writeSchool) würde
                 // sonst unten per putSchool/saveSchoolCache auf den alten Cache zurückgedreht.
@@ -16429,6 +16563,10 @@ function App() {
             myRights = rights;
             setSyncing(false);
             saveCache(uid, schuelerListeEinspielen(list || [], ladeStart));
+            // Was beim letzten Mal nicht mehr beim Server ankam, jetzt nachsenden (lokaler Stand
+            // ist durch schuelerListeEinspielen erhalten geblieben).
+            if (Object.keys(warteschlangeRef.current).length)
+                setTimeout(() => { if (!cancelled) warteschlangeNachsenden(true); }, 0);
             setActiveId(a => {
                 const currentStuId = findCurrentApptStudentId(apptData);
                 if (currentStuId && list.find(s => s.id === currentStuId))
@@ -16463,7 +16601,7 @@ function App() {
             if (cancelled)
                 return;
             setSyncing(false);
-            setLoadErr(String(err && err.message ? err.message : err));
+            setLoadErr(istOfflineFehler(err) ? OFFLINE_LADEHINWEIS : String(err && err.message ? err.message : err));
             if (!cached)
                 updateStudents([]); // don't stay stuck on grey
             if (!cachedTpl)
@@ -17111,11 +17249,19 @@ function App() {
         if (!hasPendingSave(key))
             studentWriteDelta(stu.id, 1);
         studentTouchedRef.current.set(stu.id, Date.now());
+        // Sofort dauerhaft vormerken (nicht erst beim Fehlschlag): wird die App in den nächsten
+        // Sekunden beendet, weiß der nächste Start trotzdem, dass dieser Schüler noch offen ist.
+        if (!IS_DEMO()) {
+            const d = dirtyKeysRef.current[stu.id];
+            warteschlangeSetzen(warteschlangeVormerken(warteschlangeRef.current, stu.id, d && d.size ? Array.from(d) : null, Date.now()));
+        }
         planSave(key, async () => {
             const dirty = dirtyKeysRef.current[stu.id];
             delete dirtyKeysRef.current[stu.id];
+            const vormerkNr = warteschlangeRef.current[stu.id] ? warteschlangeRef.current[stu.id].n : undefined;
             try {
                 await dbUpdate(stu, dirty ? Array.from(dirty) : null);
+                warteschlangeSetzen(warteschlangeErledigt(warteschlangeRef.current, stu.id, vormerkNr));
                 setSaved(true);
                 // Ein offener Fahrschul-/Vorlagen-Fehler bleibt stehen - dieser Erfolg betrifft ihn nicht.
                 setSaveError(e => (e === "__schule" || e === "__vorlage") ? e : null);
@@ -17131,6 +17277,18 @@ function App() {
                     dirtyKeysRef.current[stu.id] = jetzt;
                 }
                 studentSaveFailsRef.current++;
+                const netz = istOfflineFehler(e);
+                const ws = warteschlangeRef.current;
+                if (ws[stu.id])
+                    warteschlangeSetzen({ ...ws, [stu.id]: { ...ws[stu.id], netz } });
+                if (netz) {
+                    // Kein Fehlerfenster: die Änderung liegt sicher auf dem Gerät (Cache sofort
+                    // schreiben statt auf den gebündelten Timer zu warten) und geht automatisch
+                    // raus, sobald wieder Netz da ist. Die Kopfzeile zeigt "Offline · wartet".
+                    if (uidRef.current)
+                        saveCache(uidRef.current, studentsRef.current || []);
+                    return false;
+                }
                 setSaveError(stu.id);
                 showToast("Änderungen konnten nicht gespeichert werden:\n" + fehlerText(e), "error");
                 return false;
@@ -17161,6 +17319,47 @@ function App() {
         if (stu)
             scheduleSave(stu);
     }, [saveError, students, scheduleSave, writeSchool, writeTemplate]);
+    function warteschlangeSetzen(ws) {
+        warteschlangeRef.current = ws;
+        if (uidRef.current)
+            speichereWarteschlange(uidRef.current, ws);
+        setOfflineWartend(warteschlangeOffline(ws));
+    }
+    // Offene Schüler aus der Warteschlange erneut speichern - über denselben Weg wie jede Änderung
+    // (scheduleSave), damit Zähler, Dirty-Felder und Kollegen-Merge (dbUpdate) gleich bleiben.
+    // alle=false: alles außer Einträgen, die an einem echten Serverfehler scheiterten (automatische Wiederholung);
+    // alle=true: einmal nach dem Start alles, auch frühere Serverfehler.
+    function warteschlangeNachsenden(alle) {
+        if (IS_DEMO() || !uidRef.current)
+            return;
+        const liste = studentsRef.current;
+        if (!Array.isArray(liste) || !liste.length)
+            return; // Schülerliste noch nicht da - sonst sähe jeder Eintrag "verwaist" aus
+        let ws = warteschlangeRef.current;
+        Object.keys(ws).forEach(id => {
+            const e = ws[id];
+            // netz undefined = Ausgang unbekannt (App wurde mitten im Speichern beendet) -> mitsenden.
+            // Laufende Speichervorgänge schließt die Prüfung darunter aus.
+            if (!e || (!alle && e.netz === false))
+                return;
+            if (hasPendingSave("stu:" + id) || (studentWritesRef.current.get(id) || 0) > 0)
+                return;
+            const stu = liste.find(x => x.id === id);
+            if (!stu) {
+                ws = warteschlangeErledigt(ws, id);
+                return;
+            }
+            if (e.keys) {
+                const d = dirtyKeysRef.current[id] || new Set();
+                e.keys.forEach(k => d.add(k));
+                dirtyKeysRef.current[id] = d;
+            }
+            scheduleSave(stu);
+        });
+        if (ws !== warteschlangeRef.current)
+            warteschlangeSetzen(ws);
+    }
+    nachsendenRef.current = warteschlangeNachsenden;
     // Update one student in state + cache + cloud
     const writeStudent = useCallback((next) => {
         updateStudents(prev => {
@@ -20509,7 +20708,7 @@ function App() {
         catch (e) {
             // Fehler ist hier schon gemeldet - Aufrufer erkennen ihn am Rückgabewert null und
             // brechen ab (Formular offen lassen, kein "✓ angelegt", keine WhatsApp-Nachricht).
-            showToast("Termin konnte nicht gespeichert werden:\n" + fehlerText(e), "error");
+            showToast(terminFehlerText("Termin konnte nicht gespeichert werden", e), "error");
             gespeichertWennNichtsOffen(); // nichts angelegt, nichts mehr offen - kein endloses "Speichert…"
             return null;
         }
@@ -20715,7 +20914,7 @@ function App() {
             // als hätte es geklappt (Modal schließen, WhatsApp-Bestätigung anbieten, ...).
             if (current)
                 setAppts(prev => prev.map(a => a.id === id ? current : a).sort((a, b) => a.start_at.localeCompare(b.start_at)));
-            showToast("Änderung fehlgeschlagen:\n" + fehlerText(e), "error");
+            showToast(terminFehlerText("Änderung fehlgeschlagen", e), "error");
             gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
             return false;
         }
@@ -20742,7 +20941,7 @@ function App() {
             apptDeletedRef.current.delete(id);
             if (backup)
                 setAppts(prev => prev.some(a => a.id === id) ? prev : [...prev, backup].sort((a, b) => a.start_at.localeCompare(b.start_at)));
-            showToast("Löschen fehlgeschlagen:\n" + fehlerText(e), "error");
+            showToast(terminFehlerText("Löschen fehlgeschlagen", e), "error");
             gespeichertWennNichtsOffen(); // zurückgerollt, Liste passt wieder zur DB
         }
         finally {
@@ -22021,7 +22220,7 @@ function App() {
             loadErr && React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 12, border: "2px solid var(--red)", background: "var(--red-soft)" } },
                 // --red-ink statt festem Dunkelrot: auf dem dunklen --red-soft des Dunkelmodus
                 // lag #7a241c bei ~1,5:1 und war praktisch unsichtbar.
-                React.createElement("div", { style: { fontWeight: 800, color: "var(--red-ink)", marginBottom: 4 } }, "Fehler beim Laden"),
+                React.createElement("div", { style: { fontWeight: 800, color: "var(--red-ink)", marginBottom: 4 } }, loadErr === OFFLINE_LADEHINWEIS ? "Offline" : "Fehler beim Laden"),
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--red-ink)", wordBreak: "break-word" } }, loadErr)),
             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "4px 2px 12px" } },
                 React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, "Meine Sch\u00FCler"),
@@ -30168,6 +30367,10 @@ function App() {
                 await new Promise(r => setTimeout(r, 100));
             if (studentWritesRef.current.size > 0 || studentSaveFailsRef.current !== fehlerVorher)
                 alles = false;
+            // Offline gespeicherte Änderungen, die noch nicht beim Server sind, gingen mit dem
+            // Löschen des Zwischenspeichers verloren.
+            if (Object.keys(warteschlangeRef.current).length)
+                alles = false;
             if (!alles && !await askConfirm({ title: "Nicht alles gespeichert", message: "Einige Änderungen konnten nicht gespeichert werden und gehen beim Abmelden verloren. Trotzdem abmelden?", confirmLabel: "Trotzdem abmelden", danger: true }))
                 return;
             if (deviceToken)
@@ -33083,6 +33286,14 @@ function App() {
                                     ? React.createElement("button", { className: "save-pill err", onClick: retrySave, title: "Erneut speichern", "aria-label": "Nicht gespeichert – erneut speichern" },
                                         React.createElement("span", { className: "save-pill-err-lang", "aria-hidden": "true" }, "Nicht gespeichert · erneut"),
                                         React.createElement("span", { className: "save-pill-err-kurz", "aria-hidden": "true" }, "⚠ Erneut"))
+                                    : (offlineWartend > 0 || offline)
+                                    // Offline: Änderungen liegen sicher auf dem Gerät. Antippen versucht sofort
+                                    // erneut zu senden (sonst automatisch bei Netz bzw. alle 30 s).
+                                    ? React.createElement("button", { className: "save-pill off", onClick: () => warteschlangeNachsenden(true), role: "status", "aria-live": "polite",
+                                        title: offlineWartend > 0 ? "Offline gespeichert – wird gesendet, sobald Netz da ist. Antippen zum erneuten Versuch." : "Keine Verbindung – Änderungen werden auf dem Gerät gespeichert.",
+                                        "aria-label": offlineWartend > 0 ? ("Offline gespeichert, " + offlineWartend + " warten auf Verbindung") : "Offline" },
+                                        React.createElement("span", { className: "save-pill-err-lang", "aria-hidden": "true" }, offlineWartend > 0 ? ("Offline gespeichert · " + offlineWartend + " wartet") : "Offline"),
+                                        React.createElement("span", { className: "save-pill-err-kurz", "aria-hidden": "true" }, offlineWartend > 0 ? ("⏳ " + offlineWartend) : "Offline"))
                                     : React.createElement("div", { className: "save-pill", role: "status", "aria-live": "polite", "aria-label": saved ? "Gespeichert" : "Speichert…", title: saved ? "Gespeichert" : "Speichert…" },
                                         // Symbol nur unter 480px sichtbar (CSS .save-pill-ico), sonst der Text.
                                         React.createElement("svg", { className: "save-pill-ico" + (saved ? "" : " dreht"), "aria-hidden": "true", width: "16", height: "16", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.4", strokeLinecap: "round", strokeLinejoin: "round" }, saved
