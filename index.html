@@ -3477,7 +3477,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.34.0";
+const APP_VERSION = "2.35.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3621,6 +3621,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.35.0", date: "September 2026", changes: [
+        "Neue Rolle „Büro“: Der Fahrschul-Inhaber macht unter Einstellungen › Team & Einladung eine Person zum Büro. Das Büro sieht alle Schüler der Fahrschule, teilt sie Fahrlehrern zu, hakt Unterlagen ab, erfasst Zahlungen und sieht offene Posten, Prüfungen und das Cockpit – aber keine Ausbildungsnotizen, keinen Umsatz und keine Vergütung.",
+        "Fahrschul-Dashboard: In der Schülerakte lassen sich Unterlagen (Sehtest, Erste Hilfe, Passfoto, Antrag) jetzt direkt abhaken und Zahlungen erfassen; bei den offenen Posten gibt es je Schüler „Zahlung“.",
+    ] },
     { v: "2.34.0", date: "September 2026", changes: [
         "Neu für Fahrschul-Inhaber: das Cockpit „Fahrschule“ als Startseite (umschaltbar auf „Mein Tag“). Vier Zahlen, aus denen eine Entscheidung folgt: freie Kapazität der nächsten vier Wochen, Schüler, die seit über 14 Tagen auf einen Termin warten, erbrachte, aber noch nicht berechnete Leistungen und wie viele Anfragen zur Anmeldung werden. Dazu „Was daraus folgt“, die Auslastung jedes Fahrlehrers für die nächsten vier Wochen, die Bestehensquote im ersten Versuch und die mittlere Ausbildungsdauer.",
     ] },
@@ -7131,6 +7135,97 @@ async function fetchSchoolStudentsOverview(schoolId) {
 }
 // Volle Akte eines Schuelers, auch wenn er einem anderen Fahrlehrer gehoert. Liefert exakt die
 // students-Zeile, also dasselbe Format wie fetchStudents - deshalb laeuft rowToStudent() darueber.
+/* ── Büro-Rolle (Produktplan Teil Q) ── Rechte und schreibende Büro-Funktionen, alles serverseitig
+   geprüft (_darf_schulweit): Büro darf schulweit Zuordnung, Unterlagen, Zahlungen, offene Posten,
+   Prüfungen und Cockpit - aber keine Notizen, keinen Umsatz, keine Vergütung. */
+async function fetchMyOffice(uid) {
+    const { data, error } = await sb.from("profiles").select("school_office").eq("id", uid).maybeSingle();
+    if (error) { console.error(error); return false; }
+    return !!(data && data.school_office);
+}
+async function adminSetSchoolOffice(uid, on) {
+    const { error } = await sb.rpc("admin_set_school_office", { p_teacher_id: uid, p_on: !!on });
+    if (error) throw new Error(fehlerText(error));
+}
+async function fetchSchoolBueroIds(schoolId) {
+    const { data, error } = await sb.rpc("school_buero_ids", { p_school_id: schoolId });
+    if (error) throw new Error(fehlerText(error));
+    return data || [];
+}
+async function schoolZahlungErfassen(studentId, betrag, datum, methode, invoiceId) {
+    const { data, error } = await sb.rpc("school_zahlung_erfassen", { p_student_id: studentId, p_betrag: betrag, p_datum: datum,
+        p_methode: methode || "Überweisung", p_invoice_id: invoiceId || null });
+    if (error) throw new Error(fehlerText(error));
+    return data;
+}
+async function schoolUnterlagenSetzen(studentId, key, done) {
+    const { error } = await sb.rpc("school_unterlagen_setzen", { p_student_id: studentId, p_key: key, p_done: !!done });
+    if (error) throw new Error(fehlerText(error));
+}
+// Zahlung per Rückfrage erfassen (Dashboard/Akte, Admin und Büro). true = gebucht.
+async function zahlungErfassenDialog(studentId, name, vorschlag) {
+    const eingabe = await askPrompt({ message: "Zahlung für " + name + " erfassen – Betrag in €:",
+        defaultValue: vorschlag > 0 ? vorschlag.toLocaleString("de-DE", { useGrouping: false, minimumFractionDigits: 2, maximumFractionDigits: 2 }) : "" });
+    if (eingabe == null)
+        return false;
+    const betrag = parseBetrag(eingabe);
+    if (!(betrag > 0)) {
+        showToast("Bitte einen gültigen Betrag eingeben.");
+        return false;
+    }
+    try {
+        await schoolZahlungErfassen(studentId, Math.round(betrag * 100) / 100, ymd(new Date()), "Überweisung", null);
+        showToast("✓ " + eurFmt(betrag) + " für " + name + " gebucht");
+        return true;
+    }
+    catch (e) {
+        showToast("Zahlung konnte nicht gebucht werden:\n" + fehlerText(e), "error");
+        return false;
+    }
+}
+// Team & Rollen: der Fahrschul-Admin vergibt oder entzieht das Büro-Recht.
+function TeamRollen({ schoolId, eigeneId }) {
+    const [st, setSt] = React.useState({ busy: true });
+    const [aktion, setAktion] = React.useState("");
+    const laden = React.useCallback(() => {
+        setSt(x => ({ ...x, busy: true, error: "" }));
+        Promise.all([adminFetchTeachers(schoolId), fetchSchoolBueroIds(schoolId)])
+            .then(([lehrer, buero]) => setSt({ busy: false, lehrer: lehrer || [], buero: new Set(buero || []) }))
+            .catch(e => setSt({ busy: false, error: fehlerText(e) }));
+    }, [schoolId]);
+    React.useEffect(() => { laden(); }, [laden]);
+    async function umschalten(t, an) {
+        const name = t.display_name || (t.email || "").split("@")[0];
+        if (!await askConfirm({ title: an ? "Büro-Rechte geben?" : "Büro-Rechte entziehen?",
+                message: an ? name + " sieht dann alle Schüler der Fahrschule, kann sie Fahrlehrern zuteilen, Unterlagen abhaken und Zahlungen erfassen – aber keine Ausbildungsnotizen, keinen Umsatz und keine Vergütung."
+                    : name + " sieht danach nur noch die eigenen Schüler." }))
+            return;
+        setAktion(t.id);
+        try {
+            await adminSetSchoolOffice(t.id, an);
+            laden();
+        }
+        catch (e) { showToast("Konnte das Recht nicht ändern:\n" + fehlerText(e), "error"); }
+        finally { setAktion(""); }
+    }
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 16 } },
+        React.createElement("label", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--muted)", display: "block", marginBottom: 6 } }, "Team & Rollen"),
+        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } },
+            "Büro: sieht alle Schüler der Fahrschule, teilt sie zu, hakt Unterlagen ab und erfasst Zahlungen – ohne Ausbildungsnotizen, Umsatz und Vergütung. Die Person tritt wie ein Fahrlehrer mit dem Einladungscode bei und bekommt hier das Recht."),
+        st.busy ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Lädt…")
+            : st.error ? React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)" } }, st.error)
+                : st.lehrer.slice().sort((a, b) => (a.display_name || a.email || "").localeCompare(b.display_name || b.email || "")).map(t => {
+                    const istBuero = st.buero.has(t.id);
+                    const rolle = t.school_admin ? "Admin" : istBuero ? "Büro" : "Fahrlehrer";
+                    const aenderbar = !t.school_admin && t.id !== eigeneId;
+                    return React.createElement("div", { key: t.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 14, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, t.display_name || (t.email || "").split("@")[0]),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, rolle + (t.students ? " · " + t.students + " Schüler" : ""))),
+                        aenderbar && React.createElement("button", { className: "btn btn-ghost", disabled: aktion === t.id, style: { padding: "7px 11px", fontSize: 12.5, flexShrink: 0 },
+                            onClick: () => umschalten(t, !istBuero) }, istBuero ? "Büro entziehen" : "Zum Büro machen"));
+                }));
+}
 async function fetchSchoolStudentAkte(studentId) {
     const { data, error } = await sb.rpc("school_student_akte", { p_student_id: studentId });
     if (error) { console.error(error); throw new Error(fehlerText(error)); }
@@ -13895,6 +13990,7 @@ function App() {
     // Maske ("Fahrschule anlegen" hängt das Profil um) nie erscheinen (Abschluss-Audit).
     const [schoolFehlt, setSchoolFehlt] = useState(false);
     const [isSchoolAdmin, setIsSchoolAdmin] = useState(false); // darf Fahrschul-Einstellungen ändern
+    const [isSchoolOffice, setIsSchoolOffice] = useState(false); // Büro-Rolle: schulweite Verwaltung ohne Notizen/Umsatz (Produktplan Teil Q)
     const [isModerator, setIsModerator] = useState(false); // App-Moderator: darf Beiträge freigeben, alle Fahrschulen einsehen/bearbeiten
     const canModerateApp = isAdmin(session) || isModerator; // Beiträge freigeben + alle Fahrschulen einsehen/bearbeiten (NICHT: löschen, Abo-Befreiung – exklusiv isAdmin)
     const [calShare, setCalShare] = useState(null); // null | {code} für den Fahrzeug-Kalender (Link + Ansicht)
@@ -16082,6 +16178,7 @@ function App() {
             // Profil, Arbeitszeiten, Interessenten und Prüfplätze von Konto A - schlug bei B ein
             // Abruf fehl (.catch(() => {})), blieb A's Stand einfach stehen.
             setIsSchoolAdmin(false);
+            setIsSchoolOffice(false);
             setIsModerator(false);
             setPracticeLogEnabled(false);
             setCalendarFeedToken(null);
@@ -16236,6 +16333,8 @@ function App() {
                 setPracticeLogEnabled(v); }).catch(() => { });
             fetchCalendarFeedToken(uid).then(v => { if (!cancelled)
                 setCalendarFeedToken(v); }).catch(() => { });
+            fetchMyOffice(uid).then(o => { if (!cancelled)
+                setIsSchoolOffice(o); }).catch(() => { });
             fetchMyRights(uid).then(r => {
                 if (cancelled)
                     return;
@@ -21333,7 +21432,7 @@ function App() {
             { id: "fuhrpark", label: "Fuhrpark - Fahrzeuge, Kosten, Kalender", group: "Seite", action: () => setView("fuhrpark") },
             // Die Schnellsuche kannte das Dashboard bisher gar nicht - wer "Dashboard" tippte,
             // fand nichts, obwohl die Seite existiert.
-            isSchoolAdmin && { id: "schulboard", label: "Fahrschul-Dashboard - alle Fahrlehrer, Schüler zuteilen", group: "Seite", action: () => setView("schulboard") },
+            (isSchoolAdmin || isSchoolOffice) && { id: "schulboard", label: "Fahrschul-Dashboard - alle Fahrlehrer, Schüler zuteilen", group: "Seite", action: () => setView("schulboard") },
             { id: "auswertung", label: "Auswertung - Statistik, Prüfungsplanung, Abrechnung", group: "Seite", action: () => setView("auswertung") },
             { id: "tagesgeschaeft", label: "Tagesgeschäft - Tagesabschluss, Lücken, krank melden", group: "Seite", action: () => setView("tagesgeschaeft") },
             { id: "interessenten", label: "Interessenten", group: "Seite", action: () => setView("interessenten") },
@@ -21614,7 +21713,7 @@ function App() {
              6) "Diese Woche" - Fristen-Radar (vollständig), Paket-Guthaben knapp, lange nicht
                 gefahren, Fahrstunde morgen erinnern, und (nur Handy) offene Terminvorschläge.
            Kein Klickziel geht verloren, jede Zeile ruft exakt denselben Handler wie vorher auf. ── */
-        const zeigtCockpitWahl = !!(isSchoolAdmin && school && school.id);
+        const zeigtCockpitWahl = !!((isSchoolAdmin || isSchoolOffice) && school && school.id);
         const imCockpit = zeigtCockpitWahl && (homeModus || "schule") === "schule";
         const modusUmschalter = zeigtCockpitWahl && React.createElement("div", { className: "home-modus", role: "group", "aria-label": "Startseite" },
             React.createElement("button", { type: "button", "aria-pressed": !imCockpit, onClick: () => homeModusWaehlen("tag") }, "Mein Tag"),
@@ -30137,7 +30236,7 @@ function App() {
             { id: "abo", section: "konto", tone: "sky", label: "Abonnement", icon: IC.kosten, keywords: "abo abonnement bezahlen monatsbeitrag paypal lifetime zugang freischalten kosten rechnung mitgliedschaft",
                 status: (mySubscription && mySubscription.subscription_lifetime) ? "Lifetime" : ((mySubscription && mySubscription.subscription_active) ? ((mySubscription.subscription_amount != null ? Number(mySubscription.subscription_amount).toFixed(2).replace(".", ",") + " €/Monat" : "Aktiv")) : "Kein Abo hinterlegt") },
             nativeApp && { id: "geraet", section: "konto", tone: "sky", label: "Gerät & Benachrichtigungen", icon: IC.geraet, keywords: "push benachrichtigung widget", status: deviceToken ? "Aktiv" : "Nicht aktiv" },
-            isSchoolAdmin && { id: "schulboard", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Fahrschul-Dashboard",
+            (isSchoolAdmin || isSchoolOffice) && { id: "schulboard", section: "fahrschule", cluster: "Identität & Team", tone: "clay", label: "Fahrschul-Dashboard",
                 icon: IC.admin, keywords: "dashboard auswertung fahrlehrer team zuteilen zuordnung schueler umhaengen statistik grafik auslastung umsatz pruefungsquote offene posten",
                 status: "Alle Fahrlehrer · Schüler zuteilen", direct: () => setView("schulboard") },
             // Moderatoren sehen dort nur die Freigaben (Audit H-M9) - Beschriftung entsprechend
@@ -30687,7 +30786,8 @@ function App() {
                                         showToast("Code konnte nicht erzeugt werden:\n" + (e.message || e), "error");
                                     }
                                 } }, "Neuen Code erzeugen")),
-                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet. Über Per WhatsApp teilen verschickst du App-Link, Code und eine kurze Anleitung in einer Nachricht."))),
+                            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 8, lineHeight: 1.5 } }, "Gib diesen Code an neue Fahrlehrer deiner Fahrschule weiter. Sie tragen ihn bei der Registrierung ein und werden dadurch sofort und sicher eurer Fahrschule zugeordnet. Über Per WhatsApp teilen verschickst du App-Link, Code und eine kurze Anleitung in einer Nachricht.")),
+                        isSchoolAdmin && school && school.id && !IS_DEMO() && React.createElement(TeamRollen, { schoolId: school.id, eigeneId: uid })),
                     settingsScreen === "standorte" && React.createElement(SettingsScreen, { title: "Standorte", onBack: closeScreen },
                         canEditSchool ? React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
                             locations.length === 0 && !locEdit &&
@@ -32812,7 +32912,7 @@ function App() {
                 tabMenu === "sb-mehr" && React.createElement("div", { className: "sb-sub" },
                     // isSchoolAdmin-Eintrag vorn, danach die feste Liste - filter(Boolean) wirft ihn
                     // fuer alle anderen wieder raus (gleiche Sichtbarkeitsregel wie im Mehr-Sheet).
-                    [isSchoolAdmin && ["schulboard", "Fahrschul-Dashboard", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
+                    [(isSchoolAdmin || isSchoolOffice) && ["schulboard", "Fahrschul-Dashboard", React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("rect", { x: "3", y: "3", width: "7", height: "9", rx: "1.5" }),
                         React.createElement("rect", { x: "14", y: "3", width: "7", height: "5", rx: "1.5" }),
                         React.createElement("rect", { x: "14", y: "12", width: "7", height: "9", rx: "1.5" }),
@@ -32909,7 +33009,7 @@ function App() {
                 view === "tagesgeschaeft" && renderTagesgeschaeft(),
                 view === "interessenten" && renderInteressenten(),
                 view === "fuhrpark" && renderFuhrpark(),
-                view === "schulboard" && isSchoolAdmin && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0 }),
+                view === "schulboard" && (isSchoolAdmin || isSchoolOffice) && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0, rolle: isSchoolAdmin ? "admin" : "buero" }),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
                 view === "impressum" && renderImpressum(),
@@ -33049,7 +33149,7 @@ function App() {
                                 // Steht bewusst an erster Stelle und nur fuer Fahrschul-Admins: das
                                 // Dashboard ist fuer sie der Einstieg in alles Schulweite. Vorher lag
                                 // es nur in den Einstellungen und war praktisch unauffindbar.
-                                isSchoolAdmin && React.createElement("button", { className: "tabpop-item" + (view === "schulboard" ? " on" : ""), onClick: () => { setView("schulboard"); setTabMenu(null); setMehrGroup(null); } },
+                                (isSchoolAdmin || isSchoolOffice) && React.createElement("button", { className: "tabpop-item" + (view === "schulboard" ? " on" : ""), onClick: () => { setView("schulboard"); setTabMenu(null); setMehrGroup(null); } },
                                     React.createElement("span", { className: "tabpop-ic" },
                                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                                             React.createElement("rect", { x: "3", y: "3", width: "7", height: "9", rx: "1.5" }),
@@ -41500,7 +41600,10 @@ function InhaberCockpit({ schoolId, stdPreis, lokal, onDetails }) {
                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)" } }, s))))),
         onDetails && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12 }, onClick: onDetails }, "Alle Details im Fahrschul-Dashboard ›"));
 }
-function SchulDashboard({ schoolId, stdPreis }) {
+function SchulDashboard({ schoolId, stdPreis, rolle }) {
+    // Büro (Produktplan Teil Q): kein Umsatz, keine Vergütung, keine Fahrstunden-Auswertung - der
+    // Server verweigert diese Daten ohnehin, deshalb werden sie gar nicht erst angefragt.
+    const istAdmin = rolle !== "buero";
     const [daten, setDaten] = React.useState({ busy: true, error: "" });
     const [zeitraum, setZeitraum] = React.useState(() => { const d = new Date(); return { modus: "monat", jahr: d.getFullYear(), monat: d.getMonth() + 1 }; });
     const [suche, setSuche] = React.useState("");
@@ -41515,10 +41618,10 @@ function SchulDashboard({ schoolId, stdPreis }) {
         setDaten(d => ({ ...d, busy: true, error: "" }));
         Promise.all([
             adminFetchTeachers(schoolId),
-            fetchSchoolFahrstunden(schoolId),
+            istAdmin ? fetchSchoolFahrstunden(schoolId) : Promise.resolve([]),
             fetchSchoolExamStats(schoolId),
             fetchSchoolOffenePosten(schoolId),
-            fetchVerguetungen(schoolId),
+            istAdmin ? fetchVerguetungen(schoolId) : Promise.resolve([]),
             fetchSchoolStudentsOverview(schoolId),
             fetchSchoolAssignmentLog(schoolId, 40),
         ]).then(([lehrer, leistungen, pruefungen, offene, verguetung, schueler, protokoll]) => {
@@ -41526,7 +41629,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
             (verguetung || []).forEach(v => { if (v.verguetung && v.verguetung.modell) vgMap[v.teacher_id] = v.verguetung; });
             setDaten({ busy: false, error: "", lehrer, leistungen, pruefungen, offene, vgMap, schueler, protokoll });
         }).catch(e => setDaten({ busy: false, error: fehlerText(e) }));
-    }, [schoolId]);
+    }, [schoolId, istAdmin]);
     React.useEffect(() => { laden(); }, [laden]);
 
     const gr = dashZeitraum(zeitraum);
@@ -41720,7 +41823,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
             { k: "umsatz", label: "Umsatz im Zeitraum", wert: eurFmt(a.umsatzGesamt), d: ["M12 1v22", "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"] },
             { k: "schueler", label: "Aktive Schüler", wert: a.aktiveSchueler.length, d: ["M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M23 21v-2a4 4 0 0 0-3-3.87"] },
             { k: "offen", label: "Offene Beträge", wert: eurFmt(a.offenGesamt), d: ["M3 7h18v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z", "M3 7l2-4h14l2 4", "M12 11v6"] },
-        ].map(k => React.createElement("div", { key: k.k, className: "home-v2-statcell" },
+        ].filter(k => istAdmin || (k.k !== "ue" && k.k !== "umsatz")).map(k => React.createElement("div", { key: k.k, className: "home-v2-statcell" },
             React.createElement("span", { className: "home-v2-stat-ic" },
                 React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                     k.d.map((d, i) => React.createElement("path", { key: i, d: d })))),
@@ -41735,7 +41838,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
             React.createElement("div", { className: "home-v2-stat-label" }, k.label)))),
 
         // ── Auslastung ───────────────────────────────────────────────────────────────────
-        abschnitt(
+        istAdmin && abschnitt(
             React.createElement(DashKopf, { titel: "Auslastung je Fahrlehrer", beisatz: "Unterrichtseinheiten im Zeitraum", ton: "orange",
                 pfad: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] }),
             React.createElement(DashBalken, { daten: a.lehrer.map(t => {
@@ -41749,7 +41852,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
                 React.createElement(DashVerlauf, { punkte: a.verlauf, formatWert: w => w + " UE" }))),
 
         // ── Umsatz & Vergütung ───────────────────────────────────────────────────────────
-        abschnitt(
+        istAdmin && abschnitt(
             React.createElement(DashKopf, { titel: "Umsatz & Vergütung", beisatz: "Was jeder erwirtschaftet, und was hinterlegt ist", ton: "sage",
                 pfad: ["M12 1v22", "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"] }),
             a.lehrer.map(t => {
@@ -41805,7 +41908,9 @@ function SchulDashboard({ schoolId, stdPreis }) {
                     React.createElement("span", { style: { width: 8, height: 8, borderRadius: 99, background: a.farbe[o.teacher] || "var(--muted)", flexShrink: 0 } }),
                     React.createElement("span", { style: { flex: 1, minWidth: 0, overflowWrap: "anywhere" } }, o.name),
                     React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, a.nameVon[o.teacher] || ""),
-                    React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums", color: "var(--red-ink)", flexShrink: 0 } }, eurFmt(o.offen)))))),
+                    React.createElement("span", { style: { fontWeight: 800, fontFamily: "var(--font-d)", fontVariantNumeric: "tabular-nums", color: "var(--red-ink)", flexShrink: 0 } }, eurFmt(o.offen)),
+                    React.createElement("button", { className: "btn btn-ghost", disabled: !!aktion, "aria-label": "Zahlung für " + o.name + " erfassen", style: { padding: "5px 9px", fontSize: 12, flexShrink: 0 },
+                        onClick: async () => { setAktion("zahlung"); try { if (await zahlungErfassenDialog(o.studentId, o.name, o.offen)) laden(); } finally { setAktion(""); } } }, "Zahlung"))))),
 
         // ── Schülerzahlen & Klassen ──────────────────────────────────────────────────────
         abschnitt(
@@ -41819,7 +41924,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
                     .map((k, i) => ({ label: k, wert: a.klassen[k], farbe: DASH_LEHRERFARBEN[i % DASH_LEHRERFARBEN.length] })) }))),
 
         // ── Ausbildungsfortschritt ───────────────────────────────────────────────────────
-        abschnitt(
+        istAdmin && abschnitt(
             React.createElement(DashKopf, { titel: "Ausbildungsfortschritt", beisatz: "Auf welchen Stufen im Zeitraum gefahren wurde", ton: "sky",
                 pfad: ["M3 3v18h18", "M7 15l4-4 3 3 5-6"] }),
             React.createElement(DashBalken, { daten: Object.keys(a.stufen).sort((x, y) => a.stufen[y] - a.stufen[x])
@@ -41830,7 +41935,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
                 "Zeigt, wo die Ausbildung gerade stattfindet: viele Fahrstunden auf den Grundstufen bedeuten viele Anfänger, ein Schwerpunkt auf den oberen Stufen viele Prüfungskandidaten.")),
 
         // ── Fahrzeuge ────────────────────────────────────────────────────────────────────
-        abschnitt(
+        istAdmin && abschnitt(
             React.createElement(DashKopf, { titel: "Fahrzeugnutzung", beisatz: "Fahrzeit je Fahrzeug im Zeitraum", ton: "clay",
                 pfad: ["M5 17h14M6.5 17l-1.2-5.4a2 2 0 0 1 .3-1.6l1.8-2.6A2 2 0 0 1 9.1 6.5h5.8a2 2 0 0 1 1.7.9l1.8 2.6a2 2 0 0 1 .3 1.6L17.5 17", "M7 20v-3M17 20v-3"] }),
             React.createElement(DashBalken, { daten: Object.keys(a.fahrzeuge).sort((x, y) => a.fahrzeuge[y] - a.fahrzeuge[x])
@@ -41983,6 +42088,17 @@ function SchulDashboard({ schoolId, stdPreis }) {
                                 [zeile("Geburtsdatum", dashDatum(s.geb)), zeile("Telefon", s.tel), zeile("Festnetz", s.festnetz), zeile("Anschrift", s.anschrift),
                                  zeile("Klasse", s.klasse), zeile("Theorie", s.theorie ? "bestanden" : ""), zeile("Sehhilfe", s.sehhilfe ? "ja" : ""),
                                  zeile("Ausbildungsbeginn", dashDatum(s.ausbildungsbeginn)), zeile("Archiviert", s.archived ? "ja" : "")].filter(Boolean),
+                                // Unterlagen: Admin und Büro haken direkt hier ab (school_unterlagen_setzen)
+                                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Unterlagen"),
+                                React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [["sehtest", "Sehtest"], ["erstehilfe", "Erste Hilfe"], ["passfoto", "Passfoto"], ["antrag", "Antrag gestellt"]].map(([key, label]) => {
+                                    const an = !!(s.licenseSteps && s.licenseSteps[key] && s.licenseSteps[key].done);
+                                    return React.createElement("button", { key: key, type: "button", "aria-pressed": an, disabled: !!aktion,
+                                        onClick: async () => { setAktion("unterlage"); try { await schoolUnterlagenSetzen(s.id, key, !an); akteOeffnen(akte.meta); } catch (e) { showToast(fehlerText(e), "error"); } finally { setAktion(""); } },
+                                        style: { border: "1.5px solid " + (an ? "var(--green)" : "var(--line)"), background: an ? "var(--green-soft)" : "var(--card)", color: an ? "var(--green-ink)" : "var(--ink-2)",
+                                            borderRadius: 99, padding: "7px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" } }, (an ? "✓ " : "") + label);
+                                })),
+                                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!aktion, style: { marginTop: 12 },
+                                    onClick: async () => { setAktion("zahlung"); try { if (await zahlungErfassenDialog(s.id, ((s.vorname || "") + " " + (s.name || "")).trim() || "Schüler", 0)) { akteOeffnen(akte.meta); laden(); } } finally { setAktion(""); } } }, "Zahlung erfassen"),
                                 s.bemerkungen && React.createElement(React.Fragment, null,
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Bemerkungen"),
                                     React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.55, whiteSpace: "pre-line", margin: 0 } }, s.bemerkungen)),
@@ -42006,7 +42122,7 @@ function SchulDashboard({ schoolId, stdPreis }) {
                                     fahrten.length > 60 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
                                         "Die 60 jüngsten Fahrstunden sind aufgeführt, insgesamt sind es " + fahrten.length + ".")),
                                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "16px 0 0" } },
-                                    "Diese Einsicht ist nur lesend. Geändert wird ein Schüler weiterhin ausschließlich von dem Fahrlehrer, dem er zugeordnet ist."));
+                                    "Unterlagen und Zahlungen lassen sich hier direkt erfassen. Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
 }
