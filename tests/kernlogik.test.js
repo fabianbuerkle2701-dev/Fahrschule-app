@@ -178,3 +178,23 @@ test("Schüler-Vorauswahl beim Start: laufender Termin, sonst einer in den näch
     assert.equal(f([spaeter]), null, "mehr als 10 Minuten entfernt: keine Vorauswahl");
     assert.equal(f([anfrage]), null, "offene Anfragen zählen nicht");
 });
+
+test("Prüfungsakte: chronologisch, bestandener Versuch verdrängt den gleichen Führerschein-Schritt", () => {
+    const { pruefungsakteVon: f } = require("./lade-app")(["pruefungsakteVon"]);
+    const stu = {
+        theorie: "2026-08-10",
+        licenseSteps: { sehtest: { done: true, date: "2026-05-02" }, antrag: { done: false, date: "2026-06-01" } },
+        exams: [
+            { art: "theorie", date: "2026-08-01", passed: false },
+            { art: "theorie", date: "2026-08-10", passed: true },
+            { art: "praxis", date: "", passed: false },
+        ],
+        examReadinessVerlauf: [{ typ: "festgestellt", am: "2026-09-20T10:00:00.000Z", von: "Frau Kranz", ergebnis: "bestanden" }],
+    };
+    const akte = rein(f(stu));
+    assert.deepEqual(akte.map(e => e.datum), ["2026-09-20", "2026-08-10", "2026-08-01", "2026-05-02"]);
+    assert.equal(akte[1].text, "Theorieprüfung bestanden");          // nicht doppelt
+    assert.equal(akte[2].typ, "schlecht");
+    assert.equal(akte[0].von, "Frau Kranz");
+    assert.deepEqual(rein(f({})), []);
+});

@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.22.1";
+const APP_VERSION = "2.23.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.23.0", date: "September 2026", changes: [
+        "Prüfungsakte: Im Reife-Bereich stehen Führerschein-Schritte, Prüfungsversuche sowie Feststellung und Rücknahme der Prüfungsreife jetzt chronologisch in einer Akte.",
+        "Prüfungsversuche: Ein als bestanden markierter Versuch trägt auch „Theorieprüfung bestanden“ bzw. „Praxisprüfung bestanden“ im Führerschein-Stand nach (ein schon eingetragenes Datum bleibt).",
+        "Prüfungsversuche: Ist eine Prüfung im Führerschein-Stand als bestanden eingetragen, aber kein Versuch erfasst, lässt er sich mit einem Tipp nachtragen - sonst fehlt er in der Erfolgsquote.",
+    ] },
     { v: "2.22.1", date: "September 2026", changes: [
         "Terminanfragen: Auf der Buchungsseite sind belegte oder schon angefragte Zeiten jetzt gesperrt und als „belegt“ markiert; überschneidende Wunschtermine werden vor dem Absenden abgefangen.",
         "Startseite: Ein Tipp auf „Nächster Termin“ wählt wieder den Schüler dieses Termins aus und öffnet seine Ausbildung.",
@@ -12866,6 +12871,43 @@ function licenseStepDone(stu, key) {
         return !!stu.theorie;
     const steps = stu.licenseSteps || {};
     return !!(steps[key] && steps[key].done);
+}
+// Prüfungsakte eines Schülers: Führerschein-Schritte, Prüfungsversuche und Feststellung/Rücknahme
+// der Prüfungsreife als eine chronologische Liste (neueste zuerst). Ein bestandener Versuch und der
+// gleichnamige Führerschein-Schritt am selben Tag erscheinen nur einmal.
+function pruefungsakteVon(stu) {
+    const out = [];
+    const datumOk = d => typeof d === "string" && /^\d{4}-\d{2}-\d{2}/.test(d);
+    const exams = (stu && stu.exams) || [];
+    exams.forEach(e => {
+        if (!datumOk(e.date))
+            return;
+        const art = e.art === "theorie" ? "Theorieprüfung" : "Praxisprüfung";
+        out.push({ datum: e.date.slice(0, 10), text: art + (e.passed ? " bestanden" : " – Versuch nicht bestanden"), typ: e.passed ? "gut" : "schlecht" });
+    });
+    LICENSE_STEPS.forEach(st => {
+        let datum = null;
+        if (st.key === "theorie_bestanden")
+            datum = datumOk(stu.theorie) ? stu.theorie.slice(0, 10) : null;
+        else {
+            const x = (stu.licenseSteps || {})[st.key];
+            datum = x && x.done && datumOk(x.date) ? x.date.slice(0, 10) : null;
+        }
+        if (!datum)
+            return;
+        if ((st.key === "theorie_bestanden" && exams.some(e => e.art === "theorie" && e.passed && e.date && e.date.slice(0, 10) === datum))
+            || (st.key === "praxis_bestanden" && exams.some(e => e.art === "praxis" && e.passed && e.date && e.date.slice(0, 10) === datum)))
+            return;
+        out.push({ datum, text: st.label, typ: /bestanden/.test(st.key) ? "gut" : "neutral" });
+    });
+    ((stu && stu.examReadinessVerlauf) || []).forEach(e => {
+        if (!datumOk(e.am))
+            return;
+        out.push({ datum: new Date(e.am).toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" }),
+            text: e.typ === "zurueckgenommen" ? "Prüfungsreife zurückgenommen" : (e.ergebnis === "nicht_bestanden" ? "Prüfungsreife festgestellt (Test nicht bestanden)" : "Prüfungsreife festgestellt"),
+            typ: e.typ === "zurueckgenommen" ? "schlecht" : "gut", von: e.von || "" });
+    });
+    return out.sort((a, b) => b.datum.localeCompare(a.datum));
 }
 const VEHICLE_COST_CATEGORIES = ["Kraftstoff", "Werkstatt/Reparatur", "TÜV/HU", "Versicherung", "Leasing/Finanzierung", "Sonstiges"];
 // FAQ-Fragen unter Mehr/Einstellungen/Konto - der Fragetext geht 1:1 an den KI-Helfer, dessen
@@ -22698,7 +22740,7 @@ function App() {
             { ok: !!(active.examReadiness && active.examReadiness.ergebnis !== "nicht_bestanden"), text: "Prüfungsreife festgestellt" },
         ];
         const vOffen = voraussetzungen.filter(v => !v.ok).length;
-        const verlauf = (active.examReadinessVerlauf || []).slice().reverse();
+        const akte = pruefungsakteVon(active);
         return React.createElement("div", null,
             React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, display: "flex", alignItems: "center", gap: 13,
                     border: "2px solid " + amp.farbe } },
@@ -22753,11 +22795,13 @@ function App() {
                         active.examSims.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 3).map(sim => React.createElement("button", { key: sim.id, className: "btn btn-ghost", style: { textAlign: "left", justifyContent: "flex-start" }, onClick: () => oeffneReifeForm(sim) },
                             "Test vom " + fmtD(sim.date) + new Date(sim.date).getFullYear() + (sim.durationSec ? " · " + Math.round(sim.durationSec / 60) + " Min." : "") + " übernehmen"))),
                     React.createElement("button", { className: "btn btn-block", onClick: () => oeffneReifeForm(null) }, "Prüfungsreife amtlich feststellen")),
-            verlauf.length > 0 && React.createElement("details", { className: "card", style: { padding: "10px 16px", marginBottom: 12 } },
-                React.createElement("summary", { style: { cursor: "pointer", fontSize: 13, fontWeight: 700, color: "var(--ink-2)" } }, "Verlauf der Prüfungsreife (" + verlauf.length + ")"),
-                React.createElement("div", { style: { marginTop: 6 } }, verlauf.map((e, i) => React.createElement("div", { key: i, style: { fontSize: 12.5, color: "var(--muted)", padding: "4px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
-                    React.createElement("span", { style: { fontWeight: 700, color: e.typ === "zurueckgenommen" ? "var(--red-ink)" : "var(--ink-2)" } }, e.typ === "zurueckgenommen" ? "Zurückgenommen" : (e.ergebnis === "nicht_bestanden" ? "Festgestellt (Test nicht bestanden)" : "Festgestellt")),
-                    " am " + new Date(e.am).toLocaleDateString("de-DE") + (e.von ? " von " + e.von : "") + (e.datum ? " · Test vom " + new Date(e.datum).toLocaleDateString("de-DE") : ""))))),
+            // Prüfungsakte: alles Prüfungsrelevante chronologisch an einer Stelle (Maßnahme 5).
+            akte.length > 0 && React.createElement("details", { className: "card", style: { padding: "10px 16px", marginBottom: 12 } },
+                React.createElement("summary", { style: { cursor: "pointer", fontSize: 13, fontWeight: 700, color: "var(--ink-2)" } }, "Prüfungsakte (" + akte.length + (akte.length === 1 ? " Eintrag)" : " Einträge)")),
+                React.createElement("div", { style: { marginTop: 6 } }, akte.map((e, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, fontSize: 12.5, padding: "5px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                    React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, fontVariantNumeric: "tabular-nums", minWidth: 74 } }, new Date(e.datum + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0, fontWeight: e.typ === "neutral" ? 500 : 700, color: e.typ === "gut" ? "var(--green-ink, var(--green))" : e.typ === "schlecht" ? "var(--red-ink)" : "var(--ink-2)" } },
+                        e.text, e.von ? React.createElement("span", { style: { fontWeight: 400, color: "var(--muted)" } }, " · " + e.von) : null))))),
             r.theorieOffen && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
                 React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Theoriepr\u00FCfung"),
                 " noch nicht bestanden"),
@@ -24895,8 +24939,28 @@ function App() {
                     { id: uniqueId("ex"), art: art, date: ymd(new Date()), passed: false }] });
         }
         function patchExam(id, patch) {
-            updateActive({ exams: (active.exams || []).map(e => e.id === id ? { ...e, ...patch } : e) });
+            const exams = (active.exams || []).map(e => e.id === id ? { ...e, ...patch } : e);
+            const ex = exams.find(e => e.id === id);
+            const extra = {};
+            // Bestanden abgehakt: den Führerschein-Stand mitziehen, sonst zeigen Ampel und
+            // Voraussetzungs-Checkliste weiter "Theorie offen" (zwei Quellen für dieselbe Tatsache).
+            // Nur ergänzen, nie ein schon eingetragenes Datum überschreiben.
+            if (patch.passed && ex && ex.date) {
+                if (ex.art === "theorie" && !active.theorie)
+                    extra.theorie = ex.date;
+                const pb = (active.licenseSteps || {}).praxis_bestanden;
+                if (ex.art === "praxis" && !(pb && pb.done))
+                    extra.licenseSteps = { ...(active.licenseSteps || {}), praxis_bestanden: { ...(pb || {}), done: true, date: ex.date } };
+            }
+            updateActive({ exams, ...extra });
         }
+        // Umgekehrt: laut Führerschein-Liste bestanden, aber kein bestandener Versuch erfasst -
+        // dann fehlt er in der Erfolgsquote. Mit einem Tipp nachtragen.
+        const pbStep = (active.licenseSteps || {}).praxis_bestanden;
+        const fehlend = [
+            active.theorie && /^\d{4}-\d{2}-\d{2}/.test(active.theorie) && !exams.some(e => e.art === "theorie" && e.passed) ? { art: "theorie", date: active.theorie.slice(0, 10) } : null,
+            pbStep && pbStep.done && pbStep.date && !exams.some(e => e.art === "praxis" && e.passed) ? { art: "praxis", date: String(pbStep.date).slice(0, 10) } : null,
+        ].filter(Boolean);
         // Mit Rückfrage (Audit F-N15): ein Versuch ist Grundlage der Erfolgsquote, ein
         // versehentlich getroffenes × war bisher sofort und ohne Rückweg weg.
         async function removeExam(ex) {
@@ -24919,6 +24983,9 @@ function App() {
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Prüfungsversuche")),
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginBottom: 12 } },
                 "Jeden Versuch einzeln erfassen – auch die nicht bestandenen. Daraus berechnet die App die Erfolgsquote deiner Fahrschule."),
+            fehlend.map(x => React.createElement("div", { key: "fehlt-" + x.art, style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 10, padding: "9px 11px", marginBottom: 10, fontSize: 12.5, lineHeight: 1.45 } },
+                React.createElement("span", { style: { flex: 1, minWidth: 180 } }, (x.art === "theorie" ? "Theorie" : "Praxis") + " ist als bestanden am " + new Date(x.date + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) + " eingetragen, aber kein Versuch erfasst – er fehlt in der Erfolgsquote."),
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "7px 12px", fontSize: 12.5 }, onClick: () => updateActive({ exams: [...(active.exams || []), { id: uniqueId("ex"), art: x.art, date: x.date, passed: true }] }) }, "Versuch nachtragen"))),
             exams.length === 0
                 ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 4 } }, "Noch keine Versuche erfasst.")
                 : exams.map(e => React.createElement("div", { key: e.id, style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "9px 0", borderTop: "1px solid var(--line)" } },
