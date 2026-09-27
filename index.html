@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.18.0";
+const APP_VERSION = "2.19.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.19.0", date: "September 2026", changes: [
+            "Startseite, „Diese Woche“: neuer Hinweis „Schüler ohne nächsten Termin“ - wer in den letzten drei Wochen gefahren ist, aber noch keinen neuen Termin hat. Ein Tipp öffnet die Liste mit „Erinnern“ per WhatsApp samt Buchungslink; erinnerte Schüler verschwinden bis zur nächsten Fahrstunde aus der Liste",
+            "Ebenfalls neu in „Diese Woche“: Schüler mit grüner Ampel, deren Prüfungsreife noch nicht festgestellt ist („bereit für die Testfahrt“). Ein Tipp zeigt sie in der Schülerliste",
+        ] },
     { v: "2.18.0", date: "September 2026", changes: [
             "Kalender: Vergangene Fahrstunden, die noch nicht abgeschlossen sind, tragen das Kennzeichen „Abschluss offen“. Antippen und „Fahrstunde abschließen“ wählen - schon erledigte Stunden bleiben unmarkiert",
         ] },
@@ -13967,6 +13971,7 @@ function App() {
     // Kontoauszug einlesen: Text aus dem Online-Banking einfügen, Zahlungen den Rechnungen zuordnen.
     const [zahlungsImport, setZahlungsImport] = useState(null); // null | {text, vorschlaege|null}
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
+    const [ohneTerminOpen, setOhneTerminOpen] = useState(false); // Liste "ohne nächsten Termin" auf der Startseite
     const [abbruchOpen, setAbbruchOpen] = useState(false); // Liste "Abbruch-Risiko" auf der Startseite (Verwaltung-ersetzen-Fahrplan, Phase 2)
     const [erinnerungen, setErinnerungen] = useState(false); // Liste "Erinnerungen für morgen" auf der Startseite
     const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
@@ -16842,6 +16847,9 @@ function App() {
         const vorname = (stu.vorname || "").trim() || dispName(stu);
         const text = "Hallo " + vorname + ", denk bitte daran, deinen nächsten Termin für die Fahrstunde auszumachen" + (bookingCode ? ": " + bookingURL() : ".");
         window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+        // Gegen den aktuellen Stand speichern: der Aufruf kommt auch direkt nach einem Abschluss,
+        // dessen writeStudent den Render-Schnappschuss "stu" schon überholt hat.
+        schuelerAendernUndSpeichern(stu.id, cur => ({ ...cur, terminErinnertAt: new Date().toISOString() }));
     }
     // Termin-Menü: Ist der Termin vorbei und noch nicht bestätigt, führt "Fahrstunde abschließen"
     // in dieselbe Abfrage wie nach Terminende - statt eines leeren Fahrtenbuch-Eintrags ohne Dauer.
@@ -17223,6 +17231,26 @@ function App() {
     // Paket-Guthaben knapp: Schüler mit einem übernommenen UE-Paket, deren Guthaben zur Neige
     // geht (<=2 UE) oder schon aufgebraucht ist (0) - guter Moment, ein Anschlusspaket
     // anzubieten, bevor die nächste Fahrstunde ungeplant zum vollen Einzelpreis wird.
+    // Schüler, die in den letzten STILL_TAGE Tagen gefahren sind, aber keinen nächsten Termin haben -
+    // die Lücke vor "lange nicht gefahren": wer jetzt erinnert wird, fällt dort gar nicht erst hinein.
+    // Nach "Erinnern" (terminErinnertAt) verschwindet der Schüler, bis wieder ein Termin stattfand.
+    const ohneTerminList = React.useMemo(() => {
+        const jetzt = Date.now();
+        const grenze = jetzt - STILL_TAGE * 86400000;
+        const letzterTermin = {};
+        (appts || []).forEach(a => {
+            if (a.status !== "confirmed" || !a.student_id)
+                return;
+            const t = new Date(a.start_at).getTime();
+            if (t < jetzt && (!letzterTermin[a.student_id] || t > letzterTermin[a.student_id]))
+                letzterTermin[a.student_id] = t;
+        });
+        return (students || []).filter(s => s._isMine && !s.archived && !s.pending && !nextApptByStudent[s.id])
+            .map(s => ({ s, letzte: letzterTermin[s.id] || null }))
+            .filter(x => x.letzte && x.letzte >= grenze)
+            .filter(x => !(x.s.terminErinnertAt && new Date(x.s.terminErinnertAt).getTime() >= x.letzte))
+            .sort((a, b) => b.letzte - a.letzte);
+    }, [appts, students, nextApptByStudent]);
     const paketKnapp = React.useMemo(() => {
         return (students || []).filter(s => s._isMine && !s.archived).map(s => ({ s, remaining: packageRemainingUE(s, Number(pricePerHour) || 0) }))
             .filter(x => x.remaining != null && x.remaining <= 2)
@@ -21131,6 +21159,17 @@ function App() {
         if (stillCount > 0)
             weekItems.push({ key: "still", icon: icClock, onClick: () => setStillOpen(true),
                 text: stillCount === 1 ? "1 Schüler lange nicht gefahren" : stillCount + " Schüler lange nicht gefahren" });
+        if (ohneTerminList.length > 0)
+            weekItems.push({ key: "ohnetermin", icon: icClock, onClick: () => setOhneTerminOpen(true),
+                text: ohneTerminList.length === 1 ? "1 Schüler ohne nächsten Termin" : ohneTerminList.length + " Schüler ohne nächsten Termin" });
+        // Rechnerisch bereit (grüne Ampel), aber die Prüfungsreife ist noch nicht festgestellt -
+        // der nächste Schritt ist die Testfahrt in voller Prüfungsdauer (§ 11 FahrschAusbV-E).
+        const testfahrtBereit = (students || []).filter(s => s._isMine && !s.archived && !s.pending
+            && !(s.examReadiness && s.examReadiness.ergebnis === "bestanden")
+            && ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen");
+        if (testfahrtBereit.length > 0)
+            weekItems.push({ key: "testfahrt", icon: icClock, accent: true, onClick: () => { setSearch(""); setListFilter("reif"); setView("liste"); },
+                text: testfahrtBereit.length === 1 ? "1 Schüler bereit für die Testfahrt zur Prüfungsreife" : testfahrtBereit.length + " Schüler bereit für die Testfahrt zur Prüfungsreife" });
         if (erinnerungOffen > 0)
             weekItems.push({ key: "erinnern", icon: icClock, onClick: () => setErinnerungen(true),
                 text: erinnerungOffen === 1 ? "1 Fahrstunde morgen erinnern" : erinnerungOffen + " Fahrstunden morgen erinnern" });
@@ -34087,6 +34126,24 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        ohneTerminOpen && React.createElement("div", { onClick: () => setOhneTerminOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
+                    borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Ohne nächsten Termin"),
+                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Kürzlich gefahren, aber noch kein neuer Termin im Kalender. Nach dem Erinnern verschwindet der Schüler aus der Liste."),
+                ohneTerminList.length === 0
+                    ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Alle aktiven Schüler haben einen nächsten Termin.")
+                    : ohneTerminList.map(({ s, letzte }) => {
+                        const tage = Math.max(0, Math.floor((Date.now() - letzte) / 86400000));
+                        return React.createElement("div", { key: s.id, className: "card", style: { display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8 } },
+                            React.createElement("div", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, tage === 0 ? "heute gefahren" : (tage === 1 ? "gestern gefahren" : "vor " + tage + " Tagen gefahren"))),
+                            React.createElement("button", { onClick: () => terminErinnerungSenden(s), className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
+                    }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOhneTerminOpen(false) }, "Schließen"))),
         abbruchOpen && React.createElement("div", { onClick: () => setAbbruchOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
