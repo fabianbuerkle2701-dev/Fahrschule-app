@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.24.0";
+const APP_VERSION = "2.25.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.25.0", date: "September 2026", changes: [
+        "Unterlagen anfordern: Im Führerschein-Stand und in der Liste „Unterlagen fehlen“ gehen fehlender Sehtest, Erste-Hilfe-Kurs, Passfoto oder Antrag mit einem Tipp als WhatsApp-Nachricht an den Schüler; das Datum der letzten Anforderung wird angezeigt.",
+    ] },
     { v: "2.24.0", date: "September 2026", changes: [
         "Startseite: „Diese Woche“ meldet Schüler kurz vor der Prüfung, bei denen Sehtest, Erste Hilfe, Passfoto oder Antrag noch fehlen – mit einem Tipp direkt zu ihrem Führerschein-Stand.",
         "Die Listen „Ohne nächsten Termin“ und „Unterlagen fehlen“ schließen jetzt auch mit Escape bzw. der Zurück-Wischgeste.",
@@ -12913,6 +12916,18 @@ function pruefungsakteVon(stu) {
     });
     return out.sort((a, b) => b.datum.localeCompare(a.datum));
 }
+// Text für "Fehlende Unterlagen anfordern" - null, wenn nichts fehlt. Namen so, wie Schüler sie
+// kennen ("Antrag ... gestellt" ist nur die Checklisten-Formulierung).
+const UNTERLAGEN_TEXT = { sehtest: "Sehtest", erstehilfe: "Erste-Hilfe-Kurs", passfoto: "biometrisches Passfoto", antrag: "Antrag bei der Führerscheinstelle" };
+function unterlagenNachricht(stu) {
+    const fehlt = Object.keys(UNTERLAGEN_TEXT).filter(k => !licenseStepDone(stu || {}, k));
+    if (!fehlt.length)
+        return null;
+    const vorname = ((stu && stu.vorname) || "").trim();
+    return "Hallo" + (vorname ? " " + vorname : "") + ", für deine Prüfungsanmeldung fehlt noch:\n" + fehlt.map(k => "• " + UNTERLAGEN_TEXT[k]).join("\n")
+        + "\n\nBitte kümmere dich möglichst bald darum" + (fehlt.indexOf("antrag") >= 0 ? " – der Antrag dauert bei der Führerscheinstelle oft einige Wochen" : "")
+        + ". Gib mir Bescheid, wenn du es erledigt hast.";
+}
 const VEHICLE_COST_CATEGORIES = ["Kraftstoff", "Werkstatt/Reparatur", "TÜV/HU", "Versicherung", "Leasing/Finanzierung", "Sonstiges"];
 // FAQ-Fragen unter Mehr/Einstellungen/Konto - der Fragetext geht 1:1 an den KI-Helfer, dessen
 // Systemprompt (netlify/functions/assistant.js) dieselben Themen als Wissensquelle kennt, damit
@@ -16966,6 +16981,19 @@ function App() {
         // Gegen den aktuellen Stand speichern: der Aufruf kommt auch direkt nach einem Abschluss,
         // dessen writeStudent den Render-Schnappschuss "stu" schon überholt hat.
         schuelerAendernUndSpeichern(stu.id, cur => ({ ...cur, terminErinnertAt: new Date().toISOString() }));
+    }
+    // Fehlende Unterlagen per WhatsApp anfordern (Maßnahme 7/8). Synchron im Klick (Safari).
+    function unterlagenAnfordern(stu) {
+        const text = unterlagenNachricht(stu);
+        if (!text)
+            return;
+        const num = stu && stu.tel ? waNumber(stu.tel) : "";
+        if (!num) {
+            showToast("Für " + dispName(stu) + " ist keine Telefonnummer hinterlegt.");
+            return;
+        }
+        window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+        schuelerAendernUndSpeichern(stu.id, cur => ({ ...cur, unterlagenAngefordertAt: new Date().toISOString() }));
     }
     // Termin-Menü: Ist der Termin vorbei und noch nicht bestätigt, führt "Fahrstunde abschließen"
     // in dieselbe Abfrage wie nach Terminende - statt eines leeren Fahrtenbuch-Eintrags ohne Dauer.
@@ -24912,6 +24940,16 @@ function App() {
                             React.createElement("span", { style: done ? { color: "var(--green)", fontWeight: 600 } : null }, st.label)),
                         done && React.createElement("input", { type: "date", value: date, onChange: e => setStepDate(st.key, e.target.value), style: { border: "1.5px solid var(--line)", borderRadius: 9, padding: "6px 8px", fontSize: 16, width: 142, flexShrink: 0 } }));
                 })),
+            (() => {
+                const offen = ["sehtest", "erstehilfe", "passfoto", "antrag"].filter(k => !licenseStepDone(active, k)).length;
+                if (!offen)
+                    return null;
+                const am = active.unterlagenAngefordertAt ? new Date(active.unterlagenAngefordertAt).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }) : "";
+                return React.createElement("div", { style: { margin: "-6px 0 16px" } },
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => unterlagenAnfordern(active), style: { color: active.tel ? "#128C3E" : "var(--muted)" } },
+                        (offen === 1 ? "Fehlende Unterlage" : offen + " fehlende Unterlagen") + " per WhatsApp anfordern"),
+                    am && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", textAlign: "center", marginTop: 5 } }, "Zuletzt angefordert am " + am));
+            })(),
             renderPruefungsversuche(),
             renderWegZurPruefung(),
             renderRueckwaertsFahrplan(),
@@ -34369,13 +34407,14 @@ function App() {
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Diese Schüler sind fast so weit oder haben schon einen Prüfungstermin – ohne Sehtest, Erste Hilfe, Passfoto und Antrag geht die Anmeldung nicht. Der Antrag dauert bei der Führerscheinstelle oft Wochen."),
                 unterlagenFehlen.length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Alle prüfungsnahen Schüler haben ihre Unterlagen vollständig.")
-                    : unterlagenFehlen.map(({ s, fehlt }) => React.createElement("button", { key: s.id, className: "card", onClick: () => { setUnterlagenOpen(false); oeffneSchuelerReiter(s.id, "antrag"); },
-                        style: { display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8, width: "100%", textAlign: "left" } },
-                        React.createElement("div", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
-                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
-                            React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
-                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", overflowWrap: "anywhere" } }, "Fehlt: " + fehlt.join(", "))),
-                        React.createElement("span", { "aria-hidden": "true", style: { color: "var(--muted)", flexShrink: 0 } }, "›"))),
+                    : unterlagenFehlen.map(({ s, fehlt }) => React.createElement("div", { key: s.id, className: "card", style: { display: "flex", alignItems: "center", gap: 11, padding: "12px 14px", marginBottom: 8 } },
+                        React.createElement("button", { onClick: () => { setUnterlagenOpen(false); oeffneSchuelerReiter(s.id, "antrag"); }, style: { display: "flex", alignItems: "center", gap: 11, flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", padding: 0, color: "inherit" } },
+                            React.createElement("div", { className: "avatar tone-" + avatarTone(s.id), style: { width: 38, height: 38, minWidth: 38, fontSize: 14 } }, initials(s)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, dispName(s)),
+                                React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", overflowWrap: "anywhere" } }, "Fehlt: " + fehlt.join(", ")),
+                                s.unterlagenAngefordertAt && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } }, "angefordert am " + new Date(s.unterlagenAngefordertAt).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" })))),
+                        React.createElement("button", { onClick: () => unterlagenAnfordern(s), className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Anfordern"))),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setUnterlagenOpen(false) }, "Schließen"))); })(),
         abbruchOpen && React.createElement("div", { onClick: () => setAbbruchOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,

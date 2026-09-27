@@ -256,3 +256,15 @@ test("Ampel: grün nur mit Fortschritt ≥ 90 %, Theorie und erfüllten Sonderfa
     assert.equal(aus.ampel({ ...voll, drivenLessons: [] }, ADK, STRECKEN, {}).stufe, "gelb", "ohne Sonderfahrten höchstens gelb");
     assert.equal(aus.ampel({ items: { a1: 1 }, strecken: {} }, ADK, STRECKEN, {}).stufe, "rot");
 });
+
+test("Unterlagen anfordern: Text listet nur Fehlendes, Antrags-Hinweis nur wenn der Antrag fehlt", () => {
+    const { unterlagenNachricht: f } = require("./lade-app")(["unterlagenNachricht"]);
+    const t = f({ vorname: " Lena ", licenseSteps: { sehtest: { done: true }, erstehilfe: { done: true } } });
+    assert.match(t, /^Hallo Lena, für deine Prüfungsanmeldung fehlt noch:\n• biometrisches Passfoto\n• Antrag bei der Führerscheinstelle\n\n/);
+    assert.match(t, /oft einige Wochen/);
+    assert.doesNotMatch(t, /Sehtest/);
+    const ohneAntrag = f({ licenseSteps: { antrag: { done: true } } });
+    assert.match(ohneAntrag, /^Hallo, /, "ohne Vornamen kein doppeltes Leerzeichen");
+    assert.doesNotMatch(ohneAntrag, /Wochen/);
+    assert.equal(f({ licenseSteps: { sehtest: { done: true }, erstehilfe: { done: true }, passfoto: { done: true }, antrag: { done: true } } }), null);
+});
