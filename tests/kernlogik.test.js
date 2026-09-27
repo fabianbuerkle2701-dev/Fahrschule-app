@@ -307,3 +307,16 @@ test("Lebensphase: Reihenfolge der Phasen und genau ein nächster Schritt", () =
     assert.equal(p.key, "pruefung"); assert.match(p.schritt, /^Praxisprüfung am /);
     assert.equal(f({ exams: [{ art: "praxis", passed: true }] }, { stufe: "gruen", praxisTermin: "2026-10-15" }).key, "bestanden");
 });
+
+test("Schüler-App: ein nächster Schritt – Prüfung vor Unterlagen vor Termin", () => {
+    const { naechsterSchrittSchueler: f } = require("./lade-app")(["naechsterSchrittSchueler"]);
+    const jetzt = new Date("2026-09-27T10:00:00+02:00");
+    const pf = { art: "PF", status: "confirmed", start_at: "2026-10-09T08:00:00Z" };
+    const fs1 = { art: "ÜST", status: "confirmed", start_at: "2026-09-29T08:00:00Z" };
+    const offen = { unterlagen: { sehtest: true, erstehilfe: false, passfoto: true, antrag: false } };
+    assert.deepEqual(rein(f(offen, [fs1, pf], jetzt)), { key: "pruefung", tage: 12 });
+    assert.deepEqual(rein(f(offen, [fs1], jetzt)), { key: "unterlagen", offen: ["erstehilfe", "antrag"] });
+    assert.deepEqual(rein(f({}, [], jetzt)), { key: "termin" });
+    assert.equal(f({}, [fs1], jetzt), null, "Termin steht, nichts offen: keine Karte");
+    assert.equal(f({}, [{ ...pf, status: "pending" }], jetzt), null, "nur angefragte Prüfungsfahrt zählt nicht");
+});
