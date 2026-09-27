@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.16.0";
+const APP_VERSION = "2.17.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.17.0", date: "September 2026", changes: [
+            "Fahrstunde abschließen mit einem Tipp: Die Abfrage nach dem Termin ist jetzt kompakt. Dauer wie geplant, der nächste Termin kommt aus dem Kalender - im Normalfall genügt „Abschließen“. Dauer ändern sowie Bewertung und Notiz sind nur noch bei Bedarf aufklappbar",
+            "Steht noch kein nächster Termin im Kalender, sagt die Abfrage das deutlich und bietet „Per WhatsApp erinnern“ an - mit dem Buchungslink, falls vorhanden. Freie Zeiten zum direkten Einplanen gibt es weiterhin darunter",
+        ] },
     { v: "2.16.0", date: "September 2026", changes: [
             "Beim Abschließen einer Fahrstunde schlägt die App bis zu drei freie Zeiten für den nächsten Termin vor (aus deinen Arbeitszeiten, frühestens morgen). Ein Tipp öffnet danach das Termin-Fenster schon ausgefüllt",
             "Im Termin-Menü heißt es bei vergangenen, noch nicht bestätigten Terminen jetzt „Fahrstunde abschließen“ und führt in dieselbe Abfrage mit Dauer und Bewertung - vorher entstand dort ein leerer Fahrtenbuch-Eintrag ohne Dauer",
@@ -9943,11 +9947,13 @@ function ampel(stu, adk, strecken, sonderfahrtenSoll) {
 /* ════════ Icons (Feather, MIT) ════════ */
 const I = ({ children }) => React.createElement("svg", { width: "21", height: "21", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" }, children);
 // ── Fenster zum Bestätigen der Dauer einer vergangenen Fahrstunde ──
-function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip, lastRatings, folgeSlots }) {
+function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip, lastRatings, folgeSlots, naechsterTermin, erinnern }) {
+    // So wenig Aufwand wie möglich nach der Stunde: Im Normalfall genügt EIN Tipp auf
+    // "Abschließen" - Dauer wie geplant, nächster Termin aus dem Kalender. Dauer ändern sowie
+    // Bewertung, Thema und "Woran nächstes Mal arbeiten" (fürs Fahrtenbuch) sind aufklappbar.
     const [folge, setFolge] = React.useState(null);
-    // Abschluss in einem Schritt: Dauer (für die Abrechnung) und - optional - Bewertung, Thema und
-    // "Woran nächstes Mal arbeiten" (für das Fahrtenbuch) in derselben Abfrage. Vorher waren das
-    // zwei getrennte Wege, und das Fahrtenbuch blieb meist leer.
+    const [dauerOffen, setDauerOffen] = React.useState(false);
+    const [detailsOffen, setDetailsOffen] = React.useState(false);
     const [ratings, setRatings] = React.useState({});
     const [thema, setThema] = React.useState("");
     const [naechstes, setNaechstes] = React.useState("");
@@ -9970,82 +9976,97 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
     }
     const quick = [45, 60, 75, 90, 105, 135];
     const ue = (Number(minutes) || 0) / 45;
-    const dateLabel = appt ? new Date(appt.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "long", day: "2-digit", month: "long" }) : "";
+    const ueText = ue.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " UE";
+    const wieGeplant = Number(minutes) === Number(plannedMinutes || 45);
+    const dateLabel = appt ? new Date(appt.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" }) : "";
     const timeLabel = appt ? new Date(appt.start_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) : "";
     const endLabel = (appt && appt.end_at) ? new Date(appt.end_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) : "";
-    const apptNote = (appt && (appt.note || appt.title || "")).replace(/^\u00A7SONST\u00A7/, "").trim();
+    const apptNote = (appt && (appt.note || appt.title || "")).replace(/^§SONST§/, "").trim();
+    const anzahlDetails = Object.keys(ratings).filter(k => ratings[k]).length + (thema.trim() ? 1 : 0) + (naechstes.trim() ? 1 : 0);
     const eingabe = { fontSize: 16, width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 11px", background: "var(--card)", color: "var(--ink)" };
     const abschnitt = { fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 8 };
+    const zeile = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "11px 0", borderTop: "1px solid var(--line)" };
+    const linkKnopf = { fontSize: 13, fontWeight: 700, color: "var(--orange-deep)", background: "none", border: "none", padding: "8px 0", flexShrink: 0 };
+    function abschliessen() {
+        const m = parseInt(minutes, 10);
+        if (isNaN(m) || m <= 0) {
+            showToast("Bitte eine gültige Dauer eingeben.");
+            return;
+        }
+        einmal(() => onConfirm(m, { ratings, thema: thema.trim(), naechstes: naechstes.trim(), folge }));
+    }
     return React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
-        React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "22px 20px", maxHeight: "calc(100dvh - 36px)", overflowY: "auto" } },
-            total > 1 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", textAlign: "center", marginBottom: 8, textTransform: "uppercase", letterSpacing: ".05em" } },
-                "Fahrstunde ",
-                index + 1,
-                " von ",
-                total),
-            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, textAlign: "center", marginBottom: 4 } }, "Fahrstunde abschlie\u00DFen"),
-            React.createElement("p", { style: { fontSize: 13.5, color: "var(--ink-2)", textAlign: "center", lineHeight: 1.5, marginBottom: 10 } },
-                React.createElement("b", null, studentName)),
-            React.createElement("div", { style: { background: "var(--field-bg)", borderRadius: 12, padding: "10px 13px", marginBottom: 16, textAlign: "center" } },
-                React.createElement("div", { style: { fontSize: 10.5, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".05em", marginBottom: 3 } }, "Im Kalender geplant"),
-                React.createElement("div", { style: { fontSize: 14, fontWeight: 600, color: "var(--ink)" } }, dateLabel),
-                React.createElement("div", { style: { fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)", color: "var(--orange-deep)", marginTop: 1 } },
-                    timeLabel,
-                    endLabel ? " – " + endLabel : "",
-                    " Uhr",
-                    endLabel ? " (" + plannedMinutes + " Min)" : ""),
-                apptNote && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 5, fontStyle: "italic" } }, apptNote)),
-            React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 8 } }, "Tats\u00E4chliche Dauer"),
-            React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 } }, quick.map(q => React.createElement("button", { key: q, onClick: () => setMinutes(q), style: { flex: "1 0 28%", padding: "10px 0", borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)",
-                    border: (Number(minutes) === q ? "2px solid var(--orange)" : "1.5px solid var(--line)"),
-                    background: (Number(minutes) === q ? "var(--orange-soft)" : "var(--card)"),
-                    color: (Number(minutes) === q ? "var(--orange-deep)" : "var(--ink)") } },
-                q,
-                " Min"))),
-            React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 6 } },
-                React.createElement("input", { type: "number", inputMode: "numeric", min: "1", value: minutes, onChange: e => setMinutes(e.target.value), style: { flex: 1 } }),
-                React.createElement("span", { style: { fontSize: 14, color: "var(--muted)", whiteSpace: "nowrap" } },
-                    "Min \u00B7 ",
-                    ue.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-                    " UE")),
-            React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginTop: 18 } },
-                React.createElement("div", { style: { ...abschnitt, marginBottom: 4 } }, "Bewertung (optional)"),
-                hatLetzte && React.createElement("button", { type: "button", onClick: () => setRatings({ ...lastRatings }),
-                    style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", background: "none", border: "none", padding: "6px 0" } }, "Wie letztes Mal")),
-            LESSON_FIELDS.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "5px 0", borderTop: "1px solid var(--line)" } },
-                React.createElement("span", { lang: "de", style: { fontSize: 13, fontWeight: 500, flex: 1, minWidth: 0, hyphens: "auto", WebkitHyphens: "auto", overflowWrap: "anywhere", lineHeight: 1.3 } }, f.label),
-                React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } }, SMILEYS.map(sm => {
-                    const on = ratings[f.id] === sm.v;
-                    return React.createElement("button", { key: sm.v, type: "button", "aria-label": f.label + ": " + sm.label, "aria-pressed": on,
-                        onClick: () => setRatings(r => ({ ...r, [f.id]: on ? null : sm.v })),
-                        style: { width: 38, height: 38, borderRadius: 10, fontSize: 18,
-                            border: on ? "2.5px solid " + sm.color : "2px solid var(--line)",
-                            background: on ? sm.bg : "var(--card)",
-                            filter: on ? "none" : "grayscale(0.6) opacity(0.55)" } }, sm.emoji);
-                })))),
-            React.createElement("label", { htmlFor: "abschluss-thema", style: { ...abschnitt, display: "block", marginTop: 14, marginBottom: 6 } }, "Thema"),
-            React.createElement("input", { id: "abschluss-thema", type: "text", value: thema, onChange: e => setThema(e.target.value), maxLength: 200,
-                placeholder: "z. B. Kreisverkehr, Einparken", style: eingabe }),
-            React.createElement("label", { htmlFor: "abschluss-naechstes", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Woran nächstes Mal arbeiten?"),
-            React.createElement("input", { id: "abschluss-naechstes", type: "text", value: naechstes, onChange: e => setNaechstes(e.target.value), maxLength: 300,
-                placeholder: "Erscheint vor der nächsten Stunde", style: eingabe }),
-            // Folgetermin: nur echte freie Lücken aus der Arbeitszeit (freieLueckenAmTag). Ein Tipp
-            // öffnet nach dem Abschluss das Termin-Fenster vorausgefüllt - gespeichert wird erst dort,
-            // mit denselben Prüfungen (Überschneidung, Limits) wie jeder andere Termin.
-            folgeSlots && folgeSlots.length > 0 && React.createElement(React.Fragment, null,
-                React.createElement("div", { style: { ...abschnitt, marginTop: 14, marginBottom: 6 } }, "Nächster Termin (optional)"),
-                React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, folgeSlots.map(s => {
-                    const on = folge && folge.date === s.date && folge.start === s.start;
-                    return React.createElement("button", { key: s.date + s.start, type: "button", "aria-pressed": !!on, onClick: () => setFolge(on ? null : s),
-                        style: { flex: "1 0 28%", padding: "9px 6px", borderRadius: 12, fontSize: 13, fontWeight: 700, lineHeight: 1.3,
-                            border: on ? "2px solid var(--orange)" : "1.5px solid var(--line)",
-                            background: on ? "var(--orange-soft)" : "var(--card)", color: on ? "var(--orange-deep)" : "var(--ink)" } },
-                        s.label, React.createElement("br"), s.start + " Uhr");
-                }))),
-            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 18, marginBottom: 8 }, onClick: () => { const m = parseInt(minutes, 10); if (isNaN(m) || m <= 0) {
-                    showToast("Bitte eine gültige Dauer eingeben.");
-                    return;
-                } einmal(() => onConfirm(m, { ratings, thema: thema.trim(), naechstes: naechstes.trim(), folge })); } }, folge ? "Abschlie\u00DFen und Termin anlegen" : "Abschlie\u00DFen"),
+        React.createElement("div", { style: { background: "var(--card)", width: "100%", maxWidth: 420, borderRadius: 20, padding: "20px 20px 16px", maxHeight: "calc(100dvh - 36px)", overflowY: "auto" } },
+            total > 1 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6, textTransform: "uppercase", letterSpacing: ".05em" } },
+                "Fahrstunde " + (index + 1) + " von " + total),
+            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 2 } }, "Fahrstunde abschließen"),
+            React.createElement("div", { style: { fontSize: 14, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 10 } },
+                React.createElement("b", null, studentName),
+                " · " + dateLabel + ", " + timeLabel + (endLabel ? "–" + endLabel : "") + " Uhr",
+                apptNote && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontStyle: "italic", marginTop: 2 } }, apptNote)),
+            // Dauer: eine Zeile, nur bei Abweichung aufklappen.
+            React.createElement("div", { style: zeile },
+                React.createElement("div", { style: { fontSize: 14, color: "var(--ink)" } },
+                    React.createElement("b", null, minutes + " Min"),
+                    React.createElement("span", { style: { color: "var(--muted)" } }, " · " + ueText + (wieGeplant ? " · wie geplant" : " · geändert"))),
+                React.createElement("button", { type: "button", onClick: () => setDauerOffen(o => !o), "aria-expanded": dauerOffen, style: linkKnopf }, dauerOffen ? "Fertig" : "Ändern")),
+            dauerOffen && React.createElement("div", { style: { paddingBottom: 10 } },
+                React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 } }, quick.map(q => React.createElement("button", { key: q, type: "button", onClick: () => setMinutes(q), style: { flex: "1 0 28%", padding: "10px 0", borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)",
+                        border: (Number(minutes) === q ? "2px solid var(--orange)" : "1.5px solid var(--line)"),
+                        background: (Number(minutes) === q ? "var(--orange-soft)" : "var(--card)"),
+                        color: (Number(minutes) === q ? "var(--orange-deep)" : "var(--ink)") } }, q + " Min"))),
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                    React.createElement("input", { type: "number", inputMode: "numeric", min: "1", value: minutes, "aria-label": "Dauer in Minuten", onChange: e => setMinutes(e.target.value), style: { ...eingabe, flex: 1, width: "auto" } }),
+                    React.createElement("span", { style: { fontSize: 14, color: "var(--muted)", whiteSpace: "nowrap" } }, "Min"))),
+            // Nächster Termin: steht einer im Kalender, nur anzeigen. Sonst Hinweis zum Erinnern,
+            // optional gleich selbst einplanen (freie Lücken aus der Arbeitszeit, freieLueckenAmTag -
+            // gespeichert wird erst im Termin-Fenster mit den üblichen Prüfungen).
+            React.createElement("div", { style: { ...zeile, display: "block" } },
+                naechsterTermin
+                    ? React.createElement("div", { style: { fontSize: 14, color: "var(--ink)" } },
+                        React.createElement("span", { style: { color: "var(--muted)" } }, "Nächster Termin: "),
+                        React.createElement("b", null, naechsterTermin))
+                    : React.createElement("div", { style: { background: "var(--amber-bg)", color: "var(--amber-ink)", borderRadius: 12, padding: "10px 13px", fontSize: 13.5, lineHeight: 1.45 } },
+                        React.createElement("b", null, "Noch kein nächster Termin."),
+                        " Erinnere " + ((erinnern && erinnern.vorname) || "den Schüler") + ", einen neuen Termin auszumachen.",
+                        erinnern && erinnern.onClick && React.createElement("button", { type: "button", onClick: erinnern.onClick,
+                            style: { display: "block", marginTop: 8, fontSize: 13, fontWeight: 700, color: "var(--amber-ink)", background: "var(--card)", border: "1.5px solid currentColor", borderRadius: 10, padding: "7px 12px" } },
+                            "Per WhatsApp erinnern")),
+                !naechsterTermin && folgeSlots && folgeSlots.length > 0 && React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", margin: "10px 0 6px" } }, "Oder gleich selbst einplanen:"),
+                    React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, folgeSlots.map(s => {
+                        const on = folge && folge.date === s.date && folge.start === s.start;
+                        return React.createElement("button", { key: s.date + s.start, type: "button", "aria-pressed": !!on, onClick: () => setFolge(on ? null : s),
+                            style: { flex: "1 0 28%", padding: "9px 6px", borderRadius: 12, fontSize: 13, fontWeight: 700, lineHeight: 1.3,
+                                border: on ? "2px solid var(--orange)" : "1.5px solid var(--line)",
+                                background: on ? "var(--orange-soft)" : "var(--card)", color: on ? "var(--orange-deep)" : "var(--ink)" } },
+                            s.label, React.createElement("br"), s.start + " Uhr");
+                    })))),
+            // Bewertung & Notiz: freiwillig, zugeklappt.
+            React.createElement("div", { style: zeile },
+                React.createElement("div", { style: { fontSize: 14, color: "var(--ink)" } }, "Bewertung & Notiz",
+                    React.createElement("span", { style: { color: "var(--muted)" } }, anzahlDetails ? " · " + anzahlDetails + " eingetragen" : " · optional")),
+                React.createElement("button", { type: "button", onClick: () => setDetailsOffen(o => !o), "aria-expanded": detailsOffen, style: linkKnopf }, detailsOffen ? "Zuklappen" : "Hinzufügen")),
+            detailsOffen && React.createElement("div", { style: { paddingBottom: 6 } },
+                hatLetzte && React.createElement("button", { type: "button", onClick: () => setRatings({ ...lastRatings }), style: { ...linkKnopf, padding: "2px 0 8px" } }, "Bewertung wie letztes Mal"),
+                LESSON_FIELDS.map(f => React.createElement("div", { key: f.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "5px 0" } },
+                    React.createElement("span", { lang: "de", style: { fontSize: 13, fontWeight: 500, flex: 1, minWidth: 0, hyphens: "auto", WebkitHyphens: "auto", overflowWrap: "anywhere", lineHeight: 1.3 } }, f.label),
+                    React.createElement("div", { style: { display: "flex", gap: 6, flexShrink: 0 } }, SMILEYS.map(sm => {
+                        const on = ratings[f.id] === sm.v;
+                        return React.createElement("button", { key: sm.v, type: "button", "aria-label": f.label + ": " + sm.label, "aria-pressed": on,
+                            onClick: () => setRatings(r => ({ ...r, [f.id]: on ? null : sm.v })),
+                            style: { width: 38, height: 38, borderRadius: 10, fontSize: 18,
+                                border: on ? "2.5px solid " + sm.color : "2px solid var(--line)",
+                                background: on ? sm.bg : "var(--card)",
+                                filter: on ? "none" : "grayscale(0.6) opacity(0.55)" } }, sm.emoji);
+                    })))),
+                React.createElement("label", { htmlFor: "abschluss-thema", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Thema"),
+                React.createElement("input", { id: "abschluss-thema", type: "text", value: thema, onChange: e => setThema(e.target.value), maxLength: 200,
+                    placeholder: "z. B. Kreisverkehr, Einparken", style: eingabe }),
+                React.createElement("label", { htmlFor: "abschluss-naechstes", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Woran nächstes Mal arbeiten?"),
+                React.createElement("input", { id: "abschluss-naechstes", type: "text", value: naechstes, onChange: e => setNaechstes(e.target.value), maxLength: 300,
+                    placeholder: "Erscheint vor der nächsten Stunde", style: eingabe })),
+            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 14, marginBottom: 8 }, onClick: abschliessen }, folge ? "Abschließen und Termin anlegen" : "Abschließen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => einmal(onSkip) }, "Fand nicht statt")));
 }
 // ── Wischbare Zeile: nach links wischen zeigt Anruf + WhatsApp ──
@@ -16801,6 +16822,23 @@ function App() {
             out.push({ date: tag, start: luecke.from, end: fromMin(toMin(luecke.from) + dauer), label });
         }
         return out;
+    }
+    function naechsterTerminText(a) {
+        if (!a || !a.start_at)
+            return null;
+        const tag = new Date(a.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" });
+        return tag + " · " + hm(a.start_at) + " Uhr" + (a.status === "pending" ? " (angefragt)" : "");
+    }
+    // Synchron im Klick öffnen (kein await davor), sonst blockt Safari das Fenster.
+    function terminErinnerungSenden(stu) {
+        const num = stu && stu.tel ? waNumber(stu.tel) : "";
+        if (!num) {
+            showToast("Für " + dispName(stu) + " ist keine Telefonnummer hinterlegt.");
+            return;
+        }
+        const vorname = (stu.vorname || "").trim() || dispName(stu);
+        const text = "Hallo " + vorname + ", denk bitte daran, deinen nächsten Termin für die Fahrstunde auszumachen" + (bookingCode ? ": " + bookingURL() : ".");
+        window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
     }
     // Termin-Menü: Ist der Termin vorbei und noch nicht bestätigt, führt "Fahrstunde abschließen"
     // in dieselbe Abfrage wie nach Terminende - statt eines leeren Fahrtenbuch-Eintrags ohne Dauer.
@@ -33306,7 +33344,9 @@ function App() {
             return React.createElement(LessonPromptModal, { key: appt.id, appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m, extra) => confirmPastLesson(appt, m, extra), onSkip: () => skipPastLesson(appt), lastRatings: letzteBewertungen(stu),
                 // Folgetermin-Vorschläge nur beim letzten Eintrag der Warteschlange: das Termin-Fenster
                 // öffnet sich danach, und eine weitere Abfrage läge sonst darüber.
-                folgeSlots: stu && lessonPrompt.idx === lessonPrompt.queue.length - 1 ? folgeTerminVorschlaege(planned) : null });
+                folgeSlots: stu && lessonPrompt.idx === lessonPrompt.queue.length - 1 ? folgeTerminVorschlaege(planned) : null,
+                naechsterTermin: stu ? naechsterTerminText(nextApptByStudent[stu.id]) : null,
+                erinnern: stu ? { vorname: (stu.vorname || "").trim() || dispName(stu), onClick: stu.tel ? () => terminErinnerungSenden(stu) : null } : null });
         })(),
         // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
         // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
