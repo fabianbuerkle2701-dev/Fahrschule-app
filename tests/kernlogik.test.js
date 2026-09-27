@@ -198,3 +198,61 @@ test("Prüfungsakte: chronologisch, bestandener Versuch verdrängt den gleichen 
     assert.equal(akte[0].von, "Frau Kranz");
     assert.deepEqual(rein(f({})), []);
 });
+
+// ── Ausbildungslogik: Überschneidung, Sonderfahrten, Prüfungsreife, Ampel ──
+const aus = require("./lade-app")(["findOverlaps", "sonderfahrtenBilanz", "pruefungsreife", "ampel"]);
+
+test("Überschneidung: echte Überlappung ja, Anschlusstermin und offene Anfrage nein", () => {
+    const appts = [
+        { id: "1", status: "confirmed", start_at: "2026-09-28T08:00:00Z", end_at: "2026-09-28T09:30:00Z" },
+        { id: "2", status: "pending", start_at: "2026-09-28T10:00:00Z", end_at: "2026-09-28T10:45:00Z" },
+        { id: "3", status: "confirmed", start_at: "2026-09-28T12:00:00Z" },                       // ohne Ende = 45 Min
+    ];
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z").length, 1);
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:15:00Z").length, 0, "direkt anschließend ist keine Überschneidung");
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T12:30:00Z", "2026-09-28T13:00:00Z").length, 1, "fehlende Endzeit zählt als 45 Minuten");
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z", "1").length, 0, "eigener Termin wird beim Bearbeiten ignoriert");
+});
+
+const sf = (art, minutes, klasse) => ({ art, minutes, ...(klasse ? { klasse } : {}) });
+test("Sonderfahrten Klasse B: Soll 5/4/3 UE, Doppelstunde je Art Pflicht", () => {
+    const stu = { drivenLessons: [sf("ÜL", 90), sf("ÜL", 90), sf("ÜL", 45), sf("AB", 45), sf("AB", 45), sf("AB", 45), sf("AB", 45)] };
+    const b = rein(aus.sonderfahrtenBilanz(stu, "B", {}));
+    const ul = b.find(x => x.code === "ÜL"), ab = b.find(x => x.code === "AB"), nf = b.find(x => x.code === "NF");
+    assert.equal(ul.ue, 5); assert.equal(ul.erfuellt, true); assert.equal(ul.langeFahrtDabei, true);
+    assert.equal(ab.ue, 4); assert.equal(ab.erfuellt, true); assert.equal(ab.langeFahrtDabei, false, "4 x 45 Min ohne Doppelstunde");
+    assert.equal(nf.ue, 0); assert.equal(nf.sollUe, 3);
+});
+
+test("Sonderfahrten: andere Klasse zählt nicht, eigenes Soll ergänzt die Vorgabe feldweise", () => {
+    const stu = { drivenLessons: [sf("ÜL", 225, "A"), sf("ÜL", 90)] };
+    const b = rein(aus.sonderfahrtenBilanz(stu, "B", { B: { autobahn: 2 } }));
+    assert.equal(b.find(x => x.code === "ÜL").ue, 2, "Fahrten der Klasse A zählen nicht für B");
+    assert.equal(b.find(x => x.code === "AB").sollUe, 2);
+    assert.equal(b.find(x => x.code === "NF").sollUe, 3, "nicht überschriebene Felder behalten die Vorgabe");
+    assert.deepEqual(rein(aus.sonderfahrtenBilanz(stu, "A", {})), [], "ohne Soll für die Klasse keine Bilanz");
+});
+
+// Kleine Vorlage: 2 ADK-Punkte (je 1x), 1 Strecken-Station (2x)
+const ADK = [{ id: "grund", title: "Grundstufe", items: [{ id: "a1", label: "Anfahren", count: 1 }, { id: "a2", label: "Bremsen", count: 1 }] }];
+const STRECKEN = [{ id: "stadt", title: "Stadt", items: [{ id: "s1", label: "Kreisverkehr", count: 2 }] }];
+const sonderOk = [sf("ÜL", 90), sf("ÜL", 90), sf("ÜL", 45), sf("AB", 90), sf("AB", 90), sf("NF", 90), sf("NF", 45)];
+
+test("Prüfungsreife: zählt offene ADK-Punkte, Stationen, Theorie und Sonderfahrten", () => {
+    const r = rein(aus.pruefungsreife({ items: { a1: 1 }, strecken: { s1: 1 } }, ADK, STRECKEN, {}));
+    assert.equal(r.offeneADK.length, 1);
+    assert.equal(r.offeneStrecken.length, 1);
+    assert.equal(r.theorieOffen, true);
+    assert.equal(r.offeneSonderfahrten.length, 3);
+    assert.equal(r.total, 6);
+    const fertig = rein(aus.pruefungsreife({ items: { a1: 1, a2: 1 }, strecken: { s1: 2 }, theorie: "2026-09-01", drivenLessons: sonderOk }, ADK, STRECKEN, {}));
+    assert.equal(fertig.total, 0);
+});
+
+test("Ampel: grün nur mit Fortschritt ≥ 90 %, Theorie und erfüllten Sonderfahrten", () => {
+    const voll = { items: { a1: 1, a2: 1 }, strecken: { s1: 2 }, theorie: "2026-09-01", drivenLessons: sonderOk };
+    assert.equal(aus.ampel(voll, ADK, STRECKEN, {}).stufe, "gruen");
+    assert.equal(aus.ampel({ ...voll, theorie: "" }, ADK, STRECKEN, {}).stufe, "gelb", "ohne Theorie höchstens gelb");
+    assert.equal(aus.ampel({ ...voll, drivenLessons: [] }, ADK, STRECKEN, {}).stufe, "gelb", "ohne Sonderfahrten höchstens gelb");
+    assert.equal(aus.ampel({ items: { a1: 1 }, strecken: {} }, ADK, STRECKEN, {}).stufe, "rot");
+});
