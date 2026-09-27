@@ -320,3 +320,67 @@ test("Schüler-App: ein nächster Schritt – Prüfung vor Unterlagen vor Termin
     assert.equal(f({}, [fs1], jetzt), null, "Termin steht, nichts offen: keine Karte");
     assert.equal(f({}, [{ ...pf, status: "pending" }], jetzt), null, "nur angefragte Prüfungsfahrt zählt nicht");
 });
+
+// ── Inhaber-Cockpit ──
+const ck = require("./lade-app")(["cockpitKennzahlen", "cockpitFolgerungen"]);
+const JETZT = new Date(2026, 8, 28, 9, 0);   // Montag, 28.09.2026
+const wh = { mo: { von: "08:00", bis: "12:00" }, di: { von: "08:00", bis: "12:00" }, mi: { blocked: true }, do: { von: "08:00", bis: "12:00" }, fr: { von: "08:00", bis: "12:00" }, sa: null };
+
+test("Cockpit: freie Kapazität aus Arbeitszeit minus bestätigten Terminen, Sonntag und gesperrte Tage zählen nicht", () => {
+    const k = rein(ck.cockpitKennzahlen({ lehrer: [{ id: "L1", name: "Anna", work_hours: wh }],
+        belegung: [{ lehrer_id: "L1", datum: "2026-09-28", minuten: 180, anfragen: 2 }] }, [], [], 60, JETZT));
+    // 4 Wochen × 4 Arbeitstage × 240 Min = 3840 Min = 85 UE (abgerundet); gebucht 180 Min = 4 UE
+    assert.equal(k.kapazitaet.kapUE, 85);
+    assert.equal(k.kapazitaet.gebuchtUE, 4);
+    assert.equal(k.kapazitaet.freiUE, 81);
+    assert.equal(k.kapazitaet.freiWocheUE, 17, "diese Woche: 4×240 - 180 = 780 Min");
+    assert.equal(k.kapazitaet.anfragen, 2);
+    assert.equal(k.kapazitaet.auslastung, 5);
+});
+
+test("Cockpit: Tages- und Wochenlimit deckeln die Kapazität, fehlende Arbeitszeit wird ausgewiesen", () => {
+    const k = rein(ck.cockpitKennzahlen({ lehrer: [
+        { id: "L1", name: "Anna", work_hours: wh, day_limit: 180, week_limit: 450 },
+        { id: "L2", name: "Ben", work_hours: null },
+    ], belegung: [] }, [], [], 60, JETZT));
+    assert.equal(k.kapazitaet.kapUE, 40, "Wochenlimit 450 Min × 4 Wochen = 1800 Min = 40 UE");
+    assert.deepEqual(k.kapazitaet.ohneArbeitszeit, ["Ben"]);
+    assert.ok(ck.cockpitFolgerungen(k).some(f => /Ohne hinterlegte Arbeitszeiten: Ben/.test(f.text)));
+});
+
+test("Cockpit: wartende Schüler, Anfragen-Quote, Median-Dauer und Erstversuch-Quote", () => {
+    const tage = n => new Date(JETZT.getTime() - n * 86400000).toISOString();
+    const k = rein(ck.cockpitKennzahlen({
+        lehrer: [{ id: "L1", name: "Anna", work_hours: wh }],
+        schueler: [
+            { id: "a", name: "Wartet", lehrer_id: "L1", angemeldet: true, letzte: tage(20) },
+            { id: "b", name: "Hat Termin", lehrer_id: "L1", angemeldet: true, letzte: tage(30), naechste: tage(-2) },
+            { id: "c", name: "Kürzlich", lehrer_id: "L1", angemeldet: true, letzte: tage(5) },
+            { id: "d", name: "Nie gefahren", lehrer_id: "L1", angemeldet: true, angelegt: tage(40) },
+            { id: "e", name: "Archiv", lehrer_id: "L1", angemeldet: true, archiviert: true, letzte: tage(90) },
+            { id: "f", name: "Bestanden", lehrer_id: "L1", angemeldet: true, letzte: tage(60), erste_stunde: "2026-01-10", bestanden_am: "2026-05-10" },
+            { id: "g", name: "Bestanden2", lehrer_id: "L1", angemeldet: true, erste_stunde: "2026-02-01", bestanden_am: "2026-08-01" },
+        ],
+        interessenten: { angemeldet: 3, abgesagt: 1, offen: 4, kontaktiert: 2 },
+    }, [], [
+        { exams: [{ art: "praxis", date: "2026-06-01", passed: true }] },
+        { exams: [{ art: "praxis", date: "2026-07-01", passed: false }, { art: "praxis", date: "2026-07-20", passed: true }] },
+        { exams: [{ art: "theorie", date: "2026-07-01", passed: true }] },
+    ], 60, JETZT));
+    assert.deepEqual(k.warten.map(w => w.name), ["Nie gefahren", "Wartet"]);
+    assert.equal(k.warten[0].nochNieGefahren, true);
+    assert.equal(k.aktiveSchueler, 4);
+    assert.deepEqual(k.anfragen, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    assert.equal(k.dauerAnzahl, 2);
+    assert.ok(k.dauerMonate > 4 && k.dauerMonate < 5.5, "Median aus 120 und 181 Tagen ≈ 4,9 Monate");
+    assert.equal(k.quoteErstversuch, 50);
+});
+
+test("Cockpit: Geld – offener Saldo und davon noch nicht berechnet", () => {
+    const k = rein(ck.cockpitKennzahlen({}, [
+        { stu: { drivenLessons: [{ id: "x", date: "2026-09-01", minutes: 90 }] } },
+        { stu: { drivenLessons: [{ id: "y", date: "2026-09-02", minutes: 45, invoiced: "R-1", invoicedPrice: 60, invoicedCoveredUE: 0 }], payments: [{ amount: 60 }] } },
+    ], [], 60, JETZT));
+    assert.deepEqual(k.geld, { offen: 120, nichtBerechnet: 120 });
+    assert.ok(ck.cockpitFolgerungen(k).some(f => /nicht berechnet/.test(f.text)));
+});
