@@ -384,3 +384,14 @@ test("Cockpit: Geld – offener Saldo und davon noch nicht berechnet", () => {
     assert.deepEqual(k.geld, { offen: 120, nichtBerechnet: 120 });
     assert.ok(ck.cockpitFolgerungen(k).some(f => /nicht berechnet/.test(f.text)));
 });
+
+test("CSV für Excel: Semikolon, Dezimalkomma, BOM, Schutz gegen Formel-Injektion", () => {
+    const { csvText } = require("./lade-app")(["csvText"]);
+    const t = csvText(["Name", "Betrag", "Aktiv"], [["=HYPERLINK(\"x\")", 1234.5, true], ["Müller; Anna", -10, false], ["  Leer ", null, false]]);
+    assert.equal(t.charCodeAt(0), 0xFEFF, "BOM für Umlaute in Excel");
+    const z = t.slice(1).split("\r\n");
+    assert.equal(z[0], "Name;Betrag;Aktiv");
+    assert.equal(z[1], "\"'=HYPERLINK(\"\"x\"\")\";1234,5;ja", "Formel wird entschärft und gequotet");
+    assert.equal(z[2], "\"Müller; Anna\";'-10;nein".replace("'-10", "-10"), "Semikolon im Text wird gequotet, Zahl bleibt Zahl");
+    assert.equal(z[3], "\"  Leer \";;nein");
+});
