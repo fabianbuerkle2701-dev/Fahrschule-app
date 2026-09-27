@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.15.0";
+const APP_VERSION = "2.16.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.16.0", date: "September 2026", changes: [
+            "Beim Abschließen einer Fahrstunde schlägt die App bis zu drei freie Zeiten für den nächsten Termin vor (aus deinen Arbeitszeiten, frühestens morgen). Ein Tipp öffnet danach das Termin-Fenster schon ausgefüllt",
+            "Im Termin-Menü heißt es bei vergangenen, noch nicht bestätigten Terminen jetzt „Fahrstunde abschließen“ und führt in dieselbe Abfrage mit Dauer und Bewertung - vorher entstand dort ein leerer Fahrtenbuch-Eintrag ohne Dauer",
+        ] },
     { v: "2.15.0", date: "September 2026", changes: [
             "Fahrstunde in einem Schritt abschließen: Die Abfrage nach dem Termin fragt jetzt neben der Dauer auch Bewertung, Thema und „Woran nächstes Mal arbeiten?“ ab - alles optional. Daraus entsteht direkt der Fahrtenbuch-Eintrag, und die Notiz erscheint vor der nächsten Stunde beim Schüler. „Wie letztes Mal“ übernimmt die Bewertung der vorigen Stunde mit einem Tipp",
         ] },
@@ -9939,7 +9943,8 @@ function ampel(stu, adk, strecken, sonderfahrtenSoll) {
 /* ════════ Icons (Feather, MIT) ════════ */
 const I = ({ children }) => React.createElement("svg", { width: "21", height: "21", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" }, children);
 // ── Fenster zum Bestätigen der Dauer einer vergangenen Fahrstunde ──
-function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip, lastRatings }) {
+function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip, lastRatings, folgeSlots }) {
+    const [folge, setFolge] = React.useState(null);
     // Abschluss in einem Schritt: Dauer (für die Abrechnung) und - optional - Bewertung, Thema und
     // "Woran nächstes Mal arbeiten" (für das Fahrtenbuch) in derselben Abfrage. Vorher waren das
     // zwei getrennte Wege, und das Fahrtenbuch blieb meist leer.
@@ -10024,10 +10029,23 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
             React.createElement("label", { htmlFor: "abschluss-naechstes", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Woran nächstes Mal arbeiten?"),
             React.createElement("input", { id: "abschluss-naechstes", type: "text", value: naechstes, onChange: e => setNaechstes(e.target.value), maxLength: 300,
                 placeholder: "Erscheint vor der nächsten Stunde", style: eingabe }),
+            // Folgetermin: nur echte freie Lücken aus der Arbeitszeit (freieLueckenAmTag). Ein Tipp
+            // öffnet nach dem Abschluss das Termin-Fenster vorausgefüllt - gespeichert wird erst dort,
+            // mit denselben Prüfungen (Überschneidung, Limits) wie jeder andere Termin.
+            folgeSlots && folgeSlots.length > 0 && React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { ...abschnitt, marginTop: 14, marginBottom: 6 } }, "Nächster Termin (optional)"),
+                React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, folgeSlots.map(s => {
+                    const on = folge && folge.date === s.date && folge.start === s.start;
+                    return React.createElement("button", { key: s.date + s.start, type: "button", "aria-pressed": !!on, onClick: () => setFolge(on ? null : s),
+                        style: { flex: "1 0 28%", padding: "9px 6px", borderRadius: 12, fontSize: 13, fontWeight: 700, lineHeight: 1.3,
+                            border: on ? "2px solid var(--orange)" : "1.5px solid var(--line)",
+                            background: on ? "var(--orange-soft)" : "var(--card)", color: on ? "var(--orange-deep)" : "var(--ink)" } },
+                        s.label, React.createElement("br"), s.start + " Uhr");
+                }))),
             React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 18, marginBottom: 8 }, onClick: () => { const m = parseInt(minutes, 10); if (isNaN(m) || m <= 0) {
                     showToast("Bitte eine gültige Dauer eingeben.");
                     return;
-                } einmal(() => onConfirm(m, { ratings, thema: thema.trim(), naechstes: naechstes.trim() })); } }, "Abschlie\u00DFen"),
+                } einmal(() => onConfirm(m, { ratings, thema: thema.trim(), naechstes: naechstes.trim(), folge })); } }, folge ? "Abschlie\u00DFen und Termin anlegen" : "Abschlie\u00DFen"),
             React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => einmal(onSkip) }, "Fand nicht statt")));
 }
 // ── Wischbare Zeile: nach links wischen zeigt Anruf + WhatsApp ──
@@ -16154,13 +16172,17 @@ function App() {
     useEffect(() => {
         if (lessonPrompt)
             return; // schon offen
+        // Nicht über ein offenes Termin-Fenster legen (z.B. Folgetermin aus dem Abschluss) -
+        // die Abfrage kommt, sobald das Fenster geschlossen ist.
+        if (apptForm)
+            return;
         if (!students || students.length === 0)
             return;
         const list = pendingPastLessons();
         if (list.length > 0) {
             setLessonPrompt({ queue: list, idx: 0 });
         }
-    }, [appts, students]);
+    }, [appts, students, !!apptForm]);
     // Fahrschulfarbe neu anwenden, wenn sie sich ändert oder das Theme wechselt (Soft/Deep-Schattierung
     // ist richtungsabhängig vom Theme, siehe applySchoolColor)
     useEffect(() => { if (school && school.color)
@@ -16758,8 +16780,32 @@ function App() {
             catch (e) { }
             const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price: (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)), apptId: appt.id, fromAppt: true, art: appt.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
+            if (extra && extra.folge) {
+                const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST" };
+                setApptForm({ ...f, _stand: apptFormStand(f) });
+            }
         }
         advanceLessonPrompt();
+    }
+    // Bis zu drei freie Lücken in den nächsten 14 Tagen für den Folgetermin, höchstens eine je Tag
+    // und frühestens morgen. Ohne hinterlegte Arbeitszeiten keine Vorschläge (freieLueckenAmTag).
+    function folgeTerminVorschlaege(minuten) {
+        const dauer = Math.max(15, Number(minuten) || 45);
+        const out = [];
+        for (let i = 1; i <= 14 && out.length < 3; i++) {
+            const tag = ymd(addDays(new Date(), i));
+            const luecke = freieLueckenAmTag(tag, dauer)[0];
+            if (!luecke)
+                continue;
+            const label = new Date(tag + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" });
+            out.push({ date: tag, start: luecke.from, end: fromMin(toMin(luecke.from) + dauer), label });
+        }
+        return out;
+    }
+    // Termin-Menü: Ist der Termin vorbei und noch nicht bestätigt, führt "Fahrstunde abschließen"
+    // in dieselbe Abfrage wie nach Terminende - statt eines leeren Fahrtenbuch-Eintrags ohne Dauer.
+    function abschlussOffenFuer(a) {
+        return !IS_DEMO() && !!a && pendingPastLessons().find(x => x.id === a.id) || null;
     }
     // Termin als nicht gefahren markieren (z.B. ausgefallen), nicht in die Kosten
     function skipPastLesson(appt) {
@@ -33257,7 +33303,10 @@ function App() {
             const appt = lessonPrompt.queue[lessonPrompt.idx];
             const stu = students.find(x => x.id === (appt._matchedStudentId || appt.student_id));
             const planned = appt.end_at ? Math.round((new Date(appt.end_at).getTime() - new Date(appt.start_at).getTime()) / 60000) : 45;
-            return React.createElement(LessonPromptModal, { key: appt.id, appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m, extra) => confirmPastLesson(appt, m, extra), onSkip: () => skipPastLesson(appt), lastRatings: letzteBewertungen(stu) });
+            return React.createElement(LessonPromptModal, { key: appt.id, appt: appt, studentName: stu ? dispName(stu) : (appt.title || "Schüler"), plannedMinutes: planned, index: lessonPrompt.idx, total: lessonPrompt.queue.length, onConfirm: (m, extra) => confirmPastLesson(appt, m, extra), onSkip: () => skipPastLesson(appt), lastRatings: letzteBewertungen(stu),
+                // Folgetermin-Vorschläge nur beim letzten Eintrag der Warteschlange: das Termin-Fenster
+                // öffnet sich danach, und eine weitere Abfrage läge sonst darüber.
+                folgeSlots: stu && lessonPrompt.idx === lessonPrompt.queue.length - 1 ? folgeTerminVorschlaege(planned) : null });
         })(),
         // school ohne id kommt nur vor, wenn kein echter Fahrschul-Datensatz zugeordnet werden konnte
         // (siehe schoolRecovery-State oben) - eine gesunde Sitzung hat hier immer eine echte id.
@@ -34817,12 +34866,16 @@ function App() {
                         React.createElement("path", { d: "M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" })),
                     "Termin bearbeiten"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--orange-deep)", border: "1.5px solid var(--orange)" },
-                        onClick: () => { const a = apptChoice; setApptChoice(null); rateLessonFromAppt(a); } },
+                        onClick: () => { const a = apptChoice; setApptChoice(null); const offen = abschlussOffenFuer(a);
+                            if (offen)
+                                setLessonPrompt({ queue: [offen], idx: 0 });
+                            else
+                                rateLessonFromAppt(a); } },
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2" }),
                         React.createElement("rect", { x: "9", y: "3", width: "6", height: "4", rx: "1" }),
                         React.createElement("path", { d: "M9 12h6M9 16h4" })),
-                    "Fahrstunde anlegen"),
+                    abschlussOffenFuer(apptChoice) ? "Fahrstunde abschließen" : "Fahrstunde anlegen"),
                 // Löschen direkt hier statt erst im Terminplaner: bei einer Absage will man den
                 // Termin nur loswerden und nicht vorher durch die Bearbeitungsmaske.
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10, gap: 8, color: "var(--red)" },
