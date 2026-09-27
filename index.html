@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.20.1";
+const APP_VERSION = "2.21.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.21.0", date: "September 2026", changes: [
+        "Prüfungsreife: Die Voraussetzungen zur Prüfungsanmeldung (Theorie, Sonderfahrten, Unterlagen, Konto, festgestellte Reife) stehen jetzt als Checkliste auf einen Blick beisammen.",
+        "Prüfungsreife: Feststellen und Zurücknehmen werden jetzt mit Datum und Fahrlehrer im Verlauf festgehalten, statt beim Zurücknehmen spurlos zu verschwinden.",
+    ] },
     { v: "2.20.1", date: "September 2026", changes: [
             "Auch beim manuellen Nachtragen einer Fahrstunde ist der Preis jetzt aus der Preisliste (Posten „Fahrstunde“) vorbelegt, sofern eingetragen",
         ] },
@@ -14267,19 +14271,26 @@ function App() {
             setReifeForm(g => g && ({ ...g, error: "Bitte Datum und Dauer des Tests angeben." }));
             return;
         }
-        writeStudent({ ...active, examReadiness: {
+        const eintrag = {
             simId: f.simId || null, datum: f.datum, dauerMin: Math.max(0, Math.round(Number(f.dauerMin) || 0)),
             strecke: (f.strecke || "").trim(), ergebnis: f.ergebnis === "nicht_bestanden" ? "nicht_bestanden" : "bestanden",
             bemerkung: (f.bemerkung || "").trim(), festgestelltAm: ymd(new Date()), festgestelltVon: teacherName || "",
-        } });
+        };
+        // Verlauf: jede Feststellung und Rücknahme bleibt nachvollziehbar - ein rechtlich relevanter
+        // Vorgang, der sonst beim Zurücknehmen oder Neu-Feststellen spurlos überschrieben würde.
+        const verlauf = [...(active.examReadinessVerlauf || []), { typ: "festgestellt", am: new Date().toISOString(), von: teacherName || "", datum: eintrag.datum, ergebnis: eintrag.ergebnis }];
+        writeStudent({ ...active, examReadiness: eintrag, examReadinessVerlauf: verlauf });
         setReifeForm(null);
         showToast("Prüfungsreife festgehalten.");
     }
     async function reifeZuruecknehmen() {
         if (!active || !active.examReadiness)
             return;
+        const sid = active.id;
         if (await askConfirm({ message: "Die festgestellte Prüfungsreife wieder zurücknehmen? Das ändert nichts an bereits ausgehändigten Bestätigungen.", confirmLabel: "Zurücknehmen", danger: true }))
-            writeStudent({ ...active, examReadiness: null });
+            // Nach der Rückfrage gegen den AKTUELLEN Stand speichern, nicht gegen den Render-Schnappschuss.
+            schuelerAendernUndSpeichern(sid, cur => cur.examReadiness ? { ...cur, examReadiness: null,
+                examReadinessVerlauf: [...(cur.examReadinessVerlauf || []), { typ: "zurueckgenommen", am: new Date().toISOString(), von: teacherName || "", datum: cur.examReadiness.datum }] } : null);
     }
     function druckeReifeBestaetigung() {
         if (!active || !active.examReadiness)
@@ -18194,7 +18205,7 @@ function App() {
             // Lokalen Stand nachziehen: dieselben Felder entfernen, die der Server entfernt hat.
             const weg = ["adkDates","adkLog","adkNotes","items","customCounts","strecken","streckenLog",
                 "streckenNotes","routes","drivenLessons","lessons","manualHours","noShows","exams",
-                "schaltkompetenzTests","examSims","examReadiness","licenseSteps","begleitfahrten","begleitplan",
+                "schaltkompetenzTests","examSims","examReadiness","examReadinessVerlauf","licenseSteps","begleitfahrten","begleitplan",
                 "begleitEinweisung","elternTel","theorie","theoryProgress","theoryMockExams",
                 "bemerkungen","lastNote","messages","avatarUrl",
                 "geb","tel","festnetz","sehhilfe","kopfstuetze","lenkrad","pin","pinCustom",
@@ -22639,6 +22650,20 @@ function App() {
         // Grün heißt "ab 90 %", nicht "alles erledigt": Einzelpunkte können trotzdem noch offen
         // sein und stehen unten in der Liste. Die Texte dürfen dann nicht "alles geübt" behaupten.
         const offenText = r.total === 1 ? "1 offener Punkt" : r.total + " offene Punkte";
+        // Voraussetzungen zur Prüfungsanmeldung auf einen Blick - dieselben Quellen wie Unterlagen,
+        // Theorie, Sonderfahrten und Konto, nur hier gesammelt, damit niemand vier Reiter abklappern muss.
+        const offenBetrag = sumCharges(active, Number(pricePerHour) || 0) - sumPayments(active);
+        const unterlagenOffen = ["sehtest", "erstehilfe", "passfoto", "antrag"].filter(k => !licenseStepDone(active, k))
+            .map(k => (LICENSE_STEPS.find(x => x.key === k) || { label: k }).label);
+        const voraussetzungen = [
+            { ok: !r.theorieOffen, text: "Theorieprüfung bestanden" },
+            { ok: r.offeneSonderfahrten.length === 0, text: "Sonderfahrten erfüllt", hinweis: r.offeneSonderfahrten.length ? r.offeneSonderfahrten.map(x => x.label).join(", ") + " offen" : "" },
+            { ok: unterlagenOffen.length === 0, text: "Unterlagen vollständig", hinweis: unterlagenOffen.length ? "Fehlt: " + unterlagenOffen.join(", ") : "" },
+            { ok: offenBetrag <= 0.005, text: "Konto ausgeglichen", hinweis: offenBetrag > 0.005 ? eurFmt(offenBetrag) + " offen" : "" },
+            { ok: !!(active.examReadiness && active.examReadiness.ergebnis !== "nicht_bestanden"), text: "Prüfungsreife festgestellt" },
+        ];
+        const vOffen = voraussetzungen.filter(v => !v.ok).length;
+        const verlauf = (active.examReadinessVerlauf || []).slice().reverse();
         return React.createElement("div", null,
             React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, display: "flex", alignItems: "center", gap: 13,
                     border: "2px solid " + amp.farbe } },
@@ -22664,6 +22689,15 @@ function App() {
             // Prüfungsreife amtlich feststellen (Reformentwurf, § 11 FahrschAusbV-E): bewusst
             // unabhängig von "ready" oben anzeigbar - der Fahrlehrer kann den Test schon gemacht
             // haben, auch wenn die App den Gesamtfortschritt noch unter 90 % misst.
+            React.createElement("div", { className: "card", style: { padding: "12px 16px", marginBottom: 12 } },
+                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 6 } },
+                    React.createElement("span", { style: { fontWeight: 800, fontSize: 14 } }, "Voraussetzungen zur Prüfungsanmeldung"),
+                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: vOffen ? "var(--amber)" : "var(--green)", flexShrink: 0 } }, vOffen ? vOffen + " offen" : "alle erfüllt")),
+                voraussetzungen.map((v, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 9, alignItems: "flex-start", padding: "5px 0", fontSize: 13.5 } },
+                    React.createElement("span", { role: "img", "aria-label": v.ok ? "erfüllt" : "offen", style: { width: 18, flexShrink: 0, fontWeight: 800, color: v.ok ? "var(--green)" : "var(--amber)" } }, v.ok ? "✓" : "○"),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("span", { style: { color: v.ok ? "var(--ink-2)" : "var(--ink)", fontWeight: v.ok ? 500 : 650 } }, v.text),
+                                                v.hinweis && React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1, overflowWrap: "anywhere" } }, v.hinweis))))),
             active.examReadiness
                 ? React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, borderLeft: "5px solid var(--green)" } },
                     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" } },
@@ -22684,6 +22718,11 @@ function App() {
                         active.examSims.slice().sort((a, b) => (b.date || "").localeCompare(a.date || "")).slice(0, 3).map(sim => React.createElement("button", { key: sim.id, className: "btn btn-ghost", style: { textAlign: "left", justifyContent: "flex-start" }, onClick: () => oeffneReifeForm(sim) },
                             "Test vom " + fmtD(sim.date) + new Date(sim.date).getFullYear() + (sim.durationSec ? " · " + Math.round(sim.durationSec / 60) + " Min." : "") + " übernehmen"))),
                     React.createElement("button", { className: "btn btn-block", onClick: () => oeffneReifeForm(null) }, "Prüfungsreife amtlich feststellen")),
+            verlauf.length > 0 && React.createElement("details", { className: "card", style: { padding: "10px 16px", marginBottom: 12 } },
+                React.createElement("summary", { style: { cursor: "pointer", fontSize: 13, fontWeight: 700, color: "var(--ink-2)" } }, "Verlauf der Prüfungsreife (" + verlauf.length + ")"),
+                React.createElement("div", { style: { marginTop: 6 } }, verlauf.map((e, i) => React.createElement("div", { key: i, style: { fontSize: 12.5, color: "var(--muted)", padding: "4px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                    React.createElement("span", { style: { fontWeight: 700, color: e.typ === "zurueckgenommen" ? "var(--red-ink)" : "var(--ink-2)" } }, e.typ === "zurueckgenommen" ? "Zurückgenommen" : (e.ergebnis === "nicht_bestanden" ? "Festgestellt (Test nicht bestanden)" : "Festgestellt")),
+                    " am " + new Date(e.am).toLocaleDateString("de-DE") + (e.von ? " von " + e.von : "") + (e.datum ? " · Test vom " + new Date(e.datum).toLocaleDateString("de-DE") : ""))))),
             r.theorieOffen && React.createElement("div", { className: "card", style: { padding: "11px 14px", marginBottom: 10, borderLeft: "5px solid var(--amber)" } },
                 React.createElement("span", { style: { fontWeight: 700, color: "var(--amber)" } }, "Theoriepr\u00FCfung"),
                 " noch nicht bestanden"),
