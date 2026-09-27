@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.19.0";
+const APP_VERSION = "2.20.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.20.0", date: "September 2026", changes: [
+            "Eine Preisquelle: Ist in der Preisliste nach § 32 der Posten „Fahrstunde“ für die Klasse eingetragen, wird jede neu abgeschlossene Fahrstunde und Sonderfahrt mit diesem Preis berechnet (ab dem Datum „Gültig ab“). So stimmt gemeldeter und berechneter Preis überein. Bereits erfasste Stunden bleiben unverändert; ohne Eintrag gilt wie bisher der Preis pro UE",
+        ] },
     { v: "2.19.0", date: "September 2026", changes: [
             "Startseite, „Diese Woche“: neuer Hinweis „Schüler ohne nächsten Termin“ - wer in den letzten drei Wochen gefahren ist, aber noch keinen neuen Termin hat. Ein Tipp öffnet die Liste mit „Erinnern“ per WhatsApp samt Buchungslink; erinnerte Schüler verschwinden bis zur nächsten Fahrstunde aus der Liste",
             "Ebenfalls neu in „Diese Woche“: Schüler mit grüner Ampel, deren Prüfungsreife noch nicht festgestellt ist („bereit für die Testfahrt“). Ein Tipp zeigt sie in der Schülerliste",
@@ -8495,6 +8498,25 @@ const PREISPOSTEN_32 = [
     { key: "aufbauseminar", nr: "12", label: "Aufbauseminar (§ 2a StVG)" },
     { key: "fahreignungsseminar", nr: "13", label: "Fahreignungsseminar (§ 4a StVG)" },
 ];
+// Preisquelle für neu abgeschlossene Fahrstunden: Posten 5 "Fahrstunde" der § 32-Preisliste für die
+// Klasse des Schülers - damit berechnet wird, was gemeldet ist, statt zweier Preisstände. Nur für
+// Fahrstunden und Sonderfahrten (je 45 Minuten); Prüfungsteile sind Pauschalen und bleiben beim
+// bisherigen Weg. Liegt "Gültig ab" in der Zukunft oder fehlt der Posten: null (Rückfall auf den
+// Preis pro UE aus den Einstellungen).
+function preisAusPreisliste(school, klasse, art, heuteKey) {
+    const pl = school && school.preisliste;
+    if (!pl || !pl.klassen || typeof pl.klassen !== "object")
+        return null;
+    if (pl.gueltigAb && heuteKey && pl.gueltigAb > heuteKey)
+        return null;
+    const gruppe = ART_GROUP_OF[art || "ÜST"];
+    if (gruppe !== "Fahrstunden" && gruppe !== "Sonderfahrten")
+        return null;
+    const posten = pl.klassen[klasse || DEFAULT_KLASSE];
+    const v = posten ? posten.fahrstunde : null;
+    const n = typeof v === "number" ? v : parseFloat(String(v == null ? "" : v).replace(",", "."));
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
 function preispostenFuer(klasse) {
     return PREISPOSTEN_32.filter(p => !p.nurKlassen || p.nurKlassen.indexOf(klasse) >= 0);
 }
@@ -16807,7 +16829,9 @@ function App() {
                 time = new Date(appt.start_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" });
             }
             catch (e) { }
-            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price: (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)), apptId: appt.id, fromAppt: true, art: appt.art || "" }];
+            const ausListe = preisAusPreisliste(school, stu.klasse, appt.art || "ÜST", ymd(new Date()));
+            const price = ausListe != null ? ausListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour));
+            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
             if (extra && extra.folge) {
                 const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST" };
@@ -30418,6 +30442,8 @@ function App() {
                                     React.createElement("div", { style: ueberschrift }, "Preisliste nach § 32 (Reformentwurf)"),
                                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 } },
                                         "Nach dem Gesetzentwurf (BT-Drs. 21/7404, noch nicht in Kraft) meldet jede Fahrschule ihre Preise je Führerscheinklasse in 13 festen Posten elektronisch an das Bundesverkehrsministerium – und zwar jede Änderung vor ihrer Anwendung. Verstöße sind bußgeldbewehrt, bestehende Fahrschulen melden erstmals bis 01.10.2027. Das Meldeverfahren selbst gibt es noch nicht; die Liste bereitet dich darauf vor. Allindrive unterstützt die Meldung, ersetzt aber keine rechtliche Prüfung."),
+                                    React.createElement("p", { style: { fontSize: 11.5, color: "var(--ink-2)", background: "var(--field-bg)", borderRadius: 10, padding: "8px 10px", margin: "0 0 10px", lineHeight: 1.5 } },
+                                        "Posten 5 „Fahrstunde“ ist zugleich der Abrechnungspreis: Jede neu abgeschlossene Fahrstunde oder Sonderfahrt dieser Klasse wird damit berechnet (ab „Gültig ab“). Fehlt der Posten, gilt der Preis pro UE oben."),
                                     React.createElement("div", { className: "stud-seg", role: "group", "aria-label": "Führerscheinklasse", style: { marginBottom: 12, overflowX: "auto" } },
                                         klassen.map(k => React.createElement("button", { key: k, className: "stud-seg-btn" + (aktiv === k ? " on" : ""), "aria-pressed": aktiv === k, onClick: () => setPreisKlasse(k) },
                                             k, belegt.indexOf(k) >= 0 ? " ✓" : ""))),
