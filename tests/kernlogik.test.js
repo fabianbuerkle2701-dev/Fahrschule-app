@@ -135,6 +135,7 @@ test("Fahrstunde abschließen: neuer Eintrag trägt Termin, Notiz wird lastNote"
     assert.equal(out.lessons[0].apptId, "t1");
     assert.deepEqual(rein(out.lessons[0].ratings), { spiegel: 2 });  // leere Bewertungen fallen weg
     assert.equal(out.lastNote, "Schulterblick");
+    assert.ok(out.lastNoteAt && !Number.isNaN(Date.parse(out.lastNoteAt)), "Notiz braucht Zeitstempel, sonst räumt notizErledigt() sie nie weg");
 });
 
 test("Fahrstunde abschließen: vorhandener Eintrag desselben Termins wird ergänzt, nicht überschrieben", () => {

@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.26.0";
+const APP_VERSION = "2.27.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.27.0", date: "September 2026", changes: [
+        "Kalender und Startseite: Am nächsten Termin eines Schülers steht jetzt das Lernziel („Ziel: …“ aus „Woran nächstes Mal arbeiten“) oder, falls keins notiert ist, sein wiederkehrender Schwachpunkt aus dem Fahrtenbuch („Achtung: …“).",
+        "Fehlerbehebung: Eine beim Abschließen notierte „Woran nächstes Mal arbeiten“-Notiz verschwindet jetzt wie vorgesehen, sobald an einem späteren Tag gefahren wurde (ihr fehlte der Zeitstempel).",
+    ] },
     { v: "2.26.0", date: "September 2026", changes: [
         "Fahrschüler-App: Neue Karte „Unterlagen für die Prüfung“ – Schüler sehen selbst, ob Sehtest, Erste-Hilfe-Kurs, Passfoto und Antrag schon abgehakt sind (in allen vier Sprachen).",
     ] },
@@ -12841,8 +12845,12 @@ function fahrtenbuchAusAbschluss(stu, appt, date, extra) {
     else {
         out.lessons = [{ id: uniqueId("ls"), date, thema, gut: "", schlecht: naechstes, route: null, ratings, note: "", apptId: (appt && appt.id) || null }, ...lessons];
     }
-    if (naechstes)
+    // Mit Zeitstempel wie die Notiz im Schülerkopf - ohne lastNoteAt räumt notizErledigt() sie nie
+    // weg, sie stünde dann nach allen folgenden Stunden weiter da.
+    if (naechstes) {
         out.lastNote = naechstes;
+        out.lastNoteAt = new Date().toISOString();
+    }
     return out;
 }
 // Bewertungen des jüngsten Fahrtenbuch-Eintrags mit mindestens einer Bewertung ("Wie letztes Mal").
@@ -19227,6 +19235,26 @@ function App() {
         return (stu.drivenLessons || []).some(l => l && l.date && l.date > seit);
     }
 
+    // Lernziel am NÄCHSTEN Termin eines Schülers (Produktplan #13): die offene Notiz "Woran nächstes
+    // Mal arbeiten", sonst der deutlichste wiederkehrende Schwachpunkt aus dem Fahrtenbuch. Nur am
+    // nächsten Termin, damit nicht jede künftige Karte dasselbe wiederholt.
+    function lernzielFuer(a, stu) {
+        if (!a || !stu || a.status === "offered")
+            return null;
+        const naechster = nextApptByStudent[stu.id];
+        if (!naechster || naechster.id !== a.id)
+            return null;
+        const notiz = (stu.lastNote || "").trim();
+        if (notiz && !notizErledigt(stu))
+            return { typ: "ziel", text: notiz };
+        const schwaeche = wiederkehrendeSchwaechenAus(stu.lessons)[0];
+        return schwaeche ? { typ: "warn", text: schwaeche.feld } : null;
+    }
+    function lernzielZeile(lz, extraStyle) {
+        return lz ? React.createElement("div", { style: { fontSize: 12, fontWeight: 600, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+                color: lz.typ === "ziel" ? "var(--orange-ink)" : "var(--amber-ink)", ...(extraStyle || {}) } },
+            (lz.typ === "ziel" ? "Ziel: " : "Achtung: ") + lz.text) : null;
+    }
     const updateActive = (patch) => { if (active)
         writeStudent({ ...active, ...patch }); };
     // Freigabe (shared_with) nur lokal nachziehen - dbShare hat sie schon gespeichert, und
@@ -21451,7 +21479,8 @@ function App() {
                             [naechsterStu && naechsterStu.klasse ? "Klasse " + naechsterStu.klasse : null, artLabelPlain(apptArt(naechster))].filter(Boolean).join(" · ")),
                         React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 8, fontSize: 13.5, color: "var(--ink-2)", minWidth: 0, overflowWrap: "anywhere" } },
                             icPin({ width: 18, height: 18, style: { flexShrink: 0 } }),
-                            naechsterOrt)),
+                            naechsterOrt),
+                        naechsterStu && lernzielZeile(lernzielFuer(naechster, naechsterStu), { fontSize: 13, whiteSpace: "normal", overflowWrap: "anywhere" })),
                     React.createElement("span", { className: "btn btn-primary", style: { fontSize: 13, padding: "10px 18px" } }, "Zum Termin →")))
                 : React.createElement("div", { className: "card soft", style: { padding: 0, marginBottom: 12, overflow: "hidden", position: "relative" } },
                     React.createElement("img", { src: ILLUSTRATION_FORTSCHRITT, alt: "", "aria-hidden": "true", className: "ill-deko", style: { position: "absolute", right: -22, bottom: -16, width: "58%", maxWidth: 235, pointerEvents: "none" } }),
@@ -28218,7 +28247,8 @@ function App() {
                             React.createElement("div", { style: { flex: 1, minWidth: 0 } },
                                 React.createElement("div", { style: { fontWeight: 700, fontSize: 15, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, offered ? "Warteliste-Angebot" : (name || a.title || "Termin")),
                                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 } },
-                                    [artLabelPlain(apptArt(a)), aStu && aStu.klasse ? "Klasse " + aStu.klasse : null].filter(Boolean).join(" · ") || noteText(a) || "Termin")),
+                                    [artLabelPlain(apptArt(a)), aStu && aStu.klasse ? "Klasse " + aStu.klasse : null].filter(Boolean).join(" · ") || noteText(a) || "Termin"),
+                                lernzielZeile(lernzielFuer(a, aStu))),
                             offered && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--sage-deep)",
                                     background: "var(--card)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase" } }, "Warteliste"),
                             pend && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--amber-ink)",
