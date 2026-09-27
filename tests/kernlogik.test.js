@@ -288,3 +288,22 @@ test("Zahlungsabgleich per Name + Betrag: nur eindeutige Fälle, Bank-Schreibwei
     // dieselbe Rechnung in zwei Zeilen: nicht raten
     assert.deepEqual(rein(f([z[0], "28.09.2026 Müller, Jörg 180,00"], schueler)), []);
 });
+
+test("Lebensphase: Reihenfolge der Phasen und genau ein nächster Schritt", () => {
+    const { lebensphaseVon: f } = require("./lade-app")(["lebensphaseVon"]);
+    const alleUnterlagen = { sehtest: { done: true }, erstehilfe: { done: true }, passfoto: { done: true }, antrag: { done: true } };
+    assert.deepEqual(rein(f({}, { stufe: "rot", stunden: 0 })), { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" });
+    assert.equal(f({}, { stufe: "rot", stunden: 4 }).schritt, "Antrag bei der Führerscheinstelle anstoßen");
+    assert.equal(f({ licenseSteps: alleUnterlagen }, { stufe: "rot", stunden: 4 }).schritt, null);
+    // Vorbereitung: Theorie vor Sonderfahrten vor Unterlagen vor Testfahrt
+    assert.equal(f({}, { stufe: "gelb", stunden: 20, offeneSonderfahrten: ["Autobahn"] }).schritt, "Theorieprüfung ablegen");
+    assert.equal(f({ theorie: "2026-09-01" }, { stufe: "gelb", stunden: 20, offeneSonderfahrten: ["Autobahn", "Dämmerungsfahrt"] }).schritt, "Noch zwei Sonderfahrten: Autobahn und Dämmerungsfahrt");
+    assert.equal(f({ theorie: "x" }, { stufe: "gruen", stunden: 30 }).schritt, "Unterlagen vervollständigen");
+    assert.equal(f({ theorie: "x", licenseSteps: alleUnterlagen }, { stufe: "gruen", stunden: 30 }).schritt, "Testfahrt zur Prüfungsreife");
+    // Reif -> angemeldet -> bestanden
+    assert.equal(f({ examReadiness: { ergebnis: "bestanden" }, licenseSteps: alleUnterlagen }, { stufe: "gruen" }).schritt, "Zur Praxisprüfung anmelden");
+    assert.equal(f({ examReadiness: { ergebnis: "nicht_bestanden" } }, { stufe: "gruen" }).key, "vorbereitung", "nicht bestandener Test ist keine Reife");
+    const p = f({}, { stufe: "gruen", praxisTermin: "2026-10-15" });
+    assert.equal(p.key, "pruefung"); assert.match(p.schritt, /^Praxisprüfung am /);
+    assert.equal(f({ exams: [{ art: "praxis", passed: true }] }, { stufe: "gruen", praxisTermin: "2026-10-15" }).key, "bestanden");
+});

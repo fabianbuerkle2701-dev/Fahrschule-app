@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.29.0";
+const APP_VERSION = "2.30.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.30.0", date: "September 2026", changes: [
+        "Lebensphase: Jeder Schüler zeigt jetzt automatisch, wo er steht (Start, In Ausbildung, Prüfungsvorbereitung, Prüfungsreif, Prüfung angemeldet, Bestanden) – in der Schülerliste und im Profilkopf, dort zusammen mit genau einem nächsten Schritt (z. B. „Noch zwei Sonderfahrten: Autobahn und Dämmerungsfahrt“ oder „Testfahrt zur Prüfungsreife“).",
+    ] },
     { v: "2.29.0", date: "September 2026", changes: [
         "Schnellsuche: findet jetzt auch Rechnungen per Nummer (öffnet die Kosten des Schülers), Interessenten per Name und Schüler wie Interessenten per Telefonnummer (ab 4 Ziffern, auch mit 0 statt +49).",
     ] },
@@ -12971,6 +12974,40 @@ function pruefungsakteVon(stu) {
     });
     return out.sort((a, b) => b.datum.localeCompare(a.datum));
 }
+// Lebensphase eines Schülers (Produktplan #4), abgeleitet aus vorhandenen Daten - keine eigene
+// Eingabe, die veralten könnte. Liefert Phase + genau EINEN nächsten Schritt.
+// info = { stufe: "rot"|"gelb"|"gruen", praxisTermin: "YYYY-MM-DD"|null, offeneSonderfahrten: [Label], stunden: Zahl }
+const LEBENSPHASEN = ["start", "ausbildung", "vorbereitung", "reif", "pruefung", "bestanden"];
+function lebensphaseVon(stu, info) {
+    const s = stu || {};
+    const i = info || {};
+    const steps = s.licenseSteps || {};
+    const erledigt = k => !!(steps[k] && steps[k].done);
+    const unterlagenOffen = ["sehtest", "erstehilfe", "passfoto", "antrag"].filter(k => !erledigt(k)).length;
+    const sf = i.offeneSonderfahrten || [];
+    // Formulierung wie im Produktplan: Kernaussage zuerst ("Noch zwei Sonderfahrten: ..."), damit auch
+    // eine auf zwei Zeilen gekürzte Anzeige das Wesentliche zeigt.
+    const zahlwort = ["", "eine", "zwei", "drei", "vier", "fünf"];
+    const sfText = sf.length ? (sf.length === 1 ? "Noch eine Sonderfahrt: " + sf[0]
+        : "Noch " + (zahlwort[sf.length] || sf.length) + " Sonderfahrten: " + sf.slice(0, -1).join(", ") + " und " + sf[sf.length - 1]) : "";
+    const datumText = d => new Date(d + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" });
+    if (erledigt("praxis_bestanden") || (s.exams || []).some(e => e && e.art === "praxis" && e.passed))
+        return { key: "bestanden", label: "Bestanden", schritt: "Ausbildung abschließen und archivieren" };
+    if (i.praxisTermin || erledigt("praxis_angemeldet"))
+        return { key: "pruefung", label: "Prüfung angemeldet", schritt: i.praxisTermin ? "Praxisprüfung am " + datumText(i.praxisTermin) : "Prüfungstermin eintragen" };
+    if (s.examReadiness && s.examReadiness.ergebnis === "bestanden")
+        return { key: "reif", label: "Prüfungsreif", schritt: unterlagenOffen ? "Unterlagen vervollständigen" : "Zur Praxisprüfung anmelden" };
+    if (i.stufe === "gelb" || i.stufe === "gruen") {
+        const schritt = !s.theorie ? "Theorieprüfung ablegen"
+            : sf.length ? sfText
+                : unterlagenOffen ? "Unterlagen vervollständigen"
+                    : i.stufe === "gruen" ? "Testfahrt zur Prüfungsreife" : "Letzte offene Punkte üben";
+        return { key: "vorbereitung", label: "Prüfungsvorbereitung", schritt };
+    }
+    if ((Number(i.stunden) || 0) > 0 || (s.drivenLessons || []).length > 0)
+        return { key: "ausbildung", label: "In Ausbildung", schritt: !erledigt("antrag") ? "Antrag bei der Führerscheinstelle anstoßen" : null };
+    return { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" };
+}
 // Text für "Fehlende Unterlagen anfordern" - null, wenn nichts fehlt. Namen so, wie Schüler sie
 // kennen ("Antrag ... gestellt" ist nur die Checklisten-Formulierung).
 const UNTERLAGEN_TEXT = { sehtest: "Sehtest", erstehilfe: "Erste-Hilfe-Kurs", passfoto: "biometrisches Passfoto", antrag: "Antrag bei der Führerscheinstelle" };
@@ -19275,6 +19312,15 @@ function App() {
         return (stu.drivenLessons || []).some(l => l && l.date && l.date > seit);
     }
 
+    function lebensphase(stu, stufe) {
+        if (!stu)
+            return null;
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const st = stufe || ampel(stu, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll).stufe;
+        const offeneSF = sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll).filter(x => !x.erfuellt || !x.langeFahrtDabei).map(x => x.label);
+        const pt = praxisPruefungTermin(stu);
+        return lebensphaseVon(stu, { stufe: st, praxisTermin: pt ? pt.datum : null, offeneSonderfahrten: offeneSF, stunden: countStunden(stu) + (parseInt(stu.manualHours, 10) || 0) });
+    }
     // Lernziel am NÄCHSTEN Termin eines Schülers (Produktplan #13): die offene Notiz "Woran nächstes
     // Mal arbeiten", sonst der deutlichste wiederkehrende Schwachpunkt aus dem Fahrtenbuch. Nur am
     // nächsten Termin, damit nicht jede künftige Karte dasselbe wiederholt.
@@ -21108,9 +21154,10 @@ function App() {
                     archived && React.createElement("span", { style: { fontSize: 11, fontWeight: 600, color: "var(--green)", marginLeft: 7 } }, "\u2713 bestanden"),
                     !s._isMine && React.createElement("span", { title: "Mit dir geteilt", style: { fontSize: 11, fontWeight: 600, color: "var(--blue)", marginLeft: 7 } }, "geteilt"),
                     !archived && s.noShows && s.noShows.length > 0 && React.createElement("span", { title: s.noShows.length + "\u00d7 nicht erschienen", style: { fontSize: 10.5, fontWeight: 800, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 5, padding: "1px 6px", marginLeft: 7, verticalAlign: "1px" } }, s.noShows.length + "\u00d7")),
-                (totalStd > 0 || balance > 0.005 || balance < -0.005) && React.createElement("div", { className: "stud-meta" },
-                    totalStd > 0 ? totalStd + " Std." : "",
-                    (totalStd > 0 && (balance > 0.005 || balance < -0.005)) ? " \u00B7 " : "",
+                // Lebensphase (Produktplan #4) vorne, bei archivierten Schülern wie bisher nur Stunden/Saldo.
+                (!archived || totalStd > 0 || balance > 0.005 || balance < -0.005) && React.createElement("div", { className: "stud-meta" },
+                    [!archived ? (lebensphase(s, amp.stufe) || {}).label : "", totalStd > 0 ? totalStd + " Std." : ""].filter(Boolean).join(" \u00B7 "),
+                    ((!archived || totalStd > 0) && (balance > 0.005 || balance < -0.005)) ? " \u00B7 " : "",
                     balance > 0.005 ? React.createElement("span", { style: { fontWeight: 700, color: "#D14343" } }, eurFmt(balance) + " offen") :
                         (balance < -0.005 ? React.createElement("span", { style: { fontWeight: 700, color: "var(--green)" } }, eurFmt(-balance) + " Guthaben") : null)),
                 nextAppt && React.createElement("div", { className: "stud-meta", style: { marginTop: 2, color: "var(--orange-deep)", fontWeight: 600, display: "flex", alignItems: "center", gap: 5 } },
@@ -21894,9 +21941,12 @@ function App() {
                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
                     countStunden(active),
                     " Std. \u00B7 ",
+                    (lebensphase(active) || {}).label + " \u00B7 ",
                     active.theorie ? "Theorie bestanden" : "Theorie offen",
                     !showReliability && noShows.length > 0 && React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "var(--red-ink)", background: "var(--red-soft)", borderRadius: 6, padding: "2px 7px", marginLeft: 6 } },
-                        " \u00B7 " + noShows.length + "\u00D7 nicht erschienen"))),
+                        " \u00B7 " + noShows.length + "\u00D7 nicht erschienen")),
+                // Ein nächster Schritt (Produktplan #4): was als Nächstes ansteht, in einem Satz.
+                (() => { const ph = lebensphase(active); return ph && ph.schritt ? React.createElement("div", { style: { fontSize: 12, fontWeight: 600, color: "var(--orange-ink)", marginTop: 2, lineHeight: 1.35, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden", overflowWrap: "anywhere" } }, "Nächster Schritt: " + ph.schritt) : null; })()),
             React.createElement("button", { className: "btn btn-ghost", style: { padding: "8px 13px", fontSize: 13 }, onClick: () => setView("liste") }, "Wechseln"));
     }
     function studentNoteCard() {
