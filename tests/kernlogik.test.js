@@ -269,3 +269,22 @@ test("Unterlagen anfordern: Text listet nur Fehlendes, Antrags-Hinweis nur wenn 
     assert.doesNotMatch(ohneAntrag, /Wochen/);
     assert.equal(f({ licenseSteps: { sehtest: { done: true }, erstehilfe: { done: true }, passfoto: { done: true }, antrag: { done: true } } }), null);
 });
+
+test("Zahlungsabgleich per Name + Betrag: nur eindeutige Fälle, Bank-Schreibweise wird erkannt", () => {
+    const { zuordnungNameBetrag: f } = require("./lade-app")(["zuordnungNameBetrag"]);
+    const schueler = [
+        { id: "s1", vorname: "Jörg", nachname: "Müller", invoices: [{ id: "r1", offen: 180 }, { id: "r2", offen: 62.5 }] },
+        { id: "s2", vorname: "Anna Lena", nachname: "Schmidt", invoices: [{ id: "r3", offen: 450 }] },
+        { id: "s3", vorname: "Anna", nachname: "Schmidt", invoices: [{ id: "r4", offen: 450 }] },
+    ];
+    const z = [
+        "27.09.2026 GUTSCHRIFT MUELLER JOERG Fahrstunden 180,00",   // eindeutig -> r1
+        "27.09.2026 Anna Lena Schmidt Überweisung 450,00",          // passt auf s2 UND s3 -> liegen lassen
+        "27.09.2026 Joerg Mueller 99,00",                           // kein passender offener Betrag
+        "27.09.2026 Max Mustermann 180,00",                         // kein Schüler
+    ];
+    const t = rein(f(z, schueler));
+    assert.deepEqual(t, [{ zeilenIndex: 0, studentId: "s1", invoiceId: "r1", betrag: 180 }]);
+    // dieselbe Rechnung in zwei Zeilen: nicht raten
+    assert.deepEqual(rein(f([z[0], "28.09.2026 Müller, Jörg 180,00"], schueler)), []);
+});

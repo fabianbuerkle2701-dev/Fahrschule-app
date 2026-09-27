@@ -3451,7 +3451,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.27.0";
+const APP_VERSION = "2.28.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3595,6 +3595,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.28.0", date: "September 2026", changes: [
+        "Kontoauszug-Abgleich: Zeilen ohne Rechnungsnummer werden jetzt zuerst per Name und Betrag zugeordnet – ohne KI, wenn Vor- und Nachname genau eines Schülers in der Zeile stehen (auch in Bank-Schreibweise wie „MUELLER“) und der Betrag genau einer offenen Rechnung entspricht. Mehrdeutiges bleibt für die KI; gebucht wird weiterhin erst auf Tipp.",
+    ] },
     { v: "2.27.0", date: "September 2026", changes: [
         "Kalender und Startseite: Am nächsten Termin eines Schülers steht jetzt das Lernziel („Ziel: …“ aus „Woran nächstes Mal arbeiten“) oder, falls keins notiert ist, sein wiederkehrender Schwachpunkt aus dem Fahrtenbuch („Achtung: …“).",
         "Fehlerbehebung: Eine beim Abschließen notierte „Woran nächstes Mal arbeiten“-Notiz verschwindet jetzt wie vorgesehen, sobald an einem späteren Tag gefahren wurde (ihr fehlte der Zeitstempel).",
@@ -9235,6 +9238,40 @@ function parseKontoauszug(text) {
             betraege: findeBetraege(zeile), datum: findeDatum(zeile) });
     });
     return treffer;
+}
+// Namen so vergleichbar machen, wie Banken sie schreiben: "MÜLLER" kommt oft als "MUELLER" an.
+function namensNorm(t) {
+    return String(t || "").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+// Zweite feste Regel vor der KI (Produktplan #18): Zeilen OHNE Rechnungsnummer, in denen Vor- UND
+// Nachname genau eines Schülers stehen und ein Betrag genau EINER seiner offenen Rechnungen
+// entspricht. Alles Mehrdeutige (zwei Schüler, zwei passende Rechnungen, dieselbe Rechnung in zwei
+// Zeilen) bleibt bewusst liegen - dafür gibt es die KI bzw. den Fahrlehrer. Gebucht wird nie
+// automatisch. schueler: [{ id, vorname, nachname, invoices: [{ id, offen }] }]
+function zuordnungNameBetrag(zeilen, schueler) {
+    const treffer = [];
+    (zeilen || []).forEach((zeile, zeilenIndex) => {
+        const betraege = findeBetraege(zeile);
+        if (!betraege.length)
+            return;
+        const norm = " " + namensNorm(zeile) + " ";
+        const kandidaten = (schueler || []).filter(x => {
+            const v = namensNorm(x.vorname), n = namensNorm(x.nachname);
+            return v && n && norm.includes(" " + v + " ") && norm.includes(" " + n + " ");
+        });
+        if (kandidaten.length !== 1)
+            return;
+        const passend = (kandidaten[0].invoices || []).filter(inv => inv.offen > 0.005 && betraege.some(b => Math.abs(b - inv.offen) < 0.005));
+        if (passend.length !== 1)
+            return;
+        const betrag = betraege.find(b => Math.abs(b - passend[0].offen) < 0.005);
+        treffer.push({ zeilenIndex, studentId: kandidaten[0].id, invoiceId: passend[0].id, betrag });
+    });
+    // Dieselbe Rechnung aus zwei Zeilen: nicht raten, beide liegen lassen.
+    const zaehler = {};
+    treffer.forEach(t => { zaehler[t.invoiceId] = (zaehler[t.invoiceId] || 0) + 1; });
+    return treffer.filter(t => zaehler[t.invoiceId] === 1);
 }
 /* ════════ DATEV-Buchungsstapel: welche Buchungen ein Monat ergibt ════════ */
 // Bewusst als reine Funktion ohne App-Zustand (per node prüfbar). k = { debitor, erloes19,
@@ -29155,7 +29192,22 @@ function App() {
                 return { ...basis, status: "kein_betrag" };
             return { ...basis, status: "mehrdeutig" };
         });
-        setZahlungsImport(z => ({ ...z, vorschlaege: vorschlaege }));
+        // Zeilen ohne Rechnungsnummer: erst die feste Regel Name + Betrag, erst danach (auf Knopfdruck) die KI.
+        const bekannt = new Set(vorschlaege.map(v => v.text));
+        const vergeben = new Set(vorschlaege.filter(v => ["ok", "abweichend", "gebucht"].includes(v.status)).map(v => v.invoiceId));
+        const rest = String((zahlungsImport && zahlungsImport.text) || "").split(/\r?\n/).map(z => z.trim()).filter(z => z && !bekannt.has(z.slice(0, 160)));
+        const eigene = (students || []).filter(s => s._isMine);
+        const perRegel = zuordnungNameBetrag(rest, eigene.map(s => ({ id: s.id, vorname: s.vorname, nachname: s.name,
+            invoices: (s.invoices || []).filter(inv => !inv.cancelledBy && !inv.stornoOf).map(inv => ({ id: inv.id, offen: invoiceOpen(s, inv) })) })))
+            .filter(m => !vergeben.has(m.invoiceId)).map((m, i) => {
+                const stu = eigene.find(s => s.id === m.studentId);
+                const inv = (stu.invoices || []).find(iv => iv.id === m.invoiceId);
+                const zeile = rest[m.zeilenIndex];
+                return { key: "rn-" + i + "-" + inv.id, text: zeile.slice(0, 160), nummer: inv.number || "–", datum: findeDatum(zeile),
+                    studentId: stu.id, studentName: dispName(stu), invoiceId: inv.id, offen: invoiceOpen(stu, inv), total: Number(inv.total) || 0,
+                    status: "regel_name", betrag: m.betrag };
+            });
+        setZahlungsImport(z => ({ ...z, vorschlaege: [...vorschlaege, ...perRegel] }));
     }
     function bucheZahlung(v, betrag) {
         const stu = (students || []).find(s => s.id === v.studentId);
@@ -29216,7 +29268,7 @@ function App() {
             // Rechnungen, die schon einen buchbaren oder gebuchten Vorschlag haben (z.B. aus dem
             // exakten Rechnungsnummer-Abgleich), nicht ein zweites Mal vorschlagen.
             const schonVergeben = new Set((zahlungsImport.vorschlaege || [])
-                .filter(v => ["ok", "abweichend", "ki_vorschlag", "gebucht"].includes(v.status))
+                .filter(v => ["ok", "abweichend", "ki_vorschlag", "regel_name", "gebucht"].includes(v.status))
                 .map(v => v.invoiceId));
             const neue = matches.map((m, i) => {
                 const zeile = kandidaten[m.lineIndex];
@@ -34213,10 +34265,10 @@ function App() {
                     disabled: !(zahlungsImport.text || "").trim(), onClick: analysiereKontoauszug }, "Zeilen auswerten"),
                 zahlungsImport.vorschlaege && (zahlungsImport.vorschlaege.length === 0
                     ? React.createElement("div", { className: "card", style: { padding: "16px 14px", fontSize: 13.5, color: "var(--muted)", textAlign: "center" } },
-                        "Keine Zeile mit einer Rechnungsnummer gefunden. Versuch es unten mit der KI-Zuordnung per Name und Betrag.")
+                        "Keine Zeile mit Rechnungsnummer oder eindeutigem Namen und Betrag gefunden. Versuch es unten mit der KI-Zuordnung.")
                     : React.createElement("div", null, zahlungsImport.vorschlaege.map(v => {
                         const farbe = v.status === "gebucht" ? "var(--sage-deep)"
-                            : v.status === "ok" ? "var(--sage-deep)"
+                            : (v.status === "ok" || v.status === "regel_name") ? "var(--sage-deep)"
                                 : v.status === "ki_vorschlag" ? "var(--sky-deep)"
                                     : (v.status === "unbekannt" || v.status === "bezahlt") ? "var(--muted)"
                                         : v.status === "storniert" ? "var(--red)" : "var(--amber)";
@@ -34227,7 +34279,8 @@ function App() {
                                     : v.status === "kein_betrag" ? "Kein Betrag in der Zeile erkennbar"
                                         : v.status === "mehrdeutig" ? "Mehrere Betr\u00E4ge in der Zeile \u2013 bitte w\u00E4hlen"
                                             : v.status === "abweichend" ? "Betrag weicht vom offenen Betrag ab"
-                                                : v.status === "ki_vorschlag" ? "\u2728 KI-Vorschlag \u00B7 Konfidenz " + v.konfidenz : "";
+                                                : v.status === "ki_vorschlag" ? "\u2728 KI-Vorschlag \u00B7 Konfidenz " + v.konfidenz
+                                                    : v.status === "regel_name" ? "Zugeordnet per Name und Betrag (ohne KI)" : "";
                         return React.createElement("div", { key: v.key, className: "card", style: { padding: "12px 14px", marginBottom: 8, borderLeft: "3px solid " + farbe } },
                             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 10, alignItems: "baseline" } },
                                 React.createElement("div", { style: { fontSize: 14, fontWeight: 700 } }, v.nummer),
@@ -34236,7 +34289,7 @@ function App() {
                             v.status !== "unbekannt" && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 6 } },
                                 "Rechnung " + eurFmt(v.total) + " \u00B7 offen " + eurFmt(v.offen)),
                             hinweis && React.createElement("div", { style: { fontSize: 12.5, color: farbe, fontWeight: 600, marginBottom: 8 } }, hinweis),
-                            (v.status === "ok" || v.status === "abweichend" || v.status === "ki_vorschlag") && React.createElement("button", { className: "btn btn-primary btn-block", style: { padding: "8px", fontSize: 13.5 },
+                            (v.status === "ok" || v.status === "abweichend" || v.status === "ki_vorschlag" || v.status === "regel_name") && React.createElement("button", { className: "btn btn-primary btn-block", style: { padding: "8px", fontSize: 13.5 },
                                 onClick: () => bucheZahlung(v, v.betrag) }, eurFmt(v.betrag) + " als Zahlung buchen"),
                             v.status === "mehrdeutig" && React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
                                 v.betraege.map((b, bi) => React.createElement("button", { key: bi, className: "btn btn-ghost", style: { padding: "7px 11px", fontSize: 13 },
