@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.57.1";
+const APP_VERSION = "2.58.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.58.0", date: "September 2026", changes: [
+            "Papierkorb: Gelöschte Schüler, abgelehnte Online-Anmeldungen und Interessenten lassen sich 30 Tage lang wiederherstellen (Schülerliste ganz unten oder Schnellsuche „Papierkorb“). Termine werden dabei wieder zugeordnet, danach wird automatisch endgültig gelöscht",
+        ] },
     { v: "2.57.1", date: "September 2026", changes: [
             "Sammelrechnung rechnet nur ab, was in „Nicht abgerechnet“ steht: Posten, die du dort mit × herausgenommen hast, bleiben draußen",
             "Bestätigen einer Anfrage nennt eine überschneidende zweite Anfrage jetzt als solche; ein in der App unterschriebener Vertrag behält den Vermerk mit Datum",
@@ -6297,6 +6300,30 @@ async function dbUpdateInteressent(id, patch) {
             throw new Error(error.message || "Änderung konnte nicht gespeichert werden");
         }
     });
+}
+// ── Papierkorb 30 Tage (v2.58.0, Produktplan #41, docs/migrationen-angewandt/2026-09-28_papierkorb.sql).
+// Beim Löschen eine Kopie der Karteikarte ablegen; ein täglicher Serverlauf leert nach 30 Tagen.
+const PAPIERKORB_TAGE = 30;
+async function papierkorbAblegen(uid, art, refId, name, daten, extra) {
+    if (IS_DEMO())
+        return null;
+    try {
+        const { data, error } = await sb.from("papierkorb").insert({ owner: uid, art, ref_id: refId || null, name: name || "", daten, extra: extra || {} }).select("id").single();
+        if (error)
+            throw error;
+        return (data && data.id) || null;
+    }
+    catch (e) {
+        console.error("Papierkorb:", e);
+        return null;
+    }
+}
+async function papierkorbEntfernen(id) {
+    if (!id || IS_DEMO())
+        return;
+    const { error } = await sb.from("papierkorb").delete().eq("id", id);
+    if (error)
+        throw new Error(error.message);
 }
 async function dbDeleteInteressent(id) {
     await withNetworkRetry(async () => {
@@ -14671,6 +14698,8 @@ function App() {
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
     const sammelLaeuftRef = useRef(false); // Sammelrechnung (v2.57.0): Doppeltipp-Sperre
+    const [papierkorb, setPapierkorb] = useState(null); // v2.58.0: null | {liste, busy, error}
+    const papierkorbBusyRef = useRef(false);
     // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
     const lueckenOfferRef = useRef(new Set());
     // Aktueller Stand von students/school/tpl/appts als Ref - Grundlage für jedes "erst berechnen,
@@ -16258,6 +16287,7 @@ function App() {
         // Unterseite bewusst stehen, damit "Zurück" dorthin führt - Escape schloss sie sonst unsichtbar.
         else if (settingsScreen && view === "einstellungen") setSettingsScreen(null);
         else if (wochePlanen) setWochePlanen(false);
+        else if (papierkorb) setPapierkorb(null);
         else return false;
         return true;
     }
@@ -16268,7 +16298,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16508,7 +16538,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -18695,15 +18725,90 @@ function App() {
         }
     }
     async function removeInteressent(it) {
-        if (!await askConfirm({ message: dispName(it) + " wirklich löschen?" }))
+        if (!await askConfirm({ message: dispName(it) + " wirklich löschen?\n\nDer Eintrag liegt danach noch " + PAPIERKORB_TAGE + " Tage im Papierkorb." }))
             return;
+        const pkId = await papierkorbAblegen(uid, "interessent", it.id, dispName(it), { ...it });
         try {
             await dbDeleteInteressent(it.id);
             setInteressenten(prev => prev.filter(x => x.id !== it.id));
             setInteressentForm(null);
         }
         catch (e) {
+            papierkorbEntfernen(pkId).catch(() => { });
             showToast("Löschen fehlgeschlagen:\n" + (e.message || e), "error");
+        }
+    }
+    // ── Papierkorb (v2.58.0) ──
+    async function openPapierkorb() {
+        setPapierkorb({ liste: null, busy: true, error: "" });
+        if (IS_DEMO()) {
+            setPapierkorb({ liste: [], busy: false, error: "" });
+            return;
+        }
+        try {
+            // Ohne die Karteikarte selbst (daten) - die wird erst beim Wiederherstellen geladen.
+            const { data, error } = await sb.from("papierkorb").select("id, art, ref_id, name, extra, geloescht_am").order("geloescht_am", { ascending: false });
+            if (error)
+                throw error;
+            setPapierkorb({ liste: data || [], busy: false, error: "" });
+        }
+        catch (e) {
+            setPapierkorb({ liste: [], busy: false, error: fehlerText(e) });
+        }
+    }
+    async function papierkorbWiederherstellen(e) {
+        if (papierkorbBusyRef.current)
+            return;
+        papierkorbBusyRef.current = true;
+        setPapierkorb(pk => pk && ({ ...pk, busy: true }));
+        try {
+            const { data: row, error } = await sb.from("papierkorb").select("*").eq("id", e.id).single();
+            if (error || !row)
+                throw new Error((error && error.message) || "Eintrag nicht gefunden");
+            if (row.art === "schueler") {
+                const created = await dbInsert(uid, row.daten || {});
+                if (!created)
+                    throw new Error("Schüler konnte nicht angelegt werden");
+                const neu = updateStudents(prev => [...(prev || []), created]);
+                saveCache(uid, neu);
+                // Termine, die beim Löschen gelöst wurden und noch da sind, wieder anhängen
+                const termine = (row.extra && Array.isArray(row.extra.termine)) ? row.extra.termine : [];
+                let zurueck = 0;
+                for (const t of termine) {
+                    const a = (appts || []).find(x => x.id === t.id && !x.student_id);
+                    if (a && await updateAppt(a.id, { student_id: created.id, title: t.title || "" }))
+                        zurueck++;
+                }
+                await papierkorbEntfernen(row.id);
+                showToast(dispName(created) + " ist wieder da" + (zurueck ? ", " + zurueck + (zurueck === 1 ? " Termin wieder zugeordnet" : " Termine wieder zugeordnet") : "")
+                    + ((row.extra && row.extra.dokumente) ? ". Hochgeladene Dokumente kommen nicht zurück." : "."));
+            }
+            else {
+                const created = await dbInsertInteressent(uid, row.daten || {});
+                if (created)
+                    setInteressenten(prev => [created, ...(prev || [])]);
+                await papierkorbEntfernen(row.id);
+                showToast((row.name || "Interessent") + " ist wieder unter den Interessenten.");
+            }
+            setPapierkorb(pk => pk && ({ ...pk, busy: false, liste: (pk.liste || []).filter(x => x.id !== e.id) }));
+        }
+        catch (err) {
+            setPapierkorb(pk => pk && ({ ...pk, busy: false }));
+            showToast("Wiederherstellen fehlgeschlagen:\n" + fehlerText(err), "error");
+        }
+        finally {
+            papierkorbBusyRef.current = false;
+        }
+    }
+    async function papierkorbEndgueltig(e) {
+        if (!await askConfirm({ title: (e.name || "Eintrag") + " endgültig löschen?", message: "Das lässt sich nicht rückgängig machen.", confirmLabel: "Endgültig löschen" }))
+            return;
+        try {
+            await papierkorbEntfernen(e.id);
+            setPapierkorb(pk => pk && ({ ...pk, liste: (pk.liste || []).filter(x => x.id !== e.id) }));
+        }
+        catch (err) {
+            showToast("Löschen fehlgeschlagen:\n" + fehlerText(err), "error");
         }
     }
     // Übernimmt einen Interessenten als vollwertigen Schüler - gleicher Anlege-Pfad wie
@@ -18795,13 +18900,15 @@ function App() {
             + "bring die Nachweise gerne zur ersten Stunde mit oder gib sie vorher ab. Bei Fragen meld dich einfach! Bis bald, " + schule;
     }
     async function rejectEnrollment(s) {
-        if (!await askConfirm({ message: "Anmeldung von " + dispName(s) + " ablehnen und löschen?" }))
+        if (!await askConfirm({ message: "Anmeldung von " + dispName(s) + " ablehnen und löschen?\n\nSie liegt danach noch " + PAPIERKORB_TAGE + " Tage im Papierkorb." }))
             return;
+        const pkId = await papierkorbAblegen(uid, "schueler", s.id, dispName(s), { ...s }, { anmeldung: true });
         try {
             await dbDelete(s.id);
             updateStudents(prev => (prev || []).filter(x => x.id !== s.id));
         }
         catch (e) {
+            papierkorbEntfernen(pkId).catch(() => { });
             showToast("Konnte nicht gelöscht werden:\n" + fehlerText(e), "error");
         }
     }
@@ -20227,10 +20334,15 @@ function App() {
         // Daten merken, um sie bei Bedarf wiederherstellen zu können (aktueller Stand, nicht die
         // beim Antippen übergebene Kopie).
         const backup = { ...((studentsRef.current || []).find(x => x.id === s.id) || s) };
+        // Papierkorb (v2.58.0): Kopie samt Terminbezug - beim Wiederherstellen werden die dann noch
+        // vorhandenen, gelösten Termine wieder angehängt.
+        const pkId = await papierkorbAblegen(uid, "schueler", s.id, dispName(backup), backup,
+            { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length });
         try {
             await dbDelete(s.id);
         }
         catch (e) {
+            papierkorbEntfernen(pkId).catch(() => { });
             // Serverseitiger Schutz hat zugeschlagen (z.B. weil die lokale Rechnungsliste veraltet war)
             // Die Dokumente sind zu diesem Zeitpunkt schon entfernt (siehe oben) - das sagen, statt
             // den Eindruck zu erwecken, es sei nichts passiert.
@@ -20264,12 +20376,13 @@ function App() {
         }
         if (terminFehler)
             showToast(terminFehler + (terminFehler === 1 ? " Termin von " : " Termine von ") + name + " konnte" + (terminFehler === 1 ? "" : "n") + " nicht bereinigt werden – bitte im Kalender nachsehen.", "error");
-        showUndo(name + " gelöscht", async () => {
+        showUndo(name + (pkId ? " gelöscht (30 Tage im Papierkorb)" : " gelöscht"), async () => {
             const created = await dbInsert(uid, backup);
             if (!created) {
                 showToast("Wiederherstellen fehlgeschlagen.", "error");
                 return;
             }
+            papierkorbEntfernen(pkId).catch(() => { });
             const neu = updateStudents(prev => [...(prev || []), created]);
             saveCache(uid, neu);
             setActiveId(created.id);
@@ -22335,6 +22448,7 @@ function App() {
             (isSchoolAdmin || isSchoolOffice) && { id: "teamkalender", label: "Team-Kalender - Termine aller Fahrlehrer, umhängen", group: "Seite", keywords: "ressourcenkalender ressourcen alle fahrlehrer termine umhängen", action: () => setView("teamkalender") },
             { id: "auswertung", label: "Auswertung - Statistik, Prüfungsplanung, Abrechnung", group: "Seite", action: () => setView("auswertung") },
             { id: "tagesgeschaeft", label: "Tagesgeschäft - Tagesabschluss, Lücken, krank melden", group: "Seite", action: () => setView("tagesgeschaeft") },
+            { id: "papierkorb", label: "Papierkorb - gelöschte Schüler und Interessenten (30 Tage)", group: "Seite", action: () => openPapierkorb() },
             { id: "interessenten", label: "Interessenten", group: "Seite", action: () => setView("interessenten") },
             { id: "einstellungen", label: "Einstellungen", group: "Seite", action: () => setView("einstellungen") },
             { id: "videos", label: "Videos", group: "Seite", action: () => setView("videos") },
@@ -22991,6 +23105,10 @@ function App() {
                                         onClick: () => setLoeschDialog({ stu: s, eingabe: "", error: "" }) }, "Daten löschen"))));
                     })(),
                     React.createElement("div", { style: { opacity: 0.85 } }, filtered.filter(s => s.archived).map(s => studentCard(s, true))))),
+            // Papierkorb (v2.58.0)
+            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 18, justifyContent: "space-between" }, onClick: openPapierkorb },
+                React.createElement("span", null, "Papierkorb"),
+                React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 600 } }, "gelöscht, " + PAPIERKORB_TAGE + " Tage wiederherstellbar")),
             React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", textAlign: "center", marginTop: 18 } },
                 "Daten werden automatisch in der Cloud gespeichert",
                 syncing ? " · synchronisiert…" : "",
@@ -35686,6 +35804,32 @@ function App() {
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOffenePosten(null) }, "Schlie\u00DFen"))),
         // Abrechnungs-W\u00E4chter: erbrachte Leistungen, f\u00FCr die noch keine Rechnung existiert.
         // Bewusst getrennt von "Offene Posten" - dort schuldet der Sch\u00FCler Geld, hier fehlt die Rechnung.
+        papierkorb && React.createElement("div", { onClick: () => !papierkorb.busy && setPapierkorb(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Papierkorb",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 160, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                    padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Papierkorb"),
+                React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 14, lineHeight: 1.5 } },
+                    "Gelöschte Schüler, abgelehnte Anmeldungen und Interessenten bleiben " + PAPIERKORB_TAGE + " Tage wiederherstellbar, danach werden sie endgültig gelöscht. Hochgeladene Dokumente kommen nicht zurück."),
+                papierkorb.liste === null
+                    ? React.createElement("div", { style: { textAlign: "center", padding: 20, color: "var(--muted)" } }, "Lädt\u2026")
+                    : papierkorb.error
+                        ? React.createElement("div", { className: "card", style: { padding: "14px", fontSize: 13.5, color: "var(--red-ink)" } }, papierkorb.error)
+                        : papierkorb.liste.length === 0
+                            ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, "Der Papierkorb ist leer.")
+                            : React.createElement("div", { className: "card", style: { padding: "4px 14px" } }, papierkorb.liste.map((e, i) => {
+                                const tage = Math.max(0, PAPIERKORB_TAGE - Math.floor((Date.now() - new Date(e.geloescht_am).getTime()) / 86400000));
+                                const art = e.art === "interessent" ? "Interessent" : (e.extra && e.extra.anmeldung) ? "Online-Anmeldung" : "Schüler";
+                                return React.createElement("div", { key: e.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "11px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none", flexWrap: "wrap" } },
+                                    React.createElement("div", { style: { flex: "1 1 160px", minWidth: 0 } },
+                                        React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, e.name || "Ohne Namen"),
+                                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } },
+                                            art + " \u00B7 gelöscht am " + new Date(e.geloescht_am).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) + " \u00B7 " + (tage === 1 ? "noch 1 Tag" : "noch " + tage + " Tage"))),
+                                    React.createElement("button", { className: "btn btn-primary", disabled: papierkorb.busy, style: { padding: "7px 12px", fontSize: 13, flexShrink: 0 }, onClick: () => papierkorbWiederherstellen(e) }, "Wiederherstellen"),
+                                    React.createElement("button", { className: "btn btn-ghost", disabled: papierkorb.busy, style: { padding: "7px 10px", fontSize: 12.5, color: "var(--muted)", flexShrink: 0 }, onClick: () => papierkorbEndgueltig(e) }, "Endgültig löschen"));
+                            })),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, disabled: papierkorb.busy, onClick: () => setPapierkorb(null) }, "Schließen"))),
         luecken.offen && React.createElement("div", { onClick: () => { if (!sammelLaeuftRef.current) setLuecken(l => ({ ...l, offen: false })); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
