@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.56.1";
+const APP_VERSION = "2.57.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.57.0", date: "September 2026", changes: [
+            "Sammelrechnung: Unter Abrechnung › „noch nicht berechnet“ erstellst du mit einem Knopf für alle deine Schüler mit offenen Posten je eine Rechnung. Vorher siehst du Betrag und Positionen je Schüler, danach die Rechnungsnummern mit PDF. Gerechnet wird genau wie bei der Einzelrechnung",
+        ] },
     { v: "2.56.1", date: "September 2026", changes: [
             "Terminanfragen überschneiden sich nicht mehr: Beim Eintragen eines Termins warnt die App jetzt auch vor einer offenen Anfrage zur selben Zeit, Terminserien überspringen solche Tage, „Woche füllen“ und „Leerlauf verdichten“ planen nicht mehr in offene Anfragen hinein, und ein Gegenvorschlag lässt sich nicht auf einen belegten Zeitraum legen",
         ] },
@@ -14660,6 +14663,7 @@ function App() {
     const apptGenRef = useRef(0);
     const apptDeletedRef = useRef(new Set());
     const apptSavingRef = useRef(false);
+    const sammelLaeuftRef = useRef(false); // Sammelrechnung (v2.57.0): Doppeltipp-Sperre
     // Fenster ("YYYY-MM-DD HH:MM"), für die gerade ein Lücken-Radar-Angebot gespeichert wird.
     const lueckenOfferRef = useRef(new Set());
     // Aktueller Stand von students/school/tpl/appts als Ref - Grundlage für jedes "erst berechnen,
@@ -16209,7 +16213,7 @@ function App() {
         else if (printChoice) setPrintChoice(false);
         else if (offenePosten) setOffenePosten(null);
         else if (zahlungsImport) setZahlungsImport(null);
-        else if (luecken.offen) setLuecken(l => ({ ...l, offen: false }));
+        else if (luecken.offen) { if (!sammelLaeuftRef.current) setLuecken(l => ({ ...l, offen: false })); }
         else if (quotenpilot) setQuotenpilot(null);
         else if (erinnerungen) setErinnerungen(false);
         else if (stillOpen) setStillOpen(false);
@@ -24396,6 +24400,110 @@ function App() {
     // das Speichern des Schülers nach dem Ziehen der Nummer fehlschlagen - die Nummer war dann
     // trotzdem verbraucht, aber keine Rechnung existierte dafür: eine Lücke in der nach §14 UStG
     // vorgeschriebenen lückenlosen Nummernfolge.
+    // Nach create_invoice den lokalen Stand des Schülers nachziehen (eingefrorene Paket-UE und Preis je
+    // Stunde, Rechnung anhängen, vorgemerkte Umbuchungen zuordnen) - gemeinsam für die Einzelrechnung
+    // (confirmInvoice) und die Sammelrechnung (sammelErstellen), damit beide garantiert gleich rechnen.
+    function rechnungLokalNachziehen(sid, inv, chosenLessonIds, chosenCostIds) {
+        const cur = (studentsRef.current || []).find(s => s.id === sid);
+        if (!cur)
+            return null;
+        {
+            const coveredById = {};
+            lessonBillables(cur, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
+            // Auch den Preis je UE festschreiben (invoicedPrice): bei Stunden ohne eigenen Preis gilt
+            // sonst immer der HEUTIGE Standardpreis, und eine spätere Preisänderung verschob den
+            // Saldo einer längst bezahlten Rechnung (Abschluss-Audit, siehe lessonBillables).
+            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0, invoicedPrice: lessonPricePerUE(l, Number(pricePerHour) || 0) } : l);
+            const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
+            const invoices = [...(cur.invoices || []), inv];
+            // Beim Storno vorgemerkte Zahlungen (siehe cancelInvoice) gehören jetzt zu dieser Rechnung.
+            const payments = (cur.payments || []).map(pay => (pay.umbuchenVon && !pay.invoiceId) ? (() => { const { umbuchenVon, ...rest } = pay; return { ...rest, invoiceId: inv.id, umgebuchtVon: umbuchenVon }; })() : pay);
+            const neu = { ...cur, drivenLessons, costItems, invoices, payments };
+            writeStudent(neu);
+            return neu;
+        }
+    }
+    // ── Sammelrechnung (v2.57.0, Produktplan #26): alle eigenen Schüler mit offenen Posten in einem
+    // Durchgang abrechnen. Je Schüler genau derselbe Weg wie die Einzelrechnung: dieselben Zeilen
+    // (rechnungsEntwurfZeilen, alle ausgewählt), create_invoice atomar, danach rechnungLokalNachziehen.
+    // Nacheinander, nicht parallel - die Rechnungsnummern kommen so in Listenreihenfolge.
+    function sammelVorschau() {
+        const price = Number(pricePerHour) || 0;
+        const liste = (students || []).filter(x => x._isMine && !x.archived && !x.dataDeletedAt).map(x => {
+            const rows = rechnungsEntwurfZeilen(x, price);
+            return { id: x.id, name: dispName(x), anzahl: rows.length, betrag: Math.round(rows.reduce((t, r) => t + (Number(r.amount) || 0), 0) * 100) / 100 };
+        }).filter(x => x.anzahl > 0 && x.betrag > 0.005).sort((a, b) => a.name.localeCompare(b.name, "de"));
+        if (!liste.length) {
+            showToast("Bei deinen Schülern ist nichts offen, das abgerechnet werden kann.");
+            return;
+        }
+        setLuecken(l => ({ ...l, sammel: { liste, status: "vorschau", ergebnisse: [] } }));
+    }
+    async function sammelErstellen() {
+        const sm = luecken.sammel;
+        if (!sm || sm.status !== "vorschau" || !school || sammelLaeuftRef.current)
+            return;
+        const summe = sm.liste.reduce((t, x) => t + x.betrag, 0);
+        if (!await askConfirm({ title: sm.liste.length + (sm.liste.length === 1 ? " Rechnung erstellen?" : " Rechnungen erstellen?"),
+            message: "Für " + sm.liste.length + (sm.liste.length === 1 ? " Schüler" : " Schüler") + " wird je eine Rechnung über alle offenen Posten erstellt, zusammen " + eurFmt(summe) + ".\n\nDie Nummern werden fortlaufend vergeben. Eine erstellte Rechnung lässt sich danach nur per Storno zurücknehmen.",
+            confirmLabel: sm.liste.length === 1 ? "Rechnung erstellen" : "Rechnungen erstellen", danger: false }))
+            return;
+        if (sammelLaeuftRef.current)
+            return;
+        sammelLaeuftRef.current = true;
+        setLuecken(l => ({ ...l, sammel: l.sammel ? { ...l.sammel, status: "laeuft", ergebnisse: [] } : l.sammel }));
+        const price = Number(pricePerHour) || 0;
+        const ergebnisse = [];
+        try {
+            for (const x of sm.liste) {
+                // Gegen den AKTUELLEN Stand neu rechnen: zwischen Vorschau und Bestätigung kann sich
+                // etwas geändert haben (neue Stunde, Einzelrechnung auf einem anderen Gerät).
+                const cur = (studentsRef.current || []).find(st => st.id === x.id);
+                const rows = cur ? rechnungsEntwurfZeilen(cur, price) : [];
+                const costRows = rows.filter(r => r.kind === "cost");
+                if (!rows.length)
+                    ergebnisse.push({ id: x.id, name: x.name, fehler: "Inzwischen nichts mehr offen." });
+                else if (costRows.some(r => !r.id))
+                    ergebnisse.push({ id: x.id, name: x.name, fehler: "Kostenposten noch nicht aktualisiert, bitte die App neu laden." });
+                else {
+                    const lessonIds = [];
+                    rows.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => lessonIds.push(id)));
+                    const costIds = costRows.map(r => r.id);
+                    try {
+                        let inv = await dbCreateInvoice(x.id, school.id, rechnungsPostenAusZeilen(rows), lessonIds, costIds, "");
+                        const faellig = rechnungFaellig(inv, zahlungszielTage);
+                        if (faellig)
+                            inv = { ...inv, faellig };
+                        rechnungLokalNachziehen(x.id, inv, lessonIds, costIds);
+                        ergebnisse.push({ id: x.id, name: x.name, inv });
+                    }
+                    catch (e) {
+                        ergebnisse.push({ id: x.id, name: x.name, fehler: fehlerText(e) });
+                    }
+                }
+                const stand = ergebnisse.slice();
+                setLuecken(l => ({ ...l, sammel: l.sammel ? { ...l.sammel, ergebnisse: stand } : l.sammel }));
+            }
+        }
+        finally {
+            sammelLaeuftRef.current = false;
+            setLuecken(l => ({ ...l, sammel: l.sammel ? { ...l.sammel, status: "fertig", ergebnisse: ergebnisse.slice() } : l.sammel }));
+        }
+        // Liste darunter auf den neuen Stand bringen: eigene Schüler aus dem aktuellen Stand,
+        // schulweit neu vom Server (create_invoice hat dort schon alles markiert).
+        if (luecken.soloMode)
+            setLuecken(l => ({ ...l, raw: (studentsRef.current || []).filter(x => !x.archived && x._isMine).map(x => ({ studentId: x.id, name: dispName(x), teacher: "", stu: x })) }));
+        else
+            openLuecken();
+    }
+    function sammelPdf(e) {
+        const stu = (studentsRef.current || []).find(st => st.id === e.id);
+        if (!stu || !e.inv)
+            return;
+        setDruckSchueler(stu);
+        setInvoicePreview(e.inv);
+        doPrint("invoice");
+    }
     async function confirmInvoice() {
         const d = invoiceDraft;
         if (!d || !active || !school)
@@ -24449,20 +24557,7 @@ function App() {
         // nach dem Neuladen war das Paketguthaben doppelt da und die nächste Rechnung zu niedrig
         // (Audit F-H1). Gegen studentsRef rechnen, dann über writeStudent speichern: die übrigen
         // Felder stimmen mit dem Serverstand überein (dieselben Marker, dieselbe Rechnung).
-        const cur = (studentsRef.current || []).find(s => s.id === active.id);
-        if (cur) {
-            const coveredById = {};
-            lessonBillables(cur, Number(pricePerHour) || 0).forEach(b => { coveredById[b.lesson.id] = b.coveredUE; });
-            // Auch den Preis je UE festschreiben (invoicedPrice): bei Stunden ohne eigenen Preis gilt
-            // sonst immer der HEUTIGE Standardpreis, und eine spätere Preisänderung verschob den
-            // Saldo einer längst bezahlten Rechnung (Abschluss-Audit, siehe lessonBillables).
-            const drivenLessons = (cur.drivenLessons || []).map(l => chosenLessonIds.indexOf(l.id) >= 0 ? { ...l, invoiced: inv.number, invoicedCoveredUE: coveredById[l.id] || 0, invoicedPrice: lessonPricePerUE(l, Number(pricePerHour) || 0) } : l);
-            const costItems = (cur.costItems || []).map(it => chosenCostIds.indexOf(it.id) >= 0 ? { ...it, invoiced: inv.number } : it);
-            const invoices = [...(cur.invoices || []), inv];
-            // Beim Storno vorgemerkte Zahlungen (siehe cancelInvoice) gehören jetzt zu dieser Rechnung.
-            const payments = (cur.payments || []).map(pay => (pay.umbuchenVon && !pay.invoiceId) ? (() => { const { umbuchenVon, ...rest } = pay; return { ...rest, invoiceId: inv.id, umgebuchtVon: umbuchenVon }; })() : pay);
-            writeStudent({ ...cur, drivenLessons, costItems, invoices, payments });
-        }
+        rechnungLokalNachziehen(active.id, inv, chosenLessonIds, chosenCostIds);
         setInvoiceDraft(null);
         setDruckSchueler(null);
         setInvoicePreview(inv);
@@ -35581,7 +35676,7 @@ function App() {
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setOffenePosten(null) }, "Schlie\u00DFen"))),
         // Abrechnungs-W\u00E4chter: erbrachte Leistungen, f\u00FCr die noch keine Rechnung existiert.
         // Bewusst getrennt von "Offene Posten" - dort schuldet der Sch\u00FCler Geld, hier fehlt die Rechnung.
-        luecken.offen && React.createElement("div", { onClick: () => setLuecken(l => ({ ...l, offen: false })), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        luecken.offen && React.createElement("div", { onClick: () => { if (!sammelLaeuftRef.current) setLuecken(l => ({ ...l, offen: false })); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
@@ -35597,6 +35692,38 @@ function App() {
                         style: { padding: "6px 8px", fontSize: 13 } }),
                     luecken.stichtag && React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 9px", fontSize: 12 },
                         onClick: () => setLuecken(l => ({ ...l, stichtag: "" })) }, "zur\u00FCcksetzen")),
+                // Sammelrechnung (v2.57.0): nur für die eigenen Schüler - Rechnungen für Schüler anderer
+                // Fahrlehrer schreibt deren Fahrlehrer bzw. das Büro in der Schülerakte.
+                (() => {
+                    const sm = luecken.sammel;
+                    if (!sm) {
+                        if (luecken.busy)
+                            return null;
+                        const eigene = lueckenListe().filter(x => (students || []).some(st => st.id === x.studentId && st._isMine));
+                        return eigene.length > 0 && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 12 }, onClick: sammelVorschau },
+                            eigene.length === 1 ? "Rechnung erstellen" : "Rechnungen für alle " + eigene.length + " erstellen");
+                    }
+                    const summe = sm.liste.reduce((t, x) => t + x.betrag, 0);
+                    const zeile = (key, links, rechts, ton) => React.createElement("div", { key, style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--line)", fontSize: 13.5 } },
+                        React.createElement("span", { style: { flex: 1, minWidth: 0, color: ton || "var(--ink)" } }, links), rechts);
+                    return React.createElement("div", { className: "card", style: { padding: "14px", marginBottom: 12, borderLeft: "3px solid var(--orange)" } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 4 } },
+                            sm.status === "vorschau" ? "Sammelrechnung" : sm.status === "laeuft" ? "Rechnungen werden erstellt \u2026 " + sm.ergebnisse.length + " von " + sm.liste.length : "Fertig"),
+                        sm.status === "vorschau" && React.createElement(React.Fragment, null,
+                            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 8, lineHeight: 1.5 } },
+                                "Je Schüler eine Rechnung über alle offenen Posten, wie bei der Einzelrechnung." + (luecken.stichtag ? " Der Stichtag oben gilt nur für die Anzeige, abgerechnet wird alles Offene." : "")),
+                            sm.liste.map(x => zeile(x.id, x.name + " \u00B7 " + x.anzahl + (x.anzahl === 1 ? " Position" : " Positionen"), React.createElement("b", { style: { whiteSpace: "nowrap" } }, eurFmt(x.betrag)))),
+                            zeile("summe", React.createElement("b", null, "Zusammen"), React.createElement("b", { style: { whiteSpace: "nowrap" } }, eurFmt(summe))),
+                            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10 }, onClick: sammelErstellen },
+                                sm.liste.length === 1 ? "1 Rechnung erstellen" : sm.liste.length + " Rechnungen erstellen"),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setLuecken(l => ({ ...l, sammel: null })) }, "Abbrechen")),
+                        sm.status !== "vorschau" && React.createElement(React.Fragment, null,
+                            sm.ergebnisse.map(e => e.inv
+                                ? zeile(e.id, e.name + " \u00B7 " + e.inv.number + " \u00B7 " + eurFmt(e.inv.total),
+                                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "5px 10px", fontSize: 12.5, flexShrink: 0 }, onClick: () => sammelPdf(e) }, "PDF"))
+                                : zeile(e.id, e.name + ": " + e.fehler, null, "var(--red-ink)")),
+                            sm.status === "fertig" && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, onClick: () => setLuecken(l => ({ ...l, sammel: null })) }, "Fertig")));
+                })(),
                 luecken.busy
                     ? React.createElement("div", { style: { textAlign: "center", padding: "20px", color: "var(--muted)" } }, "L\u00E4dt\u2026")
                     : luecken.error
