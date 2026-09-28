@@ -14,6 +14,7 @@ const app = require("./lade-app")([
     "APP_VERSION", "CHANGELOG",
     "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
     "spaltenRaten", "excelSerialZuDatum",
+    "rechnungsEntwurfZeilen", "rechnungsPostenAusZeilen", "rechnungsSchnappschuss",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -436,4 +437,26 @@ test("Excel-Tageszahl in Datum", () => {
     assert.equal(app.excelSerialZuDatum(38718), "01.01.2006");
     assert.equal(app.excelSerialZuDatum("45658"), "01.01.2025");
     assert.equal(app.excelSerialZuDatum(12), "", "Unsinn bleibt leer");
+});
+
+test("Rechnung aus offenen Posten: Paket abgezogen, gleiche Preise gruppiert, Kosten einzeln", () => {
+    const s = {
+        packages: [{ includedUE: 3 }],
+        drivenLessons: [
+            { id: "a", date: "2026-09-01", minutes: 90 },          // 2 UE im Paket
+            { id: "b", date: "2026-09-03", minutes: 90 },          // 1 UE Paket + 1 UE zu zahlen
+            { id: "c", date: "2026-09-05", minutes: 45 },          // 1 UE zu zahlen
+            { id: "d", date: "2026-09-06", minutes: 45, invoiced: "RE-1", invoicedCoveredUE: 0, invoicedPrice: 60 },
+        ],
+        costItems: [{ id: "k1", label: "Grundbetrag", amount: 300 }, { id: "k2", label: "Alt", amount: 10, invoiced: "RE-1" }],
+    };
+    const z = app.rechnungsEntwurfZeilen(s, 60);
+    assert.deepEqual(rein(z.map(r => [r.kind, r.amount, (r.ids || []).join(",")])), [["lessongroup", 120, "b,c"], ["cost", 300, ""]]);
+    assert.match(z[0].label, /^2 Fahrstunden \u00E0 60,00.€$/);
+    assert.equal(z[0].von, "2026-09-03"); assert.equal(z[0].bis, "2026-09-05");
+    const posten = app.rechnungsPostenAusZeilen(z);
+    assert.deepEqual(rein(posten[0]), { label: z[0].label, amount: 120, date: "", von: "2026-09-03", bis: "2026-09-05" });
+    const snap = app.rechnungsSchnappschuss(s, 60, ["b", "c"]);
+    assert.deepEqual(rein(snap), { b: { invoicedCoveredUE: 1, invoicedPrice: 60 }, c: { invoicedCoveredUE: 0, invoicedPrice: 60 } });
+    assert.deepEqual(rein(app.rechnungsEntwurfZeilen(null, 60)), []);
 });

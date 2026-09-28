@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.42.0";
+const APP_VERSION = "2.43.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.43.0", date: "September 2026", changes: [
+            "Neu: Inhaber und Büro schreiben Rechnungen direkt aus der Schülerakte im Fahrschul-Dashboard - offene Fahrstunden (Paket schon abgezogen) und Kostenposten auswählen, Rechnung mit der nächsten Nummer der Fahrschule erstellen und als PDF ausgeben. Rechnungen lassen sich dort auch ansehen und stornieren; bereits gezahlte Beträge können dabei der Ersatzrechnung gutgeschrieben werden",
+            "Rechnungen des Büros sind wie Zahlungen gegen einen älteren Stand auf dem Fahrlehrer-Gerät geschützt; Fahrlehrer und Büro rechnen mit denselben Funktionen",
+        ] },
     { v: "2.42.0", date: "September 2026", changes: [
             "Neu im Fahrschul-Dashboard: Interessenten der ganzen Fahrschule. Inhaber und Büro nehmen Anfragen auf, pflegen Status und nächsten Kontakt (fällige sind markiert), rufen direkt an und übergeben den Interessenten einem Fahrlehrer - der sieht ihn sofort in seiner eigenen Interessenten-Liste und übernimmt ihn von dort als Schüler",
         ] },
@@ -7273,10 +7277,13 @@ async function nextDocumentNumber(schoolId, kind) {
 function neuerKostenposten(felder) {
     return { id: "ci" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8), ...felder };
 }
-async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIds, note) {
+// extra (nur Büro-Weg): { lessonExtra, faellig } - siehe rechnungsSchnappschuss.
+async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIds, note, extra) {
     const { data, error } = await sb.rpc("create_invoice", {
         p_student_id: studentId, p_school_id: schoolId, p_items: items,
         p_lesson_ids: lessonIds, p_cost_ids: costIds, p_note: note || "",
+        ...(extra && extra.lessonExtra ? { p_lesson_extra: extra.lessonExtra } : {}),
+        ...(extra && extra.faellig ? { p_faellig: extra.faellig } : {}),
     });
     if (error) {
         console.error(error);
@@ -7288,9 +7295,11 @@ async function dbCreateInvoice(studentId, schoolId, items, lessonIds, costIds, n
 // Bestand (Belegpflicht), bekommt aber einen Verweis auf die neue Stornorechnung, die selbst eine
 // echte fortlaufende Nummer aus derselben Zählfolge erhält (§14 UStG) und die Beträge negiert.
 // Die dadurch als abgerechnet markierten Fahrstunden/Posten werden wieder als offen markiert.
-async function dbCancelInvoice(studentId, schoolId, invoiceId, reason) {
+// umbuchen (nur Büro-Weg): schon gezahlte Beträge der nächsten Rechnung gutschreiben (serverseitig).
+async function dbCancelInvoice(studentId, schoolId, invoiceId, reason, umbuchen) {
     const { data, error } = await sb.rpc("cancel_invoice", {
         p_student_id: studentId, p_school_id: schoolId, p_invoice_id: invoiceId, p_reason: reason || "",
+        ...(umbuchen ? { p_umbuchen: true } : {}),
     });
     if (error) {
         console.error(error);
@@ -9781,6 +9790,61 @@ function rechnungsLeistungszeitraum(s, inv) {
 // damit ein späteres Ändern des Zahlungsziels in den Einstellungen nicht rückwirkend alte
 // Rechnungen überfällig macht oder Mahnstufen springen lässt (Audit F-N17). Ältere Rechnungen
 // ohne das Feld rechnen wie bisher: Rechnungsdatum + aktuelles Zahlungsziel.
+// Offene Posten eines Schülers als Rechnungszeilen - gemeinsam für die Fahrlehrer-Rechnung
+// (openInvoiceDraft) und die Rechnung aus der Schülerakte durch Admin/Büro (v2.43.0), damit
+// beide garantiert gleich rechnen. Offene Fahrstunden werden nach ihrem tatsächlich zu zahlenden
+// Betrag gruppiert (Paket-Guthaben schon abgezogen); vollständig gedeckte erscheinen nicht.
+function rechnungsEntwurfZeilen(stu, price) {
+    const rows = [];
+    if (!stu) return rows;
+    const billableById = {};
+    lessonBillables(stu, price).forEach(b => { billableById[b.lesson.id] = b.amount; });
+    const byPrice = {};
+    (stu.drivenLessons || []).filter(l => !l.invoiced).forEach(l => {
+        const einzel = Math.round((billableById[l.id] || 0) * 100) / 100;
+        if (einzel <= 0.005)
+            return; // vollständig im Paket enthalten, nichts zu berechnen
+        const k = String(einzel);
+        if (!byPrice[k])
+            byPrice[k] = { einzel, ids: [], anzahl: 0, daten: [] };
+        byPrice[k].ids.push(l.id);
+        byPrice[k].anzahl += 1;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(l.date || ""))
+            byPrice[k].daten.push(l.date);
+    });
+    Object.keys(byPrice).forEach(k => {
+        const g = byPrice[k];
+        g.daten.sort();
+        // von/bis: erster und letzter Tag dieser Stunden - Grundlage für den Leistungszeitraum
+        // auf der Rechnung (siehe rechnungsLeistungszeitraum).
+        rows.push({ key: "lessons:" + k, kind: "lessongroup", ids: g.ids,
+            von: g.daten[0] || "", bis: g.daten[g.daten.length - 1] || "",
+            label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
+            date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
+    });
+    (stu.costItems || []).forEach((it, idx) => { if (!it.invoiced) {
+        rows.push({ key: "cost:" + (it.id || idx), id: it.id || null, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
+    } });
+    return rows;
+}
+// Rechnungsposten (items) aus den gewählten Zeilen - Fahrstunden-Gruppen mit Leistungszeitraum.
+function rechnungsPostenAusZeilen(chosen) {
+    return chosen.map(r => r.kind === "lessongroup" && r.von
+        ? { label: r.label, amount: r.amount, date: r.date || "", von: r.von, bis: r.bis || r.von }
+        : { label: r.label, amount: r.amount, date: r.date || "" });
+}
+// Je abgerechneter Fahrstunde eingefrorene Paket-UE und Preis je UE (siehe confirmInvoice/
+// lessonBillables) - vom Büro-Weg an create_invoice übergeben, dort serverseitig gespeichert.
+function rechnungsSchnappschuss(stu, price, lessonIds) {
+    const covered = {};
+    lessonBillables(stu, price).forEach(b => { covered[b.lesson.id] = b.coveredUE; });
+    const out = {};
+    (stu.drivenLessons || []).forEach(l => {
+        if (lessonIds.indexOf(l.id) >= 0)
+            out[l.id] = { invoicedCoveredUE: covered[l.id] || 0, invoicedPrice: lessonPricePerUE(l, price) };
+    });
+    return out;
+}
 function rechnungFaellig(inv, zahlungszielTage) {
     if (inv && /^\d{4}-\d{2}-\d{2}$/.test(String(inv.faellig || "")))
         return inv.faellig;
@@ -14749,6 +14813,7 @@ function App() {
     const [printChoice, setPrintChoice] = useState(false);
     const [invoiceDraft, setInvoiceDraft] = useState(null); // null | {rows:[{key,label,amount,date,kind,idx/id}], selected:[key,...], note}
     const [invoicePreview, setInvoicePreview] = useState(null); // die zuletzt erstellte/angesehene Rechnung (Snapshot), fürs Drucken
+    const [druckSchueler, setDruckSchueler] = useState(null); // Rechnung aus der Schülerakte (Büro): dieser Schüler statt "active"
     const [receiptPreview, setReceiptPreview] = useState(null); // {payment, idx} – die Zahlung, für die gerade ein Beleg gedruckt wird
     const [contractPreview, setContractPreview] = useState(null); // der zuletzt erstellte/angesehene Ausbildungsvertrag (Snapshot), fürs Drucken
     const [preismeldungPreview, setPreismeldungPreview] = useState(null); // Snapshot der Preisliste nach § 32 für den Druck (klassen, reihenfolge, gueltigAb, datum)
@@ -23922,40 +23987,8 @@ function App() {
     function openInvoiceDraft() {
         if (!active)
             return;
-        const price = Number(pricePerHour) || 0;
-        const rows = [];
-        // Offene Fahrstunden nach ihrem tatsächlich zu zahlenden Betrag gruppieren (Paket-Guthaben
-        // ist hier schon abgezogen), damit die Rechnung EINE Position "X Fahrstunden" ergibt statt
-        // vieler Einzelzeilen. Vollständig durch ein Paket gedeckte Stunden erscheinen nicht.
-        const billableById = {};
-        lessonBillables(active, price).forEach(b => { billableById[b.lesson.id] = b.amount; });
-        const openLessons = (active.drivenLessons || []).filter(l => !l.invoiced);
-        const byPrice = {};
-        openLessons.forEach(l => {
-            const einzel = Math.round((billableById[l.id] || 0) * 100) / 100;
-            if (einzel <= 0.005)
-                return; // vollständig im Paket enthalten, nichts zu berechnen
-            const k = String(einzel);
-            if (!byPrice[k])
-                byPrice[k] = { einzel, ids: [], anzahl: 0, daten: [] };
-            byPrice[k].ids.push(l.id);
-            byPrice[k].anzahl += 1;
-            if (/^\d{4}-\d{2}-\d{2}$/.test(l.date || ""))
-                byPrice[k].daten.push(l.date);
-        });
-        Object.keys(byPrice).forEach(k => {
-            const g = byPrice[k];
-            g.daten.sort();
-            // von/bis: erster und letzter Tag dieser Stunden - Grundlage für den Leistungszeitraum
-            // auf der Rechnung (siehe rechnungsLeistungszeitraum).
-            rows.push({ key: "lessons:" + k, kind: "lessongroup", ids: g.ids,
-                von: g.daten[0] || "", bis: g.daten[g.daten.length - 1] || "",
-                label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
-                date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
-        });
-        (active.costItems || []).forEach((it, idx) => { if (!it.invoiced) {
-            rows.push({ key: "cost:" + (it.id || idx), id: it.id || null, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
-        } });
+        // Gleiche Zeilen wie in der Schülerakte des Büros (rechnungsEntwurfZeilen).
+        const rows = rechnungsEntwurfZeilen(active, Number(pricePerHour) || 0);
         if (rows.length === 0) {
             showToast("Keine offenen Posten für eine neue Rechnung. Für " + dispName(active) + " ist bereits alles abgerechnet.");
             return;
@@ -23993,9 +24026,7 @@ function App() {
             return;
         }
         const chosenCostIds = costRows.map(r => r.id);
-        const items = chosen.map(r => r.kind === "lessongroup" && r.von
-            ? { label: r.label, amount: r.amount, date: r.date || "", von: r.von, bis: r.bis || r.von }
-            : { label: r.label, amount: r.amount, date: r.date || "" });
+        const items = rechnungsPostenAusZeilen(chosen);
         let inv;
         try {
             inv = await dbCreateInvoice(active.id, school.id, items, chosenLessonIds, chosenCostIds, d.note || "");
@@ -24041,10 +24072,12 @@ function App() {
             writeStudent({ ...cur, drivenLessons, costItems, invoices, payments });
         }
         setInvoiceDraft(null);
+        setDruckSchueler(null);
         setInvoicePreview(inv);
         doPrint("invoice");
     }
     function viewInvoice(inv) {
+        setDruckSchueler(null);
         setInvoicePreview(inv);
         doPrint("invoice");
     }
@@ -24111,6 +24144,7 @@ function App() {
             else
                 updateStudents(prev => (prev || []).map(s => s.id === cur.id ? next : s));
         }
+        setDruckSchueler(null);
         setInvoicePreview(storno);
         doPrint("invoice");
     }
@@ -32480,7 +32514,9 @@ function App() {
         // ohne "active" (z.B. noch kein Schüler angelegt) gedruckt werden können.
         // Preismeldung und Geschenkgutschein sind fahrschulweite (nicht schuelerbezogene)
         // Dokumente - beide muessen auch ohne ausgewaehlten Schueler druckbar sein.
-        if (!active && !preismeldungPreview && !voucherPrint)
+        // Dazu die Rechnung aus der Schülerakte (druckSchueler): ein Büro-Konto hat meist gar keinen
+        // eigenen Schüler und damit nie ein "active".
+        if (!active && !preismeldungPreview && !voucherPrint && !druckSchueler)
             return null;
         return React.createElement("div", { className: "print-sheet" },
             // Preismeldung/Gutschein duerfen laut Guard oben auch ohne "active" gedruckt werden -
@@ -33051,7 +33087,9 @@ function App() {
     }
     function invoiceSheet() {
         const inv = invoicePreview;
-        if (!inv || !active)
+        // Aus der Schülerakte (Büro) gedruckt: dieser Schüler, sonst der aktive.
+        const stu = druckSchueler || active;
+        if (!inv || !stu)
             return null;
         const iv = (school && school.invoice_settings) || {};
         const firma = iv.firma || (school && school.name) || "Fahrschule";
@@ -33059,7 +33097,7 @@ function App() {
         // nicht den heutigen Stand der Fahrschule - sonst würde ein späterer Wechsel §19 UStG <->
         // Regelbesteuerung alle bereits gestellten Rechnungen rückwirkend falsch ausweisen. Nur
         // bei Altrechnungen von vor diesem Fix (Feld fehlt) auf den aktuellen Stand zurückfallen.
-        const kUnt = rechnungKleinunternehmer(active, inv, !!iv.kleinunternehmer);
+        const kUnt = rechnungKleinunternehmer(stu, inv, !!iv.kleinunternehmer);
         const total = inv.total || 0;
         const netto = kUnt ? total : Math.round((total / 1.19) * 100) / 100;
         const ust = kUnt ? 0 : Math.round((total - netto) * 100) / 100;
@@ -33067,7 +33105,7 @@ function App() {
         // datierte Fahrstunden (nur Grundbetrag o.ä.) gilt der übliche Satz "Leistungsdatum
         // entspricht dem Rechnungsdatum".
         const deDatum = d => new Date(d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" });
-        const zeitraum = rechnungsLeistungszeitraum(active, inv);
+        const zeitraum = rechnungsLeistungszeitraum(stu, inv);
         const leistungText = zeitraum
             ? (zeitraum.von === zeitraum.bis ? "Leistungsdatum: " + deDatum(zeitraum.von) : "Leistungszeitraum: " + deDatum(zeitraum.von) + " \u2013 " + deDatum(zeitraum.bis))
             : "Leistungsdatum entspricht dem Rechnungsdatum";
@@ -33105,16 +33143,16 @@ function App() {
                 // Rechnungsempfänger stehen - sonst weicht dieser gedruckte/als PDF verschickte
                 // Beleg vom XRechnung-Buyer derselben Rechnung ab (xrechnungHerunterladen()), was
                 // z.B. den Vorsteuerabzug der Firma erschwert.
-                active.istFirmenkunde && active.firmaName
+                stu.istFirmenkunde && stu.firmaName
                     ? React.createElement(React.Fragment, null,
-                        React.createElement("div", { style: { fontWeight: "bold" } }, active.firmaName),
-                        active.firmaStrasse && React.createElement("div", null, active.firmaStrasse),
-                        active.firmaPlzOrt && React.createElement("div", null, active.firmaPlzOrt),
-                        React.createElement("div", { style: { fontSize: "9pt", color: "#444", marginTop: 2 } }, "z.Hd. " + dispName(active)),
-                        active.firmaUstId && React.createElement("div", { style: { fontSize: "9pt", color: "#444" } }, "USt-IdNr.: " + active.firmaUstId))
+                        React.createElement("div", { style: { fontWeight: "bold" } }, stu.firmaName),
+                        stu.firmaStrasse && React.createElement("div", null, stu.firmaStrasse),
+                        stu.firmaPlzOrt && React.createElement("div", null, stu.firmaPlzOrt),
+                        React.createElement("div", { style: { fontSize: "9pt", color: "#444", marginTop: 2 } }, "z.Hd. " + dispName(stu)),
+                        stu.firmaUstId && React.createElement("div", { style: { fontSize: "9pt", color: "#444" } }, "USt-IdNr.: " + stu.firmaUstId))
                     : React.createElement(React.Fragment, null,
-                        React.createElement("div", { style: { fontWeight: "bold" } }, dispName(active)),
-                        active.anschrift && React.createElement("div", null, active.anschrift))),
+                        React.createElement("div", { style: { fontWeight: "bold" } }, dispName(stu)),
+                        stu.anschrift && React.createElement("div", null, stu.anschrift))),
             React.createElement("table", { className: "ps-inv-table" },
                 React.createElement("thead", null,
                     React.createElement("tr", null,
@@ -33145,7 +33183,7 @@ function App() {
                 // Code scannt, zahlt eine Rechnung, die es nicht mehr gibt.
                 if (!iv.iban || inv.stornoOf || inv.cancelledBy)
                     return null;
-                const offen = invoiceOpen(active, inv);
+                const offen = invoiceOpen(stu, inv);
                 if (offen <= 0.005)
                     return null;
                 let epc;
@@ -33513,7 +33551,8 @@ function App() {
                 view === "tagesgeschaeft" && renderTagesgeschaeft(),
                 view === "interessenten" && renderInteressenten(),
                 view === "fuhrpark" && renderFuhrpark(),
-                view === "schulboard" && (isSchoolAdmin || isSchoolOffice) && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0, rolle: isSchoolAdmin ? "admin" : "buero" }),
+                view === "schulboard" && (isSchoolAdmin || isSchoolOffice) && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0, zahlungszielTage,
+                    onRechnungDrucken: (stu, inv) => { setDruckSchueler(stu); setInvoicePreview(inv); doPrint("invoice"); }, rolle: isSchoolAdmin ? "admin" : "buero" }),
                 view === "teamkalender" && (isSchoolAdmin || isSchoolOffice) && React.createElement(TeamKalender, { schoolId: school && school.id, lokal: IS_DEMO() ? teamKalenderLokal() : null }),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
@@ -42278,7 +42317,7 @@ function TeamKalender({ schoolId, lokal }) {
                 lehrer.length < 2 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 8 } }, "Es gibt noch keinen weiteren Fahrlehrer in der Fahrschule."),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setAuswahl(null) }, "Abbrechen"))));
 }
-function SchulDashboard({ schoolId, stdPreis, rolle }) {
+function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnungDrucken }) {
     // Büro (Produktplan Teil Q): kein Umsatz, keine Vergütung, keine Fahrstunden-Auswertung - der
     // Server verweigert diese Daten ohnehin, deshalb werden sie gar nicht erst angefragt.
     const istAdmin = rolle !== "buero";
@@ -42812,6 +42851,9 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                                 })),
                                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!aktion, style: { marginTop: 12 },
                                     onClick: async () => { setAktion("zahlung"); try { if (await zahlungErfassenDialog(s.id, ((s.vorname || "") + " " + (s.name || "")).trim() || "Schüler", 0)) { akteOeffnen(akte.meta); laden(); } } finally { setAktion(""); } } }, "Zahlung erfassen"),
+                                // Abrechnung: offene Posten abrechnen, Rechnungen drucken/stornieren (Admin und Büro)
+                                React.createElement(AkteAbrechnung, { s, schoolId, stdPreis: Number(stdPreis) || 0, zahlungszielTage, onDrucken: onRechnungDrucken,
+                                    onGeaendert: () => { akteOeffnen(akte.meta); laden(); } }),
                                 s.bemerkungen && React.createElement(React.Fragment, null,
                                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Bemerkungen"),
                                     React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.55, whiteSpace: "pre-line", margin: 0 } }, s.bemerkungen)),
@@ -42838,6 +42880,87 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                                     "Stammdaten, Unterlagen und Zahlungen lassen sich hier direkt ändern (mit Protokoll). Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
+}
+// Abrechnung in der Schülerakte (Admin/Büro, Produktplan Teil Q, v2.43.0): offene Posten
+// abrechnen, Rechnungen ansehen/drucken, stornieren. Rechnet mit denselben Funktionen wie die
+// Fahrlehrer-Rechnung (rechnungsEntwurfZeilen, rechnungsSchnappschuss); Nummer, Markierungen und
+// Schnappschüsse schreibt create_invoice serverseitig in einer Transaktion.
+function AkteAbrechnung({ s, schoolId, stdPreis, zahlungszielTage, onDrucken, onGeaendert }) {
+    const zeilen = React.useMemo(() => rechnungsEntwurfZeilen(s, stdPreis), [s, stdPreis]);
+    const [auswahl, setAuswahl] = React.useState(() => zeilen.map(r => r.key));
+    const [busy, setBusy] = React.useState(false);
+    React.useEffect(() => { setAuswahl(zeilen.map(r => r.key)); }, [zeilen]);
+    const gewaehlt = zeilen.filter(r => auswahl.indexOf(r.key) >= 0);
+    const summe = Math.round(gewaehlt.reduce((t, r) => t + (Number(r.amount) || 0), 0) * 100) / 100;
+    const rechnungen = (s.invoices || []).slice().sort((a, b) => String(b.number || "").localeCompare(String(a.number || "")));
+    const name = ((s.vorname || "") + " " + (s.name || "")).trim() || "den Schüler";
+    async function erstellen() {
+        if (busy || !gewaehlt.length) return;
+        if (gewaehlt.some(r => r.kind === "cost" && !r.id)) { showToast("Diese Kostenposten sind noch nicht aktualisiert. Der Fahrlehrer muss die App einmal neu laden."); return; }
+        if (!await askConfirm({ title: "Rechnung erstellen?", message: "Rechnung über " + eurFmt(summe) + " für " + name + ". Sie bekommt die nächste Rechnungsnummer der Fahrschule und lässt sich danach nur noch stornieren.", confirmLabel: "Erstellen" }))
+            return;
+        setBusy(true);
+        try {
+            const lessonIds = [];
+            gewaehlt.filter(r => r.kind === "lessongroup").forEach(r => r.ids.forEach(id => lessonIds.push(id)));
+            const heute = ymd(new Date());
+            const inv = await dbCreateInvoice(s.id, schoolId, rechnungsPostenAusZeilen(gewaehlt), lessonIds,
+                gewaehlt.filter(r => r.kind === "cost").map(r => r.id), "",
+                { lessonExtra: rechnungsSchnappschuss(s, stdPreis, lessonIds), faellig: rechnungFaellig({ date: heute }, zahlungszielTage) });
+            showToast("Rechnung " + inv.number + " erstellt.");
+            if (onDrucken) onDrucken(s, inv);
+            onGeaendert();
+        } catch (e) { showToast(fehlerText(e), "error"); }
+        finally { setBusy(false); }
+    }
+    async function stornieren(inv) {
+        if (busy) return;
+        const grund = await askPrompt({ title: "Rechnung " + inv.number + " stornieren?",
+            message: "Es wird eine Stornorechnung mit eigener Nummer erstellt. Die ursprüngliche Rechnung bleibt erhalten und wird als storniert markiert.",
+            placeholder: "Grund (optional)", confirmLabel: "Stornieren" });
+        if (grund === null) return;
+        let umbuchen = false;
+        const bezahlt = invoicePaidDirekt(s, inv.id);
+        if (bezahlt > 0.005) {
+            umbuchen = await askConfirm({ title: "Bezahlten Betrag übertragen?",
+                message: eurFmt(bezahlt) + " sind auf diese Rechnung schon bezahlt. Sollen sie der nächsten Rechnung für " + name + " gutgeschrieben werden?",
+                confirmLabel: "Ja, übertragen", cancelLabel: "Nein", danger: false, abortLabel: "Storno abbrechen", abortValue: null });
+            if (umbuchen === null) return;
+        }
+        setBusy(true);
+        try {
+            const storno = await dbCancelInvoice(s.id, schoolId, inv.id, grund, !!umbuchen);
+            showToast("Stornorechnung " + storno.number + " erstellt." + (umbuchen ? " " + eurFmt(bezahlt) + " gehen auf die nächste Rechnung." : ""));
+            if (onDrucken) onDrucken(s, storno);
+            onGeaendert();
+        } catch (e) { showToast(fehlerText(e), "error"); }
+        finally { setBusy(false); }
+    }
+    const ueber = t => React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, t);
+    return React.createElement(React.Fragment, null,
+        ueber("Offene Posten"),
+        zeilen.length === 0
+            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Nichts offen - alles ist abgerechnet.")
+            : React.createElement(React.Fragment, null,
+                zeilen.map(r => React.createElement("label", { key: r.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderTop: "1px solid var(--line)", fontSize: 13.5, cursor: "pointer" } },
+                    React.createElement("input", { type: "checkbox", checked: auswahl.indexOf(r.key) >= 0, disabled: busy, style: { width: 18, height: 18, flexShrink: 0 },
+                        onChange: () => setAuswahl(a => a.indexOf(r.key) >= 0 ? a.filter(k => k !== r.key) : [...a, r.key]) }),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0 } }, r.label),
+                    React.createElement("span", { style: { fontWeight: 700, fontVariantNumeric: "tabular-nums", flexShrink: 0 } }, eurFmt(r.amount)))),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 10 }, disabled: busy || !gewaehlt.length, onClick: erstellen },
+                    busy ? "Einen Moment…" : ("Rechnung erstellen · " + eurFmt(summe)))),
+        rechnungen.length > 0 && ueber("Rechnungen (" + rechnungen.length + ")"),
+        rechnungen.map(inv => {
+            const st = inv.stornoOf ? "Storno zu " + inv.stornoOf : inv.cancelledBy ? "storniert (" + inv.cancelledBy + ")" : ({ offen: "offen", teil: "teilweise bezahlt", bezahlt: "bezahlt" }[invoiceStatus(s, inv)] || "");
+            const farbe = inv.stornoOf || inv.cancelledBy ? "var(--muted)" : invoiceStatus(s, inv) === "bezahlt" ? "var(--green-ink)" : "var(--amber-ink)";
+            return React.createElement("div", { key: inv.id || inv.number, style: { display: "flex", alignItems: "center", gap: 8, padding: "8px 0", borderTop: "1px solid var(--line)", fontSize: 13.5, flexWrap: "wrap" } },
+                React.createElement("span", { style: { flex: 1, minWidth: 140 } },
+                    React.createElement("span", { style: { fontWeight: 700 } }, inv.number), " · ", dashDatum(inv.date),
+                    React.createElement("span", { style: { display: "block", fontSize: 12, color: farbe, fontWeight: 700 } }, st)),
+                React.createElement("span", { style: { fontWeight: 700, fontVariantNumeric: "tabular-nums" } }, eurFmt(inv.total)),
+                React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, disabled: busy, onClick: () => onDrucken && onDrucken(s, inv) }, "PDF"),
+                !inv.stornoOf && !inv.cancelledBy && React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red-ink)" }, disabled: busy, onClick: () => stornieren(inv) }, "Stornieren"));
+        }));
 }
 // Interessenten der ganzen Fahrschule (Produktplan Teil Q): Admin und Büro nehmen Anfragen an,
 // pflegen Status und Wiedervorlage und teilen sie einem Fahrlehrer zu. Die Übernahme als Schüler
