@@ -15,6 +15,7 @@ const app = require("./lade-app")([
     "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
     "spaltenRaten", "excelSerialZuDatum",
     "rechnungsEntwurfZeilen", "rechnungsPostenAusZeilen", "rechnungsSchnappschuss",
+    "arbeitszeitArt", "arbeitszeitTage",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -459,4 +460,30 @@ test("Rechnung aus offenen Posten: Paket abgezogen, gleiche Preise gruppiert, Ko
     const snap = app.rechnungsSchnappschuss(s, 60, ["b", "c"]);
     assert.deepEqual(rein(snap), { b: { invoicedCoveredUE: 1, invoicedPrice: 60 }, c: { invoicedCoveredUE: 0, invoicedPrice: 60 } });
     assert.deepEqual(rein(app.rechnungsEntwurfZeilen(null, 60)), []);
+});
+
+test("Arbeitszeit § 12 FahrlG: Arten, 495-Minuten-Grenze, Pausen, Überschneidungen", () => {
+    const t = (start, ende, art, extra) => ({ start_at: "2026-09-28T" + start + ":00+02:00", end_at: "2026-09-28T" + ende + ":00+02:00", art, status: "confirmed", ...(extra || {}) });
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "PRIVAT")), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "ÜST", { status: "offered" })), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "ÜST", { note: "§URLAUB§" })), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "TH")), "arbeit");
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "PF")), "praxis");
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "EIGENE")), "praxis");
+    // 07:00-15:30 durchgehend Fahrstunden (510 Min.), dazu 16:00-18:00 Theorie
+    const tage = app.arbeitszeitTage([
+        t("07:00", "11:00", "ÜST"), t("11:10", "15:30", "AB"),   // 10 Min Lücke = keine Pause
+        t("12:00", "12:30", "ÜST"),                              // überschneidet, zählt nicht doppelt
+        t("16:00", "18:00", "TH"), t("09:00", "10:00", "PRIVAT"),
+    ]);
+    assert.equal(tage.length, 1);
+    const d = tage[0];
+    assert.equal(d.tag, "2026-09-28");
+    assert.equal(d.praxisMin, 500);
+    assert.equal(d.arbeitMin, 620);
+    assert.equal(d.laengsterBlockMin, 510);
+    assert.deepEqual([d.ueberPraxis, d.ueberArbeit, d.langerBlock], [true, true, true]);
+    // Mit echter Pause: zwei Blöcke, alles im Rahmen
+    const ok = app.arbeitszeitTage([t("08:00", "12:00", "ÜST"), t("12:30", "15:00", "ÜL")])[0];
+    assert.deepEqual([ok.praxisMin, ok.laengsterBlockMin, ok.ueberPraxis, ok.langerBlock], [390, 240, false, false]);
 });

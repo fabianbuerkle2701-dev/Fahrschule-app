@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.43.0";
+const APP_VERSION = "2.44.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.44.0", date: "September 2026", changes: [
+            "Neu: Arbeitszeitnachweis nach § 12 FahrlG. Je Tag Beginn, Ende und Minuten praktischer Fahrunterricht (einschließlich Prüfungsfahrten) aus den bestätigten Terminen; markiert werden Tage über 495 Minuten, über 10 Stunden Gesamtarbeitszeit und über 6 Stunden ohne Pause. Monatsnachweis als Excel-Datei (CSV). Für jeden Fahrlehrer unter Einstellungen › Arbeit & Ausbildung, für Inhaber und Büro im Fahrschul-Dashboard mit Übersicht aller Fahrlehrer",
+            "Team-Kalender warnt beim Umhängen, wenn der Fahrlehrer dadurch an dem Tag über 495 Minuten Fahrunterricht käme; die Einstellungen weisen auf die gesetzliche Grenze hin, wenn das eigene Tageslimit darüber liegt oder ausgeschaltet ist",
+        ] },
     { v: "2.43.0", date: "September 2026", changes: [
             "Neu: Inhaber und Büro schreiben Rechnungen direkt aus der Schülerakte im Fahrschul-Dashboard - offene Fahrstunden (Paket schon abgezogen) und Kostenposten auswählen, Rechnung mit der nächsten Nummer der Fahrschule erstellen und als PDF ausgeben. Rechnungen lassen sich dort auch ansehen und stornieren; bereits gezahlte Beträge können dabei der Ersatzrechnung gutgeschrieben werden",
             "Rechnungen des Büros sind wie Zahlungen gegen einen älteren Stand auf dem Fahrlehrer-Gerät geschützt; Fahrlehrer und Büro rechnen mit denselben Funktionen",
@@ -13489,6 +13493,83 @@ function csvZelle(v) {
 function csvText(kopf, zeilen) {
     return "\ufeff" + [kopf.map(csvZelle).join(";")].concat((zeilen || []).map(z => z.map(csvZelle).join(";"))).join("\r\n");
 }
+/* ════════ Arbeitszeitnachweis nach § 12 FahrlG (v2.44.0) ════════
+   § 12 FahrlG: "Die tägliche Gesamtdauer des praktischen Fahrunterrichts einschließlich der
+   Prüfungsfahrten ... darf 495 Minuten nicht überschreiten; sie muss durch Pausen von ausreichender
+   Dauer unterbrochen sein und muss in geeigneter Form nachgewiesen werden." Mit anderen beruflichen
+   Tätigkeiten am selben Tag: Gesamtarbeitszeit höchstens zehn Stunden.
+   Grundlage sind die Kalendertermine (Beginn/Ende): bestätigte (auch mit offener Absage-Anfrage) und
+   Altbestand ohne Status. Privat, Urlaub und "Sonstige"-Blocker zählen gar nicht; Theorie,
+   sonstige Tätigkeiten, Seminar, Vorstellung zur Theorieprüfung und "Versetzt" sind Arbeitszeit,
+   aber kein praktischer Fahrunterricht. Unbekannte (eigene) Arten zählen vorsichtshalber als Praxis. */
+const PRAXIS_GRENZE_MIN = 495;
+const ARBEIT_GRENZE_MIN = 600;
+const PAUSE_AB_MIN = 15;          // kürzere Lücken zwischen Terminen gelten nicht als Pause
+const LANGER_BLOCK_MIN = 360;     // Hinweis ab 6 Std. am Stück (Orientierung: § 4 Arbeitszeitgesetz)
+const NUR_ARBEITSZEIT_ARTEN = new Set(["TH", "ST", "STI", "SASF", "VT", "VS"]);
+function arbeitszeitArt(t) {
+    if (!t) return null;
+    const status = t.status || "";
+    if (status && status !== "confirmed" && status !== "cancel_requested") return null;
+    if (t.typ === "urlaub" || t.typ === "privat" || t.typ === "sonstige") return null;
+    const note = String(t.note || "");
+    if (note.indexOf("§URLAUB§") === 0 || note.indexOf("§SONST§") === 0) return null;
+    const art = t.art || "ÜST";
+    if (art === "PRIVAT") return null;
+    return NUR_ARBEITSZEIT_ARTEN.has(art) ? "arbeit" : "praxis";
+}
+// Je Kalendertag (Berlin): Beginn, Ende, Minuten praktischer Unterricht und gesamt, längster Block
+// ohne Pause und die drei Hinweise. Überschneidende Termine zählen nur einmal.
+function arbeitszeitTage(termine) {
+    const tage = {};
+    (termine || []).forEach(t => {
+        const k = arbeitszeitArt(t);
+        if (!k || !t.start_at) return;
+        const s = new Date(t.start_at).getTime();
+        const e = t.end_at ? new Date(t.end_at).getTime() : s + 45 * 60000;
+        if (!(e > s)) return;
+        const tag = ymd(t.start_at);
+        (tage[tag] = tage[tag] || []).push({ s, e, k });
+    });
+    // Minuten einer Liste von Intervallen ohne Doppelzählung von Überschneidungen.
+    const vereinigt = liste => {
+        let summe = 0, bs = null, be = null;
+        liste.slice().sort((a, b) => a.s - b.s).forEach(x => {
+            if (be === null || x.s > be) { if (be !== null) summe += be - bs; bs = x.s; be = x.e; }
+            else be = Math.max(be, x.e);
+        });
+        if (be !== null) summe += be - bs;
+        return Math.round(summe / 60000);
+    };
+    return Object.keys(tage).sort().map(tag => {
+        const l = tage[tag].slice().sort((a, b) => a.s - b.s);
+        let maxBlock = 0, bs = l[0].s, be = l[0].e;
+        l.slice(1).forEach(x => {
+            if (x.s - be >= PAUSE_AB_MIN * 60000) { maxBlock = Math.max(maxBlock, be - bs); bs = x.s; be = x.e; }
+            else be = Math.max(be, x.e);
+        });
+        maxBlock = Math.round(Math.max(maxBlock, be - bs) / 60000);
+        const praxisMin = vereinigt(l.filter(x => x.k === "praxis"));
+        const arbeitMin = vereinigt(l);
+        return { tag, beginn: l[0].s, ende: Math.max(...l.map(x => x.e)), anzahl: l.length, praxisMin, arbeitMin,
+            laengsterBlockMin: maxBlock, ueberPraxis: praxisMin > PRAXIS_GRENZE_MIN, ueberArbeit: arbeitMin > ARBEIT_GRENZE_MIN,
+            langerBlock: maxBlock > LANGER_BLOCK_MIN };
+    });
+}
+function arbeitszeitHinweise(t) {
+    return [t.ueberPraxis && ("über " + PRAXIS_GRENZE_MIN + " Min. Fahrunterricht"), t.ueberArbeit && "über 10 Std. Arbeitszeit",
+        t.langerBlock && "über 6 Std. ohne Pause"].filter(Boolean);
+}
+// Monatsnachweis als CSV (Excel) - "in geeigneter Form nachgewiesen".
+function arbeitszeitCsv(name, monat, tage) {
+    const zeilen = tage.map(t => [dashDatumKurz(t.tag), hm(t.beginn), hm(t.ende), t.praxisMin, t.arbeitMin - t.praxisMin, t.arbeitMin, t.anzahl, t.laengsterBlockMin, arbeitszeitHinweise(t).join("; ")]);
+    const summe = f => tage.reduce((x, t) => x + t[f], 0);
+    zeilen.push(["Summe", "", "", summe("praxisMin"), summe("arbeitMin") - summe("praxisMin"), summe("arbeitMin"), summe("anzahl"), "", tage.filter(t => arbeitszeitHinweise(t).length).length + " Tage mit Hinweis"]);
+    csvHerunterladen("arbeitszeit_" + String(name || "fahrlehrer").replace(/[^A-Za-z0-9ÄÖÜäöüß_-]+/g, "_") + "_" + monat + ".csv",
+        ["Datum", "Beginn", "Ende", "Praktischer Fahrunterricht (Min.)", "Sonstige Arbeitszeit (Min.)", "Arbeitszeit gesamt (Min.)", "Termine", "Längster Block ohne Pause (Min.)", "Hinweis"],
+        zeilen);
+}
+function dashDatumKurz(iso) { const m = String(iso || "").match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[3] + "." + m[2] + "." + m[1] : ""; }
 function csvHerunterladen(dateiname, kopf, zeilen) {
     const url = URL.createObjectURL(new Blob([csvText(kopf, zeilen)], { type: "text/csv;charset=utf-8" }));
     const a = document.createElement("a");
@@ -14677,6 +14758,7 @@ function App() {
     const [zahlungsImport, setZahlungsImport] = useState(null); // null | {text, vorschlaege|null}
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [ohneTerminOpen, setOhneTerminOpen] = useState(false); // Liste "ohne nächsten Termin" auf der Startseite
+    const [arbeitszeitOpen, setArbeitszeitOpen] = useState(false); // eigener Arbeitszeitnachweis (§ 12 FahrlG)
     const [unterlagenOpen, setUnterlagenOpen] = useState(false); // Liste "Prüfung naht, Unterlagen fehlen" auf der Startseite
     const [folgeschritte, setFolgeschritte] = useState(null); // null | { studentId, erledigt: {} } - "So geht es weiter" nach der Übernahme eines Interessenten
     const [abbruchOpen, setAbbruchOpen] = useState(false); // Liste "Abbruch-Risiko" auf der Startseite (Verwaltung-ersetzen-Fahrplan, Phase 2)
@@ -15888,6 +15970,7 @@ function App() {
         else if (erinnerungen) setErinnerungen(false);
         else if (stillOpen) setStillOpen(false);
         else if (ohneTerminOpen) setOhneTerminOpen(false);
+        else if (arbeitszeitOpen) setArbeitszeitOpen(false);
         else if (unterlagenOpen) setUnterlagenOpen(false);
         else if (folgeschritte) setFolgeschritte(null);
         else if (fristenOpen) setFristenOpen(false);
@@ -15927,7 +16010,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16167,7 +16250,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -30881,7 +30964,10 @@ function App() {
                                 React.createElement("label", null, "Tageslimit in Minuten (z.B. 495)",
                                 React.createElement(EntwurfFeld, { inputMode: "numeric", wert: dayLimit, parse: parseGanzzahlAb(0), onWert: setDayLimit })),
                                 dayLimit > 0 && React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 4 } },
-                                    "Entspricht ", (dayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag.")),
+                                    "Entspricht ", (dayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag."),
+                                (dayLimit === 0 || dayLimit > PRAXIS_GRENZE_MIN) && React.createElement("div", { role: "note", style: { fontSize: 12, color: "var(--amber-ink)", fontWeight: 700, marginTop: 6, lineHeight: 1.45 } },
+                                    "§ 12 FahrlG erlaubt höchstens " + PRAXIS_GRENZE_MIN + " Minuten praktischen Fahrunterricht am Tag (einschließlich Prüfungsfahrten). " + (dayLimit === 0 ? "Ohne Limit warnt die Planung nicht davor." : "Dein Limit liegt darüber."))),
+                            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12 }, onClick: () => setArbeitszeitOpen(true) }, "Arbeitszeitnachweis ansehen (§ 12 FahrlG)"),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit in Minuten (0 = aus)",
                                 React.createElement(EntwurfFeld, { inputMode: "numeric", wert: weekLimit, parse: parseGanzzahlAb(0), onWert: setWeekLimit })),
@@ -35318,6 +35404,14 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        arbeitszeitOpen && React.createElement("div", { onClick: () => setArbeitszeitOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Arbeitszeitnachweis",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                    padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 12 } }, "Mein Arbeitszeitnachweis"),
+                React.createElement(Arbeitszeitnachweis, { modus: "eigen", termine: appts, eigenerName: teacherName || "Fahrlehrer" }),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => setArbeitszeitOpen(false) }, "Schließen"))),
         ohneTerminOpen && React.createElement("div", { onClick: () => setOhneTerminOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
@@ -42205,9 +42299,15 @@ function TeamKalender({ schoolId, lokal }) {
         if (!t || !lehrerId || t.lehrer_id === lehrerId)
             return;
         if (lokal) { showToast("Demo-Ansicht: Termine werden nicht umgehängt."); return; }
-        if (!await askConfirm({ title: "Termin umhängen?", confirmLabel: "Umhängen",
+        // § 12 FahrlG: käme der Ziel-Fahrlehrer an diesem Tag über 495 Minuten Fahrunterricht? Nur
+        // Hinweis in der Rückfrage - die Entscheidung bleibt beim Büro (z.B. wenn ein Termin ausfällt).
+        const zielTag = arbeitszeitTage((st.termine || []).filter(x => x.lehrer_id === lehrerId && x.id !== t.id).concat([{ ...t, lehrer_id: lehrerId }]))[0];
+        const grenzHinweis = zielTag && zielTag.ueberPraxis
+            ? "\n\nAchtung: " + lehrerName(lehrerId) + " hätte an diesem Tag dann " + zielTag.praxisMin + " Minuten Fahrunterricht - mehr als die " + PRAXIS_GRENZE_MIN + " Minuten nach § 12 FahrlG."
+            : "";
+        if (!await askConfirm({ title: "Termin umhängen?", confirmLabel: "Umhängen", danger: !!grenzHinweis,
                 message: (t.name || "Fahrstunde") + " (" + zeitText(t) + " Uhr) von " + lehrerName(t.lehrer_id) + " zu " + lehrerName(lehrerId)
-                    + " geben? " + lehrerName(lehrerId) + " sieht den Schüler danach ebenfalls. Bitte beiden Bescheid geben – eine automatische Benachrichtigung gibt es noch nicht." }))
+                    + " geben? " + lehrerName(lehrerId) + " sieht den Schüler danach ebenfalls. Bitte beiden Bescheid geben – eine automatische Benachrichtigung gibt es noch nicht." + grenzHinweis }))
             return;
         setAktion(true);
         try {
@@ -42726,6 +42826,12 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
             liste.length > 120 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 10 } },
                 "Es werden die ersten 120 Treffer angezeigt - grenze die Suche weiter ein, um die übrigen " + (liste.length - 120) + " zu sehen.")),
 
+        // ── Arbeitszeit nach § 12 FahrlG (Admin und Büro) ─────────────────────
+        React.createElement("div", { className: "card", style: { padding: "16px 16px", marginBottom: 14 } },
+            React.createElement(DashKopf, { titel: "Arbeitszeitnachweis", beisatz: "§ 12 FahrlG · je Fahrlehrer und Monat", ton: "sage",
+                pfad: ["M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z", "M12 6v6l4 2"] }),
+            React.createElement(Arbeitszeitnachweis, { modus: "schule", schoolId })),
+
         // ── Interessenten (Admin und Büro) ────────────────────────────────────
         React.createElement(SchulInteressenten, { schoolId }),
 
@@ -42880,6 +42986,97 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
                                     "Stammdaten, Unterlagen und Zahlungen lassen sich hier direkt ändern (mit Protokoll). Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
+}
+async function fetchSchoolArbeitszeit(schoolId, vonISO, bisISO) {
+    const { data, error } = await sb.rpc("school_arbeitszeit", { p_school_id: schoolId, p_von: vonISO, p_bis: bisISO });
+    if (error) throw new Error(fehlerText(error));
+    return Array.isArray(data) ? data : [];
+}
+// Arbeitszeitnachweis nach § 12 FahrlG (v2.44.0). modus "eigen": die übergebenen eigenen Termine;
+// modus "schule": alle Fahrlehrer der Fahrschule (Admin/Büro, RPC school_arbeitszeit) mit Übersicht.
+const MONATSNAMEN = ["Januar", "Februar", "März", "April", "Mai", "Juni", "Juli", "August", "September", "Oktober", "November", "Dezember"];
+function Arbeitszeitnachweis({ modus, schoolId, termine, eigenerName }) {
+    const heute = new Date();
+    const [monat, setMonat] = React.useState({ j: heute.getFullYear(), m: heute.getMonth() + 1 });
+    const [st, setSt] = React.useState({ busy: modus === "schule", error: "", lehrer: [], termine: [] });
+    const [auswahl, setAuswahl] = React.useState(null); // Lehrer-ID in der Schul-Ansicht
+    const monatKey = monat.j + "-" + String(monat.m).padStart(2, "0");
+    const laden = React.useCallback(() => {
+        if (modus !== "schule" || !schoolId) return;
+        setSt(x => ({ ...x, busy: true, error: "" }));
+        const von = new Date(monat.j, monat.m - 1, 1), bis = new Date(monat.j, monat.m, 1);
+        Promise.all([fetchSchoolArbeitszeit(schoolId, von.toISOString(), bis.toISOString()), adminFetchTeachers(schoolId), fetchSchoolBueroIds(schoolId)])
+            .then(([t, lehrer, buero]) => {
+                const bueroSet = new Set(buero || []);
+                setSt({ busy: false, error: "", termine: t,
+                    lehrer: (lehrer || []).filter(x => !bueroSet.has(x.id)).map(x => ({ id: x.id, name: x.display_name || (x.email || "").split("@")[0] }))
+                        .sort((a, b) => a.name.localeCompare(b.name, "de")) });
+            })
+            .catch(e => setSt(x => ({ ...x, busy: false, error: fehlerText(e) })));
+    }, [modus, schoolId, monatKey]);
+    React.useEffect(() => { laden(); }, [laden]);
+    const imMonat = t => String(ymd(t.start_at)).slice(0, 7) === monatKey;
+    const tageFuer = id => arbeitszeitTage((modus === "schule" ? st.termine.filter(t => t.lehrer_id === id) : (termine || [])).filter(imMonat));
+    const verschieben = d => { setMonat(x => { const n = new Date(x.j, x.m - 1 + d, 1); return { j: n.getFullYear(), m: n.getMonth() + 1 }; }); };
+    const stunden = min => (Math.round(min / 6) / 10).toLocaleString("de-DE") + " Std.";
+    const chip = (text, rot) => React.createElement("span", { key: text, style: { display: "inline-block", fontSize: 11, fontWeight: 800, borderRadius: 99, padding: "2px 8px", marginRight: 4, marginTop: 3,
+        background: rot ? "var(--danger-bg)" : "var(--amber-bg)", color: rot ? "var(--red-ink)" : "var(--amber-ink)" } }, text);
+    const kopf = React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12 } },
+        React.createElement("button", { className: "btn btn-ghost", "aria-label": "Monat zurück", style: { minWidth: 44, minHeight: 44, padding: 10 }, onClick: () => verschieben(-1) }, "‹"),
+        React.createElement("div", { style: { flex: 1, textAlign: "center", fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, MONATSNAMEN[monat.m - 1] + " " + monat.j),
+        React.createElement("button", { className: "btn btn-ghost", "aria-label": "Monat vor", style: { minWidth: 44, minHeight: 44, padding: 10 }, onClick: () => verschieben(1) }, "›"));
+    const lehrerName = id => ((st.lehrer.find(l => l.id === id) || {}).name) || "Fahrlehrer";
+
+    // Tagesliste eines Fahrlehrers
+    const tagesListe = (tage, name) => React.createElement(React.Fragment, null,
+        tage.length === 0
+            ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 0" } }, "Keine Termine in diesem Monat.")
+            : tage.map(t => {
+                const h = arbeitszeitHinweise(t);
+                return React.createElement("div", { key: t.tag, style: { padding: "8px 0", borderTop: "1px solid var(--line)", fontSize: 13.5 } },
+                    React.createElement("div", { style: { display: "flex", gap: 10, alignItems: "baseline", flexWrap: "wrap" } },
+                        React.createElement("span", { style: { minWidth: 86, fontWeight: 700, fontVariantNumeric: "tabular-nums" } }, dashDatumKurz(t.tag).slice(0, 6) + " " + ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"][new Date(t.tag + "T12:00:00").getDay()]),
+                        React.createElement("span", { style: { color: "var(--muted)", fontVariantNumeric: "tabular-nums" } }, hm(t.beginn) + "–" + hm(t.ende)),
+                        React.createElement("span", { style: { marginLeft: "auto", fontWeight: 700, fontVariantNumeric: "tabular-nums", color: t.ueberPraxis ? "var(--red-ink)" : "inherit" } },
+                            t.praxisMin + " Min." + (t.arbeitMin > t.praxisMin ? " (+" + (t.arbeitMin - t.praxisMin) + " sonst.)" : ""))),
+                    h.length > 0 && React.createElement("div", null, h.map(x => chip(x, x.indexOf("495") >= 0))));
+            }),
+        tage.length > 0 && React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "10px 0 0", borderTop: "1px solid var(--line)", fontSize: 13.5, fontWeight: 800 } },
+            React.createElement("span", null, tage.length + (tage.length === 1 ? " Arbeitstag" : " Arbeitstage")),
+            React.createElement("span", null, stunden(tage.reduce((x, t) => x + t.praxisMin, 0)) + " Fahrunterricht")),
+        tage.length > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12 }, onClick: () => arbeitszeitCsv(name, monatKey, tage) }, "Nachweis als Excel (CSV)"));
+
+    let inhalt;
+    if (modus === "schule" && st.busy) inhalt = React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Wird geladen…");
+    else if (modus === "schule" && st.error) inhalt = React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)" } }, st.error,
+        " ", React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 10px", fontSize: 12.5 }, onClick: laden }, "Erneut versuchen"));
+    else if (modus === "schule" && !auswahl) {
+        inhalt = st.lehrer.length === 0 ? React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Keine Fahrlehrer gefunden.")
+            : st.lehrer.map(l => {
+                const tage = tageFuer(l.id);
+                const mitHinweis = tage.filter(t => arbeitszeitHinweise(t).length).length;
+                const ueber = tage.filter(t => t.ueberPraxis).length;
+                return React.createElement("button", { key: l.id, type: "button", onClick: () => setAuswahl(l.id),
+                        style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", border: "none", borderTop: "1px solid var(--line)", background: "none", cursor: "pointer", color: "inherit", font: "inherit", textAlign: "left" } },
+                    React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14 } }, l.name),
+                        React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)" } }, tage.length + " Tage · " + stunden(tage.reduce((x, t) => x + t.praxisMin, 0)) + " Fahrunterricht")),
+                    ueber > 0 ? chip(ueber + "× über 495 Min.", true) : mitHinweis > 0 ? chip(mitHinweis + " Hinweis" + (mitHinweis === 1 ? "" : "e"), false)
+                        : React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: "var(--green-ink)" } }, "im Rahmen"),
+                    React.createElement("span", { "aria-hidden": "true", style: { color: "var(--muted)" } }, "›"));
+            });
+    }
+    else if (modus === "schule") {
+        inhalt = React.createElement(React.Fragment, null,
+            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, marginBottom: 8 }, onClick: () => setAuswahl(null) }, "‹ Alle Fahrlehrer"),
+            React.createElement("div", { style: { fontWeight: 800, fontSize: 15, marginBottom: 6 } }, lehrerName(auswahl)),
+            tagesListe(tageFuer(auswahl), lehrerName(auswahl)));
+    }
+    else inhalt = tagesListe(tageFuer(null), eigenerName || "ich");
+
+    return React.createElement(React.Fragment, null, kopf, inhalt,
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "14px 0 0" } },
+            "§ 12 FahrlG: höchstens " + PRAXIS_GRENZE_MIN + " Minuten praktischer Fahrunterricht am Tag (einschließlich Prüfungsfahrten), unterbrochen durch ausreichende Pausen; mit anderen beruflichen Tätigkeiten höchstens 10 Stunden. Grundlage sind die bestätigten Termine im Kalender - Theorie und sonstige Tätigkeiten zählen als Arbeitszeit, Privates und Urlaub gar nicht. „Über 6 Std. ohne Pause“ ist ein Hinweis (Orientierung: Arbeitszeitgesetz), kein fester Grenzwert im FahrlG."));
 }
 // Abrechnung in der Schülerakte (Admin/Büro, Produktplan Teil Q, v2.43.0): offene Posten
 // abrechnen, Rechnungen ansehen/drucken, stornieren. Rechnet mit denselben Funktionen wie die
