@@ -3533,7 +3533,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.49.0";
+const APP_VERSION = "2.50.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3677,6 +3677,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.50.0", date: "September 2026", changes: [
+            "Absage in einem Fenster: Bestätigst du eine kurzfristige Storno-Anfrage, stehen Ausfallgebühr (Betrag vorausgefüllt, „Gebühr buchen“ oder „Kulanz“), der betroffene Schüler für die Warteliste und die Ersatz-Kandidaten jetzt zusammen in einem Fenster. Vorher kamen zwei Rückfragen zur Gebühr nacheinander und schoben sich über die Warteliste",
+        ] },
     { v: "2.49.0", date: "September 2026", changes: [
             "Neu: Abholort am Termin. Im Termin-Fenster mit Vorschlägen per Tipp (zuletzt genutzter Abholort des Schülers, „Zu Hause“ aus der Anschrift, Standorte der Fahrschule). Steht im Kalender an der Terminkarte, in der WhatsApp-Bestätigung und in der Excel-Liste",
         ] },
@@ -21783,10 +21786,11 @@ function App() {
             // fehlgeschlagenes Löschen (Netzwerkfehler) denselben Termin doppelt vergeben: der
             // ursprüngliche Termin steht in der DB weiter, ein Wartelisten-Schüler bekommt ihn aber
             // trotzdem angeboten.
+            // Absage in EINEM Sheet (Produktplan #12, v2.50.0): Gebührenfrage, Betroffener auf die
+            // Warteliste und Ersatz-Kandidaten zusammen - vorher liefen zwei Gebühren-Rückfragen
+            // gleichzeitig mit dem Wartelisten-Sheet und schoben sich darüber.
             if (freed && ok)
-                maybeOfferWaitlist({ ...freed, status: "confirmed" });
-            if (kurzfristig && freed && ok)
-                await chargeAusfallgebuehrFuerTermin(freed);
+                maybeOfferWaitlist({ ...freed, status: "confirmed" }, undefined, kurzfristig ? { gebuehr: ausfallgebuehrVorschlag(freed) } : null);
         }
     }
     // Ausfallgebühr für eine kurzfristig stornierte Fahrstunde - eigenständig statt reportNoShow()
@@ -21794,31 +21798,27 @@ function App() {
     // zwingend derselbe Schüler ist, dessen Termin gerade storniert wurde. Schreibt deshalb
     // gegen den GERADE AKTUELLEN Schülerstand (patchStudentNow/studentsRef), nicht gegen eine
     // beim Aufruf eingefangene Kopie - zwischen den awaits unten kann sich einiges ändern.
-    async function chargeAusfallgebuehrFuerTermin(appt) {
+    function ausfallgebuehrVorschlag(appt) {
         const sid = appt.student_id;
-        const stu = sid ? (students || []).find(s => s.id === sid) : null;
-        if (!stu)
-            return;
-        const chargeFee = await askConfirm({ message: "Der Termin wurde erst kurzfristig storniert. Soll dafür eine Ausfallgebühr auf das Konto von " + dispName(stu) + " gebucht werden?" });
-        if (!chargeFee)
-            return;
-        const suggestion = noShowFeeDefault != null ? String(noShowFeeDefault).replace(".", ",")
-            : pricePerHour ? (Number(pricePerHour) / 2).toFixed(2).replace(".", ",") : "";
-        const amountStr = await askPrompt({ message: "Höhe der Ausfallgebühr (€):", defaultValue: suggestion });
-        if (amountStr === null)
-            return;
-        // Erst Tausenderpunkte entfernen, dann Komma zu Punkt - ein einfaches replace(",", ".")
-        // würde bei "1.000,00" nur bis zum zweiten Punkt lesen und 1 statt 1000 € buchen
-        // (gleiches Muster wie in findeBetraege()).
-        const raw = amountStr || "";
+        const stu = sid ? (students || []).find(x => x.id === sid) : null;
+        if (!stu) return null;
+        const betrag = noShowFeeDefault != null ? noShowFeeDefault : (pricePerHour ? Math.round(Number(pricePerHour) / 2 * 100) / 100 : 0);
+        return { sid, name: dispName(stu), stunden: Math.max(0, Math.round((new Date(appt.start_at).getTime() - Date.now()) / 3600000)),
+            frist: stornoFristStunden, betrag: betrag ? String(betrag.toFixed(2)).replace(".", ",") : "", status: null };
+    }
+    // Schreibt gegen den GERADE AKTUELLEN Schülerstand (patchStudentNow), nicht gegen eine Kopie.
+    // Liefert den gebuchten Betrag oder null.
+    function ausfallgebuehrBuchen(sid, betragText) {
+        const raw = String(betragText || "");
+        // Erst Tausenderpunkte entfernen, dann Komma zu Punkt (siehe findeBetraege()).
         const parsed = parseFloat(raw.indexOf(",") >= 0 ? raw.replace(/\./g, "").replace(",", ".") : raw);
         if (isNaN(parsed) || parsed <= 0)
-            return;
-        const patchedStudent = patchStudentNow(sid, s => ({ ...s, costItems: [...(s.costItems || []), neuerKostenposten({ label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount: parsed })] }));
-        if (patchedStudent) {
-            scheduleSave(patchedStudent);
-            showFlash("✓ Ausfallgebühr gebucht");
-        }
+            return null;
+        const patchedStudent = patchStudentNow(sid, st => ({ ...st, costItems: [...(st.costItems || []), neuerKostenposten({ label: "Ausfallgebühr (kurzfristige Absage) " + new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }), amount: Math.round(parsed * 100) / 100 })] }));
+        if (!patchedStudent)
+            return null;
+        scheduleSave(patchedStudent);
+        return Math.round(parsed * 100) / 100;
     }
     async function rejectCancel(id) {
         if (await askConfirm({ message: "Stornierung ablehnen? Der Termin bleibt bestehen (Status: bestätigt).", confirmLabel: "Ablehnen", danger: false })) {
@@ -22873,7 +22873,7 @@ function App() {
                 : pricePerHour ? (Number(pricePerHour) / 2).toFixed(2).replace(".", ",") : "";
             const amountStr = await askPrompt({ message: "Höhe der Ausfallgebühr (€):", defaultValue: suggestion });
             if (amountStr !== null) {
-                // Gleiches Muster wie in chargeAusfallgebuehrFuerTermin() / findeBetraege(): erst
+                // Gleiches Muster wie in ausfallgebuehrBuchen() / findeBetraege(): erst
                 // Tausenderpunkte entfernen, dann Komma zu Punkt - sonst liest "1.000,00" als 1.
                 const raw = amountStr || "";
                 const parsed = parseFloat(raw.indexOf(",") >= 0 ? raw.replace(/\./g, "").replace(",", ".") : raw);
@@ -22882,7 +22882,7 @@ function App() {
             }
         }
         const entry = { id: uniqueId("ns"), date: ymd(new Date()), note: note.trim() };
-        // Wie chargeAusfallgebuehrFuerTermin: zwischen den awaits oben können Minuten vergehen, in
+        // Wie ausfallgebuehrBuchen: zwischen den awaits oben können Minuten vergehen, in
         // denen ein Kollege denselben (geteilten) Schüler ändert und der Fokus-Refetch dessen neuen
         // Stand in "active" einspielt. Schreibt darum funktional gegen den GERADE AKTUELLEN
         // Schülerstand (patchStudentNow/studentsRef), nicht gegen die beim Klick eingefangene "active"-Kopie -
@@ -27183,7 +27183,7 @@ function App() {
         const [next, ...rest] = queue;
         maybeOfferWaitlist(next, rest);
     }
-    async function maybeOfferWaitlist(freedAppt, queue) {
+    async function maybeOfferWaitlist(freedAppt, queue, extra) {
         if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id) {
             offerNextInQueue(queue);
             return;
@@ -27216,8 +27216,8 @@ function App() {
         // erschien das Sheet nur, wenn ANDERE Schueler passten - fiel der Termin ohne passende
         // Kandidaten aus, passierte gar nichts und er war einfach raus.
         const betroffen = (aktuelleSchueler || []).find(x => x.id === freedAppt.student_id) || null;
-        if (candidates.length || betroffen)
-            setWaitlistOffer({ appt: freedAppt, candidates, betroffen, queue: queue || [] });
+        if (candidates.length || betroffen || (extra && extra.gebuehr))
+            setWaitlistOffer({ appt: freedAppt, candidates, betroffen, queue: queue || [], ...(extra || {}) });
         else
             offerNextInQueue(queue);
     }
@@ -36598,6 +36598,31 @@ function App() {
                 React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
                 waitlistOffer.queue && waitlistOffer.queue.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } },
                     "Noch " + waitlistOffer.queue.length + (waitlistOffer.queue.length === 1 ? " weiterer freier Termin danach" : " weitere freie Termine danach")),
+                waitlistOffer.gebuehr && (() => {
+                    const g = waitlistOffer.gebuehr;
+                    const setG = patch => setWaitlistOffer(w => w && w.gebuehr ? ({ ...w, gebuehr: { ...w.gebuehr, ...patch } }) : w);
+                    return React.createElement("div", { style: { padding: "13px 14px", marginBottom: 16, borderRadius: "var(--r-tile)", border: "1.5px solid var(--amber, var(--line))",
+                            background: "color-mix(in srgb, var(--amber, #E5A100) 10%, var(--card))" } },
+                        React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Kurzfristig abgesagt"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, margin: "3px 0 10px" } },
+                            g.name + " hat " + (g.stunden <= 1 ? "weniger als eine Stunde" : g.stunden + " Stunden") + " vor Beginn abgesagt" + (g.frist != null ? ", deine Stornofrist sind " + g.frist + " Stunden." : ".")),
+                        g.status === "gebucht"
+                            ? React.createElement("div", { role: "status", style: { fontSize: 13.5, fontWeight: 700, color: "var(--green-ink)" } }, "Ausfallgebühr " + eurFmt(g.gebucht) + " gebucht")
+                            : g.status === "kulanz"
+                                ? React.createElement("div", { role: "status", style: { fontSize: 13.5, fontWeight: 700, color: "var(--ink-2)" } }, "Kulanz: keine Ausfallgebühr",
+                                    React.createElement("button", { type: "button", onClick: () => setG({ status: null }), style: { marginLeft: 8, border: "none", background: "none", color: "var(--muted)", textDecoration: "underline", cursor: "pointer", fontSize: 12.5 } }, "Ändern"))
+                                : React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" } },
+                                    React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, flex: "1 1 120px", border: "1.5px solid var(--line)", borderRadius: "var(--r-input)", background: "var(--card)", padding: "0 12px", minHeight: 44 } },
+                                        React.createElement("input", { type: "text", inputMode: "decimal", value: g.betrag, "aria-label": "Ausfallgebühr in Euro", onChange: e => setG({ betrag: e.target.value, fehler: "" }),
+                                            style: { border: "none", outline: "none", background: "transparent", width: "100%", fontSize: 16, fontWeight: 700, color: "var(--ink)" } }), "€"),
+                                    React.createElement("button", { type: "button", className: "btn btn-primary", style: { minHeight: 44 }, onClick: () => {
+                                            const b = ausfallgebuehrBuchen(g.sid, g.betrag);
+                                            if (b == null) { setG({ fehler: "Bitte einen Betrag über 0 € eingeben." }); return; }
+                                            setG({ status: "gebucht", gebucht: b });
+                                        } }, "Gebühr buchen"),
+                                    React.createElement("button", { type: "button", className: "btn btn-ghost", style: { minHeight: 44 }, onClick: () => setG({ status: "kulanz" }) }, "Kulanz")),
+                        g.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", marginTop: 6 } }, g.fehler));
+                })(),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
                     waitlistOffer.candidates.length
                         ? (waitlistOffer.candidates.length + (waitlistOffer.candidates.length === 1 ? " Schüler wartet auf einen früheren Termin" : " Schüler warten auf einen früheren Termin"))
