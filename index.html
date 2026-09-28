@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.40.0";
+const APP_VERSION = "2.41.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.41.0", date: "September 2026", changes: [
+            "Neu im Fahrschul-Dashboard: Stammdaten eines Schülers (Name, Geburtsdatum, Handy, Festnetz, Anschrift, Anmeldedatum) können Inhaber und Büro jetzt direkt in der Schülerakte korrigieren - jede Änderung steht im Protokoll „Letzte Änderungen“",
+            "Behoben: Eine vom Büro erfasste Zahlung oder abgehakte Unterlage konnte verloren gehen, wenn der Fahrlehrer den Schüler danach mit einem älteren Stand auf seinem Gerät speicherte. Der Server erkennt das jetzt und behält die Änderung des Büros; neue Einträge des Fahrlehrers bleiben ebenfalls erhalten",
+        ] },
     { v: "2.40.0", date: "September 2026", changes: [
             "Bestand übernehmen (Umstieg von anderer Software): Excel-Dateien (.xlsx) werden jetzt direkt gelesen, nicht nur CSV. Die Spalten erkennt die App an den Überschriften (Nachname, Geb.-Datum, Straße, PLZ, Ort, Telefon, Führerscheinklasse …) - ohne KI, es verlässt nichts das Gerät. Nur wenn nicht einmal eine Namensspalte erkannt wird, hilft die KI (sofern für die Fahrschule eingeschaltet); sonst ordnest du in der Vorschau von Hand zu",
             "Straße, Hausnummer, PLZ und Ort aus getrennten Spalten werden zu einer Anschrift zusammengesetzt; Excel-Datumswerte werden richtig übernommen",
@@ -7372,6 +7376,16 @@ async function schoolUnterlagenSetzen(studentId, key, done) {
     const { error } = await sb.rpc("school_unterlagen_setzen", { p_student_id: studentId, p_key: key, p_done: !!done });
     if (error) throw new Error(fehlerText(error));
 }
+// Stammdaten eines Schülers schulweit ändern (Admin/Büro, v2.41.0). Nur die übergebenen Felder;
+// der Server markiert sie (schulAenderungen), damit ein veralteter Stand auf dem Fahrlehrer-Gerät
+// sie beim nächsten Speichern nicht wieder überschreibt. Liefert die Namen der geänderten Felder.
+async function schoolStammdatenSetzen(studentId, felder) {
+    const { data, error } = await sb.rpc("school_stammdaten_setzen", { p_student_id: studentId, p_felder: felder });
+    if (error) throw new Error(fehlerText(error));
+    return Array.isArray(data) ? data : [];
+}
+const STAMMDATEN_FELDER = [["vorname", "Vorname", "text"], ["name", "Nachname", "text"], ["geb", "Geburtsdatum", "date"],
+    ["tel", "Handy", "tel"], ["festnetz", "Festnetz", "tel"], ["anschrift", "Anschrift", "text"], ["ausbildungsbeginn", "Anmeldedatum", "date"]];
 // Zahlung per Rückfrage erfassen (Dashboard/Akte, Admin und Büro). true = gebucht.
 async function zahlungErfassenDialog(studentId, name, vorschlag) {
     const eingabe = await askPrompt({ message: "Zahlung für " + name + " erfassen – Betrag in €:",
@@ -42257,6 +42271,7 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
     const [mitArchiv, setMitArchiv] = React.useState(false);
     const [zuteilen, setZuteilen] = React.useState(null);   // Schüler, für den das Zuteilen-Sheet offen ist
     const [akte, setAkte] = React.useState(null);           // {busy, error, student, meta}
+    const [stammEdit, setStammEdit] = React.useState(null); // null | {werte, busy, error} - Stammdaten in der Akte bearbeiten
     const [aktion, setAktion] = React.useState("");         // laufende Zuteilung, sperrt die Knöpfe
 
     const laden = React.useCallback(() => {
@@ -42398,6 +42413,7 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
     // inzwischen geschlossen oder eine andere geöffnet, würde eine späte Antwort sonst die Akte
     // ungefragt wieder aufmachen bzw. die falsche Person zeigen.
     async function akteOeffnen(stud) {
+        setStammEdit(null);
         const anfrage = { busy: true, meta: stud };
         setAkte(anfrage);
         let neu;
@@ -42666,6 +42682,7 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                         e.aktion === "umgehaengt" ? (" von " + (e.von_name || "?") + " zu " + (e.nach_name || "?") + " umgehängt")
                         : e.aktion === "freigegeben" ? (" für " + (e.nach_name || "?") + " freigegeben")
                         : e.aktion === "termin_umgehaengt" ? (": Termin von " + (e.von_name || "?") + " zu " + (e.nach_name || "?") + " umgehängt")
+                        : e.aktion === "stammdaten" ? " geändert"
                         : (" - Freigabe für " + (e.nach_name || "?") + " entzogen")),
                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 2 } },
                         (e.durch_name || "unbekannt") + " · " + new Date(e.created_at).toLocaleString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) + " Uhr"))))),
@@ -42735,6 +42752,34 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                                 [zeile("Geburtsdatum", dashDatum(s.geb)), zeile("Telefon", s.tel), zeile("Festnetz", s.festnetz), zeile("Anschrift", s.anschrift),
                                  zeile("Klasse", s.klasse), zeile("Theorie", s.theorie ? "bestanden" : ""), zeile("Sehhilfe", s.sehhilfe ? "ja" : ""),
                                  zeile("Ausbildungsbeginn", dashDatum(s.ausbildungsbeginn)), zeile("Archiviert", s.archived ? "ja" : "")].filter(Boolean),
+                                // Stammdaten: Admin und Büro korrigieren direkt (school_stammdaten_setzen, protokolliert)
+                                !stammEdit
+                                    ? React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!aktion, style: { marginTop: 10 },
+                                        onClick: () => setStammEdit({ werte: Object.fromEntries(STAMMDATEN_FELDER.map(([k]) => [k, s[k] || ""])), busy: false, error: "" }) }, "Stammdaten bearbeiten")
+                                    : React.createElement("div", { className: "card", style: { padding: "12px 14px", marginTop: 10, background: "var(--bg-soft, var(--card))" } },
+                                        STAMMDATEN_FELDER.map(([k, label, typ]) => React.createElement("div", { key: k, className: "field", style: { marginBottom: 8 } },
+                                            React.createElement("label", { htmlFor: "stamm-" + k }, label),
+                                            React.createElement("input", { id: "stamm-" + k, type: typ, value: stammEdit.werte[k] || "", disabled: stammEdit.busy,
+                                                autoComplete: "off", onChange: e => { const v = e.target.value; setStammEdit(se => se && ({ ...se, error: "", werte: { ...se.werte, [k]: v } })); } }))),
+                                        stammEdit.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", margin: "4px 0 8px" } }, stammEdit.error),
+                                        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 4 } },
+                                            React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, disabled: stammEdit.busy, onClick: () => setStammEdit(null) }, "Abbrechen"),
+                                            React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: stammEdit.busy,
+                                                onClick: async () => {
+                                                    const felder = {};
+                                                    STAMMDATEN_FELDER.forEach(([k]) => { const v = String(stammEdit.werte[k] || "").trim(); if (v !== String(s[k] || "").trim()) felder[k] = v; });
+                                                    if (!Object.keys(felder).length) { setStammEdit(null); return; }
+                                                    if (!String(stammEdit.werte.vorname || "").trim() && !String(stammEdit.werte.name || "").trim()) {
+                                                        setStammEdit(se => se && ({ ...se, error: "Vor- oder Nachname muss ausgefüllt sein." })); return; }
+                                                    setStammEdit(se => se && ({ ...se, busy: true, error: "" }));
+                                                    try {
+                                                        const geaendert = await schoolStammdatenSetzen(s.id, felder);
+                                                        showToast(geaendert.length ? ("Gespeichert: " + geaendert.join(", ") + ". " + (akte.meta ? akte.meta.teacherName : "Der Fahrlehrer") + " sieht es beim nächsten Öffnen der App.") : "Keine Änderung.");
+                                                        setStammEdit(null);
+                                                        akteOeffnen(akte.meta);
+                                                        laden();
+                                                    } catch (e) { setStammEdit(se => se && ({ ...se, busy: false, error: fehlerText(e) })); }
+                                                } }, stammEdit.busy ? "Speichert…" : "Speichern"))),
                                 // Unterlagen: Admin und Büro haken direkt hier ab (school_unterlagen_setzen)
                                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 11, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", margin: "16px 0 6px" } }, "Unterlagen"),
                                 React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [["sehtest", "Sehtest"], ["erstehilfe", "Erste Hilfe"], ["passfoto", "Passfoto"], ["antrag", "Antrag gestellt"]].map(([key, label]) => {
@@ -42769,7 +42814,7 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                                     fahrten.length > 60 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } },
                                         "Die 60 jüngsten Fahrstunden sind aufgeführt, insgesamt sind es " + fahrten.length + ".")),
                                 React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "16px 0 0" } },
-                                    "Unterlagen und Zahlungen lassen sich hier direkt erfassen. Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
+                                    "Stammdaten, Unterlagen und Zahlungen lassen sich hier direkt ändern (mit Protokoll). Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
 }
