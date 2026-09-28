@@ -3533,7 +3533,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.51.0";
+const APP_VERSION = "2.51.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3677,6 +3677,12 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.51.1", date: "September 2026", changes: [
+            "Absage-Fenster: Ist die Ausfallgebühr noch nicht entschieden, fragt die App vor dem Schließen oder Weiterschalten nach, statt sie still fallen zu lassen",
+            "Termin-Fenster: Ein Tipp auf eine freie Zeit bei einem Termin ohne Ende setzt jetzt 45 Minuten ab dem neuen Beginn (vorher konnte ein stundenlanger Termin entstehen)",
+            "Terminserien übernehmen Ziel der Stunde und Abholort an alle Termine; bei sonstiger Tätigkeit wird kein Abholort mehr gespeichert",
+            "Fahrschulwechsel: Den eigenen Übergabecode kann man nicht mehr selbst einlösen (sonst stand der Schüler doppelt im Bestand)",
+        ] },
     { v: "2.51.0", date: "September 2026", changes: [
             "Schüler sehen jetzt in ihrer App und auf der Buchungsseite, wo sie abgeholt werden und was das Ziel der Stunde ist - an der nächsten Fahrstunde und in der Terminliste, auf Deutsch, Englisch, Türkisch und Russisch",
         ] },
@@ -16119,7 +16125,7 @@ function App() {
         else if (mahnCockpit) setMahnCockpit(false);
         else if (folgeCockpit) setFolgeCockpit(false);
         else if (practiceLog) setPracticeLog(null);
-        else if (waitlistOffer) offerNextInQueue(waitlistOffer.queue);
+        else if (waitlistOffer) waitlistSchliessen();
         else if (welcomeOffer) setWelcomeOffer(null);
         else if (showNachweisModal) setShowNachweisModal(false);
         else if (contractSignId) setContractSignId(null);
@@ -27365,8 +27371,23 @@ function App() {
         }
     }
 
+    // Absage-Fenster weiterschalten/schließen: ist die Ausfallgebühr noch nicht entschieden, erst
+    // nachfragen - sonst verschwand sie still (Pre-Push-Review v2.51; vor v2.50 war sie eine eigene Rückfrage).
+    async function gebuehrEntschieden() {
+        const g = waitlistOffer && waitlistOffer.gebuehr;
+        if (!g || g.status)
+            return true;
+        return await askConfirm({ title: "Ausfallgebühr noch offen", message: g.name + " hat kurzfristig abgesagt. Ohne Ausfallgebühr weiter?", confirmLabel: "Ohne Gebühr weiter" });
+    }
+    async function waitlistSchliessen() {
+        const w = waitlistOffer;
+        if (w && await gebuehrEntschieden())
+            offerNextInQueue(w.queue);
+    }
     async function createWaitlistOffer() {
         if (!waitlistOffer)
+            return;
+        if (!await gebuehrEntschieden())
             return;
         const { appt, queue } = waitlistOffer;
         // Doppeltipp-Sperre wie in offerLueckenSlot: das Sheet bleibt bis nach dem await offen, ein
@@ -29123,7 +29144,7 @@ function App() {
             ...((() => { const z = (!f.urlaub && !f.sonstige && f.student_id) ? String(f.ziel || "").trim().slice(0, 300) : "";
                 return (z || f.zielAlt) ? { ziel: z || null } : {}; })()),
             // Abholort (v2.49.0): wie das Ziel nur mitschicken, wenn gesetzt oder vorher vorhanden.
-            ...((() => { const o = !f.urlaub ? String(f.abholort || "").trim().slice(0, 200) : "";
+            ...((() => { const o = (!f.urlaub && !f.sonstige) ? String(f.abholort || "").trim().slice(0, 200) : "";
                 return (o || f.abholortAlt) ? { abholort: o || null } : {}; })())
         };
         apptSavingRef.current = true;
@@ -29167,6 +29188,8 @@ function App() {
             return;
         }
         const anzahl = Math.max(2, Math.min(52, parseInt(f.serie.anzahl, 10) || 2));
+        const serieZiel = (!f.sonstige && f.student_id) ? String(f.ziel || "").trim().slice(0, 300) : "";
+        const serieAbholort = !f.sonstige ? String(f.abholort || "").trim().slice(0, 200) : "";
         const stepDays = f.serie.wiederholung === "biweekly" ? 14 : 7;
         const dates = [];
         for (let i = 0; i < anzahl; i++) {
@@ -29197,7 +29220,9 @@ function App() {
                     continue;
                 }
                 const payload = { start_at: startISO, end_at: endISO, student_id: f.student_id || null,
-                    note: makeNote(f.sonstige, f.note || ""), title: f.title || "", status: "confirmed", art: f.art || "ÜST" };
+                    note: makeNote(f.sonstige, f.note || ""), title: f.title || "", status: "confirmed", art: f.art || "ÜST",
+                    // Ziel/Abholort wie beim Einzeltermin (fehlten bis v2.51.1 an allen Serienterminen)
+                    ...(serieZiel ? { ziel: serieZiel } : {}), ...(serieAbholort ? { abholort: serieAbholort } : {}) };
                 const c = await addAppt(payload);
                 if (c)
                     createdCount++;
@@ -36594,7 +36619,7 @@ function App() {
                         React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" })),
                     "Termin löschen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setApptChoice(null) }, "Abbrechen"))),
-        waitlistOffer && React.createElement("div", { onClick: () => offerNextInQueue(waitlistOffer.queue), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex",
+        waitlistOffer && React.createElement("div", { onClick: () => waitlistSchliessen(), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex",
                 alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
                     padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)", maxHeight: "85dvh", overflowY: "auto" } },
@@ -36693,7 +36718,7 @@ function App() {
                                 e && e.grund && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45, marginTop: 4, paddingLeft: 31 } }, e.grund));
                         }));
                 })(),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => offerNextInQueue(waitlistOffer.queue) }, "Nicht anbieten"))),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => waitlistSchliessen() }, "Nicht anbieten"))),
         // Willkommensnachricht nach Übernahme einer Anmeldung - gleiches Muster wie waitlistOffer:
         // fertiger Text, ein Klick öffnet WhatsApp, die App verschickt nichts von allein.
         welcomeOffer && React.createElement("div", { onClick: () => setWelcomeOffer(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex",
@@ -36728,7 +36753,7 @@ function App() {
                     const heute = ymd(new Date());
                     const tagPlus = n => ymd(addDays(new Date(heute + "T12:00:00"), n));
                     const dauer = f.start && f.end && toMin(f.end) > toMin(f.start) ? toMin(f.end) - toMin(f.start) : 0;
-                    const setStart = t => setApptForm(x => x && apptMitStart({ ...x, end: x.end || addMinutesToTime(t, 45) }, t));
+                    const setStart = t => setApptForm(x => x && (x.end ? apptMitStart(x, t) : { ...x, start: t, end: addMinutesToTime(t, 45) }));
                     const setDauer = d => setF({ end: f.start ? fromMin(toMin(f.start) + d) : f.end });
                     const langDatum = d => d ? new Date(d + "T12:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }) : "";
                     if (f.urlaub)
