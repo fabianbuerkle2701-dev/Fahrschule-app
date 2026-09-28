@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.41.0";
+const APP_VERSION = "2.42.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.42.0", date: "September 2026", changes: [
+            "Neu im Fahrschul-Dashboard: Interessenten der ganzen Fahrschule. Inhaber und Büro nehmen Anfragen auf, pflegen Status und nächsten Kontakt (fällige sind markiert), rufen direkt an und übergeben den Interessenten einem Fahrlehrer - der sieht ihn sofort in seiner eigenen Interessenten-Liste und übernimmt ihn von dort als Schüler",
+        ] },
     { v: "2.41.0", date: "September 2026", changes: [
             "Neu im Fahrschul-Dashboard: Stammdaten eines Schülers (Name, Geburtsdatum, Handy, Festnetz, Anschrift, Anmeldedatum) können Inhaber und Büro jetzt direkt in der Schülerakte korrigieren - jede Änderung steht im Protokoll „Letzte Änderungen“",
             "Behoben: Eine vom Büro erfasste Zahlung oder abgehakte Unterlage konnte verloren gehen, wenn der Fahrlehrer den Schüler danach mit einem älteren Stand auf seinem Gerät speicherte. Der Server erkennt das jetzt und behält die Änderung des Büros; neue Einträge des Fahrlehrers bleiben ebenfalls erhalten",
@@ -7386,6 +7389,21 @@ async function schoolStammdatenSetzen(studentId, felder) {
 }
 const STAMMDATEN_FELDER = [["vorname", "Vorname", "text"], ["name", "Nachname", "text"], ["geb", "Geburtsdatum", "date"],
     ["tel", "Handy", "tel"], ["festnetz", "Festnetz", "tel"], ["anschrift", "Anschrift", "text"], ["ausbildungsbeginn", "Anmeldedatum", "date"]];
+// Interessenten schulweit (Admin/Büro, v2.42.0) - RLS lässt sonst nur den eigenen Bestand sehen.
+async function fetchSchoolInteressenten(schoolId) {
+    const { data, error } = await sb.rpc("school_interessenten", { p_school_id: schoolId });
+    if (error) throw new Error(fehlerText(error));
+    return Array.isArray(data) ? data : [];
+}
+async function schoolInteressentSpeichern(schoolId, id, owner, felder) {
+    const { data, error } = await sb.rpc("school_interessent_speichern", { p_school_id: schoolId, p_id: id || null, p_owner: owner || null, p_felder: felder || {} });
+    if (error) throw new Error(fehlerText(error));
+    return data;
+}
+async function schoolInteressentLoeschen(schoolId, id) {
+    const { error } = await sb.rpc("school_interessent_loeschen", { p_school_id: schoolId, p_id: id });
+    if (error) throw new Error(fehlerText(error));
+}
 // Zahlung per Rückfrage erfassen (Dashboard/Akte, Admin und Büro). true = gebucht.
 async function zahlungErfassenDialog(studentId, name, vorschlag) {
     const eingabe = await askPrompt({ message: "Zahlung für " + name + " erfassen – Betrag in €:",
@@ -42669,6 +42687,9 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
             liste.length > 120 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 10 } },
                 "Es werden die ersten 120 Treffer angezeigt - grenze die Suche weiter ein, um die übrigen " + (liste.length - 120) + " zu sehen.")),
 
+        // ── Interessenten (Admin und Büro) ────────────────────────────────────
+        React.createElement(SchulInteressenten, { schoolId }),
+
         // ── Protokoll ────────────────────────────────────────────────────────────────────
         abschnitt(
             React.createElement(DashKopf, { titel: "Letzte Änderungen", beisatz: "Jede Zuteilung wird mitgeschrieben", ton: "sky",
@@ -42817,6 +42838,143 @@ function SchulDashboard({ schoolId, stdPreis, rolle }) {
                                     "Stammdaten, Unterlagen und Zahlungen lassen sich hier direkt ändern (mit Protokoll). Alles andere ändert weiterhin der Fahrlehrer, dem der Schüler zugeordnet ist." + (istAdmin ? "" : " Ausbildungsnotizen sind für das Büro ausgeblendet.")));
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
+}
+// Interessenten der ganzen Fahrschule (Produktplan Teil Q): Admin und Büro nehmen Anfragen an,
+// pflegen Status und Wiedervorlage und teilen sie einem Fahrlehrer zu. Die Übernahme als Schüler
+// macht weiterhin der zuständige Fahrlehrer (er sieht den Interessenten in seiner eigenen Liste).
+const INTERESSENT_STATUS = [["offen", "Offen", "var(--blue)"], ["kontaktiert", "Kontaktiert", "var(--amber)"],
+    ["angemeldet", "Angemeldet", "var(--green)"], ["abgesagt", "Abgesagt", "var(--muted)"]];
+function SchulInteressenten({ schoolId }) {
+    const [st, setSt] = React.useState({ busy: true, error: "", liste: [], lehrer: [] });
+    const [filter, setFilter] = React.useState("aktiv"); // aktiv | alle
+    const [form, setForm] = React.useState(null); // null | {id, owner, werte, busy, error}
+    const laden = React.useCallback(() => {
+        if (!schoolId) return;
+        setSt(x => ({ ...x, busy: true, error: "" }));
+        Promise.all([fetchSchoolInteressenten(schoolId), adminFetchTeachers(schoolId), fetchSchoolBueroIds(schoolId)])
+            .then(([liste, lehrer, buero]) => {
+                const bueroSet = new Set(buero || []);
+                setSt({ busy: false, error: "", liste,
+                    lehrer: (lehrer || []).filter(t => !bueroSet.has(t.id))
+                        .map(t => ({ id: t.id, name: t.display_name || (t.email || "").split("@")[0] }))
+                        .sort((a, b) => a.name.localeCompare(b.name, "de")) });
+            })
+            .catch(e => setSt(x => ({ ...x, busy: false, error: fehlerText(e) })));
+    }, [schoolId]);
+    React.useEffect(() => { laden(); }, [laden]);
+    React.useEffect(() => {
+        if (!form) return;
+        const onEsc = e => { if (e.key === "Escape" && !form.busy) setForm(null); };
+        document.addEventListener("keydown", onEsc);
+        return () => document.removeEventListener("keydown", onEsc);
+    }, [form]);
+
+    const heute = ymd(new Date());
+    const statusInfo = k => INTERESSENT_STATUS.find(x => x[0] === k) || INTERESSENT_STATUS[0];
+    const aktiv = it => it.status !== "angemeldet" && it.status !== "abgesagt";
+    const liste = st.liste.filter(it => filter === "alle" || aktiv(it))
+        .sort((a, b) => (aktiv(b) - aktiv(a)) || (a.follow_up_am || "9999").localeCompare(b.follow_up_am || "9999") || (b.created_at || "").localeCompare(a.created_at || ""));
+    const offen = st.liste.filter(aktiv).length;
+    const faellig = st.liste.filter(it => aktiv(it) && it.follow_up_am && it.follow_up_am <= heute).length;
+
+    function oeffnen(it) {
+        setForm(it
+            ? { id: it.id, owner: it.owner, busy: false, error: "", werte: { vorname: it.vorname || "", name: it.name || "", tel: it.tel || "", klasse: it.klasse || "",
+                status: it.status || "offen", follow_up_am: it.follow_up_am || "", notiz: it.notiz || "" } }
+            : { id: null, owner: st.lehrer.length === 1 ? st.lehrer[0].id : "", busy: false, error: "",
+                werte: { vorname: "", name: "", tel: "", klasse: "B", status: "offen", follow_up_am: "", notiz: "" } });
+    }
+    async function speichern() {
+        const f = form;
+        if (!f || f.busy) return;
+        if (!f.werte.vorname.trim() && !f.werte.name.trim()) { setForm({ ...f, error: "Bitte einen Namen angeben." }); return; }
+        if (!f.owner) { setForm({ ...f, error: "Bitte einen zuständigen Fahrlehrer wählen." }); return; }
+        setForm({ ...f, busy: true, error: "" });
+        try {
+            const alt = f.id ? st.liste.find(x => x.id === f.id) : null;
+            await schoolInteressentSpeichern(schoolId, f.id, !alt || alt.owner !== f.owner ? f.owner : null, f.werte);
+            const lehrer = st.lehrer.find(t => t.id === f.owner);
+            showToast(!alt ? ("Interessent angelegt - " + (lehrer ? lehrer.name : "der Fahrlehrer") + " sieht ihn in seiner Liste.")
+                : alt.owner !== f.owner ? ("An " + (lehrer ? lehrer.name : "den Fahrlehrer") + " übergeben.") : "Gespeichert.");
+            setForm(null);
+            laden();
+        } catch (e) { setForm(x => x && ({ ...x, busy: false, error: fehlerText(e) })); }
+    }
+    async function loeschen() {
+        const f = form;
+        if (!f || !f.id || f.busy) return;
+        if (!await askConfirm({ title: "Interessent löschen?", message: "Der Eintrag verschwindet auch aus der Liste des Fahrlehrers. Für eine normale Absage lieber den Status „Abgesagt“ wählen - dann bleibt die Umwandlungsquote richtig.", confirmLabel: "Löschen", danger: true }))
+            return;
+        setForm({ ...f, busy: true, error: "" });
+        try { await schoolInteressentLoeschen(schoolId, f.id); showToast("Gelöscht."); setForm(null); laden(); }
+        catch (e) { setForm(x => x && ({ ...x, busy: false, error: fehlerText(e) })); }
+    }
+    const feld = (k, label, typ, extra) => React.createElement("div", { className: "field", style: { marginBottom: 10, ...(extra || {}) } },
+        React.createElement("label", { htmlFor: "si-" + k }, label),
+        React.createElement("input", { id: "si-" + k, type: typ || "text", value: form.werte[k] || "", disabled: form.busy, autoComplete: "off",
+            onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, error: "", werte: { ...x.werte, [k]: v } })); } }));
+
+    return React.createElement("div", { className: "card", style: { padding: "16px 16px", marginBottom: 14 } },
+        React.createElement(DashKopf, { titel: "Interessenten", ton: "clay",
+            beisatz: st.busy ? "wird geladen…" : (offen + (offen === 1 ? " offene Anfrage" : " offene Anfragen") + (faellig ? " · " + faellig + " heute fällig" : "")),
+            pfad: ["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8z", "M19 8v6", "M22 11h-6"] }),
+        st.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", marginBottom: 10 } }, st.error,
+            " ", React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 10px", fontSize: 12.5 }, onClick: laden }, "Erneut versuchen")),
+        React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", marginBottom: 10 } },
+            React.createElement("div", { className: "seg", style: { flex: 1, marginBottom: 0 } },
+                [["aktiv", "Offen"], ["alle", "Alle"]].map(([k, l]) => React.createElement("button", { key: k, className: filter === k ? "on" : "", onClick: () => setFilter(k) }, l))),
+            React.createElement("button", { className: "btn btn-primary", style: { padding: "9px 14px", flexShrink: 0 }, disabled: st.busy || !st.lehrer.length, onClick: () => oeffnen(null) }, "+ Interessent")),
+        !st.busy && liste.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", padding: "6px 0" } },
+            filter === "aktiv" ? "Keine offenen Anfragen." : "Noch keine Interessenten erfasst."),
+        liste.slice(0, 80).map(it => {
+            const [, label, farbe] = statusInfo(it.status);
+            const ueberfaellig = aktiv(it) && it.follow_up_am && it.follow_up_am < heute;
+            return React.createElement("button", { key: it.id, type: "button", onClick: () => oeffnen(it),
+                    style: { width: "100%", textAlign: "left", display: "flex", gap: 10, alignItems: "center", padding: "10px 2px", border: "none", borderTop: "1px solid var(--line)", background: "none", cursor: "pointer", color: "inherit", font: "inherit" } },
+                React.createElement("span", { "aria-hidden": "true", style: { width: 4, alignSelf: "stretch", borderRadius: 4, background: farbe, flexShrink: 0 } }),
+                React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("span", { style: { display: "block", fontWeight: 700, fontSize: 14 } }, ((it.vorname || "") + " " + (it.name || "")).trim() || "Ohne Namen"),
+                    React.createElement("span", { style: { display: "block", fontSize: 12.5, color: "var(--muted)", marginTop: 2, overflowWrap: "anywhere" } },
+                        [it.owner_name, it.klasse && ("Klasse " + it.klasse), it.tel].filter(Boolean).join(" · "))),
+                React.createElement("span", { style: { textAlign: "right", flexShrink: 0 } },
+                    React.createElement("span", { style: { display: "block", fontSize: 11, fontWeight: 800, letterSpacing: ".04em", textTransform: "uppercase", color: farbe } }, label),
+                    it.follow_up_am && aktiv(it) && React.createElement("span", { style: { display: "block", fontSize: 12, marginTop: 2, color: ueberfaellig ? "var(--red-ink)" : "var(--muted)", fontWeight: ueberfaellig ? 700 : 400 } },
+                        (ueberfaellig ? "fällig " : "") + dashDatum(it.follow_up_am))));
+        }),
+        liste.length > 80 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8 } }, "Die ersten 80 von " + liste.length + " sind aufgeführt."),
+        React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "12px 0 0" } },
+            "Jeder Interessent gehört einem Fahrlehrer und erscheint auch in dessen Liste. Als Schüler übernimmt ihn der Fahrlehrer."),
+        form && React.createElement("div", { onClick: () => { if (!form.busy) setForm(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": form.id ? "Interessent bearbeiten" : "Neuer Interessent",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 156, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                    padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 14 } }, form.id ? "Interessent bearbeiten" : "Neuer Interessent"),
+                React.createElement("div", { style: { display: "flex", gap: 10 } }, feld("vorname", "Vorname", "text", { flex: 1 }), feld("name", "Nachname", "text", { flex: 1 })),
+                React.createElement("div", { style: { display: "flex", gap: 10 } }, feld("tel", "Telefon", "tel", { flex: 2 }), feld("klasse", "Klasse", "text", { flex: 1 })),
+                React.createElement("div", { style: { display: "flex", gap: 10 } },
+                    React.createElement("div", { className: "field", style: { flex: 1, marginBottom: 10 } },
+                        React.createElement("label", { htmlFor: "si-status" }, "Status"),
+                        React.createElement("select", { id: "si-status", value: form.werte.status, disabled: form.busy,
+                                onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, werte: { ...x.werte, status: v } })); } },
+                            INTERESSENT_STATUS.map(([k, l]) => React.createElement("option", { key: k, value: k }, l)))),
+                    feld("follow_up_am", "Nächster Kontakt", "date", { flex: 1 })),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", { htmlFor: "si-owner" }, "Zuständiger Fahrlehrer"),
+                    React.createElement("select", { id: "si-owner", value: form.owner || "", disabled: form.busy,
+                            onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, error: "", owner: v })); } },
+                        React.createElement("option", { value: "" }, "– bitte wählen –"),
+                        st.lehrer.map(t => React.createElement("option", { key: t.id, value: t.id }, t.name)))),
+                React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                    React.createElement("label", { htmlFor: "si-notiz" }, "Notiz"),
+                    React.createElement("textarea", { id: "si-notiz", rows: 3, value: form.werte.notiz, disabled: form.busy, maxLength: 2000,
+                        onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, werte: { ...x.werte, notiz: v } })); } })),
+                form.werte.tel && React.createElement("a", { href: "tel:" + String(form.werte.tel).replace(/[^\d+]/g, ""), className: "btn btn-ghost btn-block", style: { marginBottom: 10, textDecoration: "none" } }, "Anrufen"),
+                form.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", margin: "4px 0 10px" } }, form.error),
+                React.createElement("div", { style: { display: "flex", gap: 8 } },
+                    React.createElement("button", { className: "btn btn-ghost", style: { flex: 1 }, disabled: form.busy, onClick: () => setForm(null) }, "Abbrechen"),
+                    React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: form.busy, onClick: speichern }, form.busy ? "Speichert…" : "Speichern")),
+                form.id && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10, color: "var(--red-ink)" }, disabled: form.busy, onClick: loeschen }, "Löschen"))));
 }
 function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
     const [teacherModelle, setTeacherModelle] = React.useState({});
