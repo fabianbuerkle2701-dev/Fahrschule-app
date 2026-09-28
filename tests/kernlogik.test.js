@@ -13,6 +13,7 @@ const app = require("./lade-app")([
     "fahrtenbuchAusAbschluss", "letzteBewertungen", "licenseStepDone",
     "APP_VERSION", "CHANGELOG",
     "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
+    "spaltenRaten", "excelSerialZuDatum",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -417,4 +418,22 @@ test("Offline-Warteschlange: erledigt nur, wenn seitdem nichts Neues dazukam", (
     assert.equal(app.warteschlangeErledigt(ws, "s1").s1, undefined, "ohne Nummer: immer entfernen (verwaist)");
     ws = { a: { keys: null, n: 1, netz: true }, b: { keys: null, n: 1, netz: false }, c: { keys: null, n: 1 } };
     assert.equal(app.warteschlangeOffline(ws), 1);
+});
+
+test("Bestand übernehmen: Spalten typischer Exporte ohne KI erkennen", () => {
+    const m = app.spaltenRaten(["Kd.-Nr.", "Nachname", "Vorname", "Geb.-Datum", "Straße", "PLZ", "Ort", "Telefon", "E-Mail", "Führerscheinklasse", "Anmeldung"]);
+    assert.deepEqual(rein(m), { vorname: 2, name: 1, geburtstag: 3, handy: 7, festnetz: null, email: 8, adresse: 4, hausnr: null,
+        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null });
+    // Eine Spalte "Name, Vorname" -> name, Vorname bleibt leer (wird beim Import geteilt)
+    const v = app.spaltenRaten(["Name, Vorname", "Handy", "Telefon privat", "Theorieprüfung am"]);
+    assert.equal(v.name, 0); assert.equal(v.vorname, null);
+    assert.equal(v.handy, 1); assert.equal(v.festnetz, 2); assert.equal(v.theorie_bestanden, 3);
+    // Nichts Erkennbares -> alles null (dann KI oder Handzuordnung)
+    assert.ok(Object.values(rein(app.spaltenRaten(["A", "B", "C"]))).every(x => x === null));
+});
+
+test("Excel-Tageszahl in Datum", () => {
+    assert.equal(app.excelSerialZuDatum(38718), "01.01.2006");
+    assert.equal(app.excelSerialZuDatum("45658"), "01.01.2025");
+    assert.equal(app.excelSerialZuDatum(12), "", "Unsinn bleibt leer");
 });

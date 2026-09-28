@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.39.0";
+const APP_VERSION = "2.40.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.40.0", date: "September 2026", changes: [
+            "Bestand übernehmen (Umstieg von anderer Software): Excel-Dateien (.xlsx) werden jetzt direkt gelesen, nicht nur CSV. Die Spalten erkennt die App an den Überschriften (Nachname, Geb.-Datum, Straße, PLZ, Ort, Telefon, Führerscheinklasse …) - ohne KI, es verlässt nichts das Gerät. Nur wenn nicht einmal eine Namensspalte erkannt wird, hilft die KI (sofern für die Fahrschule eingeschaltet); sonst ordnest du in der Vorschau von Hand zu",
+            "Straße, Hausnummer, PLZ und Ort aus getrennten Spalten werden zu einer Anschrift zusammengesetzt; Excel-Datumswerte werden richtig übernommen",
+        ] },
     { v: "2.39.0", date: "September 2026", changes: [
             "Neu: Offline-Speicherung. Fahrstunden-Einträge, ADK-Haken, Bewertungen, Zahlungen und alle anderen Schülerdaten werden zuerst auf dem Gerät und dann online gespeichert. Ohne Netz bleiben sie sicher auf dem Gerät (auch wenn die App geschlossen wird) und gehen automatisch raus, sobald wieder Verbindung da ist. Die Kopfzeile zeigt „Offline gespeichert · N wartet“; Antippen versucht es sofort erneut",
             "Termine werden auf dem Gerät gespiegelt und sind ohne Netz weiter sichtbar. Anlegen und Ändern von Terminen braucht weiterhin Internet, weil Schüler gleichzeitig online buchen - die Meldung sagt das jetzt klar statt eines technischen Netzwerkfehlers",
@@ -5812,6 +5816,126 @@ function speichereTerminCache(uid, list) { try {
 }
 catch (e) { } }
 function schoolKey(uid) { return "v3_school_" + uid; }
+/* ════════ Bestand übernehmen: Spalten ohne KI erkennen, Excel lesen (v2.40.0) ════════
+   Vorher ordnete immer die KI die Spalten zu - bei ausgeschalteter KI (schools.ki_aus) ging der
+   Import gar nicht, und jedes Mal gingen fünf Beispielzeilen mit Personendaten an den Anbieter.
+   Die Exporte der üblichen Fahrschulprogramme haben sprechende Überschriften; die erkennt diese
+   Tabelle direkt. Die KI bleibt nur Rückfall, wenn nicht einmal eine Namensspalte gefunden wird. */
+function normKopf(h) {
+    return String(h == null ? "" : h).toLowerCase()
+        .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+        .replace(/[^a-z0-9]/g, "");
+}
+// Reihenfolge = Vorrang. Erst exakte Treffer über alle Felder, dann "enthält" (nur Begriffe ab 5 Zeichen).
+const IMPORT_SPALTEN = [
+    ["vorname", ["vorname", "rufname", "vornamen", "firstname", "givenname"]],
+    ["name", ["nachname", "familienname", "zuname", "lastname", "surname", "namevorname", "nachnamevorname", "vollstaendigername", "schuelername", "fahrschueler", "schueler", "name", "kunde"]],
+    ["geburtstag", ["geburtsdatum", "geburtstag", "gebdatum", "gebdat", "geboren", "gebam", "geburt", "dateofbirth", "birthday", "dob"]],
+    ["handy", ["handy", "handynummer", "handynr", "mobil", "mobilnummer", "mobilnr", "mobiltelefon", "telmobil", "telefonmobil", "mobile"]],
+    ["festnetz", ["festnetz", "telefonprivat", "telprivat", "telefonfestnetz", "telfestnetz"]],
+    ["email", ["email", "emailadresse", "mail", "mailadresse"]],
+    ["adresse", ["strasse", "strassehausnummer", "strassehausnr", "strasseundhausnummer", "strassenr", "str", "adresse", "anschrift", "wohnanschrift"]],
+    ["hausnr", ["hausnummer", "hausnr"]],
+    ["plz", ["plz", "postleitzahl", "zip"]],
+    ["ort", ["ort", "wohnort", "stadt", "city"]],
+    ["anmeldedatum", ["anmeldedatum", "anmeldung", "angemeldetam", "angemeldet", "vertragsdatum", "vertragsbeginn", "ausbildungsbeginn", "eintritt", "eintrittsdatum", "startdatum"]],
+    ["klasse", ["klasse", "klassen", "fuehrerscheinklasse", "fsklasse", "ausbildungsklasse", "beantragteklasse"]],
+    ["theorie_bestanden", ["theoriebestanden", "theoriepruefung", "theoriepruefungam", "theoriedatum", "theorie"]],
+];
+function spaltenRaten(header) {
+    const kopf = (header || []).map(normKopf);
+    const map = {}, belegt = new Set();
+    IMPORT_SPALTEN.forEach(([f]) => { map[f] = null; });
+    const setze = (f, idx) => { map[f] = idx; belegt.add(idx); };
+    IMPORT_SPALTEN.forEach(([f, begriffe]) => {
+        for (const b of begriffe) {
+            const idx = kopf.findIndex((k, i) => !belegt.has(i) && k === b);
+            if (idx >= 0) { setze(f, idx); break; }
+        }
+    });
+    IMPORT_SPALTEN.forEach(([f, begriffe]) => {
+        if (map[f] != null) return;
+        for (const b of begriffe) {
+            if (b.length < 5) continue;
+            const idx = kopf.findIndex((k, i) => !belegt.has(i) && k.indexOf(b) >= 0);
+            if (idx >= 0) { setze(f, idx); break; }
+        }
+    });
+    // Nur eine allgemeine Telefonspalte: die ist fürs Anschreiben per WhatsApp das Handy.
+    if (map.handy == null) {
+        const idx = kopf.findIndex((k, i) => !belegt.has(i) && /^(telefon|tel|telefonnummer|telnr|rufnummer|phone)$/.test(k));
+        if (idx >= 0) setze("handy", idx);
+    }
+    return map;
+}
+// Excel speichert Datumswerte als fortlaufende Tageszahl ab 30.12.1899 (mit dem 1900-Schaltjahrfehler
+// schon eingerechnet). Nur plausible Bereiche (1920-2100) umrechnen, sonst leer.
+function excelSerialZuDatum(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 7306 || n > 73051) return "";
+    const d = new Date(Date.UTC(1899, 11, 30) + Math.floor(n) * 86400000);
+    return String(d.getUTCDate()).padStart(2, "0") + "." + String(d.getUTCMonth() + 1).padStart(2, "0") + "." + d.getUTCFullYear();
+}
+// Erstes Tabellenblatt einer .xlsx-Datei als Zeilen (Arrays von Texten). Ohne Bibliothek: .xlsx
+// ist ein ZIP mit XML darin; entpackt wird mit DecompressionStream (Safari 16.4+, Chrome 80+).
+async function xlsxZuZeilen(buf) {
+    const dv = new DataView(buf), u8 = new Uint8Array(buf);
+    let eocd = -1;
+    for (let i = u8.length - 22; i >= Math.max(0, u8.length - 65557); i--)
+        if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) throw new Error("Keine gültige Excel-Datei (.xlsx).");
+    const anzahl = dv.getUint16(eocd + 10, true);
+    let p = dv.getUint32(eocd + 16, true);
+    const dateien = {};
+    const td = new TextDecoder();
+    for (let k = 0; k < anzahl; k++) {
+        if (dv.getUint32(p, true) !== 0x02014b50) break;
+        const methode = dv.getUint16(p + 10, true), groesse = dv.getUint32(p + 20, true);
+        const nl = dv.getUint16(p + 28, true), el = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true);
+        const lokal = dv.getUint32(p + 42, true);
+        const name = td.decode(u8.subarray(p + 46, p + 46 + nl));
+        dateien[name] = { methode, groesse, lokal };
+        p += 46 + nl + el + cl;
+    }
+    async function lies(name) {
+        const e = dateien[name];
+        if (!e) return null;
+        const start = e.lokal + 30 + dv.getUint16(e.lokal + 26, true) + dv.getUint16(e.lokal + 28, true);
+        const roh = u8.subarray(start, start + e.groesse);
+        if (e.methode === 0) return td.decode(roh);
+        if (e.methode !== 8 || typeof DecompressionStream === "undefined")
+            throw new Error("Diese Excel-Datei lässt sich hier nicht entpacken. Bitte in Excel als CSV speichern.");
+        const strom = new Blob([roh]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        return await new Response(strom).text();
+    }
+    const xml = (t) => new DOMParser().parseFromString(t, "application/xml");
+    const texte = [];
+    const ss = await lies("xl/sharedStrings.xml");
+    if (ss) Array.from(xml(ss).getElementsByTagName("si")).forEach(si =>
+        texte.push(Array.from(si.getElementsByTagName("t")).map(t => t.textContent).join("")));
+    const blatt = dateien["xl/worksheets/sheet1.xml"] ? "xl/worksheets/sheet1.xml"
+        : Object.keys(dateien).filter(n => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0];
+    const sheet = blatt && await lies(blatt);
+    if (!sheet) throw new Error("In der Excel-Datei wurde kein Tabellenblatt gefunden.");
+    const spalte = (ref) => { let n = 0; const m = String(ref || "").match(/^[A-Z]+/); if (!m) return -1;
+        for (const c of m[0]) n = n * 26 + (c.charCodeAt(0) - 64); return n - 1; };
+    const zeilen = [];
+    Array.from(xml(sheet).getElementsByTagName("row")).forEach(r => {
+        const z = [];
+        Array.from(r.getElementsByTagName("c")).forEach((c, i) => {
+            const idx = c.getAttribute("r") ? spalte(c.getAttribute("r")) : i;
+            const typ = c.getAttribute("t");
+            const v = c.getElementsByTagName("v")[0];
+            let wert = "";
+            if (typ === "s") wert = texte[parseInt(v ? v.textContent : "", 10)] || "";
+            else if (typ === "inlineStr") wert = Array.from(c.getElementsByTagName("t")).map(t => t.textContent).join("");
+            else wert = v ? v.textContent : "";
+            if (idx >= 0) { while (z.length < idx) z.push(""); z[idx] = wert; }
+        });
+        zeilen.push(z);
+    });
+    return zeilen.filter(z => z.some(x => String(x).trim() !== ""));
+}
 // Alle kontobezogenen Zwischenspeicher dieses Geraets loeschen. Wird beim Abmelden gerufen:
 // v3_cache_<uid> enthaelt die vollstaendige Schuelerkartei im Klartext (Namen, Anschriften,
 // Telefonnummern, Ausbildungsstand) und blieb bisher nach dem Abmelden unbegrenzt auf dem
@@ -18681,6 +18805,8 @@ function App() {
         if (m) return m[1].padStart(2, "0") + "." + m[2].padStart(2, "0") + "." + m[3];
         m = t.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{2})$/);
         if (m) { const j = parseInt(m[3], 10); return m[1].padStart(2, "0") + "." + m[2].padStart(2, "0") + "." + (j > 40 ? 1900 + j : 2000 + j); }
+        // Aus .xlsx kommen Datumszellen als Excel-Tageszahl (z.B. 38718 = 01.01.2006).
+        if (/^\d{4,5}(\.\d+)?$/.test(t)) return excelSerialZuDatum(t);
         return "";
     }
     // Aus einer Zeile die Import-Zwischenform bauen. Steht der volle Name in einer Spalte,
@@ -18694,7 +18820,8 @@ function App() {
         }
         return { vorname, name, geburtstag: normDatum(cell(map.geburtstag)),
             handy: cell(map.handy), festnetz: cell(map.festnetz), email: cell(map.email),
-            adresse: cell(map.adresse), anmeldedatum: normDatum(cell(map.anmeldedatum)),
+            adresse: [[cell(map.adresse), cell(map.hausnr)].filter(Boolean).join(" "), [cell(map.plz), cell(map.ort)].filter(Boolean).join(" ")].filter(Boolean).join(", "),
+            anmeldedatum: normDatum(cell(map.anmeldedatum)),
             klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)) };
     }
     const normName = (v) => String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -18702,28 +18829,48 @@ function App() {
         if (!file) return;
         setCsvImport({ schritt: "laedt", busy: true, error: "" });
         try {
-            const text = await file.text();
-            const { rows } = parseCsvText(text);
+            const istXlsx = /\.xlsx$/i.test(file.name || "") || /spreadsheetml/.test(file.type || "");
+            if (/\.xls$/i.test(file.name || ""))
+                throw new Error("Das alte Excel-Format (.xls) wird nicht unterstützt. Bitte in Excel als .xlsx oder CSV speichern.");
+            const rows = istXlsx ? await xlsxZuZeilen(await file.arrayBuffer()) : parseCsvText(await file.text()).rows;
             if (rows.length < 2) {
-                setCsvImport({ schritt: "fehler", error: "Die Datei enthält keine Datenzeilen. Exportiere aus Excel bitte als CSV (Semikolon-getrennt)." });
+                setCsvImport({ schritt: "fehler", error: "Die Datei enthält keine Datenzeilen. Exportiere aus der alten Software bitte als Excel (.xlsx) oder CSV." });
                 return;
             }
-            const header = rows[0].map(h => String(h || "").trim());
-            const daten = rows.slice(1);
-            const resp = await fetch("/.netlify/functions/map-import-columns", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...(await authHeader()) },
-                body: JSON.stringify({ header, samples: daten.slice(0, 5) }),
-            });
-            const out = await resp.json().catch(() => null);
-            if (!resp.ok || !out || !out.mapping) {
-                setCsvImport({ schritt: "fehler", error: (out && out.error) || "Spalten konnten nicht zugeordnet werden." });
+            const breite = Math.max(...rows.map(r => r.length));
+            const header = Array.from({ length: breite }, (_, i) => String(rows[0][i] || "").trim());
+            const daten = rows.slice(1).map(r => Array.from({ length: breite }, (_, i) => r[i] == null ? "" : String(r[i])));
+            const geraten = spaltenRaten(header);
+            // Namensspalte erkannt: fertig, nichts verlässt das Gerät. Sonst KI als Rückfall (falls
+            // erlaubt); scheitert auch die, trotzdem zur Vorschau - dort lässt sich von Hand zuordnen.
+            if (geraten.vorname != null || geraten.name != null) {
+                setCsvImport({ schritt: "vorschau", header, daten, mapping: geraten, hinweis: "Spalten anhand der Überschriften erkannt - bitte unten kurz prüfen.", error: "" });
                 return;
             }
-            setCsvImport({ schritt: "vorschau", header, daten, mapping: out.mapping, hinweis: out.hinweis || "", error: "" });
+            let out = null;
+            if (!kiAus) {
+                try {
+                    const resp = await fetch("/.netlify/functions/map-import-columns", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json", ...(await authHeader()) },
+                        body: JSON.stringify({ header, samples: daten.slice(0, 5) }),
+                    });
+                    const j = await resp.json().catch(() => null);
+                    if (resp.ok && j && j.mapping) out = j;
+                }
+                catch (e) { }
+            }
+            if (out) {
+                const mapping = { ...geraten };
+                Object.keys(out.mapping).forEach(k => { if (out.mapping[k] != null) mapping[k] = out.mapping[k]; });
+                setCsvImport({ schritt: "vorschau", header, daten, mapping, hinweis: out.hinweis || "", error: "" });
+                return;
+            }
+            setCsvImport({ schritt: "vorschau", header, daten, mapping: geraten, hinweis: "Die Spalten wurden nicht automatisch erkannt. Bitte unten mindestens Vor- und Nachname zuordnen.", error: "" });
         }
         catch (e) {
             setCsvImport({ schritt: "fehler", error: "Datei konnte nicht gelesen werden: " + (e.message || "unbekannt") });
+            return;
         }
     }
     async function csvImportStarten() {
@@ -22230,7 +22377,7 @@ function App() {
                             React.createElement("rect", { x: "3", y: "3", width: "18", height: "18", rx: "2" }),
                             React.createElement("circle", { cx: "9", cy: "9", r: "2" }),
                             React.createElement("path", { d: "m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" }))),
-                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px", color: "var(--orange-deep)" }, onClick: () => setCsvImport({ schritt: "start" }), "aria-label": "Sch\u00FCler aus CSV-Datei \u00FCbernehmen", title: "Bestand aus alter Software \u00FCbernehmen" },
+                    React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px", color: "var(--orange-deep)" }, onClick: () => setCsvImport({ schritt: "start" }), "aria-label": "Sch\u00FCler aus Excel- oder CSV-Datei \u00FCbernehmen", title: "Bestand aus alter Software \u00FCbernehmen" },
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" },
                             React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
                             React.createElement("path", { d: "M14 2v6h6" }),
@@ -33909,12 +34056,13 @@ function App() {
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 4 } }, "Bestand \u00FCbernehmen"),
                 csvImport.schritt === "start" && React.createElement(React.Fragment, null,
                     React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", lineHeight: 1.55, marginBottom: 14 } },
-                        "Exportiere deine Sch\u00FClerliste aus der alten Software als CSV-Datei (in Excel: Speichern unter \u2192 CSV). Die Spalten ordnet die App selbst zu \u2013 du siehst vor dem Anlegen eine Vorschau."),
-                    React.createElement("label", { className: "btn btn-primary btn-block", style: { marginBottom: 10, cursor: "pointer" } }, "CSV-Datei w\u00E4hlen",
-                        React.createElement("input", { type: "file", accept: ".csv,text/csv,text/plain", style: { display: "none" },
+                        "Exportiere deine Sch\u00FClerliste aus der alten Software als Excel-Datei (.xlsx) oder CSV. Die Spalten erkennt die App an den \u00DCberschriften \u2013 du siehst vor dem Anlegen eine Vorschau und kannst jede Zuordnung \u00E4ndern."),
+                    React.createElement("label", { className: "btn btn-primary btn-block", style: { marginBottom: 10, cursor: "pointer" } }, "Excel- oder CSV-Datei w\u00E4hlen",
+                        React.createElement("input", { type: "file", accept: ".csv,.xlsx,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", style: { display: "none" },
                             onChange: e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; csvDateiGewaehlt(f); } })),
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
-                        "Zur Zuordnung werden nur die Spalten\u00FCberschriften und f\u00FCnf Beispielzeilen an die KI geschickt, nicht dein gesamter Bestand."),
+                        kiAus ? "Alles bleibt auf deinem Ger\u00E4t, bis du die Sch\u00FCler anlegst."
+                            : "Alles bleibt auf deinem Ger\u00E4t. Nur wenn die \u00DCberschriften nicht erkannt werden, gehen sie mit f\u00FCnf Beispielzeilen zur Zuordnung an die KI \u2013 nie dein gesamter Bestand."),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12 }, onClick: () => setCsvImport(null) }, "Abbrechen")),
                 csvImport.schritt === "laedt" && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "14px 0" } }, "Datei wird gelesen und Spalten werden zugeordnet\u2026"),
                 csvImport.schritt === "fehler" && React.createElement(React.Fragment, null,
@@ -33935,7 +34083,7 @@ function App() {
                     });
                     const neu = neuZeilen.length;
                     const dublettenCount = zeilen.length - neu;
-                    const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Adresse"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
+                    const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Stra\u00DFe / Adresse"], ["hausnr","Hausnummer"], ["plz","PLZ"], ["ort","Ort"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
                     return React.createElement(React.Fragment, null,
                         React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } },
                             csvImport.daten.length + " Zeilen gelesen \u00B7 " + neu + " werden angelegt"
