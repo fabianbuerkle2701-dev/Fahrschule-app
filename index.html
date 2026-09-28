@@ -3489,7 +3489,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.44.0";
+const APP_VERSION = "2.44.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3633,6 +3633,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.44.1", date: "September 2026", changes: [
+            "Behoben (Prüfung vor dem Update): Bei mit Kollegen geteilten Schülern konnte eine vom Büro erfasste Zahlung, Rechnung oder Stammdaten-Änderung trotz Schutz überschrieben werden - der Schutz greift jetzt auch dort",
+            "Behoben: Wurde ein Schüler umgehängt oder gelöscht, während auf dem Gerät noch eine Änderung auf das Speichern wartete, blieb er als Eintrag in der Liste stehen und jeder Start meldete einen Speicherfehler",
+            "Behoben: Eigene Rechnungsdetails und Zahlungszuordnungen des Fahrlehrers gingen verloren, wenn das Büro kurz davor etwas am selben Schüler geändert hatte",
+        ] },
     { v: "2.44.0", date: "September 2026", changes: [
             "Neu: Arbeitszeitnachweis nach § 12 FahrlG. Je Tag Beginn, Ende und Minuten praktischer Fahrunterricht (einschließlich Prüfungsfahrten) aus den bestätigten Terminen; markiert werden Tage über 495 Minuten, über 10 Stunden Gesamtarbeitszeit und über 6 Stunden ohne Pause. Monatsnachweis als Excel-Datei (CSV). Für jeden Fahrlehrer unter Einstellungen › Arbeit & Ausbildung, für Inhaber und Büro im Fahrschul-Dashboard mit Übersicht aller Fahrlehrer",
             "Team-Kalender warnt beim Umhängen, wenn der Fahrlehrer dadurch an dem Tag über 495 Minuten Fahrunterricht käme; die Einstellungen weisen auf die gesetzliche Grenze hin, wenn das eigene Tageslimit darüber liegt oder ausgeschaltet ist",
@@ -6062,6 +6067,13 @@ async function dbUpdate(s, changedKeys) {
             if (!fetchErr && freshRow && freshRow.data && typeof freshRow.data === "object") {
                 const merged = { ...freshRow.data };
                 changedKeys.forEach(k => { merged[k] = payload[k]; });
+                // Schul-Markierungen (schulAenderungen, v2.41.0) IMMER vom eigenen Stand: mit den frischen
+                // Server-Markierungen hielte der Server einen veralteten lokalen Wert (z.B. payments ohne
+                // die Büro-Zahlung) für "gesehen" und überschriebe die Büro-Änderung (Pre-Push-Review).
+                if (payload.schulAenderungen === undefined)
+                    delete merged.schulAenderungen;
+                else
+                    merged.schulAenderungen = payload.schulAenderungen;
                 payload = merged;
             }
         }
@@ -15503,8 +15515,19 @@ function App() {
         const ws = warteschlangeRef.current;
         const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt || !!ws[id];
         const byId = new Map((list || []).map(s => [s.id, s]));
+        // Warteschlangen-Einträge für Schüler, die der Server nicht mehr liefert (umgehängt, Freigabe
+        // entzogen, gelöscht), sind nicht mehr zustellbar: Eintrag weg, Schüler weg. Sonst blieb er als
+        // "Geist" in der Liste und jeder Start meldete erneut einen Speicherfehler (Pre-Push-Review).
+        const verwaist = Object.keys(ws).filter(id => !byId.has(id) && !((writes.get(id) || 0) > 0));
+        if (verwaist.length) {
+            let rest = ws;
+            verwaist.forEach(id => { rest = warteschlangeErledigt(rest, id); });
+            warteschlangeSetzen(rest);
+        }
+        const weg = new Set(verwaist);
         return updateStudents(prev => {
             const merged = (prev || [])
+                .filter(s => !weg.has(s.id))
                 .filter(s => busy(s.id) || byId.has(s.id))
                 .map(s => busy(s.id) ? s : byId.get(s.id));
             const knownIds = new Set(merged.map(s => s.id));
