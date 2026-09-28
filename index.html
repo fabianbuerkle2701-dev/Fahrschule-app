@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.58.0";
+const APP_VERSION = "2.59.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.59.0", date: "September 2026", changes: [
+            "Neue Konten sehen auf „Mein Tag“ die Karte „Einrichtung: x von 10“ mit dem nächsten Schritt: Fahrschule eintragen, Klassen, Arbeitszeiten, Preise, Fahrzeuge, Kollegen, Schüler übernehmen, Terminarten, Buchungslink testen und erster Termin. Jeder Schritt führt direkt an die richtige Stelle, einige lassen sich überspringen, die Karte lässt sich ausblenden",
+        ] },
     { v: "2.58.0", date: "September 2026", changes: [
             "Papierkorb: Gelöschte Schüler, abgelehnte Online-Anmeldungen und Interessenten lassen sich 30 Tage lang wiederherstellen (Schülerliste ganz unten oder Schnellsuche „Papierkorb“). Termine werden dabei wieder zugeordnet, danach wird automatisch endgültig gelöscht",
         ] },
@@ -15891,6 +15894,12 @@ function App() {
     const warteschlangeRef = useRef({});
     const uidRef = useRef(uid);
     uidRef.current = uid;
+    // Einrichtungskarte (v2.59.0, Produktplan #30): erledigte/übersprungene Schritte je Konto
+    const [einrichtung, setEinrichtung] = useState({});
+    useEffect(() => {
+        if (!uid) return;
+        try { setEinrichtung(JSON.parse(localStorage.getItem("v3_einrichtung_" + uid) || "{}") || {}); } catch (e) { setEinrichtung({}); }
+    }, [uid]);
     const [offlineWartend, setOfflineWartend] = useState(0);
     const [offline, setOffline] = useState(() => typeof navigator !== "undefined" && navigator.onLine === false);
     const nachsendenRef = useRef(null);
@@ -22785,6 +22794,8 @@ function App() {
                         : React.createElement("div", { className: "home-v2-display", style: { width: 46, height: 46, borderRadius: "50%", border: "1px solid var(--line)", background: "var(--orange-soft)", color: "var(--orange-deep)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 17 } }, (vorname || "?").trim().charAt(0).toUpperCase() || "?"))),
             // Umschalter Mein Tag / Fahrschule (nur Fahrschul-Admins)
             modusUmschalter,
+            // Einrichtungskarte für neue Konten (v2.59.0)
+            einrichtungsKarte(),
             // 1b) Nächster Termin als eigene Hero-Karte (spec 5.4: .card.soft, 3 Icon-Zeilen,
             // eigener leerer Zustand ohne Termin). Illustration bewusst als geliefertes PNG, NICHT
             // als selbst gebautes SVG: der Auftrag verlangt zwar eigene SVGs, im direkten Vergleich
@@ -28064,6 +28075,88 @@ function App() {
                 return;
         }
         setApptForm(null);
+    }
+    // ── Einrichtungskarte (v2.59.0, Produktplan #30 / Teil U): zehn Schritte bis zur arbeitsfähigen
+    // Fahrschule, als Karte auf "Mein Tag" statt als Assistent, der festhält. Was sich aus den Daten
+    // ablesen lässt, gilt automatisch als erledigt; der Rest per Tippen oder Überspringen.
+    function einrichtungMerken(patch) {
+        setEinrichtung(prev => {
+            const neu = { ...(prev || {}), ...patch };
+            try { localStorage.setItem("v3_einrichtung_" + uid, JSON.stringify(neu)); } catch (e) { }
+            return neu;
+        });
+    }
+    function einrichtungSchritte() {
+        const iv = (school && school.invoice_settings) || {};
+        const ls = einrichtung || {};
+        const erl = k => !!(ls.erledigt && ls.erledigt[k]);
+        const zuEinst = (screen, key) => () => { if (key) einrichtungMerken({ erledigt: { ...(ls.erledigt || {}), [key]: true } }); setView("einstellungen"); setSettingsScreen(screen); };
+        const schritte = [
+            { key: "schule", label: "Fahrschule eintragen", hinweis: "Name und Anschrift für Rechnungen und Vertrag",
+                fertig: !!((iv.firma || (school && school.name)) && iv.strasse && iv.plzOrt), los: zuEinst("rechnungsdaten") },
+            { key: "klassen", label: "Klassen wählen", hinweis: "Welche Führerscheinklassen du ausbildest",
+                fertig: !!(school && Array.isArray(school.klassen) && school.klassen.length) || erl("klassen"), los: zuEinst("klassen", "klassen") },
+            { key: "zeiten", label: "Arbeitszeiten hinterlegen", hinweis: "Sonst ist der Buchungslink rund um die Uhr offen",
+                fertig: !!(workHours && typeof workHours === "object" && Object.keys(workHours).some(d => workHours[d] && !workHours[d].blocked)), los: zuEinst("arbeit") },
+            { key: "preise", label: "Preise festlegen", hinweis: "Preis je Fahrstunde oder die Preisliste nach § 32", skip: true,
+                fertig: (Number(pricePerHour) || 0) > 0 || !!(school && school.preisliste && Object.keys(school.preisliste).length), los: zuEinst("kosten") },
+            { key: "fahrzeuge", label: "Fahrzeuge anlegen", hinweis: "Für Termin, Leistungsnachweis und Auslastung", skip: true,
+                fertig: vehicles.length > 0, los: zuEinst("fuhrpark") },
+            (school && isSchoolAdmin) && { key: "team", label: "Kollegen einladen", hinweis: "Mit Einladungscode, jeder behält seinen Kalender", skip: true,
+                fertig: erl("team"), los: zuEinst("team-einladung", "team") },
+            { key: "schueler", label: "Schüler übernehmen", hinweis: "Aus Excel oder CSV der alten Software, oder einzeln", skip: true,
+                fertig: (students || []).some(x => x._isMine), los: () => { setView("liste"); setCsvImport({ schritt: "start" }); } },
+            { key: "arten", label: "Terminarten prüfen", hinweis: "Übungsfahrt, Sonderfahrten, eigene Arten und Farben", skip: true,
+                fertig: erl("arten"), los: zuEinst("arten", "arten") },
+            { key: "link", label: "Buchungslink testen", hinweis: "So sehen deine Schüler die Terminbuchung",
+                fertig: erl("link"), los: () => {
+                    if (!bookingCode) {
+                        buchungsCodeSichern().then(c => showToast(c ? "Dein Buchungslink ist bereit, tippe noch einmal auf „Öffnen“." : "Der Buchungslink konnte nicht erzeugt werden."));
+                        return;
+                    }
+                    window.open(bookingURL(), "_blank", "noopener");
+                    einrichtungMerken({ erledigt: { ...(ls.erledigt || {}), link: true } });
+                } },
+            { key: "termin", label: "Ersten Termin eintragen", hinweis: "Im Kalender oder über das große Plus",
+                fertig: (appts || []).some(a => a.status === "confirmed" && a.student_id), los: () => openNewAppt() },
+        ].filter(Boolean);
+        return schritte.map(x => ({ ...x, uebersprungen: !x.fertig && !!(ls.uebersprungen && ls.uebersprungen[x.key]) }));
+    }
+    function einrichtungsKarte() {
+        // Nur für neue Konten: im laufenden Betrieb (ab 20 Terminen) ist die Einrichtung längst gelaufen.
+        if (IS_DEMO() || isSchoolOffice || !school || (einrichtung && einrichtung.aus) || (appts || []).length >= 20)
+            return null;
+        const schritte = einrichtungSchritte();
+        const offen = schritte.filter(x => !x.fertig && !x.uebersprungen);
+        if (!offen.length)
+            return null;
+        const erledigt = schritte.length - offen.length;
+        const auf = !!(einrichtung && einrichtung.auf);
+        const naechster = offen[0];
+        const knopf = (x) => React.createElement("button", { type: "button", className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 13, flexShrink: 0, color: "var(--orange-deep)" }, onClick: x.los }, "Öffnen");
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14, borderLeft: "3px solid var(--orange)" } },
+            React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, "Einrichtung: " + erledigt + " von " + schritte.length),
+                React.createElement("button", { type: "button", onClick: () => einrichtungMerken({ auf: !auf }), "aria-expanded": auf,
+                    style: { border: "none", background: "none", color: "var(--muted)", fontSize: 12.5, fontWeight: 700, cursor: "pointer", padding: "4px 0" } }, auf ? "Weniger" : "Alle Schritte")),
+            React.createElement("div", { style: { height: 6, borderRadius: 99, background: "var(--line)", overflow: "hidden", margin: "8px 0 12px" } },
+                React.createElement("div", { style: { height: "100%", width: Math.round(erledigt / schritte.length * 100) + "%", background: "var(--orange)", borderRadius: 99 } })),
+            !auf && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+                React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                    React.createElement("div", { style: { fontSize: 14, fontWeight: 700 } }, "Als Nächstes: " + naechster.label),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 1 } }, naechster.hinweis)),
+                knopf(naechster)),
+            auf && React.createElement("div", null, schritte.map((x, i) => React.createElement("div", { key: x.key, style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: i > 0 ? "1px solid var(--line)" : "none" } },
+                React.createElement("span", { "aria-hidden": "true", style: { width: 22, height: 22, borderRadius: "50%", flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800,
+                        background: x.fertig ? "var(--green)" : "transparent", color: x.fertig ? "#fff" : "var(--muted)", border: x.fertig ? "none" : "1.5px solid var(--line)" } }, x.fertig ? "\u2713" : (i + 1)),
+                React.createElement("div", { style: { flex: 1, minWidth: 0, opacity: (x.fertig || x.uebersprungen) ? .6 : 1 } },
+                    React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, textDecoration: x.fertig ? "line-through" : "none" } }, x.label + (x.uebersprungen ? " (übersprungen)" : "")),
+                    !x.fertig && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, x.hinweis)),
+                !x.fertig && x.skip && !x.uebersprungen && React.createElement("button", { type: "button", onClick: () => einrichtungMerken({ uebersprungen: { ...((einrichtung && einrichtung.uebersprungen) || {}), [x.key]: true } }),
+                    style: { border: "none", background: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer", padding: "4px 2px", flexShrink: 0 } }, "Überspringen"),
+                !x.fertig && knopf(x)))),
+            React.createElement("button", { type: "button", onClick: () => einrichtungMerken({ aus: true }),
+                style: { border: "none", background: "none", color: "var(--muted)", fontSize: 12, cursor: "pointer", padding: "8px 0 0" } }, "Karte ausblenden"));
     }
     // startHM optional (z.B. "14:15" beim Tippen auf eine freie Stelle im Zeitstrahl) - Ende ist dann Start + 60 Min
     function openNewAppt(dateStr, startHM) {
