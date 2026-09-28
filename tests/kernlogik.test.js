@@ -12,6 +12,10 @@ const app = require("./lade-app")([
     "preisAusPreisliste", "pauschalenAusPreisliste", "PREISPOSTEN_32",
     "fahrtenbuchAusAbschluss", "letzteBewertungen", "licenseStepDone",
     "APP_VERSION", "CHANGELOG",
+    "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
+    "spaltenRaten", "excelSerialZuDatum",
+    "rechnungsEntwurfZeilen", "rechnungsPostenAusZeilen", "rechnungsSchnappschuss",
+    "arbeitszeitArt", "arbeitszeitTage", "sonderfahrtenBilanz",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -319,4 +323,179 @@ test("Schüler-App: ein nächster Schritt – Prüfung vor Unterlagen vor Termin
     assert.deepEqual(rein(f({}, [], jetzt)), { key: "termin" });
     assert.equal(f({}, [fs1], jetzt), null, "Termin steht, nichts offen: keine Karte");
     assert.equal(f({}, [{ ...pf, status: "pending" }], jetzt), null, "nur angefragte Prüfungsfahrt zählt nicht");
+});
+
+// ── Inhaber-Cockpit ──
+const ck = require("./lade-app")(["cockpitKennzahlen", "cockpitFolgerungen"]);
+const JETZT = new Date(2026, 8, 28, 9, 0);   // Montag, 28.09.2026
+const wh = { mo: { von: "08:00", bis: "12:00" }, di: { von: "08:00", bis: "12:00" }, mi: { blocked: true }, do: { von: "08:00", bis: "12:00" }, fr: { von: "08:00", bis: "12:00" }, sa: null };
+
+test("Cockpit: freie Kapazität aus Arbeitszeit minus bestätigten Terminen, Sonntag und gesperrte Tage zählen nicht", () => {
+    const k = rein(ck.cockpitKennzahlen({ lehrer: [{ id: "L1", name: "Anna", work_hours: wh }],
+        belegung: [{ lehrer_id: "L1", datum: "2026-09-28", minuten: 180, anfragen: 2 }] }, [], [], 60, JETZT));
+    // 4 Wochen × 4 Arbeitstage × 240 Min = 3840 Min = 85 UE (abgerundet); gebucht 180 Min = 4 UE
+    assert.equal(k.kapazitaet.kapUE, 85);
+    assert.equal(k.kapazitaet.gebuchtUE, 4);
+    assert.equal(k.kapazitaet.freiUE, 81);
+    assert.equal(k.kapazitaet.freiWocheUE, 17, "diese Woche: 4×240 - 180 = 780 Min");
+    assert.equal(k.kapazitaet.anfragen, 2);
+    assert.equal(k.kapazitaet.auslastung, 5);
+});
+
+test("Cockpit: Tages- und Wochenlimit deckeln die Kapazität, fehlende Arbeitszeit wird ausgewiesen", () => {
+    const k = rein(ck.cockpitKennzahlen({ lehrer: [
+        { id: "L1", name: "Anna", work_hours: wh, day_limit: 180, week_limit: 450 },
+        { id: "L2", name: "Ben", work_hours: null },
+    ], belegung: [] }, [], [], 60, JETZT));
+    assert.equal(k.kapazitaet.kapUE, 40, "Wochenlimit 450 Min × 4 Wochen = 1800 Min = 40 UE");
+    assert.deepEqual(k.kapazitaet.ohneArbeitszeit, ["Ben"]);
+    assert.ok(ck.cockpitFolgerungen(k).some(f => /Ohne hinterlegte Arbeitszeiten: Ben/.test(f.text)));
+});
+
+test("Cockpit: wartende Schüler, Anfragen-Quote, Median-Dauer und Erstversuch-Quote", () => {
+    const tage = n => new Date(JETZT.getTime() - n * 86400000).toISOString();
+    const k = rein(ck.cockpitKennzahlen({
+        lehrer: [{ id: "L1", name: "Anna", work_hours: wh }],
+        schueler: [
+            { id: "a", name: "Wartet", lehrer_id: "L1", angemeldet: true, letzte: tage(20) },
+            { id: "b", name: "Hat Termin", lehrer_id: "L1", angemeldet: true, letzte: tage(30), naechste: tage(-2) },
+            { id: "c", name: "Kürzlich", lehrer_id: "L1", angemeldet: true, letzte: tage(5) },
+            { id: "d", name: "Nie gefahren", lehrer_id: "L1", angemeldet: true, angelegt: tage(40) },
+            { id: "e", name: "Archiv", lehrer_id: "L1", angemeldet: true, archiviert: true, letzte: tage(90) },
+            { id: "f", name: "Bestanden", lehrer_id: "L1", angemeldet: true, letzte: tage(60), erste_stunde: "2026-01-10", bestanden_am: "2026-05-10" },
+            { id: "g", name: "Bestanden2", lehrer_id: "L1", angemeldet: true, erste_stunde: "2026-02-01", bestanden_am: "2026-08-01" },
+        ],
+        interessenten: { angemeldet: 3, abgesagt: 1, offen: 4, kontaktiert: 2 },
+    }, [], [
+        { exams: [{ art: "praxis", date: "2026-06-01", passed: true }] },
+        { exams: [{ art: "praxis", date: "2026-07-01", passed: false }, { art: "praxis", date: "2026-07-20", passed: true }] },
+        { exams: [{ art: "theorie", date: "2026-07-01", passed: true }] },
+    ], 60, JETZT));
+    assert.deepEqual(k.warten.map(w => w.name), ["Nie gefahren", "Wartet"]);
+    assert.equal(k.warten[0].nochNieGefahren, true);
+    assert.equal(k.aktiveSchueler, 4);
+    assert.deepEqual(k.anfragen, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    assert.equal(k.dauerAnzahl, 2);
+    assert.ok(k.dauerMonate > 4 && k.dauerMonate < 5.5, "Median aus 120 und 181 Tagen ≈ 4,9 Monate");
+    assert.equal(k.quoteErstversuch, 50);
+});
+
+test("Cockpit: Geld – offener Saldo und davon noch nicht berechnet", () => {
+    const k = rein(ck.cockpitKennzahlen({}, [
+        { stu: { drivenLessons: [{ id: "x", date: "2026-09-01", minutes: 90 }] } },
+        { stu: { drivenLessons: [{ id: "y", date: "2026-09-02", minutes: 45, invoiced: "R-1", invoicedPrice: 60, invoicedCoveredUE: 0 }], payments: [{ amount: 60 }] } },
+    ], [], 60, JETZT));
+    assert.deepEqual(k.geld, { offen: 120, nichtBerechnet: 120 });
+    assert.ok(ck.cockpitFolgerungen(k).some(f => /nicht berechnet/.test(f.text)));
+});
+
+test("CSV für Excel: Semikolon, Dezimalkomma, BOM, Schutz gegen Formel-Injektion", () => {
+    const { csvText } = require("./lade-app")(["csvText"]);
+    const t = csvText(["Name", "Betrag", "Aktiv"], [["=HYPERLINK(\"x\")", 1234.5, true], ["Müller; Anna", -10, false], ["  Leer ", null, false]]);
+    assert.equal(t.charCodeAt(0), 0xFEFF, "BOM für Umlaute in Excel");
+    const z = t.slice(1).split("\r\n");
+    assert.equal(z[0], "Name;Betrag;Aktiv");
+    assert.equal(z[1], "\"'=HYPERLINK(\"\"x\"\")\";1234,5;ja", "Formel wird entschärft und gequotet");
+    assert.equal(z[2], "\"Müller; Anna\";'-10;nein".replace("'-10", "-10"), "Semikolon im Text wird gequotet, Zahl bleibt Zahl");
+    assert.equal(z[3], "\"  Leer \";;nein");
+});
+
+test("Offline-Warteschlange: Felder sammeln, ganzer Datensatz schluckt Feldlisten", () => {
+    let ws = app.warteschlangeVormerken({}, "s1", ["items"], 100);
+    ws = app.warteschlangeVormerken(ws, "s1", ["lessons", "items"], 200);
+    assert.deepEqual(rein(ws.s1), { keys: ["items", "lessons"], seit: 100, n: 2 });
+    ws = app.warteschlangeVormerken(ws, "s1", null, 300);
+    assert.equal(ws.s1.keys, null);
+    ws = app.warteschlangeVormerken(ws, "s1", ["tel"], 400);
+    assert.equal(ws.s1.keys, null, "einmal ganzer Datensatz bleibt ganzer Datensatz");
+    assert.equal(app.warteschlangeVormerken({}, "s2", [], 1).s2.keys, null, "leere Feldliste = ganzer Datensatz");
+});
+
+test("Offline-Warteschlange: erledigt nur, wenn seitdem nichts Neues dazukam", () => {
+    let ws = app.warteschlangeVormerken({}, "s1", ["items"], 1);
+    const nr = ws.s1.n;
+    ws = app.warteschlangeVormerken(ws, "s1", ["lessons"], 2); // Änderung während des Speicherns
+    assert.ok(app.warteschlangeErledigt(ws, "s1", nr).s1, "neuere Änderung darf nicht verschwinden");
+    assert.equal(app.warteschlangeErledigt(ws, "s1", ws.s1.n).s1, undefined);
+    assert.equal(app.warteschlangeErledigt(ws, "s1").s1, undefined, "ohne Nummer: immer entfernen (verwaist)");
+    ws = { a: { keys: null, n: 1, netz: true }, b: { keys: null, n: 1, netz: false }, c: { keys: null, n: 1 } };
+    assert.equal(app.warteschlangeOffline(ws), 1);
+});
+
+test("Bestand übernehmen: Spalten typischer Exporte ohne KI erkennen", () => {
+    const m = app.spaltenRaten(["Kd.-Nr.", "Nachname", "Vorname", "Geb.-Datum", "Straße", "PLZ", "Ort", "Telefon", "E-Mail", "Führerscheinklasse", "Anmeldung"]);
+    assert.deepEqual(rein(m), { vorname: 2, name: 1, geburtstag: 3, handy: 7, festnetz: null, email: 8, adresse: 4, hausnr: null,
+        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null });
+    // Eine Spalte "Name, Vorname" -> name, Vorname bleibt leer (wird beim Import geteilt)
+    const v = app.spaltenRaten(["Name, Vorname", "Handy", "Telefon privat", "Theorieprüfung am"]);
+    assert.equal(v.name, 0); assert.equal(v.vorname, null);
+    assert.equal(v.handy, 1); assert.equal(v.festnetz, 2); assert.equal(v.theorie_bestanden, 3);
+    // Nichts Erkennbares -> alles null (dann KI oder Handzuordnung)
+    assert.ok(Object.values(rein(app.spaltenRaten(["A", "B", "C"]))).every(x => x === null));
+});
+
+test("Excel-Tageszahl in Datum", () => {
+    assert.equal(app.excelSerialZuDatum(38718), "01.01.2006");
+    assert.equal(app.excelSerialZuDatum("45658"), "01.01.2025");
+    assert.equal(app.excelSerialZuDatum(12), "", "Unsinn bleibt leer");
+});
+
+test("Rechnung aus offenen Posten: Paket abgezogen, gleiche Preise gruppiert, Kosten einzeln", () => {
+    const s = {
+        packages: [{ includedUE: 3 }],
+        drivenLessons: [
+            { id: "a", date: "2026-09-01", minutes: 90 },          // 2 UE im Paket
+            { id: "b", date: "2026-09-03", minutes: 90 },          // 1 UE Paket + 1 UE zu zahlen
+            { id: "c", date: "2026-09-05", minutes: 45 },          // 1 UE zu zahlen
+            { id: "d", date: "2026-09-06", minutes: 45, invoiced: "RE-1", invoicedCoveredUE: 0, invoicedPrice: 60 },
+        ],
+        costItems: [{ id: "k1", label: "Grundbetrag", amount: 300 }, { id: "k2", label: "Alt", amount: 10, invoiced: "RE-1" }],
+    };
+    const z = app.rechnungsEntwurfZeilen(s, 60);
+    assert.deepEqual(rein(z.map(r => [r.kind, r.amount, (r.ids || []).join(",")])), [["lessongroup", 120, "b,c"], ["cost", 300, ""]]);
+    assert.match(z[0].label, /^2 Fahrstunden \u00E0 60,00.€$/);
+    assert.equal(z[0].von, "2026-09-03"); assert.equal(z[0].bis, "2026-09-05");
+    const posten = app.rechnungsPostenAusZeilen(z);
+    assert.deepEqual(rein(posten[0]), { label: z[0].label, amount: 120, date: "", von: "2026-09-03", bis: "2026-09-05" });
+    const snap = app.rechnungsSchnappschuss(s, 60, ["b", "c"]);
+    assert.deepEqual(rein(snap), { b: { invoicedCoveredUE: 1, invoicedPrice: 60 }, c: { invoicedCoveredUE: 0, invoicedPrice: 60 } });
+    assert.deepEqual(rein(app.rechnungsEntwurfZeilen(null, 60)), []);
+});
+
+test("Arbeitszeit § 12 FahrlG: Arten, 495-Minuten-Grenze, Pausen, Überschneidungen", () => {
+    const t = (start, ende, art, extra) => ({ start_at: "2026-09-28T" + start + ":00+02:00", end_at: "2026-09-28T" + ende + ":00+02:00", art, status: "confirmed", ...(extra || {}) });
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "PRIVAT")), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "ÜST", { status: "offered" })), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "ÜST", { note: "§URLAUB§" })), null);
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "TH")), "arbeit");
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "PF")), "praxis");
+    assert.equal(app.arbeitszeitArt(t("08:00", "09:00", "EIGENE")), "praxis");
+    // 07:00-15:30 durchgehend Fahrstunden (510 Min.), dazu 16:00-18:00 Theorie
+    const tage = app.arbeitszeitTage([
+        t("07:00", "11:00", "ÜST"), t("11:10", "15:30", "AB"),   // 10 Min Lücke = keine Pause
+        t("12:00", "12:30", "ÜST"),                              // überschneidet, zählt nicht doppelt
+        t("16:00", "18:00", "TH"), t("09:00", "10:00", "PRIVAT"),
+    ]);
+    assert.equal(tage.length, 1);
+    const d = tage[0];
+    assert.equal(d.tag, "2026-09-28");
+    assert.equal(d.praxisMin, 500);
+    assert.equal(d.arbeitMin, 620);
+    assert.equal(d.laengsterBlockMin, 510);
+    assert.deepEqual([d.ueberPraxis, d.ueberArbeit, d.langerBlock], [true, true, true]);
+    // Mit echter Pause: zwei Blöcke, alles im Rahmen
+    const ok = app.arbeitszeitTage([t("08:00", "12:00", "ÜST"), t("12:30", "15:00", "ÜL")])[0];
+    assert.deepEqual([ok.praxisMin, ok.laengsterBlockMin, ok.ueberPraxis, ok.langerBlock], [390, 240, false, false]);
+});
+
+test("Schulwechsel: übernommene Sonderfahrten zählen zur Pflicht, werden aber nicht abgerechnet", () => {
+    const s = {
+        drivenLessons: [{ id: "a", date: "2026-09-10", minutes: 90, art: "AB", klasse: "B" }],
+        uebernahme: { vonSchule: "Alt", fahrstunden: [{ date: "2026-08-01", minutes: 135, art: "AB" }, { date: "2026-08-02", minutes: 225, art: "ÜL", klasse: "B" }] },
+    };
+    const b = app.sonderfahrtenBilanz(s, "B", {});
+    const ab = b.find(x => x.code === "AB"), ul = b.find(x => x.code === "ÜL");
+    assert.equal(ab.ue, 5); assert.equal(ab.anzahl, 2); assert.equal(ab.erfuellt, true);
+    assert.equal(ul.ue, 5); assert.equal(ul.erfuellt, true);
+    assert.equal(app.lessonBillables(s, 60).length, 1, "nur die eigene Fahrstunde ist abrechenbar");
 });

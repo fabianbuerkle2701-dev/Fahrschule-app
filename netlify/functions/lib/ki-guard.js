@@ -51,8 +51,35 @@ async function dailyLimitOk(token) {
   }
 }
 
+// KI-Schalter je Fahrschule (v2.38.0, schools.ki_aus): hat der Fahrschul-Admin KI ausgeschaltet,
+// geht nichts an Anthropic. Anders als beim Tageslimit bewusst FAIL-CLOSED bei unerwarteten
+// Antworten - ein Datenschutz-Schalter, der im Stoerfall trotzdem Daten rausschickt, waere keiner.
+// Einzige Ausnahme: 404 (RPC noch nicht angelegt) -> erlaubt, damit ein Deploy vor der Migration
+// nichts abschaltet.
+async function schuleErlaubtKi(token) {
+  if (!token) return true;
+  try {
+    const resp = await fetch(SUPABASE_URL + "/rest/v1/rpc/ki_erlaubt", {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + token, "Content-Type": "application/json" },
+      body: "{}",
+    });
+    if (resp.status === 404) return true;
+    if (!resp.ok) return false;
+    const out = await resp.json().catch(() => null);
+    return out === true;
+  } catch (e) {
+    return false;
+  }
+}
+
 // Gibt { ok: true } zurueck, wenn der Aufruf erlaubt ist, sonst { ok: false, statusCode, error }.
 async function subscriptionGate(uid, token) {
+  // Schul-Schalter vor dem Tageslimit, damit ein gesperrter Aufruf kein Kontingent verbraucht.
+  if (!(await schuleErlaubtKi(token))) {
+    return { ok: false, statusCode: 403, error: "KI-Funktionen sind für deine Fahrschule ausgeschaltet." };
+  }
+
   // Ebene 2 zuerst (siehe Kommentar oben) - unabhaengig vom Abo-Status.
   const unterTageslimit = await dailyLimitOk(token);
   if (!unterTageslimit) {

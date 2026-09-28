@@ -69,6 +69,12 @@ exports.handler = async function (event, context) {
     return resp.json();
   }
 
+  // KI-Schalter der Fahrschule (v2.38.0): hat der Admin KI ausgeschaltet, gar nicht erst zählen oder
+  // an Anthropic schicken. Nur ein explizites false sperrt - Lesefehler zählen hier nicht.
+  if ((await rpc("public_ki_erlaubt", { code })) === false) {
+    return { statusCode: 403, headers, body: JSON.stringify({ error: "KI-Funktionen sind für diese Fahrschule ausgeschaltet." }) };
+  }
+
   // Tageslimit wie beim Buchungs-Chat: die Function ist bewusst ohne Login erreichbar
   // (Schüler haben keinen Supabase-Account), darf aber keine offene Kostenfalle sein.
   const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 120, p_feature: "explain-theory-question" });
