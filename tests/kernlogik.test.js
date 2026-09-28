@@ -376,7 +376,9 @@ test("Cockpit: wartende Schüler, Anfragen-Quote, Median-Dauer und Erstversuch-Q
     assert.deepEqual(k.warten.map(w => w.name), ["Nie gefahren", "Wartet"]);
     assert.equal(k.warten[0].nochNieGefahren, true);
     assert.equal(k.aktiveSchueler, 4);
-    assert.deepEqual(k.anfragen, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    const { quellen, absagegruende, unbeantwortet, ...kern } = k.anfragen;
+    assert.deepEqual(kern, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    assert.equal(quellen.length + absagegruende.length + unbeantwortet.length, 0, "ohne Angaben keine Listen");
     assert.equal(k.dauerAnzahl, 2);
     assert.ok(k.dauerMonate > 4 && k.dauerMonate < 5.5, "Median aus 120 und 181 Tagen ≈ 4,9 Monate");
     assert.equal(k.quoteErstversuch, 50);
@@ -541,4 +543,18 @@ test("Startwerte: Sonderfahrten in UE werden Sammelzeilen und zählen zur Bilanz
     const ul = Array.from(b).find(x => x.code === "ÜL");
     assert.equal(ul.ue, 5, "3 UE gefahren + 2 UE Startwert");
     assert.equal(ul.erfuellt, true);
+});
+
+// v2.62.0: Quellen/Absagegründe sortiert, "nicht erfasst" zuletzt; unbeantwortete Anfragen mit Fahrlehrer
+test("Cockpit: Anfragen nach Quelle und Absagegrund, unbeantwortete mit Fahrlehrer", () => {
+    const jetzt = new Date("2026-09-28T12:00:00Z");
+    const k = ck.cockpitKennzahlen({ lehrer: [{ id: "L1", name: "Miriam" }], belegung: [], schueler: [], interessenten: { abgesagt: 5 },
+        anfrage_quellen: { ohne: 4, telefon: 1, website: 3 }, absagegruende: { preis: 3, zeit: 1, ohne: 1 },
+        unbeantwortet: [{ name: "Anna", lehrer_id: "L1", seit: "2026-09-25T10:00:00Z" }] }, [], [], 50, jetzt);
+    assert.equal(JSON.stringify(Array.from(k.anfragen.quellen).map(x => x.key)), JSON.stringify(["website", "telefon", "ohne"]));
+    assert.equal(k.anfragen.absagegruende[0].label, "Zu teuer");
+    assert.equal(k.anfragen.unbeantwortet[0].lehrer, "Miriam");
+    const f = Array.from(ck.cockpitFolgerungen(k)).map(x => x.text).join(" | ");
+    assert.match(f, /1 Anfrage wartet seit über zwei Tagen/);
+    assert.match(f, /Häufigster Absagegrund: Zu teuer \(3 von 4\)/);
 });

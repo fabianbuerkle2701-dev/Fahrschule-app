@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.61.0";
+const APP_VERSION = "2.62.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.62.0", date: "September 2026", changes: [
+            "Für Inhaber: Interessenten bekommen „Wie kam die Anfrage?“ und bei einer Absage „Warum abgesagt?“ (zu teuer, keine passenden Zeiten, andere Fahrschule, meldet sich nicht)",
+            "Das Fahrschul-Cockpit zeigt, woher Anfragen kommen, warum sie absagen und welche Anfragen seit über zwei Tagen unbeantwortet sind – mit Handlungshinweis, wenn Anfragen liegen bleiben oder die meisten wegen Preis oder Zeiten absagen",
+        ] },
     { v: "2.61.0", date: "September 2026", changes: [
             "Wechsel aus einer anderen Software: Der Excel-/CSV-Import erkennt jetzt auch Spalten für gefahrene Stunden und Sonderfahrten (Überland, Autobahn, Nacht/Dämmerung). Sonderfahrten werden als Startwerte gespeichert, zählen zur Pflicht und werden nicht abgerechnet",
             "Im Schülerprofil lässt sich der bisherige Stand an Sonderfahrten auch von Hand eintragen oder ändern",
@@ -18738,7 +18742,9 @@ function App() {
         interessentSaveBusyRef.current = true;
         setInteressentForm({ ...f, busy: true });
         const payload = { vorname: f.vorname || "", name: f.name || "", tel: f.tel || "", klasse: f.klasse || "",
-            notiz: f.notiz || "", status: f.status || "offen", follow_up_am: f.follow_up_am || null };
+            notiz: f.notiz || "", status: f.status || "offen", follow_up_am: f.follow_up_am || null,
+            // v2.62.0: Quelle und (nur bei "abgesagt") Absagegrund
+            quelle: f.quelle || null, absagegrund: (f.status === "abgesagt" && f.absagegrund) ? f.absagegrund : null };
         try {
             if (f.id) {
                 await dbUpdateInteressent(f.id, payload);
@@ -19042,7 +19048,7 @@ function App() {
             openInteressentForm({
                 vorname: d.vorname || "", name: d.name || "", tel: d.tel || "",
                 klasse: guessKlasseFromText(d.klasse, klassen) || klassen[0] || DEFAULT_KLASSE,
-                notiz: d.notiz || "", status: "offen", follow_up_am: "",
+                notiz: d.notiz || "", status: "offen", follow_up_am: "", quelle: "foto",
             });
         }
         catch (e) {
@@ -20510,6 +20516,18 @@ function App() {
                         erste_stunde: stunden[0] || null, bestanden_am: bestanden };
                 }),
                 interessenten: iv,
+                // v2.62.0: dieselben Auswertungen aus den eigenen Interessenten
+                ...(() => {
+                    const neu = (interessenten || []).filter(i => i.created_at && new Date(i.created_at).getTime() >= jetzt - 90 * 86400000);
+                    const zaehle = (liste, f) => liste.reduce((o, i) => { const k = f(i); o[k] = (o[k] || 0) + 1; return o; }, {});
+                    return {
+                        anfrage_quellen: zaehle(neu, i => i.quelle || "ohne"),
+                        absagegruende: zaehle(neu.filter(i => i.status === "abgesagt"), i => i.absagegrund || "ohne"),
+                        unbeantwortet: (interessenten || []).filter(i => (i.status || "offen") === "offen" && i.created_at && new Date(i.created_at).getTime() < jetzt - 48 * 3600000
+                            && (!i.follow_up_am || i.follow_up_am <= ymd(new Date())))
+                            .map(i => ({ name: [i.vorname, i.name].filter(Boolean).join(" "), lehrer_id: uid, seit: i.created_at })),
+                    };
+                })(),
             },
             geld: eigene.map(s => ({ stu: s })),
             pruefungen: eigene.map(s => ({ exams: s.exams || [] })),
@@ -36638,6 +36656,17 @@ function App() {
                             React.createElement("option", { value: "kontaktiert" }, "Kontaktiert"),
                             React.createElement("option", { value: "angemeldet" }, "Angemeldet"),
                             React.createElement("option", { value: "abgesagt" }, "Abgesagt"))))),
+                // v2.62.0: Absagegrund (nur bei "abgesagt") und Quelle - speisen das Inhaber-Cockpit
+                interessentForm.status === "abgesagt" && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Warum abgesagt?",
+                        React.createElement("select", { value: interessentForm.absagegrund || "", onChange: e => setInteressentForm({ ...interessentForm, absagegrund: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                            React.createElement("option", { value: "" }, "\u2013 bitte w\u00E4hlen \u2013"),
+                            ABSAGEGRUENDE.map(([k, l]) => React.createElement("option", { key: k, value: k }, l))))),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Wie kam die Anfrage?",
+                        React.createElement("select", { value: interessentForm.quelle || "", onChange: e => setInteressentForm({ ...interessentForm, quelle: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                            React.createElement("option", { value: "" }, "\u2013 unbekannt \u2013"),
+                            INTERESSENT_QUELLEN.map(([k, l]) => React.createElement("option", { key: k, value: k }, l))))),
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "N\u00E4chster Kontakt (optional)",
                     React.createElement("input", { type: "date", value: interessentForm.follow_up_am || "", onChange: e => setInteressentForm({ ...interessentForm, follow_up_am: e.target.value }) }))),
@@ -43315,6 +43344,12 @@ function cockpitKennzahlen(daten, geld, pruefungen, stdPreis, jetzt) {
     const anfragen = { gesamt: anfrTotal, angemeldet: Number(it.angemeldet) || 0, abgesagt: Number(it.abgesagt) || 0,
         offen: (Number(it.offen) || 0) + (Number(it.kontaktiert) || 0),
         quote: anfrTotal > 0 ? Math.round((Number(it.angemeldet) || 0) / anfrTotal * 100) : null };
+    // v2.62.0: Quellen, Absagegründe (90 Tage) und seit über 48 h unbeantwortete Anfragen
+    const liste = (obj, namen) => Object.keys(obj || {}).map(k => ({ key: k, label: (namen.find(x => x[0] === k) || [k, k === "ohne" ? "nicht erfasst" : k])[1], n: Number(obj[k]) || 0 }))
+        .filter(x => x.n > 0).sort((a, b) => (a.key === "ohne") - (b.key === "ohne") || b.n - a.n);
+    anfragen.quellen = liste(d.anfrage_quellen, INTERESSENT_QUELLEN);
+    anfragen.absagegruende = liste(d.absagegruende, ABSAGEGRUENDE);
+    anfragen.unbeantwortet = (d.unbeantwortet || []).map(u => ({ name: (u.name || "").trim() || "Ohne Namen", lehrer: lehrerName[u.lehrer_id] || "", tage: tageSeit(u.seit) || 0 }));
     // ── Ausbildungsdauer bis zur bestandenen Praxisprüfung (Median, letzte 12 Monate) ──
     const vor12 = new Date(heute); vor12.setFullYear(vor12.getFullYear() - 1);
     const dauern = (d.schueler || []).filter(s => s.erste_stunde && s.bestanden_am && new Date(s.bestanden_am) >= vor12)
@@ -43357,6 +43392,14 @@ function cockpitFolgerungen(k) {
         out.push({ ton: k.warten.length >= 5 ? "rot" : "orange", text: (k.warten.length === 1 ? "1 Schüler wartet" : k.warten.length + " Schüler warten") + " seit über " + COCKPIT_WARTEN_TAGE + " Tagen ohne Termin – Termine anbieten, sonst droht Abbruch." });
     if (k.geld.nichtBerechnet > 0.005)
         out.push({ ton: "orange", text: eurFmt(k.geld.nichtBerechnet) + " erbracht, aber noch nicht berechnet – Rechnungen schreiben." });
+    // v2.62.0: Anfragen, die liegen bleiben, sind verlorene Schüler
+    const unb = (k.anfragen.unbeantwortet || []).length;
+    if (unb)
+        out.push({ ton: "rot", text: (unb === 1 ? "1 Anfrage wartet" : unb + " Anfragen warten") + " seit über zwei Tagen auf Antwort – heute zurückmelden, sonst entscheiden sie sich woanders." });
+    const gruende = (k.anfragen.absagegruende || []).filter(x => x.key !== "ohne");
+    const gesamtGr = gruende.reduce((t, x) => t + x.n, 0);
+    if (gesamtGr >= 4 && gruende[0].n / gesamtGr >= 0.5 && (gruende[0].key === "preis" || gruende[0].key === "zeit"))
+        out.push({ ton: "orange", text: "Häufigster Absagegrund: " + gruende[0].label + " (" + gruende[0].n + " von " + gesamtGr + ")" + (gruende[0].key === "preis" ? " – Preis oder Paket prüfen." : " – Arbeitszeiten oder Angebot am Abend/Wochenende prüfen.") });
     if (cap.auslastung != null && cap.auslastung < 50 && cap.freiUE >= 20)
         out.push({ ton: "gruen", text: cap.freiUE + " UE frei in den nächsten vier Wochen – Platz für neue Schüler: Werbung oder Warteliste abarbeiten." });
     if (cap.ohneArbeitszeit.length)
@@ -43426,6 +43469,28 @@ function InhaberCockpit({ schoolId, stdPreis, lokal, onDetails, onTeamKalender }
                     w.nochNieGefahren ? "angemeldet vor " + w.tage + " T., noch nie gefahren" : "seit " + w.tage + " Tagen"))),
             k.warten.length > 5 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setAlleWarten(v => !v) },
                 alleWarten ? "Weniger anzeigen" : "Alle " + k.warten.length + " anzeigen")),
+        // Anfragen (v2.62.0): unbeantwortet, Quellen, Absagegründe
+        (k.anfragen.unbeantwortet.length > 0 || k.anfragen.quellen.length > 0 || k.anfragen.absagegruende.length > 0) && React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
+            titel("Anfragen · letzte 90 Tage"),
+            k.anfragen.unbeantwortet.length > 0 && React.createElement("div", { style: { marginBottom: 12 } },
+                React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--red-ink)", marginBottom: 2 } }, "Seit über zwei Tagen ohne Antwort"),
+                k.anfragen.unbeantwortet.slice(0, 5).map((u, i) => React.createElement("div", { key: i, style: { display: "flex", justifyContent: "space-between", gap: 10, padding: "6px 0", borderTop: "1px solid var(--line)", fontSize: 13.5 } },
+                    React.createElement("span", { style: { minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, React.createElement("b", null, u.name), u.lehrer ? React.createElement("span", { style: { color: "var(--muted)" } }, " · " + u.lehrer) : null),
+                    React.createElement("span", { style: { flexShrink: 0, color: "var(--red-ink)", fontWeight: 600, fontVariantNumeric: "tabular-nums" } }, "seit " + u.tage + " Tagen"))),
+                k.anfragen.unbeantwortet.length > 5 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", paddingTop: 4 } }, "und " + (k.anfragen.unbeantwortet.length - 5) + " weitere – alle unter Interessenten")),
+            React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 } },
+                [["Woher sie kommen", k.anfragen.quellen, "var(--sky-deep, var(--orange))"], ["Warum sie absagen", k.anfragen.absagegruende, "var(--muted)"]].map(([t, l, farbe]) => {
+                    const max = Math.max(1, ...l.map(x => x.n));
+                    return React.createElement("div", { key: t },
+                        React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", marginBottom: 6 } }, t),
+                        l.length === 0
+                            ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, "noch nichts erfasst")
+                            : l.map(x => React.createElement("div", { key: x.key, style: { marginBottom: 6 } },
+                                React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 } },
+                                    React.createElement("span", { style: { color: x.key === "ohne" ? "var(--muted)" : "var(--ink)" } }, x.label),
+                                    React.createElement("span", { style: { fontWeight: 700, fontVariantNumeric: "tabular-nums" } }, x.n)),
+                                React.createElement(Bar, { pct: Math.round(x.n / max * 100), color: x.key === "ohne" ? "var(--line)" : farbe, h: 5 }))));
+                }))),
         // Team: Auslastung der nächsten vier Wochen je Fahrlehrer
         cap.proLehrer.length > 0 && React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
             titel("Team · nächste 4 Wochen"),
@@ -44368,6 +44433,10 @@ function AkteAbrechnung({ s, schoolId, stdPreis, zahlungszielTage, onDrucken, on
 // Interessenten der ganzen Fahrschule (Produktplan Teil Q): Admin und Büro nehmen Anfragen an,
 // pflegen Status und Wiedervorlage und teilen sie einem Fahrlehrer zu. Die Übernahme als Schüler
 // macht weiterhin der zuständige Fahrlehrer (er sieht den Interessenten in seiner eigenen Liste).
+// v2.62.0 (Produktplan Teil N): woher kam die Anfrage, warum wurde nichts daraus - Werte wie in der
+// Datenbank (Prüfbedingungen interessenten_quelle_werte / interessenten_absagegrund_werte).
+const INTERESSENT_QUELLEN = [["telefon", "Anruf"], ["persoenlich", "Persönlich"], ["website", "Website"], ["empfehlung", "Empfehlung"], ["foto", "Foto/Zettel"], ["chat", "Chat"], ["sonstiges", "Sonstiges"]];
+const ABSAGEGRUENDE = [["preis", "Zu teuer"], ["zeit", "Keine passenden Zeiten"], ["andere_fahrschule", "Andere Fahrschule"], ["meldet_sich_nicht", "Meldet sich nicht"], ["sonstiges", "Sonstiges"]];
 const INTERESSENT_STATUS = [["offen", "Offen", "var(--blue)"], ["kontaktiert", "Kontaktiert", "var(--amber)"],
     ["angemeldet", "Angemeldet", "var(--green)"], ["abgesagt", "Abgesagt", "var(--muted)"]];
 function SchulInteressenten({ schoolId }) {
@@ -44406,9 +44475,9 @@ function SchulInteressenten({ schoolId }) {
     function oeffnen(it) {
         setForm(it
             ? { id: it.id, owner: it.owner, busy: false, error: "", werte: { vorname: it.vorname || "", name: it.name || "", tel: it.tel || "", klasse: it.klasse || "",
-                status: it.status || "offen", follow_up_am: it.follow_up_am || "", notiz: it.notiz || "" } }
+                status: it.status || "offen", follow_up_am: it.follow_up_am || "", notiz: it.notiz || "", quelle: it.quelle || "", absagegrund: it.absagegrund || "" } }
             : { id: null, owner: st.lehrer.length === 1 ? st.lehrer[0].id : "", busy: false, error: "",
-                werte: { vorname: "", name: "", tel: "", klasse: "B", status: "offen", follow_up_am: "", notiz: "" } });
+                werte: { vorname: "", name: "", tel: "", klasse: "B", status: "offen", follow_up_am: "", notiz: "", quelle: "", absagegrund: "" } });
     }
     async function speichern() {
         const f = form;
@@ -44418,7 +44487,8 @@ function SchulInteressenten({ schoolId }) {
         setForm({ ...f, busy: true, error: "" });
         try {
             const alt = f.id ? st.liste.find(x => x.id === f.id) : null;
-            await schoolInteressentSpeichern(schoolId, f.id, !alt || alt.owner !== f.owner ? f.owner : null, f.werte);
+            await schoolInteressentSpeichern(schoolId, f.id, !alt || alt.owner !== f.owner ? f.owner : null,
+                { ...f.werte, absagegrund: f.werte.status === "abgesagt" ? (f.werte.absagegrund || "") : "" });
             const lehrer = st.lehrer.find(t => t.id === f.owner);
             showToast(!alt ? ("Interessent angelegt - " + (lehrer ? lehrer.name : "der Fahrlehrer") + " sieht ihn in seiner Liste.")
                 : alt.owner !== f.owner ? ("An " + (lehrer ? lehrer.name : "den Fahrlehrer") + " übergeben.") : "Gespeichert.");
@@ -44485,6 +44555,20 @@ function SchulInteressenten({ schoolId }) {
                                 onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, werte: { ...x.werte, status: v } })); } },
                             INTERESSENT_STATUS.map(([k, l]) => React.createElement("option", { key: k, value: k }, l)))),
                     feld("follow_up_am", "Nächster Kontakt", "date", { flex: 1 })),
+                // v2.62.0: Absagegrund / Quelle
+                React.createElement("div", { style: { display: "flex", gap: 10 } },
+                    form.werte.status === "abgesagt" && React.createElement("div", { className: "field", style: { flex: 1, marginBottom: 10 } },
+                        React.createElement("label", { htmlFor: "si-absagegrund" }, "Warum abgesagt?"),
+                        React.createElement("select", { id: "si-absagegrund", value: form.werte.absagegrund || "", disabled: form.busy,
+                                onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, werte: { ...x.werte, absagegrund: v } })); } },
+                            React.createElement("option", { value: "" }, "– bitte wählen –"),
+                            ABSAGEGRUENDE.map(([k, l]) => React.createElement("option", { key: k, value: k }, l)))),
+                    React.createElement("div", { className: "field", style: { flex: 1, marginBottom: 10 } },
+                        React.createElement("label", { htmlFor: "si-quelle" }, "Wie kam die Anfrage?"),
+                        React.createElement("select", { id: "si-quelle", value: form.werte.quelle || "", disabled: form.busy,
+                                onChange: e => { const v = e.target.value; setForm(x => x && ({ ...x, werte: { ...x.werte, quelle: v } })); } },
+                            React.createElement("option", { value: "" }, "– unbekannt –"),
+                            INTERESSENT_QUELLEN.map(([k, l]) => React.createElement("option", { key: k, value: k }, l))))),
                 React.createElement("div", { className: "field", style: { marginBottom: 10 } },
                     React.createElement("label", { htmlFor: "si-owner" }, "Zuständiger Fahrlehrer"),
                     React.createElement("select", { id: "si-owner", value: form.owner || "", disabled: form.busy,
