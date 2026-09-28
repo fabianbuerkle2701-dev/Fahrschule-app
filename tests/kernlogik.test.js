@@ -15,7 +15,7 @@ const app = require("./lade-app")([
     "warteschlangeVormerken", "warteschlangeErledigt", "warteschlangeOffline",
     "spaltenRaten", "excelSerialZuDatum",
     "rechnungsEntwurfZeilen", "rechnungsPostenAusZeilen", "rechnungsSchnappschuss",
-    "arbeitszeitArt", "arbeitszeitTage",
+    "arbeitszeitArt", "arbeitszeitTage", "sonderfahrtenBilanz",
 ]);
 
 test("Version und Changelog passen zusammen", () => {
@@ -486,4 +486,16 @@ test("Arbeitszeit § 12 FahrlG: Arten, 495-Minuten-Grenze, Pausen, Überschneidu
     // Mit echter Pause: zwei Blöcke, alles im Rahmen
     const ok = app.arbeitszeitTage([t("08:00", "12:00", "ÜST"), t("12:30", "15:00", "ÜL")])[0];
     assert.deepEqual([ok.praxisMin, ok.laengsterBlockMin, ok.ueberPraxis, ok.langerBlock], [390, 240, false, false]);
+});
+
+test("Schulwechsel: übernommene Sonderfahrten zählen zur Pflicht, werden aber nicht abgerechnet", () => {
+    const s = {
+        drivenLessons: [{ id: "a", date: "2026-09-10", minutes: 90, art: "AB", klasse: "B" }],
+        uebernahme: { vonSchule: "Alt", fahrstunden: [{ date: "2026-08-01", minutes: 135, art: "AB" }, { date: "2026-08-02", minutes: 225, art: "ÜL", klasse: "B" }] },
+    };
+    const b = app.sonderfahrtenBilanz(s, "B", {});
+    const ab = b.find(x => x.code === "AB"), ul = b.find(x => x.code === "ÜL");
+    assert.equal(ab.ue, 5); assert.equal(ab.anzahl, 2); assert.equal(ab.erfuellt, true);
+    assert.equal(ul.ue, 5); assert.equal(ul.erfuellt, true);
+    assert.equal(app.lessonBillables(s, 60).length, 1, "nur die eigene Fahrstunde ist abrechenbar");
 });

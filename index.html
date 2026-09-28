@@ -3491,7 +3491,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.45.0";
+const APP_VERSION = "2.46.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3635,6 +3635,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.46.0", date: "September 2026", changes: [
+            "Neu: Fahrschulwechsel per Übergabecode. Die bisherige Fahrschule erstellt im Schüler-Menü (⋮) einen Code (30 Tage gültig) und gibt ihn dem Schüler - z.B. per WhatsApp. Die neue Fahrschule löst ihn unter Schüler › Bestand übernehmen › „Übergabecode einlösen“ ein und sieht vorher eine Vorschau. Übernommen werden Stammdaten, Klasse, Theorie, Prüfungen, Unterlagen, ADK-/Strecken-Stand und die gefahrenen Stunden; Rechnungen, Zahlungen, Preise und Notizen bleiben bei der bisherigen Fahrschule",
+            "Übernommene Überland-, Autobahn- und Dämmerungsfahrten zählen zur Sonderfahrten-Pflicht, werden bei der neuen Fahrschule aber nicht abgerechnet; das Schülerprofil zeigt, was von wo übernommen wurde",
+        ] },
     { v: "2.45.0", date: "September 2026", changes: [
             "Die App startet jetzt auch ohne Internet - nach dem ersten Öffnen mit Verbindung liegen Seite und Bibliotheken auf dem Gerät. In der iPhone-App wirkt das ab dem nächsten App-Update aus dem TestFlight/App Store (neue Einstellung „App-Bound Domains“), im Browser sofort. Neue Versionen kommen weiterhin automatisch: mit Verbindung wird immer zuerst der aktuelle Stand geladen",
         ] },
@@ -6009,6 +6013,31 @@ function rowToStudent(row, uid) {
     return { ...d, id: row.id, _owner: row.owner, _shared: row.shared_with || [], _isMine: !!uid && row.owner === uid, _createdAt: row.created_at };
 }
 // Fetch all students visible to me (mine + shared with me)
+// Schulwechsel per Übergabecode (v2.46.0, Fahrschulreform F10) - siehe Migration 2026-09-28_schulwechsel.sql.
+async function wechselErstellen(studentId) {
+    const { data, error } = await sb.rpc("wechsel_erstellen", { p_student_id: studentId });
+    if (error) throw new Error(fehlerText(error));
+    return data;
+}
+async function wechselVorschau(code) {
+    const { data, error } = await sb.rpc("wechsel_vorschau", { p_code: code });
+    if (error) throw new Error(fehlerText(error));
+    return data;
+}
+async function wechselEinloesen(code) {
+    const { data, error } = await sb.rpc("wechsel_einloesen", { p_code: code });
+    if (error) throw new Error(fehlerText(error));
+    return data;
+}
+function wechselCodeAnzeige(code) { const c = String(code || ""); return c.length === 8 ? c.slice(0, 4) + "-" + c.slice(4) : c; }
+// Kurzfassung einer Übernahme für Vorschau und Profilkarte: Anzahl, Minuten, Sonderfahrten je Art.
+function uebernahmeZusammenfassung(fahrstunden) {
+    const l = Array.isArray(fahrstunden) ? fahrstunden : [];
+    const minuten = l.reduce((x, f) => x + (Number(f.minutes) || 0), 0);
+    const sonder = SONDERFAHRT_ARTEN.map(a => ({ label: a.label, minuten: l.filter(f => f.art === a.code).reduce((x, f) => x + (Number(f.minutes) || 0), 0) }))
+        .filter(x => x.minuten > 0);
+    return { anzahl: l.length, minuten, ue: Math.round(minuten / 45 * 10) / 10, sonder };
+}
 async function fetchStudents(uid) {
     // Ausdrücklich nur eigene + mit mir geteilte Schüler laden.
     // Wichtig: Der Admin hat per DB-Regel Zugriff auf ALLE Schüler (für die Zählung),
@@ -8864,7 +8893,9 @@ function sonderfahrtenBilanz(stu, klasse, sollMap) {
     const soll = { ...defaults, ...overrides };
     if (Object.keys(soll).length === 0)
         return [];
-    const lessons = stu.drivenLessons || [];
+    // Bei der vorigen Fahrschule gefahrene Stunden (Schulwechsel per Code, data.uebernahme) zählen
+    // zur Sonderfahrten-Pflicht mit - abgerechnet werden sie hier nie (keine drivenLessons).
+    const lessons = (stu.drivenLessons || []).concat((stu.uebernahme && Array.isArray(stu.uebernahme.fahrstunden)) ? stu.uebernahme.fahrstunden : []);
     return SONDERFAHRT_ARTEN.map(a => {
         const sollUe = Number(soll[a.key]) || 0;
         if (sollUe <= 0)
@@ -14776,6 +14807,8 @@ function App() {
     const [stillOpen, setStillOpen] = useState(false); // Liste "lange nicht gefahren" auf der Startseite
     const [ohneTerminOpen, setOhneTerminOpen] = useState(false); // Liste "ohne nächsten Termin" auf der Startseite
     const [arbeitszeitOpen, setArbeitszeitOpen] = useState(false); // eigener Arbeitszeitnachweis (§ 12 FahrlG)
+    const [wechselCode, setWechselCode] = useState(null);     // Schulwechsel: {stu, busy, error, code, bis}
+    const [wechselImport, setWechselImport] = useState(null); // Übergabecode einlösen: {code, busy, error, vorschau}
     const [unterlagenOpen, setUnterlagenOpen] = useState(false); // Liste "Prüfung naht, Unterlagen fehlen" auf der Startseite
     const [folgeschritte, setFolgeschritte] = useState(null); // null | { studentId, erledigt: {} } - "So geht es weiter" nach der Übernahme eines Interessenten
     const [abbruchOpen, setAbbruchOpen] = useState(false); // Liste "Abbruch-Risiko" auf der Startseite (Verwaltung-ersetzen-Fahrplan, Phase 2)
@@ -15999,6 +16032,8 @@ function App() {
         else if (stillOpen) setStillOpen(false);
         else if (ohneTerminOpen) setOhneTerminOpen(false);
         else if (arbeitszeitOpen) setArbeitszeitOpen(false);
+        else if (wechselCode) { if (!wechselCode.busy) setWechselCode(null); }
+        else if (wechselImport) { if (!wechselImport.busy) setWechselImport(null); }
         else if (unterlagenOpen) setUnterlagenOpen(false);
         else if (folgeschritte) setFolgeschritte(null);
         else if (fristenOpen) setFristenOpen(false);
@@ -16038,7 +16073,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16278,7 +16313,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -21473,6 +21508,43 @@ function App() {
         return top.s;
     }
     // Telefonnummer für WhatsApp aufbereiten (deutsche Nummern -> internationales Format)
+    // Schulwechsel: Code für die neue Fahrschule erstellen. Der Schüler bekommt ihn und gibt ihn
+    // selbst weiter - damit entscheidet er, wer seine Daten bekommt.
+    async function wechselCodeStarten(stu) {
+        if (!stu) return;
+        if (IS_DEMO()) { showToast("Demo-Ansicht: Übergabecodes werden nicht erstellt."); return; }
+        if (!await askConfirm({ title: "Fahrschulwechsel vorbereiten?",
+                message: "Es wird ein Übergabecode für " + dispName(stu) + " erstellt (30 Tage gültig). Die neue Fahrschule übernimmt damit Stammdaten, Klasse, Theorie, Prüfungen, Unterlagen, ADK-/Strecken-Stand und die gefahrenen Stunden - aber keine Rechnungen, Zahlungen, Preise oder Notizen.\n\nNur erstellen, wenn der Schüler den Wechsel wünscht. Deine Daten zu ihm bleiben unverändert erhalten.",
+                confirmLabel: "Code erstellen", danger: false }))
+            return;
+        setWechselCode({ stu, busy: true, error: "" });
+        try {
+            const r = await wechselErstellen(stu.id);
+            setWechselCode({ stu, busy: false, error: "", code: r.code, bis: r.gueltig_bis });
+        } catch (e) { setWechselCode({ stu, busy: false, error: fehlerText(e) }); }
+    }
+    async function wechselVorschauLaden() {
+        const w = wechselImport;
+        if (!w || w.busy) return;
+        if (String(w.code || "").replace(/[^A-Za-z0-9]/g, "").length !== 8) { setWechselImport({ ...w, error: "Der Code hat 8 Zeichen, z.B. AB12-CD34." }); return; }
+        setWechselImport({ ...w, busy: true, error: "" });
+        try { const v = await wechselVorschau(w.code); setWechselImport(x => x && ({ ...x, busy: false, vorschau: v })); }
+        catch (e) { setWechselImport(x => x && ({ ...x, busy: false, error: fehlerText(e) })); }
+    }
+    async function wechselUebernehmen() {
+        const w = wechselImport;
+        if (!w || w.busy || !w.vorschau) return;
+        if (IS_DEMO()) { showToast("Demo-Ansicht: Schüler werden nicht übernommen."); return; }
+        setWechselImport({ ...w, busy: true, error: "" });
+        try {
+            const neuId = await wechselEinloesen(w.code);
+            const liste = await fetchStudents(uid);
+            saveCache(uid, schuelerListeEinspielen(liste, Date.now()));
+            setWechselImport(null);
+            if (neuId) { setActiveId(neuId); setView("daten"); setStudentTab("profil"); }
+            showToast("✓ " + (((w.vorschau.schueler || {}).vorname || "") + " " + ((w.vorschau.schueler || {}).name || "")).trim() + " übernommen.");
+        } catch (e) { setWechselImport(x => x && ({ ...x, busy: false, error: fehlerText(e) })); }
+    }
     function waNumber(tel) {
         let n = (tel || "").replace(/[^\d+]/g, "");
         if (n.startsWith("+"))
@@ -26720,7 +26792,8 @@ function App() {
                 tabMenu === "daten" && React.createElement("div", { className: "headmenu" },
                     React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setPrintChoice(true); } }, "Als PDF drucken"),
                     active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); archivierenUmschalten(active); } }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren"),
-                    active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); generateHandoverSummary(active); } }, "KI-Übergabe-Einschätzung erstellen"))),
+                    active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); generateHandoverSummary(active); } }, "KI-Übergabe-Einschätzung erstellen"),
+                    React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); wechselCodeStarten(active); } }, "Fahrschulwechsel: Übergabecode"))),
             // Segment-Control auch hier (spec 7.4): ohne sie wäre der Kosten-Einstieg aus dem
             // Segment eine Sackgasse - man käme nicht per Segment zurück in ADK/Strecken/Übersicht.
             studentSegments(),
@@ -26745,6 +26818,15 @@ function App() {
                         i < STATIONS.length - 1 && React.createElement("div", { className: "path-line", style: { background: tc.fg } }));
                 })),
             studentTab === "profil" && React.createElement("div", { className: "station-panel" },
+                active.uebernahme && (() => {
+                    const z = uebernahmeZusammenfassung(active.uebernahme.fahrstunden);
+                    return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14, background: "var(--sky-bg, var(--card))" } },
+                        React.createElement("div", { style: { fontWeight: 800, fontSize: 14 } }, "Übernommen von " + (active.uebernahme.vonSchule || "anderer Fahrschule")),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
+                            (active.uebernahme.am ? "am " + dashDatum(active.uebernahme.am) + " · " : "") + z.anzahl + (z.anzahl === 1 ? " Fahrstunde" : " Fahrstunden") + " (" + String(z.ue).replace(".", ",") + " UE) dort gefahren"
+                            + (z.sonder.length ? " · Sonderfahrten: " + z.sonder.map(x => x.label + " " + x.minuten + " Min.").join(", ") : "")),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.45 } }, "Zählen zur Sonderfahrten-Pflicht, werden hier aber nicht abgerechnet. Rechnungen und Zahlungen bleiben bei der bisherigen Fahrschule."));
+                })(),
                 f("vorname", "Vorname"),
                 f("name", "Name"),
                 f("geb", "Geburtsdatum", "date"),
@@ -34248,6 +34330,10 @@ function App() {
                     React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
                         kiAus ? "Alles bleibt auf deinem Ger\u00E4t, bis du die Sch\u00FCler anlegst."
                             : "Alles bleibt auf deinem Ger\u00E4t. Nur wenn die \u00DCberschriften nicht erkannt werden, gehen sie mit f\u00FCnf Beispielzeilen zur Zuordnung an die KI \u2013 nie dein gesamter Bestand."),
+                    React.createElement("div", { style: { borderTop: "1px solid var(--line)", marginTop: 16, paddingTop: 14 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14, marginBottom: 4 } }, "Schüler wechselt von einer anderen Fahrschule?"),
+                        React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 0 10px" } }, "Nutzt die bisherige Fahrschule Allindrive, bekommt der Schüler dort einen Übergabecode. Damit übernimmst du seinen Ausbildungsstand."),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => { setCsvImport(null); setWechselImport({ code: "", busy: false, error: "", vorschau: null }); } }, "Übergabecode einlösen")),
                     React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 12 }, onClick: () => setCsvImport(null) }, "Abbrechen")),
                 csvImport.schritt === "laedt" && React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "14px 0" } }, "Datei wird gelesen und Spalten werden zugeordnet\u2026"),
                 csvImport.schritt === "fehler" && React.createElement(React.Fragment, null,
@@ -35432,6 +35518,55 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        wechselCode && React.createElement("div", { onClick: () => { if (!wechselCode.busy) setWechselCode(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Übergabecode",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                    padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 6 } }, "Übergabecode für " + dispName(wechselCode.stu)),
+                wechselCode.busy ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)", padding: "14px 0" } }, "Wird erstellt…")
+                : wechselCode.error ? React.createElement("div", { role: "alert", style: { fontSize: 13.5, color: "var(--red-ink)", padding: "10px 0" } }, wechselCode.error)
+                : React.createElement(React.Fragment, null,
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 34, letterSpacing: ".08em", textAlign: "center", padding: "16px 0 6px", userSelect: "all" } }, wechselCodeAnzeige(wechselCode.code)),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", textAlign: "center", marginBottom: 14 } }, "gültig bis " + dashDatum(String(wechselCode.bis || "").slice(0, 10)) + " · nur einmal einlösbar"),
+                    React.createElement("p", { style: { fontSize: 13, lineHeight: 1.55, margin: "0 0 12px" } }, "Gib den Code dem Schüler. Die neue Fahrschule löst ihn in Allindrive unter Schüler › Bestand übernehmen › „Übergabecode einlösen“ ein. Ein neuer Code macht diesen ungültig."),
+                    wechselCode.stu && wechselCode.stu.tel && React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 },
+                        onClick: () => { const num = waNumber(wechselCode.stu.tel); window.open("https://wa.me/" + num + "?text=" + encodeURIComponent("Hallo " + (wechselCode.stu.vorname || "") + ", hier ist dein Übergabecode für die neue Fahrschule: " + wechselCodeAnzeige(wechselCode.code) + " (gültig bis " + dashDatum(String(wechselCode.bis || "").slice(0, 10)) + "). Die neue Fahrschule übernimmt damit deinen Ausbildungsstand in Allindrive."), "_blank", "noopener"); } }, "Per WhatsApp an den Schüler"),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 },
+                        onClick: () => { try { navigator.clipboard.writeText(wechselCodeAnzeige(wechselCode.code)).then(() => showToast("Code kopiert."), () => showToast("Kopieren nicht möglich - bitte abschreiben.")); } catch (e) { showToast("Kopieren nicht möglich - bitte abschreiben."); } } }, "Code kopieren")),
+                React.createElement("button", { className: "btn btn-ghost btn-block", disabled: wechselCode.busy, onClick: () => setWechselCode(null) }, "Schließen"))),
+        wechselImport && React.createElement("div", { onClick: () => { if (!wechselImport.busy) setWechselImport(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Übergabecode einlösen",
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 170, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                    padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 10 } }, "Übergabecode einlösen"),
+                !wechselImport.vorschau && React.createElement(React.Fragment, null,
+                    React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                        React.createElement("label", { htmlFor: "wechsel-code" }, "Code vom Schüler"),
+                        React.createElement("input", { id: "wechsel-code", value: wechselImport.code, autoComplete: "off", autoCapitalize: "characters", placeholder: "z.B. AB12-CD34", disabled: wechselImport.busy,
+                            style: { fontSize: 20, letterSpacing: ".08em", textTransform: "uppercase" },
+                            onChange: e => { const v = e.target.value; setWechselImport(x => x && ({ ...x, code: v, error: "" })); },
+                            onKeyDown: e => { if (e.key === "Enter") wechselVorschauLaden(); } })),
+                    React.createElement("button", { className: "btn btn-primary btn-block", disabled: wechselImport.busy, onClick: wechselVorschauLaden }, wechselImport.busy ? "Wird geprüft…" : "Prüfen")),
+                wechselImport.vorschau && (() => {
+                    const v = wechselImport.vorschau, st = v.schueler || {};
+                    const z = uebernahmeZusammenfassung(st.fahrstunden);
+                    const zeile = (k, w) => w ? React.createElement("div", { key: k, style: { display: "flex", gap: 10, padding: "6px 0", borderTop: "1px solid var(--line)", fontSize: 13.5 } },
+                        React.createElement("span", { style: { color: "var(--muted)", minWidth: 120 } }, k), React.createElement("span", { style: { flex: 1, overflowWrap: "anywhere" } }, w)) : null;
+                    return React.createElement(React.Fragment, null,
+                        React.createElement("div", { style: { fontWeight: 800, fontSize: 17 } }, ((st.vorname || "") + " " + (st.name || "")).trim() || "Schüler"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginBottom: 10 } }, "von " + v.von_schule),
+                        [zeile("Klasse", st.klasse), zeile("Geburtsdatum", st.geb && dashDatum(st.geb)), zeile("Theorie", st.theorie ? "bestanden" : "offen"),
+                         zeile("Gefahren", z.anzahl + " Fahrstunden (" + String(z.ue).replace(".", ",") + " UE)"),
+                         zeile("Sonderfahrten", z.sonder.map(x => x.label + " " + x.minuten + " Min.").join(", ")),
+                         zeile("Prüfungen", (st.exams || []).length ? (st.exams || []).length + " Versuch(e)" : "")].filter(Boolean),
+                        React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5, margin: "12px 0" } }, "Der Schüler landet in deiner Liste. Die gefahrenen Stunden zählen zur Sonderfahrten-Pflicht, werden bei dir aber nicht abgerechnet."),
+                        React.createElement("button", { className: "btn btn-primary btn-block", disabled: wechselImport.busy, onClick: wechselUebernehmen }, wechselImport.busy ? "Wird übernommen…" : "Schüler übernehmen"),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, disabled: wechselImport.busy, onClick: () => setWechselImport(x => x && ({ ...x, vorschau: null })) }, "Anderen Code eingeben"));
+                })(),
+                wechselImport.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", marginTop: 10 } }, wechselImport.error),
+                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 10 }, disabled: wechselImport.busy, onClick: () => setWechselImport(null) }, "Abbrechen"))),
         arbeitszeitOpen && React.createElement("div", { onClick: () => setArbeitszeitOpen(false), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Arbeitszeitnachweis",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
