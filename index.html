@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.56.0";
+const APP_VERSION = "2.56.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.56.1", date: "September 2026", changes: [
+            "Terminanfragen überschneiden sich nicht mehr: Beim Eintragen eines Termins warnt die App jetzt auch vor einer offenen Anfrage zur selben Zeit, Terminserien überspringen solche Tage, „Woche füllen“ und „Leerlauf verdichten“ planen nicht mehr in offene Anfragen hinein, und ein Gegenvorschlag lässt sich nicht auf einen belegten Zeitraum legen",
+        ] },
     { v: "2.56.0", date: "September 2026", changes: [
             "Kalender: neue Monatsansicht (Woche | Tag | Monat). Jeder Tag zeigt kleine Balken in der Farbe der Terminart, dazu Urlaub, Krank und Feiertage. Ein Tipp auf einen Tag öffnet ihn in der Tagesansicht",
         ] },
@@ -10649,8 +10652,9 @@ function findOverlaps(appts, startISO, endISO, ignoreId) {
     return (appts || []).filter(a => {
         if (ignoreId && a.id === ignoreId)
             return false;
-        if (a.status === "pending")
-            return false; // Vorschläge blockieren nicht
+        // Offene Anfragen zählen mit (v2.56.1, Vorgabe Fabian: "Terminanfragen dürfen sich nicht
+        // überschneiden"). Vorher übersprang die Prüfung sie - ein eingetragener Termin, eine Serie oder
+        // ein Gegenvorschlag konnte so ohne Warnung auf einer offenen Anfrage landen.
         const as = new Date(a.start_at).getTime();
         const ae = a.end_at ? new Date(a.end_at).getTime() : as + 45 * 60000;
         return s < ae && as < e; // echte Überlappung
@@ -19949,7 +19953,7 @@ function App() {
             if (clash.length) {
                 const c = clash[0];
                 const cname = apptStudentName(c) || c.title || "Termin";
-                const txt = "Achtung: Diese Zeit überschneidet sich mit einem bestehenden Termin:\n\n"
+                const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine offene Terminanfrage:\n\n" : "Achtung: Diese Zeit überschneidet sich mit einem bestehenden Termin:\n\n")
                     + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
                     + "\n\nTrotzdem anlegen?";
                 if (!await askConfirm({ message: txt }))
@@ -21451,9 +21455,17 @@ function App() {
             setCounterForm({ ...f, error: "Die Endzeit (" + f.end + " Uhr) muss nach der Startzeit (" + f.start + " Uhr) liegen." });
             return;
         }
-        setCounterForm({ ...f, busy: true, error: "" });
         const startISO = combineDT(f.date, f.start);
         const endISO = f.end ? combineDT(f.date, f.end) : null;
+        // Ein Gegenvorschlag bleibt eine Anfrage und darf nichts überdecken (v2.56.1): weder einen
+        // Termin noch eine andere offene Anfrage.
+        const clash = findOverlaps(appts, startISO, endISO, f.id);
+        if (clash.length) {
+            const c = clash[0];
+            setCounterForm({ ...f, error: "Zu dieser Zeit " + (c.status === "pending" ? "liegt schon eine offene Anfrage" : "ist schon ein Termin") + " (" + hm(c.start_at) + (c.end_at ? " bis " + hm(c.end_at) : "") + " Uhr, " + (apptStudentName(c) || c.title || "Termin") + "). Bitte eine andere Zeit wählen." });
+            return;
+        }
+        setCounterForm({ ...f, busy: true, error: "" });
         if (!await updateAppt(f.id, { start_at: startISO, end_at: endISO })) {
             // Nicht gespeichert: keinen WhatsApp-Link mit einer Zeit anbieten, die es nicht gibt.
             setCounterForm({ ...f, busy: false, error: "Die neue Zeit konnte nicht gespeichert werden. Bitte erneut versuchen." });
@@ -29292,7 +29304,7 @@ function App() {
         if (clash.length) {
             const c = clash[0];
             const cname = apptStudentName(c) || c.title || "Termin";
-            const txt = "Achtung: Dieser Termin überschneidet sich mit einem bestehenden:\n\n"
+            const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine offene Terminanfrage:\n\n" : "Achtung: Dieser Termin überschneidet sich mit einem bestehenden:\n\n")
                 + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
                 + "\n\nTrotzdem speichern?";
             if (!await askConfirm({ message: txt }))

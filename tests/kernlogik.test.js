@@ -207,14 +207,16 @@ test("Prüfungsakte: chronologisch, bestandener Versuch verdrängt den gleichen 
 // ── Ausbildungslogik: Überschneidung, Sonderfahrten, Prüfungsreife, Ampel ──
 const aus = require("./lade-app")(["findOverlaps", "sonderfahrtenBilanz", "pruefungsreife", "ampel"]);
 
-test("Überschneidung: echte Überlappung ja, Anschlusstermin und offene Anfrage nein", () => {
+test("Überschneidung: echte Überlappung ja (auch mit offener Anfrage), Anschlusstermin nein", () => {
     const appts = [
         { id: "1", status: "confirmed", start_at: "2026-09-28T08:00:00Z", end_at: "2026-09-28T09:30:00Z" },
         { id: "2", status: "pending", start_at: "2026-09-28T10:00:00Z", end_at: "2026-09-28T10:45:00Z" },
         { id: "3", status: "confirmed", start_at: "2026-09-28T12:00:00Z" },                       // ohne Ende = 45 Min
     ];
     assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z").length, 1);
-    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:15:00Z").length, 0, "direkt anschließend ist keine Überschneidung");
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:00:00Z").length, 0, "direkt anschließend ist keine Überschneidung");
+    // v2.56.1 (Vorgabe Fabian): offene Anfragen blockieren wie Termine
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:15:00Z").length, 1, "offene Anfrage zählt als belegt");
     assert.equal(aus.findOverlaps(appts, "2026-09-28T12:30:00Z", "2026-09-28T13:00:00Z").length, 1, "fehlende Endzeit zählt als 45 Minuten");
     assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z", "1").length, 0, "eigener Termin wird beim Bearbeiten ignoriert");
 });
