@@ -501,3 +501,27 @@ test("Schulwechsel: übernommene Sonderfahrten zählen zur Pflicht, werden aber 
     assert.equal(ul.ue, 5); assert.equal(ul.erfuellt, true);
     assert.equal(app.lessonBillables(s, 60).length, 1, "nur die eigene Fahrstunde ist abrechenbar");
 });
+
+// v2.57.1: Sammelrechnung darf in "Nicht abgerechnet" herausgenommene Posten (nichtBerechnen) nicht abrechnen
+const rz = require("./lade-app")(["rechnungsEntwurfZeilen"]);
+test("Rechnungszeilen: Sammelrechnung lässt herausgenommene Posten weg, Einzelrechnung zeigt sie", () => {
+    const stu = {
+        drivenLessons: [
+            { id: "L1", date: "2026-09-01", minutes: 45, price: 50 },
+            { id: "L2", date: "2026-09-02", minutes: 45, price: 50, nichtBerechnen: true },
+            { id: "L3", date: "2026-09-03", minutes: 45, price: 50, invoiced: "RE-2026-0001" },
+        ],
+        costItems: [
+            { id: "C1", label: "Lernmaterial", amount: 30 },
+            { id: "C2", label: "Kulanz", amount: 20, nichtBerechnen: true },
+        ],
+    };
+    const summe = rows => rows.reduce((t, r) => t + r.amount, 0);
+    const ids = rows => JSON.stringify(Array.from(rows).flatMap(r => Array.from(r.ids || [r.id])).sort());
+    const einzel = rz.rechnungsEntwurfZeilen(stu, 50);
+    const sammel = rz.rechnungsEntwurfZeilen(stu, 50, true);
+    assert.equal(ids(einzel), JSON.stringify(["C1", "C2", "L1", "L2"]), "Einzelrechnung bietet alles Offene an (abwählbar)");
+    assert.equal(ids(sammel), JSON.stringify(["C1", "L1"]), "Sammelrechnung nur, was die Liste zeigt");
+    assert.equal(summe(sammel), 80);
+    assert.equal(summe(einzel), 150);
+});

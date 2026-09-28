@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.57.0";
+const APP_VERSION = "2.57.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.57.1", date: "September 2026", changes: [
+            "Sammelrechnung rechnet nur ab, was in „Nicht abgerechnet“ steht: Posten, die du dort mit × herausgenommen hast, bleiben draußen",
+            "Bestätigen einer Anfrage nennt eine überschneidende zweite Anfrage jetzt als solche; ein in der App unterschriebener Vertrag behält den Vermerk mit Datum",
+        ] },
     { v: "2.57.0", date: "September 2026", changes: [
             "Sammelrechnung: Unter Abrechnung › „noch nicht berechnet“ erstellst du mit einem Knopf für alle deine Schüler mit offenen Posten je eine Rechnung. Vorher siehst du Betrag und Positionen je Schüler, danach die Rechnungsnummern mit PDF. Gerechnet wird genau wie bei der Einzelrechnung",
         ] },
@@ -9992,13 +9996,16 @@ function rechnungsLeistungszeitraum(s, inv) {
 // (openInvoiceDraft) und die Rechnung aus der Schülerakte durch Admin/Büro (v2.43.0), damit
 // beide garantiert gleich rechnen. Offene Fahrstunden werden nach ihrem tatsächlich zu zahlenden
 // Betrag gruppiert (Paket-Guthaben schon abgezogen); vollständig gedeckte erscheinen nicht.
-function rechnungsEntwurfZeilen(stu, price) {
+// ohneAusgenommene (v2.57.1): Posten, die in "Nicht abgerechnet" per × herausgenommen wurden
+// (nichtBerechnen), weglassen - so rechnet die Sammelrechnung genau das ab, was die Liste zeigt.
+// Die Einzelrechnung übergibt es nicht: dort sieht man jede Zeile und kann sie abwählen.
+function rechnungsEntwurfZeilen(stu, price, ohneAusgenommene) {
     const rows = [];
     if (!stu) return rows;
     const billableById = {};
     lessonBillables(stu, price).forEach(b => { billableById[b.lesson.id] = b.amount; });
     const byPrice = {};
-    (stu.drivenLessons || []).filter(l => !l.invoiced).forEach(l => {
+    (stu.drivenLessons || []).filter(l => !l.invoiced && !(ohneAusgenommene && l.nichtBerechnen)).forEach(l => {
         const einzel = Math.round((billableById[l.id] || 0) * 100) / 100;
         if (einzel <= 0.005)
             return; // vollständig im Paket enthalten, nichts zu berechnen
@@ -10020,7 +10027,7 @@ function rechnungsEntwurfZeilen(stu, price) {
             label: g.anzahl + " " + (g.anzahl === 1 ? "Fahrstunde" : "Fahrstunden") + (g.einzel > 0 ? (" \u00E0 " + eurFmt(g.einzel)) : ""),
             date: "", amount: Math.round(g.einzel * g.anzahl * 100) / 100 });
     });
-    (stu.costItems || []).forEach((it, idx) => { if (!it.invoiced) {
+    (stu.costItems || []).forEach((it, idx) => { if (!it.invoiced && !(ohneAusgenommene && it.nichtBerechnen)) {
         rows.push({ key: "cost:" + (it.id || idx), id: it.id || null, idx, kind: "cost", label: it.label, date: "", amount: Number(it.amount) || 0 });
     } });
     return rows;
@@ -21613,7 +21620,7 @@ function App() {
             if (clash.length) {
                 const c = clash[0];
                 const cname = apptStudentName(c) || c.title || "Termin";
-                const txt = "Achtung: Dieser Vorschlag überschneidet sich mit einem bestehenden Termin:\n\n"
+                const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine weitere offene Terminanfrage:\n\n" : "Achtung: Dieser Vorschlag überschneidet sich mit einem bestehenden Termin:\n\n")
                     + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
                     + "\n\nTrotzdem bestätigen?";
                 if (!await askConfirm({ message: txt }))
@@ -24430,7 +24437,7 @@ function App() {
     function sammelVorschau() {
         const price = Number(pricePerHour) || 0;
         const liste = (students || []).filter(x => x._isMine && !x.archived && !x.dataDeletedAt).map(x => {
-            const rows = rechnungsEntwurfZeilen(x, price);
+            const rows = rechnungsEntwurfZeilen(x, price, true);
             return { id: x.id, name: dispName(x), anzahl: rows.length, betrag: Math.round(rows.reduce((t, r) => t + (Number(r.amount) || 0), 0) * 100) / 100 };
         }).filter(x => x.anzahl > 0 && x.betrag > 0.005).sort((a, b) => a.name.localeCompare(b.name, "de"));
         if (!liste.length) {
@@ -24459,7 +24466,7 @@ function App() {
                 // Gegen den AKTUELLEN Stand neu rechnen: zwischen Vorschau und Bestätigung kann sich
                 // etwas geändert haben (neue Stunde, Einzelrechnung auf einem anderen Gerät).
                 const cur = (studentsRef.current || []).find(st => st.id === x.id);
-                const rows = cur ? rechnungsEntwurfZeilen(cur, price) : [];
+                const rows = cur ? rechnungsEntwurfZeilen(cur, price, true) : [];
                 const costRows = rows.filter(r => r.kind === "cost");
                 if (!rows.length)
                     ergebnisse.push({ id: x.id, name: x.name, fehler: "Inzwischen nichts mehr offen." });
@@ -24817,7 +24824,10 @@ function App() {
             const alt = (s.contracts || []).find(x => x.id === cid);
             if (!alt)
                 return null;
-            c = { ...alt, instrSignature: iSig, studentSignature: sSig };
+            c = { ...alt, instrSignature: iSig, studentSignature: sSig,
+                // In der App unterschrieben (v2.55.0): Vermerk mit Datum am Vertrag behalten
+                ...((contractPreview && contractPreview.studentSignedVia === "app" && sSig && sSig === contractPreview.studentSignature)
+                    ? { studentSignedVia: "app", studentSignedAt: contractPreview.studentSignedAt || "" } : {}) };
             return { ...s, contracts: s.contracts.map(x => x.id === cid ? c : x) };
         });
         setContractSignId(null);
