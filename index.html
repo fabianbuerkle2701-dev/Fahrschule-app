@@ -599,6 +599,13 @@
   .tf-akzent{color:var(--orange-deep);color:color-mix(in srgb,var(--orange) 72%,var(--ink))}
   .tf-pill.klein{min-height:34px;padding:0 12px;font-size:13px;border-style:dashed}
   .tf-pill .punkt{width:9px;height:9px;border-radius:50%;flex:none}
+  .tf-klapp{display:flex;align-items:center;gap:10px;min-height:50px;text-align:left;cursor:pointer;font-family:var(--font-d);font-weight:700}
+  .tf-klapp .punkt,.tf-artwahl .punkt{width:12px;height:12px;border-radius:50%;flex:none}
+  .tf-klapp-text{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .tf-artliste{margin-top:6px;border:1.5px solid var(--line);border-radius:var(--r-input);background:var(--card);max-height:300px;overflow-y:auto;padding:4px 0}
+  .tf-artgruppe{padding:10px 14px 4px;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+  .tf-artwahl{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:0 14px;border:none;background:none;text-align:left;cursor:pointer;font-size:15px;color:var(--ink)}
+  .tf-artwahl.on{background:var(--orange-soft);background:color-mix(in srgb,var(--orange) 14%,var(--card));font-weight:700}
   .tf-pill input,.tf-pill select,.tf-datum input{position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer;font-size:16px}
   .tf-person{flex:none;scroll-snap-align:start;width:66px;display:flex;flex-direction:column;align-items:center;gap:7px;background:none;border:none;padding:2px 0 0;cursor:pointer;color:var(--ink-2)}
   .tf-person .avatar,.tf-person .tf-ohne{width:52px;height:52px;font-size:16px;transition:box-shadow .15s ease}
@@ -3538,7 +3545,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.54.0";
+const APP_VERSION = "2.54.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3682,6 +3689,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.54.1", date: "September 2026", changes: [
+            "Termin-Fenster: Die Art ist wieder eine Klappliste – zugeklappt steht die gewählte Art mit ihrer Farbe, aufgeklappt alle Arten nach Gruppen, jede mit Farbpunkt",
+        ] },
     { v: "2.54.0", date: "September 2026", changes: [
             "Termin-Fenster: Datum wird nur noch über ein Datumsfeld gewählt, die Uhrzeit einfach als „von – bis“ (statt Heute/Morgen/Übermorgen, Zeit-Knöpfen und Dauer-Leiste). Verschiebst du den Beginn, wandert das Ende mit",
             "Kalender: Tippen auf das Datum einer Tageskarte öffnet einen neuen Termin an genau diesem Tag",
@@ -36877,7 +36887,12 @@ function App() {
                     const gewaehlt = f.student_id ? (alle.find(x => x.id === f.student_id) || students.find(x => x.id === f.student_id)) : null;
                     const personen = alle.filter(x => !q || dispName(x).toLowerCase().includes(q))
                         .sort((p, r) => ((p.id === f.student_id ? 0 : 1) - (r.id === f.student_id ? 0 : 1)) || ((wartend.has(p.id) ? 0 : 1) - (wartend.has(r.id) ? 0 : 1)) || ((nextApptByStudent[p.id] ? 1 : 0) - (nextApptByStudent[r.id] ? 1 : 0)) || dispName(p).localeCompare(dispName(r), "de"));
-                    const haeufig = ["ÜST", "ÜL", "AB", "NF", "GF", "PF", "TH"].filter(c => (arten || []).some(x => x.code === c));
+                    // Alle Arten nach Gruppen für die Klappliste (Reihenfolge wie artOptgroups)
+                    const artGruppen = (() => {
+                        const g = {};
+                        (arten || []).forEach(a => { const k = ART_GROUP_OF[a.code] || "Sonstiges"; (g[k] || (g[k] = [])).push(a); });
+                        return ART_GROUP_ORDER.filter(k => g[k]).map(k => [k, g[k]]);
+                    })();
                     const artFarbe = c => ((arten || []).find(x => x.code === c) || {}).color || "var(--line)";
                     const artAktiv = f.art || "ÜST";
                     const mehrInhalt = !!(f.note || f.sonstige || (f.serie && f.serie.on));
@@ -36911,15 +36926,26 @@ function App() {
                             React.createElement("input", { type: "time", step: "300", className: "tf-input tf-feld", value: f.start || "", "aria-label": "Von", onChange: e => { if (e.target.value) setStart(e.target.value); } }),
                             React.createElement("span", { "aria-hidden": "true" }, "bis"),
                             React.createElement("input", { type: "time", step: "300", className: "tf-input tf-feld", value: f.end || "", "aria-label": "Bis", onChange: e => setF({ end: e.target.value }) })),
-                        // Art
+                        // Art (v2.54.1, Fabian: "klappbar, aber mit den Farben"): zugeklappt die gewählte Art mit
+                        // Farbpunkt, aufgeklappt alle Arten nach Gruppen. Eigene Liste statt <select>, weil
+                        // Optionen eines Auswahlmenüs auf dem iPhone keine Farben zeigen können.
                         React.createElement("div", { className: "tf-label" }, "Art"),
-                        React.createElement("div", { className: "tf-row", role: "radiogroup", "aria-label": "Art" },
-                            haeufig.map(c => React.createElement("button", { key: c, type: "button", role: "radio", "aria-checked": artAktiv === c, className: "tf-pill" + (artAktiv === c ? " on" : ""), onClick: () => setF({ art: c }) },
-                                React.createElement("span", { className: "punkt", style: { background: artFarbe(c) }, "aria-hidden": "true" }), artLabelPlain(c))),
-                            React.createElement("label", { className: "tf-pill" + (haeufig.indexOf(artAktiv) < 0 ? " on" : "") },
-                                haeufig.indexOf(artAktiv) < 0 && React.createElement("span", { className: "punkt", style: { background: artFarbe(artAktiv) }, "aria-hidden": "true" }),
-                                haeufig.indexOf(artAktiv) < 0 ? artLabelPlain(artAktiv) : "Weitere Arten",
-                                React.createElement("select", { value: artAktiv, "aria-label": "Weitere Terminarten", onChange: e => setF({ art: e.target.value }) }, artOptgroups(arten)))),
+                        React.createElement("button", { type: "button", className: "tf-input tf-klapp", "aria-expanded": !!f.artOffen, "aria-label": "Art: " + artLabelPlain(artAktiv),
+                                onClick: () => setF({ artOffen: !f.artOffen }) },
+                            React.createElement("span", { className: "punkt", style: { background: artFarbe(artAktiv) }, "aria-hidden": "true" }),
+                            React.createElement("span", { className: "tf-klapp-text" }, artLabelPlain(artAktiv)),
+                            React.createElement("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true",
+                                    style: { flex: "none", color: "var(--muted)", transform: f.artOffen ? "rotate(180deg)" : "none", transition: "transform .15s" } },
+                                React.createElement("polyline", { points: "6 9 12 15 18 9" }))),
+                        f.artOffen && React.createElement("div", { className: "tf-artliste", role: "listbox", "aria-label": "Art wählen" },
+                            artGruppen.map(([gruppe, liste]) => React.createElement(React.Fragment, { key: gruppe },
+                                artGruppen.length > 1 && React.createElement("div", { className: "tf-artgruppe" }, gruppe),
+                                liste.map(a => React.createElement("button", { key: a.code, type: "button", role: "option", "aria-selected": a.code === artAktiv,
+                                        className: "tf-artwahl" + (a.code === artAktiv ? " on" : ""), onClick: () => setF({ art: a.code, artOffen: false }) },
+                                    React.createElement("span", { className: "punkt", style: { background: a.color || "var(--line)" }, "aria-hidden": "true" }),
+                                    React.createElement("span", { className: "tf-klapp-text" }, a.label || artLabelPlain(a.code)),
+                                    a.code === artAktiv && React.createElement("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", style: { flex: "none", color: "var(--orange)" } },
+                                        React.createElement("polyline", { points: "20 6 9 17 4 12" }))))))),
                 apptForm.art === "NF" && apptForm.date && weather && weather !== "error" && weather.lat != null && (() => {
                     const sunset = sonnenuntergangFuerDatum(weather.lat, weather.lon, new Date(combineDT(apptForm.date, "12:00")));
                     if (!sunset)
