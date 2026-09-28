@@ -3491,7 +3491,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.46.0";
+const APP_VERSION = "2.47.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3635,6 +3635,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.47.0", date: "September 2026", changes: [
+            "Neu: „Ziel der Stunde“ beim Termin. Beim Anlegen oder Bearbeiten eines Schüler-Termins lässt sich festlegen, woran in der Stunde gearbeitet wird - mit Vorschlägen per Tipp (Notiz aus der letzten Stunde, wiederkehrende Schwäche, noch fehlende Sonderfahrten). Das Ziel steht im Kalender am Termin und in der Excel-Liste; beim Abschluss nach der Stunde lässt es sich mit einem Tipp als Thema ins Fahrtenbuch übernehmen",
+        ] },
     { v: "2.46.0", date: "September 2026", changes: [
             "Neu: Fahrschulwechsel per Übergabecode. Die bisherige Fahrschule erstellt im Schüler-Menü (⋮) einen Code (30 Tage gültig) und gibt ihn dem Schüler - z.B. per WhatsApp. Die neue Fahrschule löst ihn unter Schüler › Bestand übernehmen › „Übergabecode einlösen“ ein und sieht vorher eine Vorschau. Übernommen werden Stammdaten, Klasse, Theorie, Prüfungen, Unterlagen, ADK-/Strecken-Stand und die gefahrenen Stunden; Rechnungen, Zahlungen, Preise und Notizen bleiben bei der bisherigen Fahrschule",
             "Übernommene Überland-, Autobahn- und Dämmerungsfahrten zählen zur Sonderfahrten-Pflicht, werden bei der neuen Fahrschule aber nicht abgerechnet; das Schülerprofil zeigt, was von wo übernommen wurde",
@@ -7936,10 +7939,11 @@ async function insertEinmal(table, row, meldung) {
     }, id ? 3 : 1);
 }
 async function dbInsertAppt(uid, appt) {
-    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST" }; }
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST", ziel: appt.ziel||null }; }
     const row = { owner: uid, student_id: appt.student_id || null, title: appt.title || "",
         start_at: appt.start_at, end_at: appt.end_at || null, status: appt.status || "confirmed", note: appt.note || "",
-        art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null };
+        art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null,
+        ...(appt.ziel ? { ziel: appt.ziel } : {}) };
     return await insertEinmal("appointments", row, "Termin konnte nicht gespeichert werden");
 }
 async function dbUpdateAppt(id, patch) {
@@ -10687,6 +10691,7 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
                                 filter: on ? "none" : "grayscale(0.6) opacity(0.55)" } }, sm.emoji);
                     })))),
                 React.createElement("label", { htmlFor: "abschluss-thema", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Thema"),
+                appt && appt.ziel && !thema.trim() && React.createElement("button", { type: "button", onClick: () => setThema(String(appt.ziel).slice(0, 200)), style: { ...linkKnopf, padding: "0 0 6px" } }, "Ziel als Thema übernehmen"),
                 React.createElement("input", { id: "abschluss-thema", type: "text", value: thema, onChange: e => setThema(e.target.value), maxLength: 200,
                     placeholder: "z. B. Kreisverkehr, Einparken", style: eingabe }),
                 React.createElement("label", { htmlFor: "abschluss-naechstes", style: { ...abschnitt, display: "block", marginTop: 12, marginBottom: 6 } }, "Woran nächstes Mal arbeiten?"),
@@ -20180,9 +20185,28 @@ function App() {
     // Lernziel am NÄCHSTEN Termin eines Schülers (Produktplan #13): die offene Notiz "Woran nächstes
     // Mal arbeiten", sonst der deutlichste wiederkehrende Schwachpunkt aus dem Fahrtenbuch. Nur am
     // nächsten Termin, damit nicht jede künftige Karte dasselbe wiederholt.
+    // Vorschläge für "Ziel der Stunde" im Termin-Fenster: was die letzte Stunde offen gelassen hat,
+    // eine wiederkehrende Schwäche, noch fehlende Sonderfahrten. Nur Vorschläge - ein Tipp füllt das Feld.
+    function zielVorschlaege(stu) {
+        if (!stu) return [];
+        // {text: was ins Feld kommt, label: was der Knopf zeigt (bei Sonderfahrten mit Stand)}
+        const out = [];
+        const notiz = (stu.lastNote || "").trim();
+        if (notiz && !notizErledigt(stu)) out.push({ text: notiz, label: notiz });
+        const schwaeche = wiederkehrendeSchwaechenAus(stu.lessons)[0];
+        if (schwaeche) out.push({ text: schwaeche.feld + " üben", label: schwaeche.feld + " üben" });
+        sonderfahrtenBilanz(stu, stu.klasse || DEFAULT_KLASSE, sonderfahrtenSoll || {}).filter(x => !x.erfuellt).forEach(x => {
+            const name = x.label + (x.label.indexOf("fahrt") >= 0 ? "" : "fahrt");
+            out.push({ text: name, label: name + " (" + String(x.ue).replace(".", ",") + " von " + x.sollUe + " UE)" });
+        });
+        return out.filter((v, i) => v.text && out.findIndex(o => o.text === v.text) === i).slice(0, 4);
+    }
     function lernzielFuer(a, stu) {
         if (!a || !stu || a.status === "offered")
             return null;
+        // Beim Termin selbst festgelegtes Ziel geht vor - an jedem Termin, nicht nur am nächsten.
+        if (a.ziel && String(a.ziel).trim())
+            return { typ: "ziel", text: String(a.ziel).trim() };
         const naechster = nextApptByStudent[stu.id];
         if (!naechster || naechster.id !== a.id)
             return null;
@@ -27527,7 +27551,7 @@ function App() {
     }
     // Vergleichswert für "wurde im Termin-Fenster etwas geändert?" (Audit H-N17)
     function apptFormStand(f) {
-        return f ? [f.date, f.start, f.end, f.student_id, f.note, f.title, f.art, !!f.sonstige, !!(f.serie && f.serie.on)].join("|") : "";
+        return f ? [f.date, f.start, f.end, f.student_id, f.note, f.title, f.art, !!f.sonstige, !!(f.serie && f.serie.on), f.ziel || ""].join("|") : "";
     }
     // Neue Startzeit im Termin-Fenster: die Endzeit wandert mit und die Dauer bleibt (Audit H-N17).
     // Vorher blieb das Ende stehen - aus 14:00-15:30 wurde nach "16:00" ein ungültiges 16:00-15:30.
@@ -27573,6 +27597,7 @@ function App() {
     function openEditAppt(a) {
         const f = { id: a.id, date: ymd(a.start_at), start: hm(a.start_at), end: a.end_at ? hm(a.end_at) : "",
             student_id: a.student_id || "", note: noteText(a), title: a.title || "", start_at: a.start_at, status: a.status, sonstige: isSonstige(a), art: apptArt(a),
+            ziel: a.ziel || "", zielAlt: !!a.ziel,
             // Urlaub mitführen (Audit H-H1): noteText() entfernt die Urlaubs-Markierung, beim
             // Speichern wurde der Urlaubstag deshalb zu einer 24-Stunden-Fahrstunde (ÜST
             // 00:00-23:59, ~32 UE) - und mit Tageslimit liess er sich gar nicht speichern.
@@ -29038,7 +29063,10 @@ function App() {
             // sind confirmed.
             status: f.id ? (f.status || "confirmed") : "confirmed",
             // Urlaub wird ohne Terminart angelegt (saveUrlaub: art "") - so bleibt es
-            art: f.urlaub ? "" : (f.art || "ÜST")
+            art: f.urlaub ? "" : (f.art || "ÜST"),
+            // Ziel der Stunde (v2.47.0): nur bei Schüler-Terminen; beim Bearbeiten auch zum Leeren senden.
+            ...((() => { const z = (!f.urlaub && !f.sonstige && f.student_id) ? String(f.ziel || "").trim().slice(0, 300) : "";
+                return (z || f.zielAlt) ? { ziel: z || null } : {}; })())
         };
         apptSavingRef.current = true;
         setApptForm({ ...f, busy: true });
@@ -32116,10 +32144,10 @@ function App() {
             const stu = a.student_id ? (students || []).find(x => x.id === a.student_id) : null;
             const privat = apptArt(a) === "PRIVAT";
             return [ymd(a.start_at), hm(a.start_at), a.end_at ? hm(a.end_at) : "", privat ? "Privat" : (stu ? dispName(stu) : (a.title || "")),
-                artLabelPlain(apptArt(a)), status[a.status] || a.status || "", a.end_at ? Math.round((new Date(a.end_at) - new Date(a.start_at)) / 60000) : 45];
+                artLabelPlain(apptArt(a)), status[a.status] || a.status || "", a.end_at ? Math.round((new Date(a.end_at) - new Date(a.start_at)) / 60000) : 45, privat ? "" : (a.ziel || "")];
         }).sort((x, y) => (x[0] + x[1]).localeCompare(y[0] + y[1]));
         if (!zeilen.length) { showToast("Noch keine Termine zum Exportieren."); return; }
-        csvHerunterladen("termine_" + ymd(new Date()) + ".csv", ["Datum", "Beginn", "Ende", "Schüler / Titel", "Art", "Status", "Minuten"], zeilen);
+        csvHerunterladen("termine_" + ymd(new Date()) + ".csv", ["Datum", "Beginn", "Ende", "Schüler / Titel", "Art", "Status", "Minuten", "Ziel der Stunde"], zeilen);
     }
     function exportFahrtenbuch() {
         try {
@@ -36658,6 +36686,19 @@ function App() {
                     React.createElement("select", { value: apptForm.student_id, onChange: e => setApptForm({ ...apptForm, student_id: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                         React.createElement("option", { value: "" }, "\u2013 kein Sch\u00FCler \u2013"),
                         students.filter(s => s._isMine && !s.archived).sort((a, b) => dispName(a).localeCompare(dispName(b), "de")).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s)))))),
+                !apptForm.urlaub && !apptForm.sonstige && apptForm.student_id && (() => {
+                    const stu = (students || []).find(x => x.id === apptForm.student_id);
+                    const vorschlaege = zielVorschlaege(stu).filter(v => v.text !== String(apptForm.ziel || "").trim());
+                    return React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                        React.createElement("label", { htmlFor: "appt-ziel" }, "Ziel der Stunde (optional)"),
+                        React.createElement("input", { id: "appt-ziel", type: "text", value: apptForm.ziel || "", maxLength: 300,
+                            onChange: e => setApptForm({ ...apptForm, ziel: e.target.value }), placeholder: "z.B. Kreisverkehr, rückwärts einparken, erste Autobahnfahrt\u2026" }),
+                        vorschlaege.length > 0 && React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } },
+                            vorschlaege.map(v => React.createElement("button", { key: v.text, type: "button",
+                                onClick: () => setApptForm(f => f && ({ ...f, ziel: v.text })),
+                                style: { border: "1.5px solid var(--line)", background: "var(--card)", borderRadius: 99, padding: "5px 11px", fontSize: 12.5, fontWeight: 600, color: "var(--ink-2)", cursor: "pointer", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "+ " + v.label))),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 5 } }, "Steht im Kalender am Termin und im Abschluss nach der Stunde."));
+                })(),
                 React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                     React.createElement("label", null, "Notiz (optional)",
                     React.createElement("input", { type: "text", value: apptForm.note, onChange: e => setApptForm({ ...apptForm, note: e.target.value }), placeholder: "z.B. Autobahnfahrt, Treffpunkt\u2026" }))),
