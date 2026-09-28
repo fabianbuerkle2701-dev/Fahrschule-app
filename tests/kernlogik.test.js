@@ -427,7 +427,11 @@ test("Offline-Warteschlange: erledigt nur, wenn seitdem nichts Neues dazukam", (
 test("Bestand übernehmen: Spalten typischer Exporte ohne KI erkennen", () => {
     const m = app.spaltenRaten(["Kd.-Nr.", "Nachname", "Vorname", "Geb.-Datum", "Straße", "PLZ", "Ort", "Telefon", "E-Mail", "Führerscheinklasse", "Anmeldung"]);
     assert.deepEqual(rein(m), { vorname: 2, name: 1, geburtstag: 3, handy: 7, festnetz: null, email: 8, adresse: 4, hausnr: null,
-        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null });
+        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null, stunden_gesamt: null, ueberland: null, autobahn: null, nacht: null });
+    // v2.61.0: Startwerte-Spalten (Stunden gesamt, Sonderfahrten in UE)
+    const sw = app.spaltenRaten(["Name", "Vorname", "Fahrstunden gesamt", "Überlandfahrten", "Autobahn", "Nachtfahrten", "Theoriestunden"]);
+    assert.equal(sw.stunden_gesamt, 2); assert.equal(sw.ueberland, 3); assert.equal(sw.autobahn, 4); assert.equal(sw.nacht, 5);
+    assert.notEqual(sw.stunden_gesamt, 6, "Theoriestunden sind keine Fahrstunden");
     // Eine Spalte "Name, Vorname" -> name, Vorname bleibt leer (wird beim Import geteilt)
     const v = app.spaltenRaten(["Name, Vorname", "Handy", "Telefon privat", "Theorieprüfung am"]);
     assert.equal(v.name, 0); assert.equal(v.vorname, null);
@@ -524,4 +528,17 @@ test("Rechnungszeilen: Sammelrechnung lässt herausgenommene Posten weg, Einzelr
     assert.equal(ids(sammel), JSON.stringify(["C1", "L1"]), "Sammelrechnung nur, was die Liste zeigt");
     assert.equal(summe(sammel), 80);
     assert.equal(summe(einzel), 150);
+});
+
+// v2.61.0: Startwerte aus der alten Software zählen zur Sonderfahrten-Pflicht
+const sw2 = require("./lade-app")(["startwerteFahrstunden", "sonderfahrtenBilanz"]);
+test("Startwerte: Sonderfahrten in UE werden Sammelzeilen und zählen zur Bilanz", () => {
+    const f = sw2.startwerteFahrstunden({ "ÜL": "2", "AB": "1,5", "NF": "" }, "B");
+    assert.equal(f.length, 2);
+    assert.equal(f[0].art, "ÜL"); assert.equal(f[0].minutes, 90);
+    assert.equal(f[1].art, "AB"); assert.equal(f[1].minutes, 68);
+    const b = sw2.sonderfahrtenBilanz({ drivenLessons: [{ art: "ÜL", minutes: 135, klasse: "B" }], uebernahme: { startwerte: true, fahrstunden: f } }, "B", {});
+    const ul = Array.from(b).find(x => x.code === "ÜL");
+    assert.equal(ul.ue, 5, "3 UE gefahren + 2 UE Startwert");
+    assert.equal(ul.erfuellt, true);
 });

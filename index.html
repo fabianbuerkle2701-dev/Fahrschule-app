@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.60.0";
+const APP_VERSION = "2.61.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.61.0", date: "September 2026", changes: [
+            "Wechsel aus einer anderen Software: Der Excel-/CSV-Import erkennt jetzt auch Spalten für gefahrene Stunden und Sonderfahrten (Überland, Autobahn, Nacht/Dämmerung). Sonderfahrten werden als Startwerte gespeichert, zählen zur Pflicht und werden nicht abgerechnet",
+            "Im Schülerprofil lässt sich der bisherige Stand an Sonderfahrten auch von Hand eintragen oder ändern",
+        ] },
     { v: "2.60.0", date: "September 2026", changes: [
             "Schülerliste: Hat die Fahrschule mehrere Standorte, filterst du die Liste nach Standort (oder „Ohne Standort“). Die Auswahl bleibt gemerkt",
         ] },
@@ -6004,6 +6008,11 @@ const IMPORT_SPALTEN = [
     ["anmeldedatum", ["anmeldedatum", "anmeldung", "angemeldetam", "angemeldet", "vertragsdatum", "vertragsbeginn", "ausbildungsbeginn", "eintritt", "eintrittsdatum", "startdatum"]],
     ["klasse", ["klasse", "klassen", "fuehrerscheinklasse", "fsklasse", "ausbildungsklasse", "beantragteklasse"]],
     ["theorie_bestanden", ["theoriebestanden", "theoriepruefung", "theoriepruefungam", "theoriedatum", "theorie"]],
+    // Startwerte beim Wechsel aus einer anderen Software (v2.61.0, Produktplan #31). Sonderfahrten in UE.
+    ["stunden_gesamt", ["fahrstunden", "fahrstundengesamt", "anzahlfahrstunden", "gefahrenestunden", "stundengesamt", "fahrstd"]],
+    ["ueberland", ["ueberland", "ueberlandfahrten", "ueberlandfahrt"]],
+    ["autobahn", ["autobahn", "autobahnfahrten", "autobahnfahrt"]],
+    ["nacht", ["nachtfahrten", "nachtfahrt", "beleuchtungsfahrten", "beleuchtungsfahrt", "beleuchtung", "daemmerungsfahrten", "daemmerungsfahrt", "daemmerung", "nacht"]],
 ];
 function spaltenRaten(header) {
     const kopf = (header || []).map(normKopf);
@@ -6165,6 +6174,15 @@ async function wechselEinloesen(code) {
 }
 function wechselCodeAnzeige(code) { const c = String(code || ""); return c.length === 8 ? c.slice(0, 4) + "-" + c.slice(4) : c; }
 // Kurzfassung einer Übernahme für Vorschau und Profilkarte: Anzahl, Minuten, Sonderfahrten je Art.
+// Startwerte (v2.61.0): je Sonderfahrt-Art eine Sammelzeile mit UE x 45 Minuten, ohne echtes Datum
+// der einzelnen Fahrten - das kennt die alte Software oft selbst nicht.
+function startwerteFahrstunden(ueJeArt, klasse) {
+    const heute = ymd(new Date());
+    return SONDERFAHRT_ARTEN.map(a => {
+        const ue = Number(String((ueJeArt || {})[a.code] || "").replace(",", ".")) || 0;
+        return ue > 0 ? { date: heute, minutes: Math.round(ue * 45), art: a.code, klasse: klasse || "", startwert: true } : null;
+    }).filter(Boolean);
+}
 function uebernahmeZusammenfassung(fahrstunden) {
     const l = Array.isArray(fahrstunden) ? fahrstunden : [];
     const minuten = l.reduce((x, f) => x + (Number(f.minutes) || 0), 0);
@@ -15434,6 +15452,7 @@ function App() {
     // Filter-Pillen über der Schülerliste (spec 7): "alle" | "aktiv" | "reif" | "offen"
     const [listFilter, setListFilter] = useState("alle");
     // Standort als Filter-Dimension (v2.60.0, Produktplan #39): "" = alle, "__ohne" = ohne Standort
+    const [startwerteEdit, setStartwerteEdit] = useState(null); // v2.61.0: {id, werte:{ÜL,AB,NF}}
     const [standortFilter, setStandortFilterRoh] = useState(() => { try { return localStorage.getItem("v3_standort_filter") || ""; } catch (e) { return ""; } });
     function setStandortFilter(v) { setStandortFilterRoh(v); try { localStorage.setItem("v3_standort_filter", v || ""); } catch (e) { } }
     const [tabMenu, setTabMenu] = useState(null); // null | "ausbildung" | "mehr"
@@ -19383,7 +19402,16 @@ function App() {
             handy: cell(map.handy), festnetz: cell(map.festnetz), email: cell(map.email),
             adresse: [[cell(map.adresse), cell(map.hausnr)].filter(Boolean).join(" "), [cell(map.plz), cell(map.ort)].filter(Boolean).join(" ")].filter(Boolean).join(", "),
             anmeldedatum: normDatum(cell(map.anmeldedatum)),
-            klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)) };
+            klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)),
+            stunden_gesamt: zahlAusZelle(cell(map.stunden_gesamt)),
+            ueberlandfahrten: zahlAusZelle(cell(map.ueberland)), autobahnfahrten: zahlAusZelle(cell(map.autobahn)),
+            beleuchtungsfahrten: zahlAusZelle(cell(map.nacht)) };
+    }
+    // "3", "3,5", "3 UE" -> Zahl; leer oder Unsinn -> "" (dann kein Startwert)
+    function zahlAusZelle(t) {
+        const m = String(t || "").replace(",", ".").match(/-?\d+(\.\d+)?/);
+        const n = m ? Number(m[0]) : NaN;
+        return (Number.isFinite(n) && n > 0 && n < 1000) ? String(n) : "";
     }
     const normName = (v) => String(v || "").toLowerCase().replace(/\s+/g, " ").trim();
     async function csvDateiGewaehlt(file) {
@@ -19763,10 +19791,17 @@ function App() {
             extra.push("Klasse: " + d.klasse);
         if (extra.length)
             draft.bemerkungen = extra.join("\n");
-        const manualCount = (parseInt(d.uebungsfahrten, 10) || 0) + (parseInt(d.autobahnfahrten, 10) || 0)
+        // Steht eine Gesamtzahl in der Tabelle, gilt sie; sonst die Summe der Einzelangaben (Foto-Import).
+        const gesamt = parseInt(d.stunden_gesamt, 10) || 0;
+        const manualCount = gesamt > 0 ? gesamt : (parseInt(d.uebungsfahrten, 10) || 0) + (parseInt(d.autobahnfahrten, 10) || 0)
             + (parseInt(d.ueberlandfahrten, 10) || 0) + (parseInt(d.beleuchtungsfahrten, 10) || 0) + (parseInt(d.grundfahraufgaben, 10) || 0);
         if (manualCount > 0)
             draft.manualHours = String(manualCount);
+        // Sonderfahrten aus der alten Software zählen zur Pflicht (sonderfahrtenBilanz), werden aber nie
+        // abgerechnet - dasselbe Feld wie beim Fahrschulwechsel per Übergabecode (v2.61.0).
+        const sw = startwerteFahrstunden({ "ÜL": d.ueberlandfahrten, "AB": d.autobahnfahrten, "NF": d.beleuchtungsfahrten }, draft.klasse);
+        if (sw.length)
+            draft.uebernahme = { vonSchule: "Bisheriger Stand", am: ymd(new Date()), startwerte: true, fahrstunden: sw };
         return draft;
     }
     async function createStudentFromImportInner(d) {
@@ -27318,10 +27353,49 @@ function App() {
                         i < STATIONS.length - 1 && React.createElement("div", { className: "path-line", style: { background: tc.fg } }));
                 })),
             studentTab === "profil" && React.createElement("div", { className: "station-panel" },
-                active.uebernahme && (() => {
+                // Bisheriger Stand (v2.61.0, Produktplan #31): Sonderfahrten aus der alten Software als
+                // Startwerte. Nicht bei einer Übernahme per Code - die bringt ihre Fahrten selbst mit.
+                (!active.uebernahme || active.uebernahme.startwerte) && (() => {
+                    const sw = startwerteEdit && startwerteEdit.id === active.id ? startwerteEdit : null;
+                    const vorhanden = {};
+                    ((active.uebernahme && active.uebernahme.fahrstunden) || []).forEach(x => { vorhanden[x.art] = Math.round((Number(x.minutes) || 0) / 45 * 100) / 100; });
+                    if (!sw)
+                        return React.createElement("button", { type: "button", className: "btn btn-ghost btn-block", style: { marginBottom: 14, justifyContent: "space-between" },
+                                onClick: () => setStartwerteEdit({ id: active.id, werte: { STD: String(parseInt(active.manualHours, 10) || ""), "ÜL": String(vorhanden["ÜL"] || ""), "AB": String(vorhanden["AB"] || ""), "NF": String(vorhanden["NF"] || "") } }) },
+                            React.createElement("span", null, active.uebernahme ? "Bisheriger Stand bearbeiten" : "Bisherigen Stand eintragen"),
+                            React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 600 } }, "Stunden und Sonderfahrten vor Allindrive"));
+                    const setW = (k, v) => setStartwerteEdit(x => x && ({ ...x, werte: { ...x.werte, [k]: v } }));
+                    return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14 } },
+                        React.createElement("div", { style: { fontWeight: 800, fontSize: 14 } }, "Bisheriger Stand"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", margin: "3px 0 10px", lineHeight: 1.5 } },
+                            "Was vor Allindrive schon gefahren wurde, z.B. laut bisheriger Software. Zählt zu Stunden und Sonderfahrten-Pflicht, wird aber nicht abgerechnet."),
+                        React.createElement("label", { style: { display: "block", fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)", marginBottom: 8 } }, "Fahrstunden bisher (Anzahl)",
+                            React.createElement("input", { type: "number", inputMode: "numeric", min: 0, step: "1", value: sw.werte.STD || "", onChange: e => setW("STD", e.target.value),
+                                style: { width: "100%", marginTop: 4, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 10px", fontSize: 16, background: "var(--card)" } })),
+                        React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)", margin: "4px 0 4px" } }, "davon Sonderfahrten in UE (45 Minuten)"),
+                        React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 8 } },
+                            SONDERFAHRT_ARTEN.map(a => React.createElement("label", { key: a.code, style: { fontSize: 12.5, fontWeight: 700, color: "var(--ink-2)" } }, a.label,
+                                React.createElement("input", { type: "number", inputMode: "decimal", min: 0, step: "0.5", value: sw.werte[a.code] || "", onChange: e => setW(a.code, e.target.value),
+                                    style: { width: "100%", marginTop: 4, border: "1.5px solid var(--line)", borderRadius: 10, padding: "9px 10px", fontSize: 16, background: "var(--card)" } })))),
+                        React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 12 } },
+                            React.createElement("button", { type: "button", className: "btn btn-primary", style: { flex: 1 }, onClick: () => {
+                                    const fahrten = startwerteFahrstunden(sw.werte, active.klasse || DEFAULT_KLASSE);
+                                    schuelerAendernUndSpeichern(active.id, cur => {
+                                        const neu = { ...cur, manualHours: String(Math.max(0, parseInt(sw.werte.STD, 10) || 0)) };
+                                        if (fahrten.length)
+                                            neu.uebernahme = { vonSchule: "Bisheriger Stand", am: (cur.uebernahme && cur.uebernahme.am) || ymd(new Date()), startwerte: true, fahrstunden: fahrten };
+                                        else
+                                            delete neu.uebernahme;
+                                        return neu;
+                                    });
+                                    setStartwerteEdit(null);
+                                } }, "Speichern"),
+                            React.createElement("button", { type: "button", className: "btn btn-ghost", style: { flex: 1 }, onClick: () => setStartwerteEdit(null) }, "Abbrechen")));
+                })(),
+                active.uebernahme && !(startwerteEdit && startwerteEdit.id === active.id) && (() => {
                     const z = uebernahmeZusammenfassung(active.uebernahme.fahrstunden);
                     return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14, background: "var(--sky-bg, var(--card))" } },
-                        React.createElement("div", { style: { fontWeight: 800, fontSize: 14 } }, "Übernommen von " + (active.uebernahme.vonSchule || "anderer Fahrschule")),
+                        React.createElement("div", { style: { fontWeight: 800, fontSize: 14 } }, (active.uebernahme.startwerte ? "Bisheriger Stand vor Allindrive" : "Übernommen von " + (active.uebernahme.vonSchule || "anderer Fahrschule"))),
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
                             (active.uebernahme.am ? "am " + dashDatum(active.uebernahme.am) + " · " : "") + z.anzahl + (z.anzahl === 1 ? " Fahrstunde" : " Fahrstunden") + " (" + String(z.ue).replace(".", ",") + " UE) dort gefahren"
                             + (z.sonder.length ? " · Sonderfahrten: " + z.sonder.map(x => x.label + " " + x.minuten + " Min.").join(", ") : "")),
@@ -35036,7 +35110,7 @@ function App() {
                     });
                     const neu = neuZeilen.length;
                     const dublettenCount = zeilen.length - neu;
-                    const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Stra\u00DFe / Adresse"], ["hausnr","Hausnummer"], ["plz","PLZ"], ["ort","Ort"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"]];
+                    const felder = [["vorname","Vorname"], ["name","Nachname"], ["geburtstag","Geburtsdatum"], ["handy","Handy"], ["festnetz","Festnetz"], ["email","E-Mail"], ["adresse","Stra\u00DFe / Adresse"], ["hausnr","Hausnummer"], ["plz","PLZ"], ["ort","Ort"], ["anmeldedatum","Anmeldedatum"], ["klasse","Klasse"], ["theorie_bestanden","Theorie bestanden"], ["stunden_gesamt","Fahrstunden gesamt"], ["ueberland","Überland (UE)"], ["autobahn","Autobahn (UE)"], ["nacht","Dämmerung/Nacht (UE)"]];
                     return React.createElement(React.Fragment, null,
                         React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } },
                             csvImport.daten.length + " Zeilen gelesen \u00B7 " + neu + " werden angelegt"
