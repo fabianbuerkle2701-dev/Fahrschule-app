@@ -3533,7 +3533,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.51.1";
+const APP_VERSION = "2.52.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3677,6 +3677,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.52.0", date: "September 2026", changes: [
+            "Fahrzeug an der Fahrstunde: Im Termin-Fenster wählst du das Auto (vorbelegt mit dem zuletzt benutzten). Fährt ein Kollege es zur selben Zeit oder ist es im Fahrzeug-Kalender gebucht, weist die App vor dem Speichern darauf hin",
+            "Das Fahrzeug steht an der Kalenderkarte, wandert in den Leistungsnachweis und zählt in der Fuhrpark-Auslastung mit",
+        ] },
     { v: "2.51.1", date: "September 2026", changes: [
             "Absage-Fenster: Ist die Ausfallgebühr noch nicht entschieden, fragt die App vor dem Schließen oder Weiterschalten nach, statt sie still fallen zu lassen",
             "Termin-Fenster: Ein Tipp auf eine freie Zeit bei einem Termin ohne Ende setzt jetzt 45 Minuten ab dem neuen Beginn (vorher konnte ein stundenlanger Termin entstehen)",
@@ -8003,12 +8007,27 @@ async function insertEinmal(table, row, meldung) {
     }, id ? 3 : 1);
 }
 async function dbInsertAppt(uid, appt) {
-    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST", ziel: appt.ziel||null, abholort: appt.abholort||null }; }
+    if (IS_DEMO()) { demoBlock("Demo-Ansicht: Termine werden nicht gespeichert."); return { id: "demo_"+Date.now().toString(36), owner: uid, student_id: appt.student_id||null, title: appt.title||"", start_at: appt.start_at, end_at: appt.end_at||null, status: appt.status||"confirmed", note: appt.note||"", art: appt.art||"ÜST", ziel: appt.ziel||null, abholort: appt.abholort||null, fahrzeug: appt.fahrzeug||null }; }
     const row = { owner: uid, student_id: appt.student_id || null, title: appt.title || "",
         start_at: appt.start_at, end_at: appt.end_at || null, status: appt.status || "confirmed", note: appt.note || "",
         art: appt.art || "ÜST", offer_klasse: appt.offer_klasse || null, offered_at: appt.offered_at || null,
-        ...(appt.ziel ? { ziel: appt.ziel } : {}), ...(appt.abholort ? { abholort: appt.abholort } : {}) };
+        ...(appt.ziel ? { ziel: appt.ziel } : {}), ...(appt.abholort ? { abholort: appt.abholort } : {}),
+        ...(appt.fahrzeug ? { fahrzeug: appt.fahrzeug } : {}) };
     return await insertEinmal("appointments", row, "Termin konnte nicht gespeichert werden");
+}
+// Fahrzeug schon belegt (#23)? Fragt Termine der Kollegen derselben Fahrschule und den Fahrzeug-
+// Kalender ab (RPC fahrzeug_belegt, nur Name + Uhrzeit). Ohne Netz oder bei Fehlern null - die
+// Prüfung ist ein Hinweis, sie darf das Speichern nie verhindern.
+async function fahrzeugBelegt(fahrzeug, startISO, endISO, ausserId) {
+    if (!fahrzeug || IS_DEMO() || (typeof navigator !== "undefined" && navigator.onLine === false))
+        return null;
+    try {
+        const { data, error } = await sb.rpc("fahrzeug_belegt", { p_fahrzeug: fahrzeug, p_start: startISO, p_end: endISO || null, p_ausser: ausserId || null });
+        return error ? null : (data || null);
+    }
+    catch (e) {
+        return null;
+    }
 }
 async function dbUpdateAppt(id, patch) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: nicht gespeichert."); return; }
@@ -17872,7 +17891,7 @@ function App() {
             const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
             if (extra && extra.folge) {
-                const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST" };
+                const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST", fahrzeug: (appt.fahrzeug && vehicles.some(v => v.id === appt.fahrzeug && !v.inactive)) ? appt.fahrzeug : fahrzeugVorschlag() };
                 setApptForm({ ...f, _stand: apptFormStand(f) });
             }
         }
@@ -17977,7 +17996,8 @@ function App() {
             apptId: f.id || null,
             studentId: f.student_id,
             art: f.art || "ÜST",
-            vehicleId: (vehicles.find(v => !v.inactive) || vehicles[0] || {}).id || "",
+            // Fahrzeug vom Termin (#23), sonst das zuletzt benutzte, sonst das erste aktive
+            vehicleId: (f.fahrzeug && vehicles.some(v => v.id === f.fahrzeug) ? f.fahrzeug : "") || fahrzeugVorschlag() || (vehicles.find(v => !v.inactive) || vehicles[0] || {}).id || "",
             // Klasse kommt vom Schüler selbst, nicht geraten - der Schüler ist hier bereits bekannt.
             klasse: stu.klasse || DEFAULT_KLASSE,
             stufe: LEISTUNGSSTUFEN[0],
@@ -26181,7 +26201,7 @@ function App() {
         const anzahl = Math.max(2, Math.min(52, Math.ceil(plan.restUE / sessionUE)));
         const wiederholung = plan.ueProWoche > 1.2 ? "weekly" : "biweekly";
         const f = { id: null, date: ymd(addDays(new Date(), 1)), start: "16:00", end: "17:30", student_id: active.id, note: "", title: "", sonstige: false, art: "ÜST",
-            serie: { on: true, wiederholung, anzahl } };
+            serie: { on: true, wiederholung, anzahl }, fahrzeug: fahrzeugVorschlag() };
         // Mit Vergleichsstand wie openNewAppt(): ein Tipp daneben fragt nach, sobald etwas geändert wurde (Audit H-N17)
         setApptForm({ ...f, _stand: apptFormStand(f) });
     }
@@ -27627,7 +27647,24 @@ function App() {
     }
     // Vergleichswert für "wurde im Termin-Fenster etwas geändert?" (Audit H-N17)
     function apptFormStand(f) {
-        return f ? [f.date, f.start, f.end, f.student_id, f.note, f.title, f.art, !!f.sonstige, !!(f.serie && f.serie.on), f.ziel || "", f.abholort || ""].join("|") : "";
+        return f ? [f.date, f.start, f.end, f.student_id, f.note, f.title, f.art, !!f.sonstige, !!(f.serie && f.serie.on), f.ziel || "", f.abholort || "", f.fahrzeug || ""].join("|") : "";
+    }
+    // Fahrzeug-Vorbelegung (#23): das zuletzt an einem eigenen Termin eingetragene, noch aktive
+    // Fahrzeug; gibt es nur ein aktives Fahrzeug, dieses. Ohne Fuhrpark leer.
+    function fahrzeugVorschlag() {
+        const aktiv = vehicles.filter(v => !v.inactive);
+        if (!aktiv.length)
+            return "";
+        const letzter = (appts || []).filter(a => a.fahrzeug && aktiv.some(v => v.id === a.fahrzeug))
+            .sort((p, r) => String(r.start_at).localeCompare(String(p.start_at)))[0];
+        return letzter ? letzter.fahrzeug : (aktiv.length === 1 ? aktiv[0].id : "");
+    }
+    function fahrzeugName(id) {
+        const v = id ? vehicles.find(x => x.id === id) : null;
+        return v ? (v.name || v.plate || "Fahrzeug") : "";
+    }
+    function fahrzeugBelegtText(b) {
+        return b.wer + " hat das Fahrzeug " + hm(b.start_at) + (b.end_at ? " bis " + hm(b.end_at) : "") + " Uhr" + (b.quelle === "kalender" ? " im Fahrzeug-Kalender gebucht" : "");
     }
     // Neue Startzeit im Termin-Fenster: die Endzeit wandert mit und die Dauer bleibt (Audit H-N17).
     // Vorher blieb das Ende stehen - aus 14:00-15:30 wurde nach "16:00" ein ungültiges 16:00-15:30.
@@ -27667,13 +27704,16 @@ function App() {
         const parts = s.split(":");
         const endMin = Math.min(parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10) + 60, 23 * 60 + 59);
         const e = String(Math.floor(endMin / 60)).padStart(2, "0") + ":" + String(endMin % 60).padStart(2, "0");
-        const f = { id: null, date: vorschlag.date, start: s, end: e, student_id: "", note: "", title: "", sonstige: false, art: "ÜST" };
+        const f = { id: null, date: vorschlag.date, start: s, end: e, student_id: "", note: "", title: "", sonstige: false, art: "ÜST", fahrzeug: fahrzeugVorschlag() };
         setApptForm({ ...f, _stand: apptFormStand(f) });
     }
     function openEditAppt(a) {
         const f = { id: a.id, date: ymd(a.start_at), start: hm(a.start_at), end: a.end_at ? hm(a.end_at) : "",
             student_id: a.student_id || "", note: noteText(a), title: a.title || "", start_at: a.start_at, status: a.status, sonstige: isSonstige(a), art: apptArt(a),
             ziel: a.ziel || "", zielAlt: !!a.ziel, abholort: a.abholort || "", abholortAlt: !!a.abholort,
+            fahrzeug: a.fahrzeug || "", fahrzeugAlt: !!a.fahrzeug,
+            // Belegt-Prüfung beim Bearbeiten nur, wenn Fahrzeug oder Zeit geändert wurden
+            _fzAlt: [a.fahrzeug || "", ymd(a.start_at), hm(a.start_at), a.end_at ? hm(a.end_at) : ""].join("|"),
             // Urlaub mitführen (Audit H-H1): noteText() entfernt die Urlaubs-Markierung, beim
             // Speichern wurde der Urlaubstag deshalb zu einer 24-Stunden-Fahrstunde (ÜST
             // 00:00-23:59, ~32 UE) - und mit Tageslimit liess er sich gar nicht speichern.
@@ -29125,6 +29165,20 @@ function App() {
             if (!await askConfirm({ message: txt }))
                 return;
         }
+        // Fahrzeug schon belegt (#23)? Riegel wie beim Speichern, sonst legte ein Doppeltipp während der
+        // Abfrage den Termin zweimal an.
+        if (f.fahrzeug && !f.urlaub && [f.fahrzeug, f.date, f.start, f.end || ""].join("|") !== f._fzAlt) {
+            apptSavingRef.current = true;
+            let beleg = null;
+            try {
+                beleg = await fahrzeugBelegt(f.fahrzeug, startISO, endISO, f.id);
+            }
+            finally {
+                apptSavingRef.current = false;
+            }
+            if (beleg && !await askConfirm({ title: fahrzeugName(f.fahrzeug) + " ist belegt", message: fahrzeugBelegtText(beleg) + ".\n\nTrotzdem mit diesem Fahrzeug speichern?", confirmLabel: "Trotzdem speichern" }))
+                return;
+        }
         const payload = {
             start_at: startISO,
             end_at: endISO,
@@ -29145,7 +29199,10 @@ function App() {
                 return (z || f.zielAlt) ? { ziel: z || null } : {}; })()),
             // Abholort (v2.49.0): wie das Ziel nur mitschicken, wenn gesetzt oder vorher vorhanden.
             ...((() => { const o = (!f.urlaub && !f.sonstige) ? String(f.abholort || "").trim().slice(0, 200) : "";
-                return (o || f.abholortAlt) ? { abholort: o || null } : {}; })())
+                return (o || f.abholortAlt) ? { abholort: o || null } : {}; })()),
+            // Fahrzeug (#23): wie Ziel/Abholort nur mitschicken, wenn gesetzt oder vorher vorhanden
+            ...((() => { const v = !f.urlaub ? String(f.fahrzeug || "") : "";
+                return (v || f.fahrzeugAlt) ? { fahrzeug: v || null } : {}; })())
         };
         apptSavingRef.current = true;
         setApptForm({ ...f, busy: true });
@@ -29201,6 +29258,7 @@ function App() {
         apptSavingRef.current = true;
         setApptForm({ ...f, busy: true });
         const skipped = [];
+        const fzBelegt = [];
         let createdCount = 0;
         try {
             for (const date of dates) {
@@ -29222,10 +29280,15 @@ function App() {
                 const payload = { start_at: startISO, end_at: endISO, student_id: f.student_id || null,
                     note: makeNote(f.sonstige, f.note || ""), title: f.title || "", status: "confirmed", art: f.art || "ÜST",
                     // Ziel/Abholort wie beim Einzeltermin (fehlten bis v2.51.1 an allen Serienterminen)
-                    ...(serieZiel ? { ziel: serieZiel } : {}), ...(serieAbholort ? { abholort: serieAbholort } : {}) };
+                    ...(serieZiel ? { ziel: serieZiel } : {}), ...(serieAbholort ? { abholort: serieAbholort } : {}),
+                    ...(f.fahrzeug ? { fahrzeug: f.fahrzeug } : {}) };
                 const c = await addAppt(payload);
                 if (c)
                     createdCount++;
+                // Fahrzeug belegt: Termin trotzdem anlegen, am Ende melden (das Auto lässt sich tauschen,
+                // eine übersprungene Stunde fällt dagegen leicht unter den Tisch)
+                if (c && f.fahrzeug && await fahrzeugBelegt(f.fahrzeug, startISO, endISO, c.id))
+                    fzBelegt.push(date);
                 else
                     skipped.push({ date, reason: "Speichern fehlgeschlagen" });
             }
@@ -29233,7 +29296,10 @@ function App() {
             const skipText = skipped.length
                 ? " – übersprungen: " + skipped.map(s => new Date(s.date + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" }) + " (" + s.reason + ")").join(", ")
                 : "";
-            showFlash("✓ " + createdCount + " von " + dates.length + " Terminen angelegt" + skipText);
+            const fzText = fzBelegt.length
+                ? " – " + fahrzeugName(f.fahrzeug) + " ist schon belegt am " + fzBelegt.map(d => new Date(d + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" })).join(", ")
+                : "";
+            showFlash("✓ " + createdCount + " von " + dates.length + " Terminen angelegt" + skipText + fzText);
         }
         finally {
             apptSavingRef.current = false;
@@ -29354,7 +29420,8 @@ function App() {
                                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", marginTop: 1 } },
                                     [artLabelPlain(apptArt(a)), aStu && aStu.klasse ? "Klasse " + aStu.klasse : null].filter(Boolean).join(" · ") || noteText(a) || "Termin"),
                                 lernzielZeile(lernzielFuer(a, aStu)),
-                                a.abholort && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "Abholung: " + a.abholort)),
+                                (a.abholort || fahrzeugName(a.fahrzeug)) && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-3)", marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } },
+                                    [a.abholort ? "Abholung: " + a.abholort : "", fahrzeugName(a.fahrzeug)].filter(Boolean).join(" · "))),
                             offered && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--sage-deep)",
                                     background: "var(--card)", borderRadius: 6, padding: "3px 7px", textTransform: "uppercase" } }, "Warteliste"),
                             pend && React.createElement("span", { style: { flexShrink: 0, fontSize: 10, fontWeight: 800, color: "var(--amber-ink)",
@@ -35722,7 +35789,7 @@ function App() {
                 { key: "termin", label: "Erste Fahrstunde planen", hinweis: "öffnet ein vorausgefülltes Termin-Fenster", run: () => {
                     setFolgeschritte(null);
                     const v = neuerTerminVorschlag();
-                    const f = { id: null, date: v.date, start: v.start, end: fromMin(Math.min(toMin(v.start) + 90, 23 * 60 + 59)), student_id: stu.id, note: "", title: "", sonstige: false, art: "ÜST" };
+                    const f = { id: null, date: v.date, start: v.start, end: fromMin(Math.min(toMin(v.start) + 90, 23 * 60 + 59)), student_id: stu.id, note: "", title: "", sonstige: false, art: "ÜST", fahrzeug: fahrzeugVorschlag() };
                     setApptForm({ ...f, _stand: apptFormStand(f) });
                 } },
             ];
@@ -36884,6 +36951,18 @@ function App() {
                                     onChange: e => setF({ abholort: e.target.value }), placeholder: "Wo holst du ab?" }),
                                 liste.length > 0 && React.createElement("div", { className: "tf-row", style: { marginTop: 8 } },
                                     liste.map(v => React.createElement("button", { key: v.text, type: "button", className: "tf-pill klein", title: v.text, onClick: () => setF({ abholort: v.text }) }, v.label))));
+                        })(),
+                        // Fahrzeug (#23): nur mit Fuhrpark; ein inzwischen stillgelegtes bleibt sichtbar, solange es gewählt ist
+                        (() => {
+                            const liste = vehicles.filter(v => !v.inactive || v.id === f.fahrzeug);
+                            if (!liste.length)
+                                return null;
+                            return React.createElement(React.Fragment, null,
+                                React.createElement("div", { className: "tf-label" }, "Fahrzeug", React.createElement("small", null, "optional")),
+                                React.createElement("div", { className: "tf-row", role: "radiogroup", "aria-label": "Fahrzeug" },
+                                    liste.map(v => React.createElement("button", { key: v.id, type: "button", role: "radio", "aria-checked": f.fahrzeug === v.id, title: [v.name, v.plate].filter(Boolean).join(" · "),
+                                        className: "tf-pill" + (f.fahrzeug === v.id ? " on" : ""), onClick: () => setF({ fahrzeug: v.id }) }, v.name || v.plate || "Fahrzeug")),
+                                    React.createElement("button", { type: "button", role: "radio", "aria-checked": !f.fahrzeug, className: "tf-pill" + (!f.fahrzeug ? " on" : ""), onClick: () => setF({ fahrzeug: "" }) }, "Ohne")));
                         })(),
                         // Weitere Optionen
                         React.createElement("button", { type: "button", className: "tf-mehr", "aria-expanded": !!f.mehr, onClick: () => setF({ mehr: !f.mehr }) },
@@ -43862,23 +43941,26 @@ function FahrlehrerAuslastung({ schoolId }) {
 }
 function FahrzeugAuslastung({ code, vehicles }) {
     const [rows, setRows] = React.useState(null); // null=lädt, sonst Liste
+    // Minuten je Fahrzeug aus den Terminen der Fahrschule (#23, RPC fahrzeug_minuten)
+    const [terminMin, setTerminMin] = React.useState({});
     React.useEffect(() => {
-        if (!code) { setRows([]); return; }
         let on = true;
         const bis = new Date();
         const von = new Date(bis.getTime() - 30 * 86400000);
+        if (!IS_DEMO())
+            sb.rpc("fahrzeug_minuten", { p_von: von.toISOString(), p_bis: bis.toISOString() })
+                .then(({ data }) => { if (on && data && typeof data === "object") setTerminMin(data); }, () => {});
+        if (!code) { setRows([]); return () => { on = false; }; }
         calBookings(code, von.toISOString(), bis.toISOString())
             .then(r => { if (on) setRows(r || []); })
             .catch(() => { if (on) setRows([]); });
         return () => { on = false; };
     }, [code]);
-    if (!code)
-        return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
-            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0, lineHeight: 1.5 } }, "Öffne einmal den Fahrzeug-Kalender oben, danach kann die Auslastung berechnet werden."));
     if (rows === null)
         return React.createElement("div", { className: "card", style: { padding: "13px 14px" } },
             React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: 0 } }, "Lädt…"));
     const byVeh = {};
+    Object.keys(terminMin || {}).forEach(k => { byVeh[k] = (byVeh[k] || 0) + (Number(terminMin[k]) || 0); });
     rows.forEach(b => {
         const mins = (new Date(b.end_at).getTime() - new Date(b.start_at).getTime()) / 60000;
         if (mins > 0)
@@ -43895,7 +43977,7 @@ function FahrzeugAuslastung({ code, vehicles }) {
                 React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "var(--orange-deep)", flexShrink: 0 } }, x.hours.toFixed(1).replace(".", ",") + " Std.")),
             React.createElement("div", { style: { height: 7, borderRadius: 99, background: "var(--line)", overflow: "hidden" } },
                 React.createElement("div", { style: { height: "100%", width: (x.hours / maxHours * 100) + "%", background: "var(--orange)", borderRadius: 99 } })))),
-        React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "14px 0 0", lineHeight: 1.5 } }, "Gebuchte Stunden im Fahrzeug-Kalender, letzte 30 Tage. Hilft einzuschätzen, ob ein Fahrzeug knapp wird."));
+        React.createElement("p", { style: { fontSize: 11, color: "var(--muted)", margin: "14px 0 0", lineHeight: 1.5 } }, "Fahrstunden mit eingetragenem Fahrzeug plus Buchungen im Fahrzeug-Kalender, letzte 30 Tage. Hilft einzuschätzen, ob ein Fahrzeug knapp wird."));
 }
 function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
     const [info, setInfo] = React.useState(undefined); // undefined=lädt, null=ungültig, "fehler"=nicht erreichbar
