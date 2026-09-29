@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.62.6";
+const APP_VERSION = "2.63.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3701,6 +3701,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.63.0", date: "September 2026", changes: [
+            "Schülerliste: Die Karte „Aufräumen“ schlägt Schüler mit bestandener Prüfung und seit über einem Jahr inaktive Schüler zum Archivieren vor – einzeln oder alle auf einmal, „Später“ blendet sie 30 Tage aus",
+        ] },
     { v: "2.62.6", date: "September 2026", changes: [
             "Terminarten: „Versetzt“ steht jetzt unter Sonstiges, der Theorieunterricht in einer eigenen Gruppe „Theorie“",
         ] },
@@ -9396,6 +9399,25 @@ function schaltkompetenzSummary(items) {
     const gut = vals.filter(v => v === "gut").length;
     const schlecht = vals.filter(v => v === "schlecht").length;
     return { gut, schlecht, offen: SCHALTKOMPETENZ_ITEMS.length - gut - schlecht };
+}
+// Archiv-Automatik (v2.63.0, Produktplan #27): eigene, aktive Schüler, die bestanden haben oder seit
+// über einem Jahr ohne Fahrstunde, ADK-Eintrag und ohne künftigen Termin sind.
+function archivVorschlaege(students, appts, naechsteTermine, jetzt) {
+    const heute = jetzt || new Date();
+    const vorJahr = ymd(new Date(heute.getTime() - 365 * 86400000));
+    const letzteVon = x => [lastActivity(x), x.created_at ? ymd(x.created_at) : ""]
+        .concat((x.drivenLessons || []).map(l => (l && l.date) || ""))
+        .concat((appts || []).filter(a => a.student_id === x.id && new Date(a.start_at) < heute).map(a => ymd(a.start_at)))
+        .filter(Boolean).sort().pop() || "";
+    return (students || []).filter(x => x._isMine && !x.archived && !x.pending).map(x => {
+        const bestanden = (x.exams || []).filter(e => e && e.art === "praxis" && e.passed && e.date).map(e => e.date).sort().pop();
+        if (bestanden)
+            return { s: x, grund: "bestanden am " + new Date(bestanden + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) };
+        if (naechsteTermine && naechsteTermine[x.id])
+            return null;
+        const letzte = letzteVon(x);
+        return (letzte && letzte < vorJahr) ? { s: x, grund: "zuletzt aktiv " + new Date(letzte + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", month: "long", year: "numeric" }) } : null;
+    }).filter(Boolean);
 }
 function lastActivity(s) {
     let max = "";
@@ -15475,6 +15497,8 @@ function App() {
     // Filter-Pillen über der Schülerliste (spec 7): "alle" | "aktiv" | "reif" | "offen"
     const [listFilter, setListFilter] = useState("alle");
     // Standort als Filter-Dimension (v2.60.0, Produktplan #39): "" = alle, "__ohne" = ohne Standort
+    // Archiv-Automatik (v2.63.0, Produktplan #27): "Später" blendet die Aufräumen-Karte 30 Tage aus
+    const [aufraeumenBis, setAufraeumenBis] = useState(() => { try { return localStorage.getItem("v3_aufraeumen_bis") || ""; } catch (e) { return ""; } });
     const [startwerteEdit, setStartwerteEdit] = useState(null); // v2.61.0: {id, werte:{ÜL,AB,NF}}
     const [standortFilter, setStandortFilterRoh] = useState(() => { try { return localStorage.getItem("v3_standort_filter") || ""; } catch (e) { return ""; } });
     function setStandortFilter(v) { setStandortFilterRoh(v); try { localStorage.setItem("v3_standort_filter", v || ""); } catch (e) { } }
@@ -23178,6 +23202,37 @@ function App() {
                             : kein + " passt zu diesem Filter" + archivZusatz),
                     imArchiv > 0 && !showArchived && React.createElement("button", { className: "btn btn-ghost", style: { marginRight: 8 }, onClick: () => setShowArchived(true) }, "Archiv anzeigen"),
                     React.createElement("button", { className: "btn btn-ghost", onClick: () => { setSearch(""); setListFilter("alle"); } }, "Suche und Filter zur\u00FCcksetzen"));
+            })(),
+            // Aufräumen (v2.63.0, Produktplan #27): bestandene und lange inaktive Schüler zum Archivieren
+            // vorschlagen. Archiviert wird nur auf Tipp; die Bitte um eine Bewertung bleibt beim
+            // einzelnen Archivieren über das Schüler-Menü.
+            (() => {
+                if (IS_DEMO() || (aufraeumenBis && aufraeumenBis > ymd(new Date())))
+                    return null;
+                const kandidaten = archivVorschlaege(students, appts, nextApptByStudent, new Date());
+                if (!kandidaten.length)
+                    return null;
+                const archivieren = liste => liste.forEach(k => schuelerAendernUndSpeichern(k.s.id, cur => ({ ...cur, archived: true, archivedAt: cur.archivedAt || ymd(new Date()) })));
+                return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginTop: 18 } },
+                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5 } }, "Aufräumen: " + (kandidaten.length === 1 ? "1 Schüler" : kandidaten.length + " Schüler") + " ins Archiv?"),
+                    React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", margin: "3px 0 8px", lineHeight: 1.5 } },
+                        "Bestanden oder seit über einem Jahr ohne Fahrstunde und ohne Termin. Im Archiv bleiben alle Daten erhalten, die Löschfrist nach § 31 beginnt."),
+                    kandidaten.slice(0, 8).map((k, i) => React.createElement("div", { key: k.s.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderTop: "1px solid var(--line)" } },
+                        React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700 } }, dispName(k.s)),
+                            React.createElement("div", { style: { fontSize: 12, color: "var(--muted)" } }, k.grund)),
+                        React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 11px", fontSize: 12.5, flexShrink: 0 }, onClick: () => archivieren([k]) }, "Archivieren"))),
+                    kandidaten.length > 8 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", padding: "4px 0" } }, "und " + (kandidaten.length - 8) + " weitere"),
+                    React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" } },
+                        kandidaten.length > 1 && React.createElement("button", { className: "btn btn-primary", style: { flex: "1 1 160px" }, onClick: async () => {
+                                if (await askConfirm({ title: kandidaten.length + " Schüler archivieren?", message: "Sie verschwinden aus der aktiven Liste und stehen danach unter Archiv. Zurückholen geht jederzeit über das Schüler-Menü.", confirmLabel: "Alle archivieren", danger: false }))
+                                    archivieren(kandidaten);
+                            } }, "Alle " + kandidaten.length + " archivieren"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: "1 1 120px" }, onClick: () => {
+                                const bis = ymd(addDays(new Date(), 30));
+                                setAufraeumenBis(bis);
+                                try { localStorage.setItem("v3_aufraeumen_bis", bis); } catch (e) { }
+                            } }, "Später")));
             })(),
             students.some(s => s.archived) && React.createElement("div", { style: { marginTop: 18 } },
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { justifyContent: "space-between" }, onClick: () => setShowArchived(!showArchived) },

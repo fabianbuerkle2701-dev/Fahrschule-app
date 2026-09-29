@@ -558,3 +558,22 @@ test("Cockpit: Anfragen nach Quelle und Absagegrund, unbeantwortete mit Fahrlehr
     assert.match(f, /1 Anfrage wartet seit über zwei Tagen/);
     assert.match(f, /Häufigster Absagegrund: Zu teuer \(3 von 4\)/);
 });
+
+// v2.63.0: Archiv-Vorschläge
+const av = require("./lade-app")(["archivVorschlaege"]);
+test("Archiv-Vorschläge: bestanden oder über ein Jahr inaktiv ohne künftigen Termin", () => {
+    const jetzt = new Date("2026-09-29T12:00:00Z");
+    const st = [
+        { id: "a", _isMine: true, exams: [{ art: "praxis", passed: true, date: "2026-09-01" }] },          // bestanden
+        { id: "b", _isMine: true, drivenLessons: [{ date: "2025-06-01" }], created_at: "2025-01-01" },     // inaktiv > 1 Jahr
+        { id: "c", _isMine: true, drivenLessons: [{ date: "2025-06-01" }] },                               // inaktiv, aber Termin geplant
+        { id: "d", _isMine: true, drivenLessons: [{ date: "2026-08-01" }] },                               // aktiv
+        { id: "e", _isMine: true, archived: true, exams: [{ art: "praxis", passed: true, date: "2026-01-01" }] },
+        { id: "f", _isMine: false, exams: [{ art: "praxis", passed: true, date: "2026-01-01" }] },         // fremd
+        { id: "g", _isMine: true, exams: [{ art: "praxis", passed: false, date: "2026-09-01" }], drivenLessons: [{ date: "2026-09-01" }] },
+    ];
+    const r = av.archivVorschlaege(st, [], { c: { start_at: "2026-10-01" } }, jetzt);
+    assert.equal(JSON.stringify(Array.from(r).map(x => x.s.id)), JSON.stringify(["a", "b"]));
+    assert.match(r[0].grund, /^bestanden am 1\.9\.2026$/);
+    assert.match(r[1].grund, /^zuletzt aktiv Juni 2025$/);
+});
