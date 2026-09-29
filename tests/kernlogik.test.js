@@ -613,3 +613,23 @@ test("Datenauskunft: leerer Schüler und nicht geladene Dokumente", () => {
     assert.match(JSON.stringify(a[2]), /konnte nicht geladen werden/);
     assert.match(JSON.stringify(a[0]), /nicht eingerichtet/);
 });
+
+// v2.65.0: Theorieplan in der Schüler-App
+const tp = require("./lade-app")(["theoriePlanFuerSchueler", "GRUNDSTOFF_THEMEN", "ZUSATZSTOFF_THEMEN"]);
+test("Theorieplan: markiert fehlende Pflichtthemen, zählt besuchte", () => {
+    const termine = [
+        { start_at: "2026-10-01T16:00:00Z", thema: "Ruhender Verkehr" },          // Pflicht, fehlt
+        { start_at: "2026-10-02T16:00:00Z", thema: "Risikofaktor Mensch " },      // Pflicht, schon besucht
+        { start_at: "2026-10-03T16:00:00Z", thema: "" },                          // ohne Thema
+        { start_at: "2026-10-04T16:00:00Z", thema: "Erste Hilfe Extra" },         // kein Pflichtthema
+        { start_at: "2026-10-05T16:00:00Z", thema: "Fahren mit Solokraftfahrzeugen und Zügen" }, // Zusatzstoff B
+    ];
+    const r = JSON.parse(JSON.stringify(tp.theoriePlanFuerSchueler("B", termine, ["Risikofaktor Mensch", "Sonstiges Thema"])));
+    assert.equal(r.pflicht, 14);
+    assert.equal(r.erledigt, 1);
+    assert.equal(JSON.stringify(r.termine.map(t => t.fehlt)), JSON.stringify([true, false, false, false, true]));
+    assert.equal(r.termine[1].thema, "Risikofaktor Mensch");
+    const a = JSON.parse(JSON.stringify(tp.theoriePlanFuerSchueler("A", termine, [])));
+    assert.equal(a.pflicht, 12);                   // Klasse A: nur Grundstoff (keine erfundenen Zusatztitel)
+    assert.equal(a.termine[4].fehlt, false);
+});

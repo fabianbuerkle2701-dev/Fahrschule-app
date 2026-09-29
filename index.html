@@ -3568,7 +3568,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.64.0";
+const APP_VERSION = "2.65.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3713,6 +3713,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.65.0", date: "September 2026", changes: [
+            "Theoriestunden bekommen ein Thema. Schüler sehen in ihrer App die nächsten Theoriestunden und welche Themen ihnen noch fehlen",
+        ] },
     { v: "2.64.0", date: "September 2026", changes: [
             "Neu: Datenauskunft. Im Schüler-Menü (⋮) erstellst du ein PDF mit allen Daten, die zu einem Schüler gespeichert sind – für Anfragen nach der DSGVO",
         ] },
@@ -8689,6 +8692,30 @@ async function publicStudentSetAvatar(code, name, pin, dataUrl) {
 /* ════════ Warteliste: freie Stunde automatisch an passende Schüler anbieten ════════ */
 // Schüler trägt ein/aktualisiert, wann er/sie früher dran sein möchte. Gibt true bei Erfolg.
 // Ausbildungsvertrag in der App unterschreiben (v2.55.0). "ok", "schon" oder "error".
+// Theorieplan für die Schüler-App (v2.65.0): kommende Theoriestunden der Fahrschule und die vom
+// Schüler schon besuchten Themen - siehe Migration 2026-09-29_schueler_theorieplan.sql.
+async function publicStudentTheorie(code, name, pin) {
+    const { data, error } = await sbPublic.rpc("public_student_theorie", { code, p_name: name, p_pin: pin });
+    if (error) {
+        console.error(error);
+        throw new Error(error.message);
+    }
+    return data;
+}
+// Welche kommende Stunde behandelt ein Pflichtthema, das dem Schüler noch fehlt? Reine Funktion.
+// Pflichtthemen wie im Unterrichtsnachweis: 12 Grundstoff + Zusatzstoff der Klasse (nur echte Titel).
+function theoriePlanFuerSchueler(klasse, termine, besucht) {
+    const pflicht = GRUNDSTOFF_THEMEN.concat(ZUSATZSTOFF_THEMEN[klasse] || []);
+    const war = new Set((besucht || []).map(t => String(t || "").trim()).filter(Boolean));
+    const erledigt = pflicht.filter(t => war.has(t)).length;
+    return {
+        pflicht: pflicht.length, erledigt,
+        termine: (termine || []).filter(t => t && t.start_at).map(t => {
+            const thema = String(t.thema || "").trim();
+            return { ...t, thema, fehlt: !!thema && pflicht.indexOf(thema) >= 0 && !war.has(thema) };
+        }),
+    };
+}
 async function publicStudentSignContract(code, name, pin, id, sig) {
     const { data, error } = await sbPublic.rpc("public_student_sign_contract", { code, p_name: name, p_pin: pin, p_id: id, p_sig: sig });
     if (error) {
@@ -11977,6 +12004,7 @@ const STUDENT_I18N = {
         wl_wochentage: ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"],
         wl_von: "Von", wl_bis: "Bis",
         wl_speichern: "Speichern", wl_speichert: "Speichert…", wl_gespeichert: "✓ Gespeichert",
+        th_titel: "Theorieunterricht", th_stand: "{n} von {m} Pflichtthemen", th_naechste: "Nächste Theoriestunden", th_fehlt: "Fehlt dir noch", th_keine: "Zurzeit sind keine Theoriestunden eingetragen.", th_ohne_thema: "Thema folgt",
         naechste_fahrstunde: "Nächste Fahrstunde", sa_abholung: "Abholung", sa_ziel: "Ziel der Stunde", vt_titel: "Ausbildungsvertrag", vt_text: "Deine Fahrschule hat dir den Ausbildungsvertrag zum Unterschreiben geschickt.", vt_lesen: "Lesen und unterschreiben", vt_gelesen: "Ich habe den Vertrag gelesen und bin einverstanden.", vt_unterschrift: "Deine Unterschrift", vt_absenden: "Vertrag unterschreiben", vt_spaeter: "Später", vt_fehler: "Das hat nicht geklappt. Prüfe die Verbindung und versuche es noch einmal.", vt_danke: "Danke, der Vertrag ist unterschrieben.", vt_sprache: "Lies den Vertrag in Ruhe durch. Mit deiner Unterschrift wird er verbindlich.", banner_storno_angefragt: " · Storno angefragt",
         keine_fahrstunde_banner: "Aktuell ist keine Fahrstunde für dich eingetragen. Unter „Termine“ kannst du deinem Fahrlehrer einen Wunschtermin vorschlagen.",
         sa_angefragt: " · Angefragt", sa_schnellzugriff: "Schnellzugriff",
@@ -12372,6 +12400,7 @@ const STUDENT_I18N = {
         wl_wochentage: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
         wl_von: "From", wl_bis: "To",
         wl_speichern: "Save", wl_speichert: "Saving…", wl_gespeichert: "✓ Saved",
+        th_titel: "Theory classes", th_stand: "{n} of {m} required topics", th_naechste: "Upcoming theory classes", th_fehlt: "You still need this", th_keine: "No theory classes are scheduled right now.", th_ohne_thema: "Topic to be announced",
         naechste_fahrstunde: "Next driving lesson", sa_abholung: "Pick-up", sa_ziel: "Lesson goal", vt_titel: "Training contract", vt_text: "Your driving school has sent you the training contract to sign.", vt_lesen: "Read and sign", vt_gelesen: "I have read the contract and agree to it.", vt_unterschrift: "Your signature", vt_absenden: "Sign contract", vt_spaeter: "Later", vt_fehler: "That didn't work. Check your connection and try again.", vt_danke: "Thank you, the contract is signed.", vt_sprache: "The contract is in German; the German version is binding. Your signature makes it binding.", banner_storno_angefragt: " · Cancellation requested",
         keine_fahrstunde_banner: "No driving lesson is currently scheduled for you. Under \"Appointments\" you can suggest a preferred time to your driving instructor.",
         sa_angefragt: " · Requested", sa_schnellzugriff: "Quick access",
@@ -12765,6 +12794,7 @@ const STUDENT_I18N = {
         wl_wochentage: ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"],
         wl_von: "Başlangıç", wl_bis: "Bitiş",
         wl_speichern: "Kaydet", wl_speichert: "Kaydediliyor…", wl_gespeichert: "✓ Kaydedildi",
+        th_titel: "Teori dersleri", th_stand: "{m} zorunlu konudan {n}", th_naechste: "Sıradaki teori dersleri", th_fehlt: "Bu konu sende eksik", th_keine: "Şu anda planlanmış teori dersi yok.", th_ohne_thema: "Konu daha sonra belli olacak",
         naechste_fahrstunde: "Sıradaki direksiyon dersi", sa_abholung: "Alınma yeri", sa_ziel: "Dersin hedefi", vt_titel: "Eğitim sözleşmesi", vt_text: "Sürücü kursun imzalaman için eğitim sözleşmesini gönderdi.", vt_lesen: "Oku ve imzala", vt_gelesen: "Sözleşmeyi okudum ve kabul ediyorum.", vt_unterschrift: "İmzan", vt_absenden: "Sözleşmeyi imzala", vt_spaeter: "Daha sonra", vt_fehler: "Olmadı. Bağlantını kontrol edip tekrar dene.", vt_danke: "Teşekkürler, sözleşme imzalandı.", vt_sprache: "Sözleşme Almancadır; bağlayıcı olan Almanca metindir. İmzanla bağlayıcı hale gelir.", banner_storno_angefragt: " · İptal talep edildi",
         keine_fahrstunde_banner: "Şu anda senin için planlanmış bir direksiyon dersi yok. \"Randevular\" bölümünden eğitmenine bir randevu önerebilirsin.",
         sa_angefragt: " · Talep edildi", sa_schnellzugriff: "Hızlı erişim",
@@ -13158,6 +13188,7 @@ const STUDENT_I18N = {
         wl_wochentage: ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"],
         wl_von: "С", wl_bis: "До",
         wl_speichern: "Сохранить", wl_speichert: "Сохранение…", wl_gespeichert: "✓ Сохранено",
+        th_titel: "Теоретические занятия", th_stand: "{n} из {m} обязательных тем", th_naechste: "Ближайшие теоретические занятия", th_fehlt: "Тебе ещё нужно", th_keine: "Сейчас теоретические занятия не запланированы.", th_ohne_thema: "Тема будет объявлена позже",
         naechste_fahrstunde: "Следующее занятие по вождению", sa_abholung: "Место встречи", sa_ziel: "Цель занятия", vt_titel: "Договор на обучение", vt_text: "Автошкола отправила тебе договор на обучение для подписи.", vt_lesen: "Прочитать и подписать", vt_gelesen: "Я прочитал(а) договор и согласен(на).", vt_unterschrift: "Твоя подпись", vt_absenden: "Подписать договор", vt_spaeter: "Позже", vt_fehler: "Не получилось. Проверь подключение и попробуй ещё раз.", vt_danke: "Спасибо, договор подписан.", vt_sprache: "Договор составлен на немецком языке; обязательной является немецкая версия. Подписью ты его заключаешь.", banner_storno_angefragt: " · Запрошена отмена",
         keine_fahrstunde_banner: "Сейчас для тебя не запланировано ни одного занятия по вождению. В разделе «Записи» ты можешь предложить инструктору удобное время.",
         sa_angefragt: " · Запрошено", sa_schnellzugriff: "Быстрый доступ",
@@ -20787,6 +20818,9 @@ function App() {
         return out.filter((v, i) => v.text && out.findIndex(o => o.text === v.text) === i).slice(0, 4);
     }
     function lernzielFuer(a, stu) {
+        // Theoriestunde ohne Schüler (v2.65.0): das Thema steht im selben Feld wie das Ziel.
+        if (a && !stu && a.art === "TH" && a.ziel && String(a.ziel).trim())
+            return { typ: "thema", text: String(a.ziel).trim() };
         if (!a || !stu || a.status === "offered")
             return null;
         // Beim Termin selbst festgelegtes Ziel geht vor - an jedem Termin, nicht nur am nächsten.
@@ -20803,8 +20837,8 @@ function App() {
     }
     function lernzielZeile(lz, extraStyle) {
         return lz ? React.createElement("div", { style: { fontSize: 12, fontWeight: 600, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
-                color: lz.typ === "ziel" ? "var(--orange-ink)" : "var(--amber-ink)", ...(extraStyle || {}) } },
-            (lz.typ === "ziel" ? "Ziel: " : "Achtung: ") + lz.text) : null;
+                color: lz.typ === "warn" ? "var(--amber-ink)" : "var(--orange-ink)", ...(extraStyle || {}) } },
+            (lz.typ === "ziel" ? "Ziel: " : lz.typ === "thema" ? "Thema: " : "Achtung: ") + lz.text) : null;
     }
     const updateActive = (patch) => { if (active)
         writeStudent({ ...active, ...patch }); };
@@ -28549,7 +28583,7 @@ function App() {
     }
     async function openTheoryCheckin(appt) {
         const attendance = await fetchTheoryAttendance(appt.id).catch(() => []);
-        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || "", attendance, klasse: theoryKlasse });
+        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || appt.ziel || "", attendance, klasse: theoryKlasse });
     }
     // 15 Minuten gültig - reicht für den Sitzungsbeginn, ohne dass ein alter Code tagelang gültig bliebe.
     async function startTheoryCheckin(thema) {
@@ -29989,7 +30023,7 @@ function App() {
         }
         // Fahrzeug schon belegt (#23)? Riegel wie beim Speichern, sonst legte ein Doppeltipp während der
         // Abfrage den Termin zweimal an.
-        if (f.fahrzeug && !f.urlaub && [f.fahrzeug, f.date, f.start, f.end || ""].join("|") !== f._fzAlt) {
+        if (f.fahrzeug && !f.urlaub && f.art !== "TH" && [f.fahrzeug, f.date, f.start, f.end || ""].join("|") !== f._fzAlt) {
             apptSavingRef.current = true;
             let beleg = null;
             try {
@@ -30017,13 +30051,14 @@ function App() {
             // Urlaub wird ohne Terminart angelegt (saveUrlaub: art "") - so bleibt es
             art: f.urlaub ? "" : (f.art || "ÜST"),
             // Ziel der Stunde (v2.47.0): nur bei Schüler-Terminen; beim Bearbeiten auch zum Leeren senden.
-            ...((() => { const z = (!f.urlaub && !f.sonstige && f.student_id) ? String(f.ziel || "").trim().slice(0, 300) : "";
+            // Seit v2.65.0 auch bei Theoriestunden ohne Schüler - dort ist es das Thema.
+            ...((() => { const z = (!f.urlaub && !f.sonstige && (f.student_id || f.art === "TH")) ? String(f.ziel || "").trim().slice(0, 300) : "";
                 return (z || f.zielAlt) ? { ziel: z || null } : {}; })()),
             // Abholort (v2.49.0): wie das Ziel nur mitschicken, wenn gesetzt oder vorher vorhanden.
             ...((() => { const o = (!f.urlaub && !f.sonstige) ? String(f.abholort || "").trim().slice(0, 200) : "";
                 return (o || f.abholortAlt) ? { abholort: o || null } : {}; })()),
             // Fahrzeug (#23): wie Ziel/Abholort nur mitschicken, wenn gesetzt oder vorher vorhanden
-            ...((() => { const v = !f.urlaub ? String(f.fahrzeug || "") : "";
+            ...((() => { const v = (!f.urlaub && f.art !== "TH") ? String(f.fahrzeug || "") : "";
                 return (v || f.fahrzeugAlt) ? { fahrzeug: v || null } : {}; })())
         };
         apptSavingRef.current = true;
@@ -30103,13 +30138,13 @@ function App() {
                     note: makeNote(f.sonstige, f.note || ""), title: f.title || "", status: "confirmed", art: f.art || "ÜST",
                     // Ziel/Abholort wie beim Einzeltermin (fehlten bis v2.51.1 an allen Serienterminen)
                     ...(serieZiel ? { ziel: serieZiel } : {}), ...(serieAbholort ? { abholort: serieAbholort } : {}),
-                    ...(f.fahrzeug ? { fahrzeug: f.fahrzeug } : {}) };
+                    ...(f.fahrzeug && f.art !== "TH" ? { fahrzeug: f.fahrzeug } : {}) };
                 const c = await addAppt(payload);
                 if (c)
                     createdCount++;
                 // Fahrzeug belegt: Termin trotzdem anlegen, am Ende melden (das Auto lässt sich tauschen,
                 // eine übersprungene Stunde fällt dagegen leicht unter den Tisch)
-                if (c && f.fahrzeug && await fahrzeugBelegt(f.fahrzeug, startISO, endISO, c.id))
+                if (c && f.fahrzeug && f.art !== "TH" && await fahrzeugBelegt(f.fahrzeug, startISO, endISO, c.id))
                     fzBelegt.push(date);
                 else
                     skipped.push({ date, reason: "Speichern fehlgeschlagen" });
@@ -37875,7 +37910,7 @@ function App() {
                             gruppen.map(([gruppe, liste]) => React.createElement(React.Fragment, { key: gruppe },
                                 gruppen.length > 1 && React.createElement("div", { className: "tf-artgruppe" }, gruppe),
                                 liste.map(x => React.createElement("button", { key: x.code, type: "button", role: "option", "aria-selected": x.code === artAktiv,
-                                        className: "tf-artwahl" + (x.code === artAktiv ? " on" : ""), onClick: () => setApptForm(f => f && ({ ...f, art: x.code, artOffen: false })) },
+                                        className: "tf-artwahl" + (x.code === artAktiv ? " on" : ""), onClick: () => setApptForm(f => f && ({ ...f, art: x.code, artOffen: false, fahrzeug: x.code === "TH" ? "" : (f.fahrzeug || (f.art === "TH" ? fahrzeugVorschlag() : "")) })) },
                                     React.createElement("span", { className: "punkt", style: { background: x.color || "var(--line)" }, "aria-hidden": "true" }),
                                     React.createElement("span", { className: "tf-klapp-text" }, x.label || artLabelPlain(x.code))))))));
                 })(),
@@ -37895,6 +37930,21 @@ function App() {
                     return React.createElement("div", { style: { fontSize: 12.5, color: "var(--amber-ink)", background: "var(--amber-bg)", borderRadius: 10, padding: "9px 12px", marginBottom: 12, lineHeight: 1.5 } },
                         "An diesem Tag geht die Sonne erst um " + sunset.toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) + " Uhr unter - für eine Dämmerungsfahrt könnte " + (apptForm.start || "00:00") + " Uhr noch zu früh sein. ",
                         React.createElement("button", { onClick: () => setApptForm({ ...apptForm, start: empfohlenStr, end: dauerMin > 0 ? addMinutesToTime(empfohlenStr, dauerMin) : apptForm.end }), style: { textDecoration: "underline", fontWeight: 700 } }, "Auf " + empfohlenStr + " Uhr setzen"));
+                })(),
+                // Thema der Theoriestunde (v2.65.0): steht in der Schüler-App im Theorieplan und ist
+                // beim QR-Check-in vorgewählt. Gespeichert im selben Feld wie das Ziel der Stunde.
+                !apptForm.urlaub && !apptForm.sonstige && !apptForm.student_id && apptForm.art === "TH" && (() => {
+                    const zusatz = Object.keys(ZUSATZSTOFF_THEMEN).filter(k => !klassen || !klassen.length || klassen.indexOf(k) >= 0);
+                    const bekannt = GRUNDSTOFF_THEMEN.concat(...zusatz.map(k => ZUSATZSTOFF_THEMEN[k]));
+                    const wert = apptForm.ziel || "";
+                    return React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                        React.createElement("label", null, "Thema (optional)",
+                        React.createElement("select", { value: wert, onChange: e => setApptForm({ ...apptForm, ziel: e.target.value }) },
+                            React.createElement("option", { value: "" }, "– Kein Thema –"),
+                            wert && bekannt.indexOf(wert) < 0 && React.createElement("option", { value: wert }, wert),
+                            React.createElement("optgroup", { label: "Grundstoff" }, GRUNDSTOFF_THEMEN.map((t, i) => React.createElement("option", { key: t, value: t }, (i + 1) + ". " + t))),
+                            zusatz.map(k => React.createElement("optgroup", { key: k, label: "Zusatzstoff Klasse " + k }, ZUSATZSTOFF_THEMEN[k].map((t, i) => React.createElement("option", { key: t, value: t }, (i + 1) + ". " + t)))))),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6 } }, "Schüler sehen es in ihrer App bei den nächsten Theoriestunden."));
                 })(),
                 !apptForm.urlaub && !apptForm.sonstige && apptForm.student_id && (() => {
                     const stu = (students || []).find(x => x.id === apptForm.student_id);
@@ -37921,7 +37971,7 @@ function App() {
                     (locations || []).forEach(l => { if (l && l.name) vorschlaege.push({ text: l.name, label: l.name }); });
                     const liste = vorschlaege.filter((v, i) => v.text && v.text !== String(apptForm.abholort || "").trim() && vorschlaege.findIndex(o => o.text === v.text) === i).slice(0, 5);
                     return React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                        React.createElement("label", { htmlFor: "appt-abholort" }, "Abholort (optional)"),
+                        React.createElement("label", { htmlFor: "appt-abholort" }, apptForm.art === "TH" && !apptForm.student_id ? "Ort (optional)" : "Abholort (optional)"),
                         React.createElement("input", { id: "appt-abholort", type: "text", value: apptForm.abholort || "", maxLength: 200, autoComplete: "street-address",
                             onChange: e => setApptForm({ ...apptForm, abholort: e.target.value }), placeholder: "z.B. Bahnhof, Schule, zu Hause\u2026" }),
                         liste.length > 0 && React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } },
@@ -37932,7 +37982,8 @@ function App() {
                 React.createElement("div", { className: "field", style: { marginBottom: 12 } },
                     React.createElement("label", null, "Notiz (optional)",
                     React.createElement("textarea", { rows: 2, value: apptForm.note || "", onChange: e => setApptForm({ ...apptForm, note: e.target.value }), placeholder: "Was steht in dieser Stunde an?", style: { resize: "vertical" } }))),
-                !apptForm.urlaub && vehicles.some(v => !v.inactive || v.id === apptForm.fahrzeug) && React.createElement("div", { className: "field", style: { marginBottom: 16 } },
+                // Theoriestunde (v2.65.0): kein Fahrzeug - es wäre sonst für die Zeit als belegt gezählt.
+                !apptForm.urlaub && apptForm.art !== "TH" && vehicles.some(v => !v.inactive || v.id === apptForm.fahrzeug) && React.createElement("div", { className: "field", style: { marginBottom: 16 } },
                     React.createElement("label", null, "Fahrzeug (optional)",
                     React.createElement("select", { value: apptForm.fahrzeug || "", onChange: e => setApptForm({ ...apptForm, fahrzeug: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
                         React.createElement("option", { value: "" }, "\u2013 ohne \u2013"),
@@ -41239,6 +41290,8 @@ function StudentArea({ code, info, appMode, onSprache }) {
         // Anmeldung (dorthin führt der WhatsApp-Link); in der nativen App steht die Karte auf "Start".
         !appMode && data.student && Array.isArray(data.student.vertraege) && data.student.vertraege.length > 0
             && React.createElement(VertragsKarte, { code, vertraege: data.student.vertraege, tS: t, onFertig: () => login(name, pin) }),
+        // Theorieunterricht (v2.65.0) - solange die Theorieprüfung nicht bestanden ist
+        !appMode && data.student && !data.student.theorie && React.createElement(TheorieKarte, { code, klasse: data.student.klasse, tS: t }),
         // Läuft der Zugang noch auf dem Start-PIN des Fahrlehrers, weist ein Banner darauf hin -
         // früher blockierte an dieser Stelle ein Pflichtdialog die ganze Übersicht.
         data.pin_ist_start && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 12, display: "flex", gap: 11, alignItems: "flex-start", background: "var(--amber-bg)" } },
@@ -41703,6 +41756,48 @@ function CountUp({ n, suffix }) {
 // Karte + Fenster "Ausbildungsvertrag unterschreiben" in der Schüler-App (v2.55.0). Zeigt den
 // Schnappschuss, den die Fahrschule beim Senden gespeichert hat - genau diesen Text unterschreibt der
 // Schüler. Die Vertragssprache bleibt Deutsch (verbindliche Fassung), nur die Bedienung ist übersetzt.
+// Theorieunterricht in der Schüler-App (v2.65.0, Marktreife: Lücke „Theorieunterricht“):
+// die nächsten Theoriestunden der Fahrschule mit Thema und Ort, markiert, welche Pflichtthemen
+// dem Schüler noch fehlen. Unsichtbar, solange nichts geplant und nichts besucht ist.
+function TheorieKarte({ code, klasse, tS }) {
+    const [plan, setPlan] = React.useState(null);
+    const lang = saSprache(code);
+    React.useEffect(() => {
+        let weg = false, n = "", pin = "";
+        try {
+            n = localStorage.getItem("v3_sa_name_" + code) || "";
+            pin = localStorage.getItem("v3_sa_pin_" + code) || "";
+        }
+        catch (e) { }
+        if (!n || !pin)
+            return;
+        publicStudentTheorie(code, n, pin).then(d => { if (!weg && d) setPlan(d); }).catch(() => { });
+        return () => { weg = true; };
+    }, [code]);
+    if (!plan)
+        return null;
+    const p = theoriePlanFuerSchueler(klasse || "B", plan.termine, plan.besucht);
+    if (!p.termine.length && !p.erledigt)
+        return null;
+    return React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12 } },
+        React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 } },
+            React.createElement("div", { className: "home-eyebrow" }, tS("th_titel")),
+            React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", fontWeight: 600 } }, tS("th_stand", { n: p.erledigt, m: p.pflicht }))),
+        React.createElement("div", { style: { height: 6, borderRadius: 99, background: "var(--line)", margin: "8px 0 12px", overflow: "hidden" } },
+            React.createElement("div", { style: { height: "100%", width: Math.round(p.erledigt / Math.max(1, p.pflicht) * 100) + "%", background: "var(--orange)", borderRadius: 99 } })),
+        !p.termine.length
+            ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--muted)" } }, tS("th_keine"))
+            : React.createElement(React.Fragment, null,
+                React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 4 } }, tS("th_naechste")),
+                p.termine.slice(0, 4).map((t, i) => React.createElement("div", { key: t.start_at + i, style: { display: "flex", gap: 12, padding: "8px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                    React.createElement("div", { style: { flex: "none", width: 74, fontSize: 12.5, lineHeight: 1.4 } },
+                        React.createElement("div", { style: { fontWeight: 700 } }, saDatum(lang, t.start_at, { weekday: "short", day: "2-digit", month: "2-digit" })),
+                        React.createElement("div", { style: { color: "var(--muted)" } }, new Date(t.start_at).toLocaleTimeString(saLocale(lang), { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }))),
+                    React.createElement("div", { style: { flex: 1, minWidth: 0, fontSize: 13.5, lineHeight: 1.4 } },
+                        React.createElement("div", { lang: t.thema ? "de" : undefined, style: { fontWeight: 600 } }, t.thema || tS("th_ohne_thema")),
+                        t.ort && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, t.ort),
+                        t.fehlt && React.createElement("span", { style: { display: "inline-block", marginTop: 4, fontSize: 11.5, fontWeight: 700, color: "var(--orange-deep)", background: "var(--orange-tint)", borderRadius: 99, padding: "2px 8px" } }, tS("th_fehlt")))))));
+}
 function VertragsKarte({ code, vertraege, tS, onFertig }) {
     const [offen, setOffen] = React.useState(false);
     const [gelesen, setGelesen] = React.useState(false);
@@ -41871,6 +41966,7 @@ function SchuelerStart({ code, info, onGoTab, lang }) {
         // Ausbildungsvertrag zum Unterschreiben (v2.55.0) steht vor allem anderen
         data && !fehler && Array.isArray(stu.vertraege) && stu.vertraege.length > 0
             && React.createElement(VertragsKarte, { code, vertraege: stu.vertraege, tS, onFertig: () => setVersuch(x => x + 1) }),
+        data && !fehler && stu && !stu.theorie && React.createElement(TheorieKarte, { code, klasse: stu.klasse, tS }),
         // Ein nächster Schritt (Produktplan #16): höchstens EINE Karte, feste Reihenfolge -
         // Prüfung steht an > Unterlagen fehlen > kein nächster Termin. Sonst keine Karte.
         data && !fehler && (() => {
