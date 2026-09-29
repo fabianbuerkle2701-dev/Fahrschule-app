@@ -577,3 +577,39 @@ test("Archiv-Vorschläge: bestanden oder über ein Jahr inaktiv ohne künftigen 
     assert.match(r[0].grund, /^bestanden am 1\.9\.2026$/);
     assert.match(r[1].grund, /^zuletzt aktiv Juni 2025$/);
 });
+
+// v2.64.0: Datenauskunft nach Art. 15 DSGVO
+const da = require("./lade-app")(["datenauskunftAbschnitte", "datenauskunftDatei", "STUDENT_FILE_CATEGORIES"]);
+test("Datenauskunft: alle Bereiche lesbar, PIN nie im Klartext", () => {
+    const stu = { id: "s1", _owner: "u1", _isMine: true, vorname: "Lea", name: "Sommer", geb: "2008-03-04", tel: "0171 1", klasse: "B",
+        pin: "4711", pinCustom: "4711", theorie: true, items: { a: true, b: false, c: true },
+        drivenLessons: [{ date: "2026-09-10", time: "16:00", minutes: 90, art: "ÜL" }, { date: "2026-09-01", minutes: 45 }],
+        lessons: [{ date: "2026-09-10", thema: "Autobahn", gut: "Auffahren", schlecht: "Abstand", note: "", route: { p: [] } }],
+        exams: [{ art: "theorie", date: "2026-08-20", passed: true }],
+        invoices: [{ number: "R-1", date: "2026-09-12", total: 123.5 }], payments: [{ date: "2026-09-13", amount: 50, method: "Bar" }] };
+    const ctx = { artName: c => c === "ÜL" ? "Überlandfahrt" : "Übungsstunde", standortName: "Nord",
+        termine: [{ start_at: "2026-10-01T14:00:00Z", art: "ÜST", status: "pending" }],
+        dateien: [{ filename: "sehtest.pdf", category: "sehtest", created_at: "2026-08-01T10:00:00Z" }] };
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte(stu, ctx)));
+    const titel = a.map(x => x.titel);
+    assert.equal(JSON.stringify(titel), JSON.stringify(["Stammdaten", "Ausbildung", "Prüfungen", "Fahrstunden", "Fahrtenbuch", "Termine", "Rechnungen", "Zahlungen", "Dokumente", "Zweck, Rechtsgrundlage und Speicherdauer"]));
+    const text = JSON.stringify(a);
+    assert.ok(!text.includes("4711"), "PIN darf nicht in der Auskunft stehen");
+    assert.ok(text.includes("PIN vergeben"));
+    assert.ok(text.includes("04.03.2008") && text.includes("Nord") && text.includes("Sehtest"));
+    assert.equal(JSON.stringify(a[1].zeilen[0]), JSON.stringify(["Abgehakte Punkte der Ausbildungskarte", "2"]));
+    assert.equal(JSON.stringify(a[3].zeilen[0]), JSON.stringify(["01.09.2026", "", "Übungsstunde", "45"]));   // nach Datum sortiert
+    assert.equal(a[5].zeilen[0][1], "16:00");                                                                   // Berliner Zeit
+    assert.equal(a[5].zeilen[0][3], "angefragt");
+    const datei = JSON.parse(JSON.stringify(da.datenauskunftDatei(stu, ctx)));
+    assert.equal(datei.schueler.pin, "vergeben");
+    assert.ok(!("pinCustom" in datei.schueler) && !("_owner" in datei.schueler) && !JSON.stringify(datei).includes("4711"));
+    assert.equal(datei.termine.length, 1);
+    assert.equal(datei.dokumente[0].datei, "sehtest.pdf");
+});
+test("Datenauskunft: leerer Schüler und nicht geladene Dokumente", () => {
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, { dateien: null })));
+    assert.equal(JSON.stringify(a.map(x => x.titel)), JSON.stringify(["Stammdaten", "Ausbildung", "Dokumente", "Zweck, Rechtsgrundlage und Speicherdauer"]));
+    assert.match(JSON.stringify(a[2]), /konnte nicht geladen werden/);
+    assert.match(JSON.stringify(a[0]), /nicht eingerichtet/);
+});

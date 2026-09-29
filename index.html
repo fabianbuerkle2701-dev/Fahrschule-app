@@ -3568,7 +3568,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.63.3";
+const APP_VERSION = "2.64.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3713,6 +3713,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.64.0", date: "September 2026", changes: [
+            "Neu: Datenauskunft. Im Schüler-Menü (⋮) erstellst du ein PDF mit allen Daten, die zu einem Schüler gespeichert sind – für Anfragen nach der DSGVO",
+        ] },
     { v: "2.63.3", date: "September 2026", changes: [
             "Fehlermeldungen sind kürzer und passen jetzt ganz auf den Bildschirm",
         ] },
@@ -14029,6 +14032,114 @@ function loeschDatum(stu) {
     const daten = aufbewahrungsfristen(stu).map(f => f.faellig).filter(Boolean);
     return daten.length ? new Date(Math.max(...daten.map(d => d.getTime()))) : null;
 }
+// Datenauskunft nach Art. 15 DSGVO (v2.64.0, Produktplan #28): alles, was die App zu einem
+// Schüler speichert, lesbar gegliedert. Reine Funktion - Druck (auskunftSheet) und Datei
+// (datenauskunftDatei) entstehen daraus. Die PIN steht nie im Klartext darin, nur "vergeben".
+// ctx: { artName(code), standortName, termine: [appointments], dateien: [student_files] | null }
+function datenauskunftAbschnitte(stu, ctx) {
+    ctx = ctx || {};
+    const txt = v => (typeof v === "string" || typeof v === "number") ? String(v).trim() : "";
+    const dt = d => {
+        if (!d) return "";
+        const x = new Date(/^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? d + "T12:00:00" : d);
+        return isNaN(x) ? String(d) : x.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit", year: "numeric" });
+    };
+    const uhr = d => { const x = new Date(d); return isNaN(x) ? "" : x.toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }); };
+    const eur = n => (Number(n) || 0).toLocaleString("de-DE", { style: "currency", currency: "EUR" });
+    const art = c => txt(ctx.artName ? ctx.artName(c) : c);
+    const nurGefuellt = zeilen => zeilen.filter(z => z[1] !== "").map(z => [z[0], z[1]]);
+    const abschnitte = [];
+    const firma = !!stu.istFirmenkunde;
+    abschnitte.push({ titel: "Stammdaten", zeilen: nurGefuellt([
+        ["Vorname", txt(stu.vorname)], ["Nachname", txt(stu.name)], ["Geburtsdatum", dt(stu.geb)],
+        ["Handy", txt(stu.tel)], ["Festnetz", txt(stu.festnetz)], ["Telefon Eltern", txt(stu.elternTel)], ["Anschrift", txt(stu.anschrift)],
+        ["Führerscheinklasse", txt(stu.klasse)], ["Theorieprüfung", stu.ersterwerb === false ? "Erweiterung" : "Ersterwerb"],
+        ["Sehhilfe", stu.sehhilfe ? "ja" : ""], ["Anmeldedatum", dt(stu.ausbildungsbeginn || stu.enrolledAt)],
+        ["Standort", txt(ctx.standortName)],
+        ["Firma", firma ? [stu.firmaName, stu.firmaStrasse, stu.firmaPlzOrt].map(txt).filter(Boolean).join(", ") : ""],
+        ["E-Mail Firma", firma ? txt(stu.firmaEmail) : ""], ["USt-IdNr.", firma ? txt(stu.firmaUstId) : ""],
+        ["Zugang zur Schüler-App", (stu.pin || stu.pinCustom) ? "PIN vergeben (wird hier nicht angezeigt)" : "nicht eingerichtet"],
+        ["Angelegt am", dt(stu._createdAt || stu.created_at)], ["Archiviert", stu.archived ? (dt(stu.archivedAt) || "ja") : ""],
+    ]) });
+    const gefahren = (stu.drivenLessons || []).filter(Boolean);
+    const minuten = gefahren.reduce((t, l) => t + (Number(l.minutes) || 0), 0);
+    const buch = (stu.lessons || []).filter(Boolean);
+    const strecken = buch.filter(l => l.route).length + (Array.isArray(stu.routes) ? stu.routes.length : 0);
+    const reife = stu.examReadiness || null;
+    abschnitte.push({ titel: "Ausbildung", zeilen: nurGefuellt([
+        ["Abgehakte Punkte der Ausbildungskarte", String(Object.keys(stu.items || {}).filter(k => stu.items[k]).length)],
+        ["Theorieprüfung bestanden", stu.theorie ? "ja" : "nein"],
+        ["Gefahrene Fahrstunden", gefahren.length + (minuten ? " (" + minuten + " Minuten)" : "")],
+        ["Bereits vorher gefahrene Fahrstunden", (parseInt(stu.manualHours, 10) || 0) > 0 ? String(parseInt(stu.manualHours, 10)) : ""],
+        ["Aufgezeichnete Strecken (GPS)", strecken ? String(strecken) : ""],
+        ["Prüfungsreife festgestellt", reife && reife.festgestelltAm ? dt(reife.festgestelltAm) : ""],
+        ["Notiz für die nächste Stunde", txt(stu.lastNote)], ["Bemerkungen", txt(stu.bemerkungen)],
+        ["Ausbildungsvertrag", (stu.contracts || []).length ? (stu.contracts.length === 1 ? "1 Vertrag" : stu.contracts.length + " Verträge") : ""],
+    ]) });
+    const pruef = (stu.exams || []).filter(e => e && e.date).slice().sort((a, b) => String(a.date).localeCompare(String(b.date)));
+    if (pruef.length)
+        abschnitte.push({ titel: "Prüfungen", kopf: ["Prüfung", "Datum", "Ergebnis"],
+            zeilen: pruef.map(e => [e.art === "theorie" ? "Theorie" : e.art === "praxis" ? "Praxis" : txt(e.art) || "Prüfung", dt(e.date), e.passed ? "bestanden" : e.passed === false ? "nicht bestanden" : "offen"]) });
+    if (gefahren.length)
+        abschnitte.push({ titel: "Fahrstunden", kopf: ["Datum", "Uhrzeit", "Art", "Minuten"],
+            zeilen: gefahren.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(l => [dt(l.date), txt(l.time), art(l.art || "ÜST"), l.minutes ? String(l.minutes) : ""]) });
+    const buchMitText = buch.filter(l => txt(l.thema) || txt(l.gut) || txt(l.schlecht) || txt(l.note));
+    if (buchMitText.length)
+        abschnitte.push({ titel: "Fahrtenbuch", kopf: ["Datum", "Thema", "Das lief gut", "Nächstes Mal", "Notiz"],
+            zeilen: buchMitText.slice().sort((a, b) => String(a.date).localeCompare(String(b.date))).map(l => [dt(l.date), txt(l.thema), txt(l.gut), txt(l.schlecht), txt(l.note)]) });
+    const status = { confirmed: "bestätigt", pending: "angefragt", cancelled: "abgesagt", offered: "angeboten", rejected: "abgelehnt" };
+    const termine = (ctx.termine || []).filter(a => a && a.start_at).slice().sort((a, b) => String(a.start_at).localeCompare(String(b.start_at)));
+    if (termine.length)
+        abschnitte.push({ titel: "Termine", kopf: ["Datum", "Uhrzeit", "Art", "Status"],
+            zeilen: termine.map(a => [dt(a.start_at), uhr(a.start_at), art(a.art), status[a.status] || txt(a.status)]) });
+    const rechnungen = (stu.invoices || []).filter(Boolean);
+    if (rechnungen.length)
+        abschnitte.push({ titel: "Rechnungen", kopf: ["Nummer", "Datum", "Betrag", "Hinweis"],
+            zeilen: rechnungen.map(i => [txt(i.number), dt(i.date), eur(i.total), i.cancelledBy ? "storniert" : i.stornoOf ? "Storno zu " + txt(i.stornoOf) : ""]) });
+    const zahlungen = (stu.payments || []).filter(Boolean);
+    if (zahlungen.length)
+        abschnitte.push({ titel: "Zahlungen", kopf: ["Datum", "Betrag", "Zahlart"],
+            zeilen: zahlungen.map(z => [dt(z.date), eur(z.amount), txt(z.method)]) });
+    const kosten = (stu.costItems || []).filter(Boolean);
+    if (kosten.length)
+        abschnitte.push({ titel: "Weitere Kosten", kopf: ["Bezeichnung", "Betrag"], zeilen: kosten.map(c => [txt(c.label), eur(c.amount)]) });
+    if (ctx.dateien === null)
+        abschnitte.push({ titel: "Dokumente", zeilen: [["Hinweis", "Die Liste der Dokumente konnte nicht geladen werden."]] });
+    else if ((ctx.dateien || []).length) {
+        const kat = id => ((typeof STUDENT_FILE_CATEGORIES !== "undefined" ? STUDENT_FILE_CATEGORIES : []).find(k => k.id === id) || {}).label || txt(id);
+        abschnitte.push({ titel: "Dokumente", kopf: ["Datei", "Art", "Hochgeladen am"], zeilen: ctx.dateien.map(f => [txt(f.filename), kat(f.category), dt(f.created_at)]) });
+    }
+    abschnitte.push({ titel: "Zweck, Rechtsgrundlage und Speicherdauer", zeilen: [
+        ["Zweck", "Durchführung der Fahrausbildung, Terminplanung und Abrechnung"],
+        ["Rechtsgrundlage", "Ausbildungsvertrag (Art. 6 Abs. 1 lit. b DSGVO) und gesetzliche Aufbewahrungspflichten (Art. 6 Abs. 1 lit. c DSGVO)"],
+        ["Speicherdauer", "Ausbildungsaufzeichnungen 5 Jahre ab Ende des Jahres, in dem die Ausbildung abgeschlossen wurde (§ 31 FahrlG), Rechnungen 10 Jahre (§ 147 AO)"],
+        ["Herkunft", "Bei der Anmeldung angegeben oder von der Fahrschule während der Ausbildung erfasst"],
+        ["Empfänger", "Welche Dienstleister beteiligt sind, steht in der Datenschutzerklärung der Fahrschule"],
+        ["Deine Rechte", "Berichtigung, Löschung, Einschränkung, Datenübertragbarkeit, Widerspruch und Beschwerde bei einer Datenschutz-Aufsichtsbehörde (Art. 16–21 und 77 DSGVO)"],
+    ] });
+    return abschnitte;
+}
+// Dieselbe Auskunft als Datei (Datenübertragbarkeit, Art. 20 DSGVO): der vollständige Datensatz
+// plus Termine und Dokumentliste. Interne Felder und die PIN fallen weg.
+function datenauskunftDatei(stu, ctx) {
+    ctx = ctx || {};
+    const schueler = {};
+    Object.keys(stu || {}).forEach(k => {
+        if (k.charAt(0) === "_" || k === "pin" || k === "pinCustom")
+            return;
+        schueler[k] = stu[k];
+    });
+    if (stu && (stu.pin || stu.pinCustom))
+        schueler.pin = "vergeben";
+    return {
+        erstellt: new Date().toISOString(),
+        fahrschule: ctx.fahrschule || "",
+        schueler,
+        termine: (ctx.termine || []).filter(Boolean).map(a => ({ beginn: a.start_at, ende: a.end_at, art: a.art || "", status: a.status || "",
+            ...(a.abholort ? { abholort: a.abholort } : {}), ...(a.ziel ? { ziel: a.ziel } : {}), ...(a.note ? { notiz: a.note } : {}) })),
+        dokumente: (ctx.dateien || []).map(f => ({ datei: f.filename || "", art: f.category || "", hochgeladen: f.created_at || "" })),
+    };
+}
 // Ist die 5-Jahres-Frist für die AUSBILDUNGSdaten abgelaufen? Bewusst nur diese eine Frist,
 // nicht loeschDatum(): dort zählt die SPÄTESTE aller Fristen (inkl. 10 Jahre für Rechnungen),
 // weil dort das Löschen des GESAMTEN Datensatzes gemeint ist. Die Ausbildungsdaten dürfen und
@@ -15137,6 +15248,7 @@ function App() {
     const [ohneTerminOpen, setOhneTerminOpen] = useState(false); // Liste "ohne nächsten Termin" auf der Startseite
     const [arbeitszeitOpen, setArbeitszeitOpen] = useState(false); // eigener Arbeitszeitnachweis (§ 12 FahrlG)
     const [wechselCode, setWechselCode] = useState(null);     // Schulwechsel: {stu, busy, error, code, bis}
+    const [auskunft, setAuskunft] = useState(null);           // Datenauskunft (v2.64.0): {stu, dateien: undefined=lädt | null=Fehler | [], druck}
     const [wechselImport, setWechselImport] = useState(null); // Übergabecode einlösen: {code, busy, error, vorschau}
     const [unterlagenOpen, setUnterlagenOpen] = useState(false); // Liste "Prüfung naht, Unterlagen fehlen" auf der Startseite
     const [folgeschritte, setFolgeschritte] = useState(null); // null | { studentId, erledigt: {} } - "So geht es weiter" nach der Übernahme eines Interessenten
@@ -16376,6 +16488,7 @@ function App() {
         else if (ohneTerminOpen) setOhneTerminOpen(false);
         else if (arbeitszeitOpen) setArbeitszeitOpen(false);
         else if (wechselCode) { if (!wechselCode.busy) setWechselCode(null); }
+        else if (auskunft) setAuskunft(null);
         else if (wechselImport) { if (!wechselImport.busy) setWechselImport(null); }
         else if (unterlagenOpen) setUnterlagenOpen(false);
         else if (folgeschritte) setFolgeschritte(null);
@@ -16418,7 +16531,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16658,7 +16771,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -27477,7 +27590,8 @@ function App() {
                     React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setPrintChoice(true); } }, "Als PDF drucken"),
                     active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); archivierenUmschalten(active); } }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren"),
                     active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); generateHandoverSummary(active); } }, "KI-Übergabe-Einschätzung erstellen"),
-                    React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); wechselCodeStarten(active); } }, "Fahrschulwechsel: Übergabecode"))),
+                    React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); wechselCodeStarten(active); } }, "Fahrschulwechsel: Übergabecode"),
+                    active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); datenauskunftOeffnen(active); } }, "Datenauskunft (DSGVO)"))),
             // Segment-Control auch hier (spec 7.4): ohne sie wäre der Kosten-Einstieg aus dem
             // Segment eine Sackgasse - man käme nicht per Segment zurück in ADK/Strecken/Übersicht.
             studentSegments(),
@@ -31343,9 +31457,33 @@ function App() {
             showToast("Logo konnte nicht entfernt werden:\n" + fehlerText(err), "error");
         }
     }
-    // Alle Daten eines Schülers als JSON – für DSGVO-Auskunft und Datenmitnahme.
-    function exportStudentData(stu) {
-        const blob = new Blob([JSON.stringify(stu, null, 2)], { type: "application/json" });
+    // Datenauskunft (v2.64.0): Sheet öffnen und die Dokumentliste nachladen (ohne signierte
+    // Links - für die Auskunft reichen Name, Art und Datum).
+    function datenauskunftOeffnen(stu) {
+        if (!stu) return;
+        setAuskunft({ stu, dateien: IS_DEMO() ? [] : undefined, druck: false });
+        if (IS_DEMO()) return;
+        sb.from("student_files").select("filename,category,created_at").eq("student_id", stu.id).order("created_at", { ascending: true })
+            .then(({ data, error }) => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien: error ? null : (data || []) } : a),
+                () => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien: null } : a));
+    }
+    function auskunftCtx(a) {
+        const stu = a.stu;
+        return { artName: artLabelPlain, fahrschule: (school && school.name) || "",
+            standortName: ((locations || []).find(l => l.id === stu.location_id) || {}).name || "",
+            termine: (appts || []).filter(x => x.student_id === stu.id), dateien: a.dateien };
+    }
+    function auskunftDrucken() {
+        if (!auskunft || auskunft.dateien === undefined) return;
+        setReifePreview(null);
+        setAuskunft(a => a && ({ ...a, druck: true }));
+        doPrint("handover");
+    }
+    // Alle Daten eines Schülers als Datei – für DSGVO-Auskunft und Datenmitnahme. Seit v2.64.0
+    // mit Terminen und Dokumentliste, ohne PIN und interne Felder (datenauskunftDatei).
+    function exportStudentData(stu, dateien) {
+        const inhalt = datenauskunftDatei(stu, auskunftCtx({ stu, dateien: dateien || [] }));
+        const blob = new Blob([JSON.stringify(inhalt, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
@@ -31384,7 +31522,7 @@ function App() {
                                         : "kein Archivdatum hinterlegt"),
                                 x.fristen.length > 1 && React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
                                     x.fristen.map(f => f.label + " (" + f.rechtsgrundlage + "): bis " + f.faellig.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })).join(" · "))),
-                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => exportStudentData(x.s) }, "Export"),
+                            React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5 }, onClick: () => datenauskunftOeffnen(x.s) }, "Auskunft"),
                             React.createElement("button", { className: "btn btn-ghost", style: { padding: "6px 10px", fontSize: 12.5, color: "var(--red)" }, onClick: async () => {
                                     // Vor Ablauf der Frist erst deutlich warnen (Audit H-N16) - der Knopf sah
                                     // für löschreife und noch aufzubewahrende Schüler gleich aus.
@@ -33766,7 +33904,7 @@ function App() {
             React.createElement("div", { className: "ps-receipt" }, receiptSheet()),
             React.createElement("div", { className: "ps-contract" }, contractSheet()),
             React.createElement("div", { className: "ps-schaltkompetenz" }, schaltkompetenzSheet()),
-            React.createElement("div", { className: "ps-handover" }, reifePreview ? reifeSheet() : handoverSheet()),
+            React.createElement("div", { className: "ps-handover" }, reifePreview ? reifeSheet() : (auskunft && auskunft.druck) ? auskunftSheet() : handoverSheet()),
             React.createElement("div", { className: "ps-preismeldung" }, preismeldungSheet()),
             React.createElement("div", { className: "ps-gutschein" }, gutscheinSheet()));
     }
@@ -34031,6 +34169,33 @@ function App() {
                 "Diese Bestätigung bescheinigt, dass für " + dispName(stu) + " am " + fmtD(r.datum) + new Date(r.datum).getFullYear() + " ein prüfungsähnlicher Test im Realverkehr in voller Prüfungsdauer durchgeführt wurde. Grundlage ist § 11 Absatz 1 und § 12 der Fahrschul-Ausbildungsordnung in der Fassung des Regierungsentwurfs zur Modernisierung der Fahrschulausbildung (BT-Drucksache 21/7404), Stand 20.05.2026, noch nicht in Kraft. Eine elektronische Ausstellung ist nach § 17 Absatz 5 FeV-E vorgesehen."),
             React.createElement("div", { style: { marginTop: 24, paddingTop: 14, borderTop: "1px solid #ccc", fontSize: "8pt", color: "#999", textAlign: "center" } },
                 (school && school.name) || "Allindrive", " · ", p.datum));
+    }
+    // Datenauskunft als Druck/PDF (v2.64.0) - gleiche Anmutung wie die Reife-Bestätigung.
+    function auskunftSheet() {
+        if (!auskunft || !auskunft.stu)
+            return null;
+        const stu = auskunft.stu;
+        const heute = new Date().toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" });
+        const zelle = { padding: "4px 6px", verticalAlign: "top", borderBottom: "1px solid #ddd" };
+        return React.createElement("div", { style: { fontFamily: "Georgia,serif", color: "#000", fontSize: "10pt", lineHeight: 1.5 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "2px solid #000", paddingBottom: 10, marginBottom: 14 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+                    React.createElement("img", { src: logoFor(school), alt: "", style: { width: 52, height: 52, objectFit: "cover", borderRadius: 8 } }),
+                    React.createElement("div", null,
+                        React.createElement("div", { style: { fontSize: "13pt", fontWeight: "bold" } }, (school && school.name) || "Fahrschule"),
+                        React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, (school && school.subtitle) || ""))),
+                React.createElement("div", { style: { textAlign: "right" } },
+                    React.createElement("div", { style: { fontSize: "14pt", fontWeight: "bold", letterSpacing: ".03em" } }, "DATENAUSKUNFT"),
+                    React.createElement("div", { style: { fontSize: "9pt", color: "#555" } }, "nach Art. 15 DSGVO · erstellt am " + heute))),
+            React.createElement("p", { style: { margin: "0 0 14px" } }, "Diese Übersicht enthält alle Daten, die die Fahrschule in Allindrive zu " + dispName(stu) + " gespeichert hat."),
+            datenauskunftAbschnitte(stu, auskunftCtx(auskunft)).map(a => React.createElement("div", { key: a.titel, style: { marginBottom: 14 } },
+                React.createElement("div", { style: { fontSize: "11pt", fontWeight: "bold", borderBottom: "1px solid #000", paddingBottom: 3, marginBottom: 6, breakAfter: "avoid", pageBreakAfter: "avoid" } }, a.titel),
+                React.createElement("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "9pt" } },
+                    a.kopf && React.createElement("thead", null, React.createElement("tr", null, a.kopf.map(k => React.createElement("th", { key: k, style: { ...zelle, textAlign: "left", color: "#555", fontWeight: "normal" } }, k)))),
+                    React.createElement("tbody", null, a.zeilen.map((z, i) => React.createElement("tr", { key: i, style: { breakInside: "avoid", pageBreakInside: "avoid" } },
+                        z.map((w, j) => React.createElement("td", { key: j, style: a.kopf ? zelle : { ...zelle, width: j === 0 ? "34%" : "auto", color: j === 0 ? "#555" : "#000" } }, w)))))))),
+            React.createElement("div", { style: { marginTop: 20, paddingTop: 12, borderTop: "1px solid #ccc", fontSize: "8pt", color: "#999", textAlign: "center" } },
+                (school && school.name) || "Allindrive", " · ", heute));
     }
     function handoverSheet() {
         if (!handoverModal || !handoverModal.text || !handoverModal.stu)
@@ -36489,6 +36654,28 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        // Datenauskunft (v2.64.0, Produktplan #28)
+        auskunft && (() => {
+            const stu = auskunft.stu;
+            const laedt = auskunft.dateien === undefined;
+            const zahl = (n, eins, viele) => n + " " + (n === 1 ? eins : viele);
+            const termine = (appts || []).filter(x => x.student_id === stu.id).length;
+            return React.createElement("div", { onClick: () => setAuskunft(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Datenauskunft",
+                    style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                        padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                    React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                    React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 6 } }, "Datenauskunft für " + dispName(stu)),
+                    React.createElement("p", { style: { fontSize: 13.5, color: "var(--muted)", lineHeight: 1.55, margin: "0 0 14px" } },
+                        "Alles, was zu " + (stu.vorname || dispName(stu)) + " gespeichert ist – zum Weitergeben bei einer Anfrage nach der DSGVO."),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 } },
+                        [zahl((stu.drivenLessons || []).length, "Fahrstunde", "Fahrstunden"), zahl(termine, "Termin", "Termine"), zahl((stu.invoices || []).length, "Rechnung", "Rechnungen"),
+                         laedt ? "Dokumente werden geladen…" : auskunft.dateien === null ? "Dokumente nicht geladen" : zahl(auskunft.dateien.length, "Dokument", "Dokumente")]
+                            .map(t => React.createElement("span", { key: t, style: { fontSize: 12.5, fontWeight: 600, padding: "5px 10px", borderRadius: "var(--r-pill)", background: "var(--canvas)", border: "1px solid var(--line)" } }, t))),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: laedt, onClick: auskunftDrucken }, "Als PDF drucken"),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 }, disabled: laedt, onClick: () => exportStudentData(stu, auskunft.dateien) }, "Als Datei speichern"),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAuskunft(null) }, "Schließen")));
+        })(),
         wechselCode && React.createElement("div", { onClick: () => { if (!wechselCode.busy) setWechselCode(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Übergabecode",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
