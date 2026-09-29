@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.63.1";
+const APP_VERSION = "2.63.2";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3701,6 +3701,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.63.2", date: "September 2026", changes: [
+            "Papierkorb: Wiederherstellen und „Rückgängig“ legen auch bei wackeligem Netz keinen Schüler mehr doppelt an; klappt das Ablegen im Papierkorb nicht, sagt die App es jetzt",
+            "Schülerdaten: „Bisheriger Stand“ zeigt die eingetragenen Fahrstunden statt einer falschen Zahl",
+        ] },
     { v: "2.63.1", date: "September 2026", changes: [
             "Kalender: Tippst du auf eine offene Terminanfrage, kannst du sie direkt bestätigen, eine andere Zeit vorschlagen oder ablehnen – statt im Bearbeiten-Fenster zu landen",
         ] },
@@ -6371,12 +6375,26 @@ async function papierkorbAblegen(uid, art, refId, name, daten, extra) {
         return null;
     }
 }
+// Liefert die Zahl der entfernten Einträge (0 = gab es nicht mehr, z.B. schon wiederhergestellt).
 async function papierkorbEntfernen(id) {
     if (!id || IS_DEMO())
-        return;
-    const { error } = await sb.from("papierkorb").delete().eq("id", id);
+        return 0;
+    const { data, error } = await sb.from("papierkorb").delete().eq("id", id).select("id");
     if (error)
         throw new Error(error.message);
+    return (data || []).length;
+}
+// Wiederhergestellt, aber der Eintrag ließ sich (Netz) nicht entfernen: auf diesem Gerät ausblenden,
+// damit ein zweiter Tipp keinen doppelten Schüler anlegt (Review v2.63.2).
+function papierkorbErledigtListe() {
+    try { return JSON.parse(localStorage.getItem("v3_pk_erledigt") || "[]") || []; } catch (e) { return []; }
+}
+function papierkorbErledigtMerken(id) {
+    if (!id) return;
+    try {
+        const l = papierkorbErledigtListe();
+        if (l.indexOf(id) < 0) { l.push(id); localStorage.setItem("v3_pk_erledigt", JSON.stringify(l.slice(-200))); }
+    } catch (e) { }
 }
 async function dbDeleteInteressent(id) {
     await withNetworkRetry(async () => {
@@ -18818,6 +18836,8 @@ function App() {
             await dbDeleteInteressent(it.id);
             setInteressenten(prev => prev.filter(x => x.id !== it.id));
             setInteressentForm(null);
+            if (!pkId && !IS_DEMO())
+                showToast("Gelöscht. Hinweis: Der Eintrag konnte nicht im Papierkorb gesichert werden.", "error");
         }
         catch (e) {
             papierkorbEntfernen(pkId).catch(() => { });
@@ -18836,7 +18856,8 @@ function App() {
             const { data, error } = await sb.from("papierkorb").select("id, art, ref_id, name, extra, geloescht_am").order("geloescht_am", { ascending: false });
             if (error)
                 throw error;
-            setPapierkorb({ liste: data || [], busy: false, error: "" });
+            const erledigt = papierkorbErledigtListe();
+            setPapierkorb({ liste: (data || []).filter(x => erledigt.indexOf(x.id) < 0), busy: false, error: "" });
         }
         catch (e) {
             setPapierkorb({ liste: [], busy: false, error: fehlerText(e) });
@@ -18865,15 +18886,16 @@ function App() {
                     if (a && await updateAppt(a.id, { student_id: created.id, title: t.title || "" }))
                         zurueck++;
                 }
-                await papierkorbEntfernen(row.id);
+                try { await papierkorbEntfernen(row.id); } catch (e) { papierkorbErledigtMerken(row.id); }
                 showToast(dispName(created) + " ist wieder da" + (zurueck ? ", " + zurueck + (zurueck === 1 ? " Termin wieder zugeordnet" : " Termine wieder zugeordnet") : "")
                     + ((row.extra && row.extra.dokumente) ? ". Hochgeladene Dokumente kommen nicht zurück." : "."));
             }
             else {
                 const created = await dbInsertInteressent(uid, row.daten || {});
-                if (created)
-                    setInteressenten(prev => [created, ...(prev || [])]);
-                await papierkorbEntfernen(row.id);
+                if (!created)
+                    throw new Error("Interessent konnte nicht angelegt werden");
+                setInteressenten(prev => [created, ...(prev || [])]);
+                try { await papierkorbEntfernen(row.id); } catch (e) { papierkorbErledigtMerken(row.id); }
                 showToast((row.name || "Interessent") + " ist wieder unter den Interessenten.");
             }
             setPapierkorb(pk => pk && ({ ...pk, busy: false, liste: (pk.liste || []).filter(x => x.id !== e.id) }));
@@ -18992,6 +19014,8 @@ function App() {
         try {
             await dbDelete(s.id);
             updateStudents(prev => (prev || []).filter(x => x.id !== s.id));
+            if (!pkId && !IS_DEMO())
+                showToast("Anmeldung gelöscht. Hinweis: Sie konnte nicht im Papierkorb gesichert werden.", "error");
         }
         catch (e) {
             papierkorbEntfernen(pkId).catch(() => { });
@@ -20478,13 +20502,25 @@ function App() {
         }
         if (terminFehler)
             showToast(terminFehler + (terminFehler === 1 ? " Termin von " : " Termine von ") + name + " konnte" + (terminFehler === 1 ? "" : "n") + " nicht bereinigt werden – bitte im Kalender nachsehen.", "error");
-        showUndo(name + (pkId ? " gelöscht (30 Tage im Papierkorb)" : " gelöscht"), async () => {
+        showUndo(name + (pkId ? " gelöscht (30 Tage im Papierkorb)" : " gelöscht (nicht im Papierkorb gesichert, nur Rückgängig)"), async () => {
+            // Erst den Papierkorb-Eintrag entfernen: ist er schon weg, wurde der Schüler inzwischen aus
+            // dem Papierkorb wiederhergestellt - ein zweites Anlegen ergäbe ihn doppelt (Review v2.63.2).
+            if (pkId) {
+                let weg = 1;
+                try { weg = await papierkorbEntfernen(pkId); } catch (e) { papierkorbErledigtMerken(pkId); }
+                if (weg === 0) {
+                    showToast(name + " wurde schon aus dem Papierkorb wiederhergestellt.");
+                    return;
+                }
+            }
             const created = await dbInsert(uid, backup);
             if (!created) {
-                showToast("Wiederherstellen fehlgeschlagen.", "error");
+                // Kopie zurück in den Papierkorb, damit nichts verloren geht
+                if (pkId)
+                    await papierkorbAblegen(uid, "schueler", s.id, name, backup, { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length });
+                showToast("Wiederherstellen fehlgeschlagen." + (pkId ? " Der Schüler liegt weiter im Papierkorb." : ""), "error");
                 return;
             }
-            papierkorbEntfernen(pkId).catch(() => { });
             const neu = updateStudents(prev => [...(prev || []), created]);
             saveCache(uid, neu);
             setActiveId(created.id);
@@ -27492,7 +27528,9 @@ function App() {
                     return React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 14, background: "var(--sky-bg, var(--card))" } },
                         React.createElement("div", { style: { fontWeight: 800, fontSize: 14 } }, (active.uebernahme.startwerte ? "Bisheriger Stand vor Allindrive" : "Übernommen von " + (active.uebernahme.vonSchule || "anderer Fahrschule"))),
                         React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3, lineHeight: 1.5 } },
-                            (active.uebernahme.am ? "am " + dashDatum(active.uebernahme.am) + " · " : "") + z.anzahl + (z.anzahl === 1 ? " Fahrstunde" : " Fahrstunden") + " (" + String(z.ue).replace(".", ",") + " UE) dort gefahren"
+                            (active.uebernahme.startwerte
+                                ? ((parseInt(active.manualHours, 10) || 0) + " Fahrstunden bisher")
+                                : (active.uebernahme.am ? "am " + dashDatum(active.uebernahme.am) + " · " : "") + z.anzahl + (z.anzahl === 1 ? " Fahrstunde" : " Fahrstunden") + " (" + String(z.ue).replace(".", ",") + " UE) dort gefahren")
                             + (z.sonder.length ? " · Sonderfahrten: " + z.sonder.map(x => x.label + " " + x.minuten + " Min.").join(", ") : "")),
                         React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 6, lineHeight: 1.45 } }, "Zählen zur Sonderfahrten-Pflicht, werden hier aber nicht abgerechnet. Rechnungen und Zahlungen bleiben bei der bisherigen Fahrschule."));
                 })(),
