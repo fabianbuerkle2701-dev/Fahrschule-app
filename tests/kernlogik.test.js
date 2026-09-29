@@ -207,14 +207,16 @@ test("Prüfungsakte: chronologisch, bestandener Versuch verdrängt den gleichen 
 // ── Ausbildungslogik: Überschneidung, Sonderfahrten, Prüfungsreife, Ampel ──
 const aus = require("./lade-app")(["findOverlaps", "sonderfahrtenBilanz", "pruefungsreife", "ampel"]);
 
-test("Überschneidung: echte Überlappung ja, Anschlusstermin und offene Anfrage nein", () => {
+test("Überschneidung: echte Überlappung ja (auch mit offener Anfrage), Anschlusstermin nein", () => {
     const appts = [
         { id: "1", status: "confirmed", start_at: "2026-09-28T08:00:00Z", end_at: "2026-09-28T09:30:00Z" },
         { id: "2", status: "pending", start_at: "2026-09-28T10:00:00Z", end_at: "2026-09-28T10:45:00Z" },
         { id: "3", status: "confirmed", start_at: "2026-09-28T12:00:00Z" },                       // ohne Ende = 45 Min
     ];
     assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z").length, 1);
-    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:15:00Z").length, 0, "direkt anschließend ist keine Überschneidung");
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:00:00Z").length, 0, "direkt anschließend ist keine Überschneidung");
+    // v2.56.1 (Vorgabe Fabian): offene Anfragen blockieren wie Termine
+    assert.equal(aus.findOverlaps(appts, "2026-09-28T09:30:00Z", "2026-09-28T10:15:00Z").length, 1, "offene Anfrage zählt als belegt");
     assert.equal(aus.findOverlaps(appts, "2026-09-28T12:30:00Z", "2026-09-28T13:00:00Z").length, 1, "fehlende Endzeit zählt als 45 Minuten");
     assert.equal(aus.findOverlaps(appts, "2026-09-28T09:00:00Z", "2026-09-28T09:45:00Z", "1").length, 0, "eigener Termin wird beim Bearbeiten ignoriert");
 });
@@ -374,7 +376,9 @@ test("Cockpit: wartende Schüler, Anfragen-Quote, Median-Dauer und Erstversuch-Q
     assert.deepEqual(k.warten.map(w => w.name), ["Nie gefahren", "Wartet"]);
     assert.equal(k.warten[0].nochNieGefahren, true);
     assert.equal(k.aktiveSchueler, 4);
-    assert.deepEqual(k.anfragen, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    const { quellen, absagegruende, unbeantwortet, ...kern } = k.anfragen;
+    assert.deepEqual(kern, { gesamt: 10, angemeldet: 3, abgesagt: 1, offen: 6, quote: 30 });
+    assert.equal(quellen.length + absagegruende.length + unbeantwortet.length, 0, "ohne Angaben keine Listen");
     assert.equal(k.dauerAnzahl, 2);
     assert.ok(k.dauerMonate > 4 && k.dauerMonate < 5.5, "Median aus 120 und 181 Tagen ≈ 4,9 Monate");
     assert.equal(k.quoteErstversuch, 50);
@@ -425,7 +429,11 @@ test("Offline-Warteschlange: erledigt nur, wenn seitdem nichts Neues dazukam", (
 test("Bestand übernehmen: Spalten typischer Exporte ohne KI erkennen", () => {
     const m = app.spaltenRaten(["Kd.-Nr.", "Nachname", "Vorname", "Geb.-Datum", "Straße", "PLZ", "Ort", "Telefon", "E-Mail", "Führerscheinklasse", "Anmeldung"]);
     assert.deepEqual(rein(m), { vorname: 2, name: 1, geburtstag: 3, handy: 7, festnetz: null, email: 8, adresse: 4, hausnr: null,
-        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null });
+        plz: 5, ort: 6, anmeldedatum: 10, klasse: 9, theorie_bestanden: null, stunden_gesamt: null, ueberland: null, autobahn: null, nacht: null });
+    // v2.61.0: Startwerte-Spalten (Stunden gesamt, Sonderfahrten in UE)
+    const sw = app.spaltenRaten(["Name", "Vorname", "Fahrstunden gesamt", "Überlandfahrten", "Autobahn", "Nachtfahrten", "Theoriestunden"]);
+    assert.equal(sw.stunden_gesamt, 2); assert.equal(sw.ueberland, 3); assert.equal(sw.autobahn, 4); assert.equal(sw.nacht, 5);
+    assert.notEqual(sw.stunden_gesamt, 6, "Theoriestunden sind keine Fahrstunden");
     // Eine Spalte "Name, Vorname" -> name, Vorname bleibt leer (wird beim Import geteilt)
     const v = app.spaltenRaten(["Name, Vorname", "Handy", "Telefon privat", "Theorieprüfung am"]);
     assert.equal(v.name, 0); assert.equal(v.vorname, null);
@@ -498,4 +506,74 @@ test("Schulwechsel: übernommene Sonderfahrten zählen zur Pflicht, werden aber 
     assert.equal(ab.ue, 5); assert.equal(ab.anzahl, 2); assert.equal(ab.erfuellt, true);
     assert.equal(ul.ue, 5); assert.equal(ul.erfuellt, true);
     assert.equal(app.lessonBillables(s, 60).length, 1, "nur die eigene Fahrstunde ist abrechenbar");
+});
+
+// v2.57.1: Sammelrechnung darf in "Nicht abgerechnet" herausgenommene Posten (nichtBerechnen) nicht abrechnen
+const rz = require("./lade-app")(["rechnungsEntwurfZeilen"]);
+test("Rechnungszeilen: Sammelrechnung lässt herausgenommene Posten weg, Einzelrechnung zeigt sie", () => {
+    const stu = {
+        drivenLessons: [
+            { id: "L1", date: "2026-09-01", minutes: 45, price: 50 },
+            { id: "L2", date: "2026-09-02", minutes: 45, price: 50, nichtBerechnen: true },
+            { id: "L3", date: "2026-09-03", minutes: 45, price: 50, invoiced: "RE-2026-0001" },
+        ],
+        costItems: [
+            { id: "C1", label: "Lernmaterial", amount: 30 },
+            { id: "C2", label: "Kulanz", amount: 20, nichtBerechnen: true },
+        ],
+    };
+    const summe = rows => rows.reduce((t, r) => t + r.amount, 0);
+    const ids = rows => JSON.stringify(Array.from(rows).flatMap(r => Array.from(r.ids || [r.id])).sort());
+    const einzel = rz.rechnungsEntwurfZeilen(stu, 50);
+    const sammel = rz.rechnungsEntwurfZeilen(stu, 50, true);
+    assert.equal(ids(einzel), JSON.stringify(["C1", "C2", "L1", "L2"]), "Einzelrechnung bietet alles Offene an (abwählbar)");
+    assert.equal(ids(sammel), JSON.stringify(["C1", "L1"]), "Sammelrechnung nur, was die Liste zeigt");
+    assert.equal(summe(sammel), 80);
+    assert.equal(summe(einzel), 150);
+});
+
+// v2.61.0: Startwerte aus der alten Software zählen zur Sonderfahrten-Pflicht
+const sw2 = require("./lade-app")(["startwerteFahrstunden", "sonderfahrtenBilanz"]);
+test("Startwerte: Sonderfahrten in UE werden Sammelzeilen und zählen zur Bilanz", () => {
+    const f = sw2.startwerteFahrstunden({ "ÜL": "2", "AB": "1,5", "NF": "" }, "B");
+    assert.equal(f.length, 2);
+    assert.equal(f[0].art, "ÜL"); assert.equal(f[0].minutes, 90);
+    assert.equal(f[1].art, "AB"); assert.equal(f[1].minutes, 68);
+    const b = sw2.sonderfahrtenBilanz({ drivenLessons: [{ art: "ÜL", minutes: 135, klasse: "B" }], uebernahme: { startwerte: true, fahrstunden: f } }, "B", {});
+    const ul = Array.from(b).find(x => x.code === "ÜL");
+    assert.equal(ul.ue, 5, "3 UE gefahren + 2 UE Startwert");
+    assert.equal(ul.erfuellt, true);
+});
+
+// v2.62.0: Quellen/Absagegründe sortiert, "nicht erfasst" zuletzt; unbeantwortete Anfragen mit Fahrlehrer
+test("Cockpit: Anfragen nach Quelle und Absagegrund, unbeantwortete mit Fahrlehrer", () => {
+    const jetzt = new Date("2026-09-28T12:00:00Z");
+    const k = ck.cockpitKennzahlen({ lehrer: [{ id: "L1", name: "Miriam" }], belegung: [], schueler: [], interessenten: { abgesagt: 5 },
+        anfrage_quellen: { ohne: 4, telefon: 1, website: 3 }, absagegruende: { preis: 3, zeit: 1, ohne: 1 },
+        unbeantwortet: [{ name: "Anna", lehrer_id: "L1", seit: "2026-09-25T10:00:00Z" }] }, [], [], 50, jetzt);
+    assert.equal(JSON.stringify(Array.from(k.anfragen.quellen).map(x => x.key)), JSON.stringify(["website", "telefon", "ohne"]));
+    assert.equal(k.anfragen.absagegruende[0].label, "Zu teuer");
+    assert.equal(k.anfragen.unbeantwortet[0].lehrer, "Miriam");
+    const f = Array.from(ck.cockpitFolgerungen(k)).map(x => x.text).join(" | ");
+    assert.match(f, /1 Anfrage wartet seit über zwei Tagen/);
+    assert.match(f, /Häufigster Absagegrund: Zu teuer \(3 von 4\)/);
+});
+
+// v2.63.0: Archiv-Vorschläge
+const av = require("./lade-app")(["archivVorschlaege"]);
+test("Archiv-Vorschläge: bestanden oder über ein Jahr inaktiv ohne künftigen Termin", () => {
+    const jetzt = new Date("2026-09-29T12:00:00Z");
+    const st = [
+        { id: "a", _isMine: true, exams: [{ art: "praxis", passed: true, date: "2026-09-01" }] },          // bestanden
+        { id: "b", _isMine: true, drivenLessons: [{ date: "2025-06-01" }], created_at: "2025-01-01" },     // inaktiv > 1 Jahr
+        { id: "c", _isMine: true, drivenLessons: [{ date: "2025-06-01" }] },                               // inaktiv, aber Termin geplant
+        { id: "d", _isMine: true, drivenLessons: [{ date: "2026-08-01" }] },                               // aktiv
+        { id: "e", _isMine: true, archived: true, exams: [{ art: "praxis", passed: true, date: "2026-01-01" }] },
+        { id: "f", _isMine: false, exams: [{ art: "praxis", passed: true, date: "2026-01-01" }] },         // fremd
+        { id: "g", _isMine: true, exams: [{ art: "praxis", passed: false, date: "2026-09-01" }], drivenLessons: [{ date: "2026-09-01" }] },
+    ];
+    const r = av.archivVorschlaege(st, [], { c: { start_at: "2026-10-01" } }, jetzt);
+    assert.equal(JSON.stringify(Array.from(r).map(x => x.s.id)), JSON.stringify(["a", "b"]));
+    assert.match(r[0].grund, /^bestanden am 1\.9\.2026$/);
+    assert.match(r[1].grund, /^zuletzt aktiv Juni 2025$/);
 });
