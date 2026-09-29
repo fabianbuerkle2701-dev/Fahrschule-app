@@ -3556,7 +3556,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.62.0";
+const APP_VERSION = "2.62.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3700,6 +3700,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.62.1", date: "September 2026", changes: [
+            "Termin anlegen wieder wie früher: Datum, Von/Bis mit Stunden- und Viertelstunden-Knöpfen, Dauer, Art als Auswahl, Schüler als Liste. Ziel der Stunde, Abholort und Fahrzeug bleiben als Felder erhalten",
+        ] },
     { v: "2.62.0", date: "September 2026", changes: [
             "Für Inhaber: Interessenten bekommen „Wie kam die Anfrage?“ und bei einer Absage „Warum abgesagt?“ (zu teuer, keine passenden Zeiten, andere Fahrschule, meldet sich nicht)",
             "Das Fahrschul-Cockpit zeigt, woher Anfragen kommen, warum sie absagen und welche Anfragen seit über zwei Tagen unbeantwortet sind – mit Handlungshinweis, wenn Anfragen liegen bleiben oder die meisten wegen Preis oder Zeiten absagen",
@@ -37490,91 +37493,35 @@ function App() {
                     maxHeight: "88dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
                 React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 16 } }, apptForm.urlaub ? (apptForm.note === "Krank" ? "Krank-Sperre bearbeiten" : "Urlaub bearbeiten") : (apptForm.id ? "Termin bearbeiten" : "Neuer Termin")),
-                // ── Termin-Fenster (v2.48.1, gestaltet nach Fabians Rückmeldung "nicht schön aufgebaut"). Oben groß,
-                // was entsteht; darunter Schüler, Tag, Beginn, Dauer, Art, Ziel; Seltenes unter "Weitere Optionen".
-                // Speicherlogik (saveApptForm/saveApptSerie) unverändert.
-                (() => {
-                    const f = apptForm;
-                    const setF = patch => setApptForm(x => x && ({ ...x, ...patch }));
-                    const dauer = f.start && f.end && toMin(f.end) > toMin(f.start) ? toMin(f.end) - toMin(f.start) : 0;
-                    const setStart = t => setApptForm(x => x && (x.end ? apptMitStart(x, t) : { ...x, start: t, end: addMinutesToTime(t, 45) }));
-                    const langDatum = d => d ? new Date(d + "T12:00:00").toLocaleDateString("de-DE", { weekday: "long", day: "numeric", month: "long" }) : "";
-                    if (f.urlaub)
-                        return React.createElement(React.Fragment, null,
-                            React.createElement("div", { className: "field", style: { marginBottom: 12 } },
-                                React.createElement("label", null, "Datum", React.createElement("input", { type: "date", value: f.date, onChange: e => setF({ date: e.target.value }) }))),
-                            React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 12 } },
-                                React.createElement("div", { className: "field", style: { flex: 1 } }, React.createElement("label", null, "Von", React.createElement("input", { type: "time", step: "900", value: f.start, onChange: e => setApptForm(apptMitStart(f, e.target.value)) }))),
-                                React.createElement("div", { className: "field", style: { flex: 1 } }, React.createElement("label", null, "Bis", React.createElement("input", { type: "time", step: "900", value: f.end, onChange: e => setF({ end: e.target.value }) })))),
-                            React.createElement("div", { className: "field" },
-                                React.createElement("label", null, "Notiz", React.createElement("input", { type: "text", value: f.note, onChange: e => setF({ note: e.target.value }) }))));
-                    const q = String(f.suche || "").trim().toLowerCase();
-                    const alle = students.filter(x => x._isMine && !x.archived);
-                    // Wer laut Wunschliste genau zu dieser Zeit kann und noch keinen Termin dann hat (#14)
-                    const wartend = (!f.id && f.date && f.start) ? new Set(waitlistCandidates({ start_at: combineDT(f.date, f.start),
-                        end_at: combineDT(f.date, f.end && f.end > f.start ? f.end : addMinutesToTime(f.start, 45)) }, alle, true).map(x => x.id)) : new Set();
-                    const gewaehlt = f.student_id ? (alle.find(x => x.id === f.student_id) || students.find(x => x.id === f.student_id)) : null;
-                    const personen = alle.filter(x => !q || dispName(x).toLowerCase().includes(q))
-                        .sort((p, r) => ((p.id === f.student_id ? 0 : 1) - (r.id === f.student_id ? 0 : 1)) || ((wartend.has(p.id) ? 0 : 1) - (wartend.has(r.id) ? 0 : 1)) || ((nextApptByStudent[p.id] ? 1 : 0) - (nextApptByStudent[r.id] ? 1 : 0)) || dispName(p).localeCompare(dispName(r), "de"));
-                    // Alle Arten nach Gruppen für die Klappliste (Reihenfolge wie artOptgroups)
-                    const artGruppen = (() => {
-                        const g = {};
-                        (arten || []).forEach(a => { const k = ART_GROUP_OF[a.code] || "Sonstiges"; (g[k] || (g[k] = [])).push(a); });
-                        return ART_GROUP_ORDER.filter(k => g[k]).map(k => [k, g[k]]);
-                    })();
-                    const artFarbe = c => ((arten || []).find(x => x.code === c) || {}).color || "var(--line)";
-                    const artAktiv = f.art || "ÜST";
-                    const mehrInhalt = !!(f.sonstige || (f.serie && f.serie.on));
-                    return React.createElement(React.Fragment, null,
-                        React.createElement("div", { className: "tf-kopf" },
-                            React.createElement("div", { className: "tf-kopf-zeit" }, f.start ? f.start + (f.end ? " bis " + f.end : "") : "Uhrzeit wählen"),
-                            React.createElement("div", { className: "tf-kopf-sub" }, [langDatum(f.date), dauer ? dauer + " Min." : ""].filter(Boolean).join(", "))),
-                        // Schüler
-                        React.createElement("div", { className: "tf-label" }, "Schüler", wartend.size > 0
-                            ? React.createElement("small", null, wartend.size === 1 ? "1 wartet auf diese Zeit" : wartend.size + " warten auf diese Zeit")
-                            : alle.length > 8 && React.createElement("small", null, personen.length + " von " + alle.length)),
-                        alle.length > 8 && React.createElement("input", { type: "search", className: "tf-input", value: f.suche || "", placeholder: "Name suchen", "aria-label": "Schüler suchen",
-                            onChange: e => setF({ suche: e.target.value }), style: { marginBottom: 10 } }),
-                        React.createElement("div", { className: "tf-row", role: "radiogroup", "aria-label": "Schüler" },
-                            React.createElement("button", { type: "button", role: "radio", "aria-checked": !f.student_id, className: "tf-person" + (!f.student_id ? " on" : ""), onClick: () => setF({ student_id: "" }) },
-                                React.createElement("span", { className: "tf-ohne", "aria-hidden": "true" },
-                                    React.createElement("svg", { width: 22, height: 22, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
-                                        React.createElement("path", { d: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" }), React.createElement("circle", { cx: 12, cy: 7, r: 4 }))),
-                                React.createElement("span", { className: "nm" }, "Ohne")),
-                            personen.map(x => React.createElement("button", { key: x.id, type: "button", role: "radio", "aria-checked": x.id === f.student_id,
-                                    className: "tf-person" + (x.id === f.student_id ? " on" : ""), onClick: () => setF({ student_id: x.id, suche: "" }), title: dispName(x) },
-                                React.createElement("span", { className: "avatar tone-" + avatarTone(x.id), "aria-hidden": "true" }, initials(x)),
-                                React.createElement("span", { className: "nm" }, x.vorname || dispName(x)),
-                                wartend.has(x.id) && React.createElement("span", { className: "tf-wartet" }, "wartet")))),
-                        // Datum und Uhrzeit (v2.54.0, Fabians Rückmeldung): ein Datumsfeld und "von - bis",
-                        // statt Heute/Morgen/Übermorgen, Zeit-Knöpfen und Dauer-Leiste.
-                        React.createElement("label", { htmlFor: "appt-datum", className: "tf-label" }, "Datum"),
-                        React.createElement("input", { id: "appt-datum", type: "date", className: "tf-input tf-feld", value: f.date || "", onChange: e => { if (e.target.value) setF({ date: e.target.value }); } }),
-                        React.createElement("div", { className: "tf-label" }, "Uhrzeit"),
-                        React.createElement("div", { className: "tf-zeit" },
-                            React.createElement("input", { type: "time", step: "300", className: "tf-input tf-feld", value: f.start || "", "aria-label": "Von", onChange: e => { if (e.target.value) setStart(e.target.value); } }),
-                            React.createElement("span", { "aria-hidden": "true" }, "bis"),
-                            React.createElement("input", { type: "time", step: "300", className: "tf-input tf-feld", value: f.end || "", "aria-label": "Bis", onChange: e => setF({ end: e.target.value }) })),
-                        // Art (v2.54.1, Fabian: "klappbar, aber mit den Farben"): zugeklappt die gewählte Art mit
-                        // Farbpunkt, aufgeklappt alle Arten nach Gruppen. Eigene Liste statt <select>, weil
-                        // Optionen eines Auswahlmenüs auf dem iPhone keine Farben zeigen können.
-                        React.createElement("div", { className: "tf-label" }, "Art"),
-                        React.createElement("button", { type: "button", className: "tf-input tf-klapp", "aria-expanded": !!f.artOffen, "aria-label": "Art: " + artLabelPlain(artAktiv),
-                                onClick: () => setF({ artOffen: !f.artOffen }) },
-                            React.createElement("span", { className: "punkt", style: { background: artFarbe(artAktiv) }, "aria-hidden": "true" }),
-                            React.createElement("span", { className: "tf-klapp-text" }, artLabelPlain(artAktiv)),
-                            React.createElement("svg", { width: 18, height: 18, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.2, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true",
-                                    style: { flex: "none", color: "var(--muted)", transform: f.artOffen ? "rotate(180deg)" : "none", transition: "transform .15s" } },
-                                React.createElement("polyline", { points: "6 9 12 15 18 9" }))),
-                        f.artOffen && React.createElement("div", { className: "tf-artliste", role: "listbox", "aria-label": "Art wählen" },
-                            artGruppen.map(([gruppe, liste]) => React.createElement(React.Fragment, { key: gruppe },
-                                artGruppen.length > 1 && React.createElement("div", { className: "tf-artgruppe" }, gruppe),
-                                liste.map(a => React.createElement("button", { key: a.code, type: "button", role: "option", "aria-selected": a.code === artAktiv,
-                                        className: "tf-artwahl" + (a.code === artAktiv ? " on" : ""), onClick: () => setF({ art: a.code, artOffen: false }) },
-                                    React.createElement("span", { className: "punkt", style: { background: a.color || "var(--line)" }, "aria-hidden": "true" }),
-                                    React.createElement("span", { className: "tf-klapp-text" }, a.label || artLabelPlain(a.code)),
-                                    a.code === artAktiv && React.createElement("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.6, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", style: { flex: "none", color: "var(--orange)" } },
-                                        React.createElement("polyline", { points: "20 6 9 17 4 12" }))))))),
+                React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Datum",
+                    React.createElement("input", { type: "date", value: apptForm.date, onChange: e => setApptForm({ ...apptForm, date: e.target.value }) }))),
+                React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 8 } },
+                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                        React.createElement("label", null, "Von",
+                        React.createElement("input", { type: "time", step: "900", value: apptForm.start, onChange: e => setApptForm(apptMitStart(apptForm, e.target.value)) }))),
+                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                        React.createElement("label", null, "Bis (optional)",
+                        React.createElement("input", { type: "time", step: "900", value: apptForm.end, onChange: e => setApptForm({ ...apptForm, end: e.target.value }) })))),
+                React.createElement("div", { style: { marginBottom: 6 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Startzeit \u00B7 Viertelstunde"),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, ["08:00", "09:00", "10:00", "11:00", "12:00", "13:00", "14:00", "15:00", "16:00", "17:00", "18:00"].map(t => React.createElement("button", { key: t, onClick: () => setApptForm(apptMitStart(apptForm, t)), className: "btn " + (apptForm.start === t ? "btn-primary" : "btn-ghost"), style: { padding: "6px 10px", fontSize: 13, minWidth: 0 } }, t))),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } }, ["00", ":15", ":30", ":45"].map((mm, i) => {
+                        const min = ["00", "15", "30", "45"][i];
+                        const cur = (apptForm.start || "09:00").slice(0, 2);
+                        const t = cur + ":" + min;
+                        return React.createElement("button", { key: min, onClick: () => setApptForm(apptMitStart(apptForm, t)), className: "btn " + ((apptForm.start || "").slice(3) === min ? "btn-primary" : "btn-ghost"), style: { padding: "6px 12px", fontSize: 13 } },
+                            ":",
+                            min);
+                    }))),
+                // Beim Urlaub (Audit H-H1) gibt es keine Dauer, Terminart, keinen Schüler und keine
+                // Bestätigung - diese Felder würden aus dem Urlaubstag nur wieder eine Fahrstunde machen.
+                !apptForm.urlaub && React.createElement("div", { style: { marginBottom: 14 } },
+                    React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 } }, "Dauer (setzt Endzeit)"),
+                    React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [45, 55, 60, 90, 135].map(d => React.createElement("button", { key: d, onClick: () => setApptForm({ ...apptForm, end: addMinutesToTime(apptForm.start, d) }), className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 13 } }, d === 45 ? "1 FS (45 min)" : d === 55 ? "Prüfung (55 min)" : d === 60 ? "1,33 FS (60 min)" : d === 90 ? "2 FS (90 min)" : d === 135 ? "3 FS (135 min)" : d + " min")))),
+                !apptForm.urlaub && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Art",
+                    React.createElement("select", { value: apptForm.art || "ÜST", onChange: e => setApptForm({ ...apptForm, art: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } }, artOptgroups(arten)))),
                 apptForm.art === "NF" && apptForm.date && weather && weather !== "error" && weather.lat != null && (() => {
                     const sunset = sonnenuntergangFuerDatum(weather.lat, weather.lon, new Date(combineDT(apptForm.date, "12:00")));
                     if (!sunset)
@@ -37592,62 +37539,70 @@ function App() {
                         "An diesem Tag geht die Sonne erst um " + sunset.toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) + " Uhr unter - für eine Dämmerungsfahrt könnte " + (apptForm.start || "00:00") + " Uhr noch zu früh sein. ",
                         React.createElement("button", { onClick: () => setApptForm({ ...apptForm, start: empfohlenStr, end: dauerMin > 0 ? addMinutesToTime(empfohlenStr, dauerMin) : apptForm.end }), style: { textDecoration: "underline", fontWeight: 700 } }, "Auf " + empfohlenStr + " Uhr setzen"));
                 })(),
-                        // Ziel der Stunde
-                        gewaehlt && !f.sonstige && (() => {
-                            const vorschlaege = zielVorschlaege(gewaehlt).filter(v => v.text !== String(f.ziel || "").trim());
-                            return React.createElement(React.Fragment, null,
-                                React.createElement("label", { htmlFor: "appt-ziel", className: "tf-label" }, "Ziel der Stunde", React.createElement("small", null, "optional")),
-                                React.createElement("input", { id: "appt-ziel", type: "text", className: "tf-input", value: f.ziel || "", maxLength: 300,
-                                    onChange: e => setF({ ziel: e.target.value }), placeholder: "Woran soll gearbeitet werden?" }),
-                                vorschlaege.length > 0 && React.createElement("div", { className: "tf-row", style: { marginTop: 8 } },
-                                    vorschlaege.map(v => React.createElement("button", { key: v.text, type: "button", className: "tf-pill klein", onClick: () => setF(v.art ? { ziel: v.text, art: v.art } : { ziel: v.text }) }, v.label))));
-                        })(),
-                        // Abholort: zuletzt genutzter dieses Schülers, seine Anschrift, Standorte der Fahrschule
-                        !f.sonstige && (() => {
-                            const vorschlaege = [];
-                            if (gewaehlt) {
-                                const letzter = (appts || []).filter(x => x.student_id === gewaehlt.id && x.abholort && x.id !== f.id)
-                                    .sort((p, r) => String(r.start_at).localeCompare(String(p.start_at)))[0];
-                                if (letzter) vorschlaege.push({ text: letzter.abholort, label: letzter.abholort });
-                                if (gewaehlt.anschrift) vorschlaege.push({ text: gewaehlt.anschrift, label: "Zu Hause" });
-                            }
-                            (locations || []).forEach(l => { if (l && l.name) vorschlaege.push({ text: l.name, label: l.name }); });
-                            const liste = vorschlaege.filter((v, i) => v.text && v.text !== String(f.abholort || "").trim() && vorschlaege.findIndex(o => o.text === v.text) === i).slice(0, 5);
-                            return React.createElement(React.Fragment, null,
-                                React.createElement("label", { htmlFor: "appt-abholort", className: "tf-label" }, "Abholort", React.createElement("small", null, "optional")),
-                                React.createElement("input", { id: "appt-abholort", type: "text", className: "tf-input", value: f.abholort || "", maxLength: 200, autoComplete: "street-address",
-                                    onChange: e => setF({ abholort: e.target.value }), placeholder: "Wo holst du ab?" }),
-                                liste.length > 0 && React.createElement("div", { className: "tf-row", style: { marginTop: 8 } },
-                                    liste.map(v => React.createElement("button", { key: v.text, type: "button", className: "tf-pill klein", title: v.text, onClick: () => setF({ abholort: v.text }) }, v.label))));
-                        })(),
-                        // Notiz (v2.54.2, Fabian: direkt unter den Abholort, um die Stunde zu beschreiben - vorher unter "Weitere Optionen")
-                        React.createElement("label", { htmlFor: "appt-notiz", className: "tf-label" }, "Notiz", React.createElement("small", null, "optional")),
-                        React.createElement("textarea", { id: "appt-notiz", className: "tf-input", rows: 2, value: f.note || "", onChange: e => setF({ note: e.target.value }),
-                            placeholder: "Was steht in dieser Stunde an?", style: { resize: "vertical", minHeight: 76, lineHeight: 1.45, fontFamily: "inherit" } }),
-                        // Fahrzeug (#23): nur mit Fuhrpark; ein inzwischen stillgelegtes bleibt sichtbar, solange es gewählt ist
-                        (() => {
-                            const liste = vehicles.filter(v => !v.inactive || v.id === f.fahrzeug);
-                            if (!liste.length)
-                                return null;
-                            return React.createElement(React.Fragment, null,
-                                React.createElement("div", { className: "tf-label" }, "Fahrzeug", React.createElement("small", null, "optional")),
-                                React.createElement("div", { className: "tf-row", role: "radiogroup", "aria-label": "Fahrzeug" },
-                                    liste.map(v => React.createElement("button", { key: v.id, type: "button", role: "radio", "aria-checked": f.fahrzeug === v.id, title: [v.name, v.plate].filter(Boolean).join(" · "),
-                                        className: "tf-pill" + (f.fahrzeug === v.id ? " on" : ""), onClick: () => setF({ fahrzeug: v.id }) }, v.name || v.plate || "Fahrzeug")),
-                                    React.createElement("button", { type: "button", role: "radio", "aria-checked": !f.fahrzeug, className: "tf-pill" + (!f.fahrzeug ? " on" : ""), onClick: () => setF({ fahrzeug: "" }) }, "Ohne")));
-                        })(),
-                        // Weitere Optionen
-                        React.createElement("button", { type: "button", className: "tf-mehr", "aria-expanded": !!f.mehr, onClick: () => setF({ mehr: !f.mehr }) },
-                            React.createElement("svg", { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2.4, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" }, React.createElement("polyline", { points: "9 18 15 12 9 6" })), "Weitere Optionen", !f.mehr && mehrInhalt && React.createElement("span", { style: { fontWeight: 600, color: "var(--muted)", fontSize: 12.5 } }, "(gesetzt)")),
-                        f.mehr && React.createElement("div", { className: "tf-gruppe" },
-                            React.createElement("button", { type: "button", role: "switch", "aria-checked": !!f.sonstige, className: "tf-schalter", onClick: () => setF({ sonstige: !f.sonstige }) },
-                                React.createElement("span", null, React.createElement("b", null, "Sonstige Tätigkeit"), React.createElement("small", null, "Keine Fahrstunde, zählt nicht zum Ausbildungslimit")),
-                                React.createElement("span", { className: "tf-switch" + (f.sonstige ? " on" : ""), "aria-hidden": "true" })),
-                            !f.id && React.createElement("button", { type: "button", role: "switch", "aria-checked": !!(f.serie && f.serie.on), className: "tf-schalter",
-                                    onClick: () => setF({ serie: (f.serie && f.serie.on) ? { ...f.serie, on: false } : { on: true, wiederholung: (f.serie && f.serie.wiederholung) || "weekly", anzahl: (f.serie && f.serie.anzahl) || 6 } }) },
-                                React.createElement("span", null, React.createElement("b", null, "Terminserie"), React.createElement("small", null, "Mehrfach anlegen, z.B. jede Woche zur gleichen Zeit")),
-                                React.createElement("span", { className: "tf-switch" + ((f.serie && f.serie.on) ? " on" : ""), "aria-hidden": "true" }))));
+                !apptForm.urlaub && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Sch\u00FCler (optional)",
+                    React.createElement("select", { value: apptForm.student_id, onChange: e => setApptForm({ ...apptForm, student_id: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                        React.createElement("option", { value: "" }, "\u2013 kein Sch\u00FCler \u2013"),
+                        students.filter(s => s._isMine && !s.archived).sort((a, b) => dispName(a).localeCompare(dispName(b), "de")).map(s => React.createElement("option", { key: s.id, value: s.id }, dispName(s)))))),
+                !apptForm.urlaub && !apptForm.sonstige && apptForm.student_id && (() => {
+                    const stu = (students || []).find(x => x.id === apptForm.student_id);
+                    const vorschlaege = zielVorschlaege(stu).filter(v => v.text !== String(apptForm.ziel || "").trim());
+                    return React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                        React.createElement("label", { htmlFor: "appt-ziel" }, "Ziel der Stunde (optional)"),
+                        React.createElement("input", { id: "appt-ziel", type: "text", value: apptForm.ziel || "", maxLength: 300,
+                            onChange: e => setApptForm({ ...apptForm, ziel: e.target.value }), placeholder: "z.B. Kreisverkehr, rückwärts einparken, erste Autobahnfahrt\u2026" }),
+                        vorschlaege.length > 0 && React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } },
+                            vorschlaege.map(v => React.createElement("button", { key: v.text, type: "button",
+                                onClick: () => setApptForm(f => f && ({ ...f, ziel: v.text })),
+                                style: { border: "1.5px solid var(--line)", background: "var(--card)", borderRadius: 99, padding: "5px 11px", fontSize: 12.5, fontWeight: 600, color: "var(--ink-2)", cursor: "pointer", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "+ " + v.label))),
+                        React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginTop: 5 } }, "Steht im Kalender am Termin und im Abschluss nach der Stunde."));
                 })(),
+                // Abholort (v2.49.0) und Fahrzeug (v2.52.0) - im Stil des alten Formulars (Rückbau v2.62.1)
+                !apptForm.urlaub && !apptForm.sonstige && (() => {
+                    const stu = apptForm.student_id ? (students || []).find(x => x.id === apptForm.student_id) : null;
+                    const vorschlaege = [];
+                    if (stu) {
+                        const letzter = (appts || []).filter(x => x.student_id === stu.id && x.abholort && x.id !== apptForm.id)
+                            .sort((p, r) => String(r.start_at).localeCompare(String(p.start_at)))[0];
+                        if (letzter) vorschlaege.push({ text: letzter.abholort, label: letzter.abholort });
+                        if (stu.anschrift) vorschlaege.push({ text: stu.anschrift, label: "Zu Hause" });
+                    }
+                    (locations || []).forEach(l => { if (l && l.name) vorschlaege.push({ text: l.name, label: l.name }); });
+                    const liste = vorschlaege.filter((v, i) => v.text && v.text !== String(apptForm.abholort || "").trim() && vorschlaege.findIndex(o => o.text === v.text) === i).slice(0, 5);
+                    return React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                        React.createElement("label", { htmlFor: "appt-abholort" }, "Abholort (optional)"),
+                        React.createElement("input", { id: "appt-abholort", type: "text", value: apptForm.abholort || "", maxLength: 200, autoComplete: "street-address",
+                            onChange: e => setApptForm({ ...apptForm, abholort: e.target.value }), placeholder: "z.B. Bahnhof, Schule, zu Hause\u2026" }),
+                        liste.length > 0 && React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 } },
+                            liste.map(v => React.createElement("button", { key: v.text, type: "button", title: v.text,
+                                onClick: () => setApptForm(f => f && ({ ...f, abholort: v.text })),
+                                style: { border: "1.5px solid var(--line)", background: "var(--card)", borderRadius: 99, padding: "5px 11px", fontSize: 12.5, fontWeight: 600, color: "var(--ink-2)", cursor: "pointer", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, v.label))));
+                })(),
+                !apptForm.urlaub && vehicles.some(v => !v.inactive || v.id === apptForm.fahrzeug) && React.createElement("div", { className: "field", style: { marginBottom: 12 } },
+                    React.createElement("label", null, "Fahrzeug (optional)",
+                    React.createElement("select", { value: apptForm.fahrzeug || "", onChange: e => setApptForm({ ...apptForm, fahrzeug: e.target.value }), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "12px 13px", fontSize: 16, background: "var(--card)" } },
+                        React.createElement("option", { value: "" }, "\u2013 ohne \u2013"),
+                        vehicles.filter(v => !v.inactive || v.id === apptForm.fahrzeug).map(v => React.createElement("option", { key: v.id, value: v.id }, [v.name, v.plate].filter(Boolean).join(" \u00B7 ") || "Fahrzeug"))))),
+                React.createElement("div", { className: "field", style: { marginBottom: 16 } },
+                    React.createElement("label", null, "Notiz (optional)",
+                    React.createElement("input", { type: "text", value: apptForm.note, onChange: e => setApptForm({ ...apptForm, note: e.target.value }), placeholder: "z.B. Autobahnfahrt, Treffpunkt\u2026" }))),
+                !apptForm.urlaub && React.createElement("div", { onClick: () => setApptForm({ ...apptForm, sonstige: !apptForm.sonstige }), style: { display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 13px", marginBottom: 16, borderRadius: 11, cursor: "pointer",
+                        border: "1.5px solid " + (apptForm.sonstige ? "var(--orange)" : "var(--line)"), background: apptForm.sonstige ? "var(--orange-soft)" : "transparent" } },
+                    React.createElement("div", { style: { width: 22, height: 22, borderRadius: 6, flexShrink: 0, marginTop: 1, border: "2px solid " + (apptForm.sonstige ? "var(--orange)" : "var(--muted)"),
+                            background: apptForm.sonstige ? "var(--orange)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" } }, apptForm.sonstige && React.createElement("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: "3.5", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("polyline", { points: "20 6 9 17 4 12" }))),
+                    React.createElement("div", { style: { flex: 1 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, "Sonstige T\u00E4tigkeit"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 } }, "Z\u00E4hlt nicht zum Ausbildungslimit. F\u00FCr alles, was keine praktische Ausbildung ist."))),
+                !apptForm.id && React.createElement("div", { onClick: () => setApptForm({ ...apptForm, serie: (apptForm.serie && apptForm.serie.on) ? { ...apptForm.serie, on: false } : { on: true, wiederholung: (apptForm.serie && apptForm.serie.wiederholung) || "weekly", anzahl: (apptForm.serie && apptForm.serie.anzahl) || 8 } }),
+                        style: { display: "flex", alignItems: "flex-start", gap: 11, padding: "12px 13px", marginBottom: (apptForm.serie && apptForm.serie.on) ? 10 : 16, borderRadius: 11, cursor: "pointer",
+                            border: "1.5px solid " + ((apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "var(--line)"), background: (apptForm.serie && apptForm.serie.on) ? "var(--orange-soft)" : "transparent" } },
+                    React.createElement("div", { style: { width: 22, height: 22, borderRadius: 6, flexShrink: 0, marginTop: 1, border: "2px solid " + ((apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "var(--muted)"),
+                            background: (apptForm.serie && apptForm.serie.on) ? "var(--orange)" : "transparent", display: "flex", alignItems: "center", justifyContent: "center" } }, (apptForm.serie && apptForm.serie.on) && React.createElement("svg", { width: "13", height: "13", viewBox: "0 0 24 24", fill: "none", stroke: "#fff", strokeWidth: "3.5", strokeLinecap: "round", strokeLinejoin: "round" },
+                        React.createElement("polyline", { points: "20 6 9 17 4 12" }))),
+                    React.createElement("div", { style: { flex: 1 } },
+                        React.createElement("div", { style: { fontWeight: 700, fontSize: 14.5 } }, "Terminserie anlegen"),
+                        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2, lineHeight: 1.45 } }, "Legt denselben Termin automatisch mehrfach an - z.B. jede Woche zur gleichen Zeit."))),
                 apptForm.serie && apptForm.serie.on && React.createElement("div", { style: { marginBottom: 16 } },
                     React.createElement("div", { style: { display: "flex", gap: 10, marginBottom: 10 } },
                         React.createElement("div", { className: "field", style: { flex: 1 } },
@@ -37660,10 +37615,9 @@ function App() {
                             React.createElement("input", { type: "number", min: 2, max: 52, value: apptForm.serie.anzahl, onChange: e => setApptForm({ ...apptForm, serie: { ...apptForm.serie, anzahl: e.target.value } }) })))),
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", lineHeight: 1.5 } },
                         "Termine, die sich mit bestehenden \u00FCberschneiden oder dein Tages-/Wochenlimit \u00FCberschreiten, werden automatisch \u00FCbersprungen - danach gibt es eine \u00DCbersicht.")),
-                React.createElement("div", { className: "tf-fuss" },
-                    React.createElement("button", { className: "btn btn-primary btn-block", style: { opacity: apptForm.busy ? 0.6 : 1 }, disabled: !!apptForm.busy,
-                            onClick: () => (apptForm.serie && apptForm.serie.on) ? saveApptSerie() : saveApptForm() },
-                        apptForm.busy ? "Wird gespeichert\u2026" : (apptForm.id ? "Speichern" : ((apptForm.serie && apptForm.serie.on) ? "Serie anlegen" : "Termin anlegen")))),
+                React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10, opacity: apptForm.busy ? 0.6 : 1 }, disabled: !!apptForm.busy,
+                        onClick: () => (apptForm.serie && apptForm.serie.on) ? saveApptSerie() : saveApptForm() },
+                    apptForm.busy ? "Wird gespeichert\u2026" : (apptForm.id ? "Speichern" : ((apptForm.serie && apptForm.serie.on) ? "Serie anlegen" : "Termin anlegen"))),
                 apptForm.student_id && (() => {
                     const existing = apptForm.id ? (students.find(s => s.id === apptForm.student_id) || {}).drivenLessons || [] : [];
                     const already = apptForm.id && existing.some(l => l.leistung && l.apptId === apptForm.id);
