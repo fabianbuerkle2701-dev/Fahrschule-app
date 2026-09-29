@@ -633,3 +633,15 @@ test("Theorieplan: markiert fehlende Pflichtthemen, zählt besuchte", () => {
     assert.equal(a.pflicht, 12);                   // Klasse A: nur Grundstoff (keine erfundenen Zusatztitel)
     assert.equal(a.termine[4].fehlt, false);
 });
+test("Datenauskunft: Theorie-Anwesenheit, Ladefehler und Hinweis auf fehlende Kollegen-Termine", () => {
+    const ctx = { theorie: [{ thema: "Ruhender Verkehr", checked_at: "2026-09-20T16:00:00Z" }, { thema: "", checked_at: "2026-09-21T16:00:00Z" }], dateien: null, termineNurEigene: true };
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, ctx)));
+    const th = a.find(x => x.titel === "Theorieunterricht");
+    assert.equal(JSON.stringify(th.zeilen), JSON.stringify([["20.09.2026", "Ruhender Verkehr"]]));
+    assert.ok(a.some(x => x.titel === "Hinweis zu den Terminen"));
+    const d = JSON.parse(JSON.stringify(da.datenauskunftDatei({ vorname: "Tom" }, ctx)));
+    assert.equal(d.dokumente, "konnte nicht geladen werden");
+    assert.equal(d.theorieunterricht.length, 2);
+    const n = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, { theorie: null })));
+    assert.match(JSON.stringify(n.find(x => x.titel === "Theorieunterricht")), /nicht geladen/);
+});

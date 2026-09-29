@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.67.1";
+const APP_VERSION = "2.67.2";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.67.2", date: "September 2026", changes: [
+            "Terminserie: Die Meldung nennt angelegte Termine nicht mehr fälschlich als „übersprungen“",
+            "Datenauskunft enthält jetzt auch Termine bei Kollegen und die besuchten Theoriestunden",
+            "Fehler behoben",
+        ] },
     { v: "2.67.1", date: "September 2026", changes: [
             "Theorie üben: Nach dem Prüfen steht bei jeder Antwort „richtig“ oder „falsch“ dabei, nicht nur als Farbe",
         ] },
@@ -14146,6 +14151,13 @@ function datenauskunftAbschnitte(stu, ctx) {
     if (termine.length)
         abschnitte.push({ titel: "Termine", kopf: ["Datum", "Uhrzeit", "Art", "Status"],
             zeilen: termine.map(a => [dt(a.start_at), uhr(a.start_at), art(a.art), status[a.status] || txt(a.status)]) });
+    if (ctx.termineNurEigene)
+        abschnitte.push({ titel: "Hinweis zu den Terminen", zeilen: [["Hinweis", "Termine bei anderen Fahrlehrern konnten nicht geladen werden und fehlen hier."]] });
+    const theorie = (ctx.theorie || []).filter(r => r && String(r.thema || "").trim()).slice().sort((a, b) => String(a.checked_at).localeCompare(String(b.checked_at)));
+    if (ctx.theorie === null)
+        abschnitte.push({ titel: "Theorieunterricht", zeilen: [["Hinweis", "Die Anwesenheit im Theorieunterricht konnte nicht geladen werden."]] });
+    else if (theorie.length)
+        abschnitte.push({ titel: "Theorieunterricht", kopf: ["Datum", "Thema"], zeilen: theorie.map(r => [dt(r.checked_at), txt(r.thema)]) });
     const rechnungen = (stu.invoices || []).filter(Boolean);
     if (rechnungen.length)
         abschnitte.push({ titel: "Rechnungen", kopf: ["Nummer", "Datum", "Betrag", "Hinweis"],
@@ -14191,7 +14203,8 @@ function datenauskunftDatei(stu, ctx) {
         schueler,
         termine: (ctx.termine || []).filter(Boolean).map(a => ({ beginn: a.start_at, ende: a.end_at, art: a.art || "", status: a.status || "",
             ...(a.abholort ? { abholort: a.abholort } : {}), ...(a.ziel ? { ziel: a.ziel } : {}), ...(a.note ? { notiz: a.note } : {}) })),
-        dokumente: (ctx.dateien || []).map(f => ({ datei: f.filename || "", art: f.category || "", hochgeladen: f.created_at || "" })),
+        dokumente: ctx.dateien === null ? "konnte nicht geladen werden" : (ctx.dateien || []).map(f => ({ datei: f.filename || "", art: f.category || "", hochgeladen: f.created_at || "" })),
+        theorieunterricht: ctx.theorie === null ? "konnte nicht geladen werden" : (ctx.theorie || []).map(r => ({ thema: r.thema || "", am: r.checked_at || "" })),
     };
 }
 // Ist die 5-Jahres-Frist für die AUSBILDUNGSdaten abgelaufen? Bewusst nur diese eine Frist,
@@ -28606,7 +28619,9 @@ function App() {
     }
     async function openTheoryCheckin(appt) {
         const attendance = await fetchTheoryAttendance(appt.id).catch(() => []);
-        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || appt.ziel || "", attendance, klasse: theoryKlasse });
+        const bekannt = GRUNDSTOFF_THEMEN.concat(zusatzstoffFor(theoryKlasse));
+        const ausTermin = appt.ziel && bekannt.indexOf(appt.ziel) >= 0 ? appt.ziel : "";
+        setTheoryCheckinModal({ appt, thema: appt.checkin_thema || ausTermin, attendance, klasse: theoryKlasse });
     }
     // 15 Minuten gültig - reicht für den Sitzungsbeginn, ohne dass ein alter Code tagelang gültig bliebe.
     async function startTheoryCheckin(thema) {
@@ -30125,7 +30140,7 @@ function App() {
             return;
         }
         const anzahl = Math.max(2, Math.min(52, parseInt(f.serie.anzahl, 10) || 2));
-        const serieZiel = (!f.sonstige && f.student_id) ? String(f.ziel || "").trim().slice(0, 300) : "";
+        const serieZiel = (!f.sonstige && (f.student_id || f.art === "TH")) ? String(f.ziel || "").trim().slice(0, 300) : "";
         const serieAbholort = !f.sonstige ? String(f.abholort || "").trim().slice(0, 200) : "";
         const stepDays = f.serie.wiederholung === "biweekly" ? 14 : 7;
         const dates = [];
@@ -30167,10 +30182,12 @@ function App() {
                     createdCount++;
                 // Fahrzeug belegt: Termin trotzdem anlegen, am Ende melden (das Auto lässt sich tauschen,
                 // eine übersprungene Stunde fällt dagegen leicht unter den Tisch)
-                if (c && f.fahrzeug && f.art !== "TH" && await fahrzeugBelegt(f.fahrzeug, startISO, endISO, c.id))
-                    fzBelegt.push(date);
-                else
+                // Review v2.67.2: das else hing am Fahrzeug-Check und meldete jeden angelegten Termin
+                // ohne Fahrzeugkonflikt als "übersprungen (Speichern fehlgeschlagen)".
+                if (!c)
                     skipped.push({ date, reason: "Speichern fehlgeschlagen" });
+                else if (f.fahrzeug && f.art !== "TH" && await fahrzeugBelegt(f.fahrzeug, startISO, endISO, c.id))
+                    fzBelegt.push(date);
             }
             setApptForm(null);
             const skipText = skipped.length
@@ -31519,17 +31536,23 @@ function App() {
     // Links - für die Auskunft reichen Name, Art und Datum).
     function datenauskunftOeffnen(stu) {
         if (!stu) return;
-        setAuskunft({ stu, dateien: IS_DEMO() ? [] : undefined, druck: false });
+        setAuskunft({ stu, dateien: IS_DEMO() ? [] : undefined, termine: undefined, theorie: IS_DEMO() ? [] : undefined, druck: false });
         if (IS_DEMO()) return;
-        sb.from("student_files").select("filename,category,created_at").eq("student_id", stu.id).order("created_at", { ascending: true })
-            .then(({ data, error }) => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien: error ? null : (data || []) } : a),
-                () => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien: null } : a));
+        // Review v2.67.2: Termine nicht nur aus dem eigenen Kalender (appts enthält nur owner = uid),
+        // sondern alle, die für diesen Schüler lesbar sind; dazu die Theorie-Anwesenheit.
+        const holen = q => q.then(({ data, error }) => error ? null : (data || []), () => null);
+        Promise.all([
+            holen(sb.from("student_files").select("filename,category,created_at").eq("student_id", stu.id).order("created_at", { ascending: true })),
+            holen(sb.from("appointments").select("start_at,end_at,art,status,abholort,ziel,note").eq("student_id", stu.id)),
+            holen(sb.from("theory_attendance").select("thema,checked_at").eq("student_id", stu.id)),
+        ]).then(([dateien, termine, theorie]) => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien, termine, theorie } : a));
     }
     function auskunftCtx(a) {
         const stu = a.stu;
         return { artName: artLabelPlain, fahrschule: (school && school.name) || "",
             standortName: ((locations || []).find(l => l.id === stu.location_id) || {}).name || "",
-            termine: (appts || []).filter(x => x.student_id === stu.id), dateien: a.dateien };
+            termine: Array.isArray(a.termine) ? a.termine : (appts || []).filter(x => x.student_id === stu.id),
+            termineNurEigene: !Array.isArray(a.termine) && !IS_DEMO(), dateien: a.dateien, theorie: a.theorie };
     }
     function auskunftDrucken() {
         if (!auskunft || auskunft.dateien === undefined) return;
@@ -31539,8 +31562,8 @@ function App() {
     }
     // Alle Daten eines Schülers als Datei – für DSGVO-Auskunft und Datenmitnahme. Seit v2.64.0
     // mit Terminen und Dokumentliste, ohne PIN und interne Felder (datenauskunftDatei).
-    function exportStudentData(stu, dateien) {
-        const inhalt = datenauskunftDatei(stu, auskunftCtx({ stu, dateien: dateien || [] }));
+    function exportStudentData(stu, ausk) {
+        const inhalt = datenauskunftDatei(stu, auskunftCtx(ausk && ausk.stu ? ausk : { stu, dateien: [], theorie: [] }));
         const blob = new Blob([JSON.stringify(inhalt, null, 2)], { type: "application/json" });
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
@@ -36717,7 +36740,7 @@ function App() {
             const stu = auskunft.stu;
             const laedt = auskunft.dateien === undefined;
             const zahl = (n, eins, viele) => n + " " + (n === 1 ? eins : viele);
-            const termine = (appts || []).filter(x => x.student_id === stu.id).length;
+            const termine = (Array.isArray(auskunft.termine) ? auskunft.termine : (appts || []).filter(x => x.student_id === stu.id)).length;
             return React.createElement("div", { onClick: () => setAuskunft(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Datenauskunft",
                     style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
                 React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
@@ -36731,7 +36754,7 @@ function App() {
                          laedt ? "Dokumente werden geladen…" : auskunft.dateien === null ? "Dokumente nicht geladen" : zahl(auskunft.dateien.length, "Dokument", "Dokumente")]
                             .map(t => React.createElement("span", { key: t, style: { fontSize: 12.5, fontWeight: 600, padding: "5px 10px", borderRadius: "var(--r-pill)", background: "var(--canvas)", border: "1px solid var(--line)" } }, t))),
                     React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: laedt, onClick: auskunftDrucken }, "Als PDF drucken"),
-                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 }, disabled: laedt, onClick: () => exportStudentData(stu, auskunft.dateien) }, "Als Datei speichern"),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 8 }, disabled: laedt, onClick: () => exportStudentData(stu, auskunft) }, "Als Datei speichern"),
                     React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => setAuskunft(null) }, "Schließen")));
         })(),
         wechselCode && React.createElement("div", { onClick: () => { if (!wechselCode.busy) setWechselCode(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Übergabecode",
@@ -40823,9 +40846,9 @@ function StudentArea({ code, info, appMode, onSprache }) {
         return "de";
     } });
     const t = (key, vars) => tt(lang, key, vars);
-    React.useEffect(() => { try { document.documentElement.lang = lang; } catch (e) { } }, [lang]);
+    React.useEffect(() => { try { document.documentElement.lang = lang; } catch (e) { } return () => { try { document.documentElement.lang = "de"; } catch (e) { } }; }, [lang]);
     const langSwitcher = React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" } },
-        STUDENT_LANGS.map(l => React.createElement("button", { key: l.code, lang: l.code, "aria-label": l.name, "aria-pressed": lang === l.code, onClick: () => { setLang(l.code); try {
+        STUDENT_LANGS.map(l => React.createElement("button", { key: l.code, lang: l.code, "aria-label": l.name + " (" + l.code.toUpperCase() + ")", "aria-pressed": lang === l.code, onClick: () => { setLang(l.code); try {
                     localStorage.setItem(LS_LANG, l.code);
                 }
                 catch (e) { } if (onSprache) onSprache(); }, style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 5, padding: "0 13px", minHeight: 44, borderRadius: 99,
@@ -42092,7 +42115,7 @@ function BookingPage({ code, appMode, onLogout }) {
     // Barrierefreiheit (WCAG 3.1.1): Screenreader lesen sonst englischen, türkischen oder
     // russischen Text mit deutscher Aussprache vor. Ohne Abhängigkeiten, weil die Sprache
     // hier nicht im State liegt (saSprache liest localStorage, onSprache zeichnet neu).
-    React.useEffect(() => { try { document.documentElement.lang = saSprache(code); } catch (e) { } });
+    React.useEffect(() => { try { document.documentElement.lang = saSprache(code); } catch (e) { } return () => { try { document.documentElement.lang = "de"; } catch (e) { } }; });
     // Fahrlehrer-Seite (App()) setzt data-theme selbst beim Mounten - BookingPage/StudentArea
     // sind aber ein komplett eigener Wurzelbaum (siehe Root()), App() mountet hier nie mit, also
     // blieb data-theme bisher immer ungesetzt und alle [data-theme="dark"]-Regeln griffen nie:
