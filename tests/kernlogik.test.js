@@ -754,3 +754,31 @@ test("Guthaben-Modell: nichts ist „nicht berechnet“, Saldo bleibt Posten min
     gm.ABRECHNUNG_STANDARD.modell = "offen";
     assert.equal(gm.abrechnungsModell({ abrechnungsModell: "guthaben" }), "guthaben");
 });
+
+// v2.72.0: Handlungsbedarf
+const hb = require("./lade-app")(["hinweiseOrdnen", "hinweisSignatur", "HINWEIS_STUFEN", "pruefungenMitLuecken"]);
+test("Handlungsbedarf: dringend zuerst, Zurückstellen, Signatur ändert sich mit dem Text", () => {
+    const items = [{ key: "paket", text: "1 Paket knapp" }, { key: "rechn", text: "2 überfällige Rechnungen", red: true }, { key: "chance", text: "Lücke", prio: "chance" }, { key: "still", text: "3 lange nicht gefahren" }];
+    let r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, {}, "2026-09-30")));
+    assert.equal(JSON.stringify(r.sichtbar.map(x => x.key)), JSON.stringify(["rechn", "paket", "still", "chance"]));
+    const z = { [hb.hinweisSignatur(items[0])]: "2026-10-07", [hb.hinweisSignatur(items[1])]: "2026-10-07" };
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, z, "2026-09-30")));
+    assert.equal(JSON.stringify(r.versteckt.map(x => x.key)), JSON.stringify(["paket"]));   // Dringendes bleibt sichtbar
+    assert.ok(r.sichtbar.some(x => x.key === "rechn"));
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen([{ key: "paket", text: "2 Pakete knapp" }], z, "2026-09-30")));
+    assert.equal(r.versteckt.length, 0);                                                     // neuer Text -> wieder da
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, z, "2026-10-08")));
+    assert.equal(r.versteckt.length, 0);                                                     // abgelaufen
+});
+test("Handlungsbedarf: Prüfungen in 7 Tagen mit Lücken", () => {
+    const ab = (datum, schritte) => ({ theorie: { bestanden: "2026-08-01" }, praxis: { bestanden: null, platz: { datum }, schritte } });
+    const s = [
+        { stu: { id: "a" }, ablauf: ab("2026-10-03", [{ key: "voraussetzungen", erledigt: false, offen: [{ text: "Sonderfahrten erfüllt" }, { text: "Unterlagen vollständig" }] }, { key: "reife", erledigt: true }, { key: "platz", erledigt: true }, { key: "termin", erledigt: false }, { key: "ergebnis", erledigt: false }]) },
+        { stu: { id: "b" }, ablauf: ab("2026-10-20", [{ key: "termin", erledigt: false }]) },           // zu weit weg
+        { stu: { id: "c" }, ablauf: ab("2026-10-01", [{ key: "voraussetzungen", erledigt: true }, { key: "termin", erledigt: true }, { key: "ergebnis", erledigt: false }]) }, // alles da
+    ];
+    const r = JSON.parse(JSON.stringify(hb.pruefungenMitLuecken(s, "2026-09-30")));
+    assert.equal(r.length, 1);
+    assert.equal(r[0].tage, 3);
+    assert.equal(JSON.stringify(r[0].offen), JSON.stringify(["Sonderfahrten", "Unterlagen", "Kalendereintrag"]));
+});

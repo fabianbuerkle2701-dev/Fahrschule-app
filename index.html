@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.71.0";
+const APP_VERSION = "2.72.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.72.0", date: "September 2026", changes: [
+            "Startseite „Diese Woche“: Dringendes steht jetzt oben. Neu sind Hinweise auf Prüfungen in den nächsten 7 Tagen, bei denen noch etwas fehlt, und auf prüfungsreife Schüler ohne Prüfplatz",
+            "Mit „Später“ blendest du einen Hinweis 7 Tage aus. Ändert sich etwas daran, ist er sofort wieder da",
+        ] },
     { v: "2.71.0", date: "September 2026", changes: [
             "Neu: Abrechnung mit Guthaben. In den Rechnungs-Einstellungen wählst du „Offener Betrag“ oder „Guthaben“. Bei Guthaben laden Schüler einen Betrag oder ein Paket auf, die Rechnung entsteht beim Aufladen und Fahrstunden werden vom Guthaben abgezogen",
             "Je Schüler lässt sich die Abrechnung im Bereich Kasse abweichend einstellen",
@@ -13963,6 +13967,56 @@ function lebensphaseVon(stu, info) {
         return { key: "ausbildung", label: "In Ausbildung", schritt: !erledigt("antrag") ? "Antrag bei der Führerscheinstelle anstoßen" : null };
     return { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" };
 }
+// Handlungsbedarf (v2.72.0, Produktplan Top-10 #2): EINE Liste, eine Reihenfolge. Jeder Eintrag
+// hat eine Stufe - "dringend" (heute handeln), "bald" (diese Woche), "chance" (kein Muss).
+// "Später" stellt einen Eintrag 7 Tage zurück; die Signatur enthält den Text, damit er sofort
+// wiederkommt, wenn sich etwas ändert (z.B. aus 2 überfälligen Rechnungen werden 3).
+const HINWEIS_STUFEN = ["dringend", "bald", "chance"];
+function hinweisSignatur(item) {
+    return (item && item.key || "") + "|" + (item && item.text || "");
+}
+function hinweiseOrdnen(items, zurueck, heute) {
+    const z = zurueck || {};
+    const mitStufe = (items || []).filter(Boolean).map((it, i) => ({ ...it, prio: HINWEIS_STUFEN.indexOf(it.prio) >= 0 ? it.prio : (it.red ? "dringend" : "bald"), _i: i }));
+    mitStufe.sort((a, b) => (HINWEIS_STUFEN.indexOf(a.prio) - HINWEIS_STUFEN.indexOf(b.prio)) || (a._i - b._i));
+    const sichtbar = [], versteckt = [];
+    mitStufe.forEach(it => {
+        const bis = z[hinweisSignatur(it)];
+        // Dringendes lässt sich nicht wegklicken - es muss erledigt werden.
+        (it.prio !== "dringend" && bis && bis > heute ? versteckt : sichtbar).push(it);
+    });
+    return { sichtbar, versteckt };
+}
+// Prüfungen der nächsten 7 Tage, bei denen noch etwas fehlt (Prüfungsakte). eintraege =
+// [{ stu, ablauf: pruefungsAblauf(stu) }]. Liefert je Prüfung { stu, art, datum, tage, offen: [Text] }.
+function pruefungenMitLuecken(eintraege, heute) {
+    const out = [];
+    const tageBis = d => Math.round((new Date(d + "T12:00:00Z") - new Date(heute + "T12:00:00Z")) / 86400000);
+    (eintraege || []).forEach(({ stu, ablauf }) => {
+        ["theorie", "praxis"].forEach(art => {
+            const a = ablauf && ablauf[art];
+            if (!a || a.bestanden || !a.platz || !a.platz.datum)
+                return;
+            const tage = tageBis(a.platz.datum);
+            if (tage < 0 || tage > 7)
+                return;
+            const offen = [];
+            (a.schritte || []).forEach(st => {
+                if (st.erledigt || st.key === "platz" || st.key === "ergebnis")
+                    return;
+                if (st.key === "voraussetzungen")
+                    (st.offen || []).forEach(v => offen.push(v.text.replace(/ (bestanden|erfüllt|vollständig|ausgeglichen)$/, "")));
+                else if (st.key === "reife")
+                    offen.push("Prüfungsreife");
+                else if (st.key === "termin")
+                    offen.push("Kalendereintrag");
+            });
+            if (offen.length)
+                out.push({ stu, art, datum: a.platz.datum, tage, offen });
+        });
+    });
+    return out.sort((x, y) => x.datum.localeCompare(y.datum));
+}
 // Übergabe-Faktenblatt (v2.70.0, Produktplan Teil I): was ein Fahrlehrer beim Übernehmen eines
 // Schülers wissen muss - aus den Daten berechnet, ohne KI. Nur Abweichungen statt Vollständigkeit.
 // ctx = { pct, phase, sonder: sonderfahrtenBilanz(), unterlagenOffen: [Label], offenBetrag,
@@ -16440,6 +16494,9 @@ function App() {
     // für die Karte "Neu bei dir" mit dem Faktenblatt. "Gelesen" merkt sich das Gerät.
     const [uebergaben, setUebergaben] = useState({}); // { [studentId]: { von, am } }
     const [uebergabeGesehen, setUebergabeGesehen] = useState([]);
+    // Handlungsbedarf (v2.72.0): zurückgestellte Hinweise { signatur: "YYYY-MM-DD" } je Gerät
+    const [hinweisZurueck, setHinweisZurueck] = useState(() => { try { return JSON.parse(localStorage.getItem("v3_hinweise_zurueck_" + (session && session.user && session.user.id)) || "{}") || {}; } catch (e) { return {}; } });
+    const [hinweiseAlle, setHinweiseAlle] = useState(false);
     useEffect(() => {
         if (!uid || IS_DEMO())
             return;
@@ -23239,6 +23296,36 @@ function App() {
         // in "Diese Woche" pushen, sonst stünde derselbe Hinweis auf dem Handy zweimal.
         if ((isAdmin(session) || isSchoolAdmin) && preismeldungFaellig(school))
             weekItems.push({ key: "preis", icon: icClock, onClick: () => { setView("einstellungen"); setSettingsScreen("kosten"); }, text: preismeldungHinweis(school) || "Preismeldung fällig" });
+        // Handlungsbedarf aus der Prüfungsakte (v2.72.0)
+        const heuteYmd = ymd(new Date());
+        const akteEintraege = (students || []).filter(s => s._isMine && !s.archived && !s.pending)
+            .map(s => ({ stu: s, ablauf: pruefungsAblauf(s, pruefungsKontext(s)) }));
+        const luecken7 = pruefungenMitLuecken(akteEintraege, heuteYmd);
+        if (luecken7.length > 0) {
+            const e0 = luecken7[0];
+            const wann = e0.tage === 0 ? "heute" : e0.tage === 1 ? "morgen" : "am " + fmtD(e0.datum);
+            weekItems.push({ key: "pruefungbald", prio: "dringend", red: true, icon: icClock, onClick: () => oeffneSchuelerReiter(e0.stu.id, "pruefung"),
+                text: luecken7.length === 1
+                    ? (e0.art === "praxis" ? "Praxisprüfung " : "Theorieprüfung ") + wann + ": " + dispName(e0.stu) + " – offen: " + e0.offen.join(", ")
+                    : luecken7.length + " Prüfungen in den nächsten 7 Tagen mit offenen Punkten (zuerst " + dispName(e0.stu) + ", " + wann + ")" });
+        }
+        const ohnePlatz = akteEintraege.filter(x => x.ablauf.praxis.aktuell === "platz");
+        if (ohnePlatz.length > 0)
+            weekItems.push({ key: "platzfehlt", prio: "bald", accent: true, icon: icClock, onClick: () => oeffneSchuelerReiter(ohnePlatz[0].stu.id, "pruefung"),
+                text: ohnePlatz.length === 1 ? dispName(ohnePlatz[0].stu) + " ist prüfungsreif – Prüfplatz besorgen" : ohnePlatz.length + " Schüler prüfungsreif ohne Prüfplatz" });
+        const hinweise = hinweiseOrdnen(weekItems, hinweisZurueck, heuteYmd);
+        const hinweisZeilen = hinweiseAlle ? hinweise.sichtbar.concat(hinweise.versteckt) : hinweise.sichtbar;
+        function hinweisZurueckstellen(it) {
+            const bis = ymd(addDays(new Date(), 7));
+            const neu = { ...hinweisZurueck, [hinweisSignatur(it)]: bis };
+            // Aufräumen: abgelaufene Einträge entfernen
+            Object.keys(neu).forEach(k => { if (!(neu[k] > heuteYmd)) delete neu[k]; });
+            setHinweisZurueck(neu);
+            try { localStorage.setItem("v3_hinweise_zurueck_" + uid, JSON.stringify(neu)); } catch (e) { }
+            showUndo("Für 7 Tage ausgeblendet", () => {
+                setHinweisZurueck(alt => { const z = { ...alt }; delete z[hinweisSignatur(it)]; try { localStorage.setItem("v3_hinweise_zurueck_" + uid, JSON.stringify(z)); } catch (e) { } return z; });
+            });
+        }
 
         /* ── Redesign (zweiter Anlauf): die Startseite wirkte trotz der ersten Konsolidierung
            weiterhin "überlaufen", weil bis zu sechs eigenständig gerahmte Alarm-Karten (Briefing,
@@ -23471,15 +23558,26 @@ function App() {
             // 6) Diese Woche - schlichte Haarlinien-Liste; order:7 wie zuvor, damit die Karte
             // auf beiden Breakpoints zuverlässig ganz unten bleibt (siehe CSS-Kommentar bei
             // .home-in .home-2col/.home-kpis).
-            weekItems.length > 0 && React.createElement("div", { className: "card", style: { padding: "17px 18px", order: 7 } },
-                React.createElement("div", { className: "home-v2-display", style: { fontWeight: 700, fontSize: 16 } }, "Diese Woche"),
-                React.createElement("div", null, weekItems.map(c => React.createElement("button", { key: c.key, className: "home-v2-weekrow " + (c.extraClass || ""), onClick: c.onClick },
-                    React.createElement("span", { className: "home-v2-chip" + (c.red ? " tone-red" : c.accent ? " tone-accent" : "") },
-                        c.icon({ width: 16, height: 16, stroke: "currentColor", strokeWidth: "1.7" })),
-                    React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: 500, lineHeight: 1.35 } },
-                        c.text,
-                        c.amountText && React.createElement("span", { style: { color: "var(--red)", fontWeight: 700 } }, " · " + c.amountText)),
-                    chev)))));
+            // Handlungsbedarf (v2.72.0): dringend vor bald vor Chance; "Später" blendet 7 Tage aus
+            (hinweisZeilen.length > 0 || hinweise.versteckt.length > 0) && React.createElement("div", { className: "card", style: { padding: "17px 18px", order: 7 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10 } },
+                    React.createElement("div", { className: "home-v2-display", style: { fontWeight: 700, fontSize: 16 } }, "Diese Woche"),
+                    hinweise.sichtbar.some(c => c.prio === "dringend") && React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--red-ink)" } },
+                        hinweise.sichtbar.filter(c => c.prio === "dringend").length + " dringend")),
+                React.createElement("div", null, hinweisZeilen.map(c => React.createElement("div", { key: c.key, className: "home-v2-weekrow " + (c.extraClass || ""), style: { gap: 4 } },
+                    React.createElement("button", { onClick: c.onClick, style: { flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 12, minHeight: 58, padding: 0, background: "none", border: "none", textAlign: "left", color: "inherit", cursor: "pointer" } },
+                        React.createElement("span", { className: "home-v2-chip" + (c.red || c.prio === "dringend" ? " tone-red" : c.accent || c.prio === "chance" ? " tone-accent" : "") },
+                            c.icon({ width: 16, height: 16, stroke: "currentColor", strokeWidth: "1.7" })),
+                        React.createElement("span", { style: { flex: 1, minWidth: 0, fontSize: 14.5, fontWeight: c.prio === "dringend" ? 600 : 500, lineHeight: 1.35 } },
+                            c.prio === "dringend" && React.createElement("span", { style: { position: "absolute", width: 1, height: 1, overflow: "hidden", clip: "rect(0 0 0 0)", whiteSpace: "nowrap" } }, "Dringend: "),
+                            c.text,
+                            c.amountText && React.createElement("span", { style: { color: "var(--red)", fontWeight: 700 } }, " · " + c.amountText)),
+                        chev),
+                    c.prio !== "dringend" && React.createElement("button", { onClick: () => hinweisZurueckstellen(c), "aria-label": "Später erinnern (7 Tage): " + c.text, title: "Für 7 Tage ausblenden",
+                            style: { flex: "none", minWidth: 44, minHeight: 44, border: "none", background: "none", color: "var(--muted)", fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "0 4px" } }, "Später")))),
+                hinweise.versteckt.length > 0 && React.createElement("button", { onClick: () => setHinweiseAlle(v => !v),
+                        style: { marginTop: 8, border: "none", background: "none", color: "var(--muted)", fontSize: 12.5, fontWeight: 600, padding: "6px 2px", cursor: "pointer" } },
+                    hinweiseAlle ? "Zurückgestellte wieder ausblenden" : (hinweise.versteckt.length === 1 ? "1 zurückgestellt – anzeigen" : hinweise.versteckt.length + " zurückgestellt – anzeigen"))));
     }
     function renderListe() {
         const pendingList = students.filter(s => s.pending && s._isMine);
