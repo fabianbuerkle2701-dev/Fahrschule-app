@@ -577,3 +577,208 @@ test("Archiv-Vorschläge: bestanden oder über ein Jahr inaktiv ohne künftigen 
     assert.match(r[0].grund, /^bestanden am 1\.9\.2026$/);
     assert.match(r[1].grund, /^zuletzt aktiv Juni 2025$/);
 });
+
+// v2.64.0: Datenauskunft nach Art. 15 DSGVO
+const da = require("./lade-app")(["datenauskunftAbschnitte", "datenauskunftDatei", "STUDENT_FILE_CATEGORIES"]);
+test("Datenauskunft: alle Bereiche lesbar, PIN nie im Klartext", () => {
+    const stu = { id: "s1", _owner: "u1", _isMine: true, vorname: "Lea", name: "Sommer", geb: "2008-03-04", tel: "0171 1", klasse: "B",
+        pin: "4711", pinCustom: "4711", theorie: true, items: { a: true, b: false, c: true },
+        drivenLessons: [{ date: "2026-09-10", time: "16:00", minutes: 90, art: "ÜL" }, { date: "2026-09-01", minutes: 45 }],
+        lessons: [{ date: "2026-09-10", thema: "Autobahn", gut: "Auffahren", schlecht: "Abstand", note: "", route: { p: [] } }],
+        exams: [{ art: "theorie", date: "2026-08-20", passed: true }],
+        invoices: [{ number: "R-1", date: "2026-09-12", total: 123.5 }], payments: [{ date: "2026-09-13", amount: 50, method: "Bar" }] };
+    const ctx = { artName: c => c === "ÜL" ? "Überlandfahrt" : "Übungsstunde", standortName: "Nord",
+        termine: [{ start_at: "2026-10-01T14:00:00Z", art: "ÜST", status: "pending" }],
+        dateien: [{ filename: "sehtest.pdf", category: "sehtest", created_at: "2026-08-01T10:00:00Z" }] };
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte(stu, ctx)));
+    const titel = a.map(x => x.titel);
+    assert.equal(JSON.stringify(titel), JSON.stringify(["Stammdaten", "Ausbildung", "Prüfungen", "Fahrstunden", "Fahrtenbuch", "Termine", "Rechnungen", "Zahlungen", "Dokumente", "Zweck, Rechtsgrundlage und Speicherdauer"]));
+    const text = JSON.stringify(a);
+    assert.ok(!text.includes("4711"), "PIN darf nicht in der Auskunft stehen");
+    assert.ok(text.includes("PIN vergeben"));
+    assert.ok(text.includes("04.03.2008") && text.includes("Nord") && text.includes("Sehtest"));
+    assert.equal(JSON.stringify(a[1].zeilen[0]), JSON.stringify(["Abgehakte Punkte der Ausbildungskarte", "2"]));
+    assert.equal(JSON.stringify(a[3].zeilen[0]), JSON.stringify(["01.09.2026", "", "Übungsstunde", "45"]));   // nach Datum sortiert
+    assert.equal(a[5].zeilen[0][1], "16:00");                                                                   // Berliner Zeit
+    assert.equal(a[5].zeilen[0][3], "angefragt");
+    const datei = JSON.parse(JSON.stringify(da.datenauskunftDatei(stu, ctx)));
+    assert.equal(datei.schueler.pin, "vergeben");
+    assert.ok(!("pinCustom" in datei.schueler) && !("_owner" in datei.schueler) && !JSON.stringify(datei).includes("4711"));
+    assert.equal(datei.termine.length, 1);
+    assert.equal(datei.dokumente[0].datei, "sehtest.pdf");
+});
+test("Datenauskunft: leerer Schüler und nicht geladene Dokumente", () => {
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, { dateien: null })));
+    assert.equal(JSON.stringify(a.map(x => x.titel)), JSON.stringify(["Stammdaten", "Ausbildung", "Dokumente", "Zweck, Rechtsgrundlage und Speicherdauer"]));
+    assert.match(JSON.stringify(a[2]), /konnte nicht geladen werden/);
+    assert.match(JSON.stringify(a[0]), /nicht eingerichtet/);
+});
+
+// v2.65.0: Theorieplan in der Schüler-App
+const tp = require("./lade-app")(["theoriePlanFuerSchueler", "GRUNDSTOFF_THEMEN", "ZUSATZSTOFF_THEMEN"]);
+test("Theorieplan: markiert fehlende Pflichtthemen, zählt besuchte", () => {
+    const termine = [
+        { start_at: "2026-10-01T16:00:00Z", thema: "Ruhender Verkehr" },          // Pflicht, fehlt
+        { start_at: "2026-10-02T16:00:00Z", thema: "Risikofaktor Mensch " },      // Pflicht, schon besucht
+        { start_at: "2026-10-03T16:00:00Z", thema: "" },                          // ohne Thema
+        { start_at: "2026-10-04T16:00:00Z", thema: "Erste Hilfe Extra" },         // kein Pflichtthema
+        { start_at: "2026-10-05T16:00:00Z", thema: "Fahren mit Solokraftfahrzeugen und Zügen" }, // Zusatzstoff B
+    ];
+    const r = JSON.parse(JSON.stringify(tp.theoriePlanFuerSchueler("B", termine, ["Risikofaktor Mensch", "Sonstiges Thema"])));
+    assert.equal(r.pflicht, 14);
+    assert.equal(r.erledigt, 1);
+    assert.equal(JSON.stringify(r.termine.map(t => t.fehlt)), JSON.stringify([true, false, false, false, true]));
+    assert.equal(r.termine[1].thema, "Risikofaktor Mensch");
+    const a = JSON.parse(JSON.stringify(tp.theoriePlanFuerSchueler("A", termine, [])));
+    assert.equal(a.pflicht, 12);                   // Klasse A: nur Grundstoff (keine erfundenen Zusatztitel)
+    assert.equal(a.termine[4].fehlt, false);
+});
+test("Datenauskunft: Theorie-Anwesenheit, Ladefehler und Hinweis auf fehlende Kollegen-Termine", () => {
+    const ctx = { theorie: [{ thema: "Ruhender Verkehr", checked_at: "2026-09-20T16:00:00Z" }, { thema: "", checked_at: "2026-09-21T16:00:00Z" }], dateien: null, termineNurEigene: true };
+    const a = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, ctx)));
+    const th = a.find(x => x.titel === "Theorieunterricht");
+    assert.equal(JSON.stringify(th.zeilen), JSON.stringify([["20.09.2026", "Ruhender Verkehr"]]));
+    assert.ok(a.some(x => x.titel === "Hinweis zu den Terminen"));
+    const d = JSON.parse(JSON.stringify(da.datenauskunftDatei({ vorname: "Tom" }, ctx)));
+    assert.equal(d.dokumente, "konnte nicht geladen werden");
+    assert.equal(d.theorieunterricht.length, 2);
+    const n = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, { theorie: null })));
+    assert.match(JSON.stringify(n.find(x => x.titel === "Theorieunterricht")), /nicht geladen/);
+});
+
+// v2.69.0: Geführte Prüfungsakte
+const pa = require("./lade-app")(["pruefungsAblauf", "PRUEFUNG_TERMINART"]);
+test("Prüfungsakte: Schritte, aktueller Schritt, Wiederholung, geplanter Versuch", () => {
+    const heute = "2026-09-30";
+    const ok = [{ ok: true, text: "Theorie" }];
+    // 1. neuer Schüler
+    let a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1" }, { heute, unterlagenOffen: ["Sehtest"], praxisVoraus: [{ ok: false, text: "Theorie" }] })));
+    assert.equal(a.theorie.aktuell, "voraussetzungen");
+    assert.equal(JSON.stringify(a.praxis.schritte.map(x => x.key)), JSON.stringify(["voraussetzungen", "reife", "platz", "termin", "ergebnis"]));
+    assert.equal(JSON.stringify(a.theorie.schritte.map(x => x.key)), JSON.stringify(["voraussetzungen", "platz", "termin", "ergebnis"]));
+    // 2. Theorie bestanden, Reife da, Praxisplatz zugeteilt, Termin im Kalender
+    const stu = { id: "s1", exams: [{ id: "e1", art: "theorie", date: "2026-08-01", passed: true }], examReadiness: { ergebnis: "bestanden", datum: "2026-09-20" } };
+    const slots = [{ id: "p1", art: "praxis", status: "vergeben", student_id: "s1", datum: "2026-10-14", zeit: "09:30", ort: "TÜV" },
+                   { id: "p2", art: "praxis", status: "vergeben", student_id: "anderer", datum: "2026-10-10" }];
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: ok })));
+    assert.equal(a.theorie.bestanden, "2026-08-01");
+    assert.equal(a.theorie.aktuell, null);
+    assert.equal(a.praxis.platz.datum, "2026-10-14");
+    assert.equal(a.praxis.aktuell, "termin");
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: ok, termine: [{ art: "PF", start_at: "2026-10-14T07:30:00Z", status: "confirmed" }] })));
+    assert.equal(a.praxis.aktuell, "ergebnis");
+    // 3. Durchgefallen am Platztag -> Platz aufgelöst, Wiederholung
+    const nach = { ...stu, exams: [...stu.exams, { id: "e2", art: "praxis", date: "2026-10-14", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(nach, { heute: "2026-10-20", slots, praxisVoraus: ok })));
+    assert.equal(a.praxis.platz, null);
+    assert.equal(a.praxis.fehlversuche, 1);
+    assert.equal(a.praxis.aktuell, "platz");
+    assert.match(a.praxis.schritte.find(x => x.key === "platz").label, /2\. Versuch/);
+    // 4. geplanter Versuch ohne Prüfplatz-Liste
+    const geplant = { ...stu, exams: [...stu.exams, { id: "e3", art: "praxis", date: "2026-10-30", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(geplant, { heute, praxisVoraus: ok })));
+    assert.equal(a.praxis.platz.quelle, "eintrag");
+    assert.equal(a.praxis.platz.examId, "e3");
+    // 5. bestanden über die Führerschein-Liste
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", licenseSteps: { praxis_bestanden: { done: true, date: "2026-09-01" } } }, { heute })));
+    assert.equal(a.praxis.bestanden, "2026-09-01");
+    assert.ok(a.praxis.schritte.every(x => x.erledigt));
+});
+test("Prüfungsakte: Fehlversuch am Prüfungstag zählt sofort, Theorie-Altwerte", () => {
+    const heute = "2026-10-14";
+    const slots = [{ id: "p1", art: "praxis", status: "vergeben", student_id: "s1", datum: "2026-10-14" }];
+    const stu = { id: "s1", theorie: "2026-08-01", examReadiness: { ergebnis: "bestanden" },
+        exams: [{ id: "e2", art: "praxis", date: "2026-10-14", passed: false, ergebnis: true }] };
+    let a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: [{ ok: true, text: "x" }] })));
+    assert.equal(a.praxis.fehlversuche, 1);
+    assert.equal(a.praxis.platz, null);
+    assert.equal(a.praxis.aktuell, "platz");
+    // ohne Kennzeichen (alte Liste) bleibt ein heutiger Versuch ein geplanter
+    const alt = { ...stu, exams: [{ id: "e3", art: "praxis", date: "2026-10-14", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(alt, { heute, slots, praxisVoraus: [{ ok: true, text: "x" }] })));
+    assert.equal(a.praxis.fehlversuche, 0);
+    assert.equal(a.praxis.platz.examId, "e3");
+    // Theorie-Altwert ohne Datum gilt als bestanden
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", theorie: "bestanden" }, { heute })));
+    assert.equal(a.theorie.bestanden, "ja");
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", theorie: "" }, { heute })));
+    assert.equal(a.theorie.bestanden, null);
+});
+
+// v2.70.0: Übergabe-Faktenblatt
+const uf = require("./lade-app")(["uebergabeFakten", "letzteBewertungen", "wiederkehrendeSchwaechenAus", "LESSON_FIELDS", "SMILEYS"]);
+test("Übergabe-Faktenblatt: nur Abweichungen, Warnungen markiert", () => {
+    const stu = { manualHours: "4", lastNote: "Spurwechsel links üben", sehhilfe: true,
+        drivenLessons: [{ date: "2026-09-01", minutes: 90 }, { date: "2026-09-20", minutes: 45 }],
+        lessons: [
+            { date: "2026-09-20", ratings: { verkehr: 3, tempo: 1 } },
+            { date: "2026-09-10", ratings: { tempo: 1 } },
+            { date: "2026-09-01", ratings: { tempo: 2 } } ] };
+    const ctx = { pct: 72.4, phase: "In Ausbildung", offenBetrag: 90, unterlagenOffen: ["Sehtest"], theorieBestanden: false,
+        sonder: [{ label: "Überland", ue: 3, sollUe: 5, erfuellt: false, langeFahrtDabei: true }, { label: "Autobahn", ue: 4, sollUe: 4, erfuellt: true, langeFahrtDabei: false }],
+        praxis: { bestanden: null, aktuell: "reife", schritte: [{ key: "reife", label: "Prüfungsreife festgestellt" }], platz: null, fehlversuche: 0 } };
+    const z = JSON.parse(JSON.stringify(uf.uebergabeFakten(stu, ctx)));
+    const w = l => (z.find(x => x.label === l) || {});
+    assert.equal(w("Ausbildungsstand").wert, "72 % · In Ausbildung");
+    assert.equal(w("Fahrstunden").wert, "3 UE (+ 4 vorher) · zuletzt 20.9.2026");
+    assert.equal(w("Sonderfahrten").wert, "Überland 3/5 UE, Autobahn 4/4 UE (Doppelstunde fehlt)");
+    assert.equal(w("Sonderfahrten").ton, "warn");
+    assert.equal(w("Letzte Bewertung").wert, "Geschwindigkeitsanpassung: schlecht");
+    assert.equal(w("Wiederkehrend schwach").wert, "Geschwindigkeitsanpassung");
+    assert.equal(w("Nächstes Mal").wert, "Spurwechsel links üben");
+    assert.equal(w("Konto").ton, "warn");
+    assert.equal(w("Praxisprüfung").wert, "als Nächstes: Prüfungsreife festgestellt");
+    assert.equal(w("Besonderheiten").wert, "Sehhilfe");
+    // leerer Schüler: keine leeren Zeilen
+    const leer = JSON.parse(JSON.stringify(uf.uebergabeFakten({}, {})));
+    assert.ok(leer.every(x => x.wert.trim() !== ""));
+});
+
+// v2.71.0: Abrechnungsmodell Guthaben
+const gm = require("./lade-app")(["abrechnungsModell", "ABRECHNUNG_STANDARD", "offeneLeistungen", "rechnungsEntwurfZeilen", "sumCharges", "sumPayments"]);
+test("Guthaben-Modell: nichts ist „nicht berechnet“, Saldo bleibt Posten minus Zahlungen", () => {
+    const stu = { drivenLessons: [{ id: "l1", date: "2026-09-01", minutes: 45 }], costItems: [{ id: "c1", label: "Grundbetrag", amount: 300 }],
+        payments: [{ amount: 500, invoiceId: "inv1" }] };
+    gm.ABRECHNUNG_STANDARD.modell = "offen";
+    assert.equal(gm.abrechnungsModell(stu), "offen");
+    assert.equal(gm.offeneLeistungen(stu, 60).length, 2);          // Standard: Stunde + Posten offen
+    assert.ok(gm.rechnungsEntwurfZeilen(stu, 60).length > 0);
+    gm.ABRECHNUNG_STANDARD.modell = "guthaben";
+    assert.equal(gm.abrechnungsModell(stu), "guthaben");
+    assert.equal(gm.offeneLeistungen(stu, 60).length, 0);          // kommt nicht in „nicht berechnet“
+    assert.equal(gm.rechnungsEntwurfZeilen(stu, 60).length, 0);    // keine zweite Rechnung über Leistungen
+    assert.equal(Math.round((gm.sumCharges(stu, 60) - gm.sumPayments(stu)) * 100) / 100, -140); // 140 € Guthaben übrig
+    // Ausnahme je Schüler (z.B. Firmenkunde) schlägt den Standard
+    assert.equal(gm.abrechnungsModell({ ...stu, abrechnungsModell: "offen" }), "offen");
+    assert.equal(gm.offeneLeistungen({ ...stu, abrechnungsModell: "offen" }, 60).length, 2);
+    gm.ABRECHNUNG_STANDARD.modell = "offen";
+    assert.equal(gm.abrechnungsModell({ abrechnungsModell: "guthaben" }), "guthaben");
+});
+
+// v2.72.0: Handlungsbedarf
+const hb = require("./lade-app")(["hinweiseOrdnen", "hinweisSignatur", "HINWEIS_STUFEN", "pruefungenMitLuecken"]);
+test("Handlungsbedarf: dringend zuerst, Zurückstellen, Signatur ändert sich mit dem Text", () => {
+    const items = [{ key: "paket", text: "1 Paket knapp" }, { key: "rechn", text: "2 überfällige Rechnungen", red: true }, { key: "chance", text: "Lücke", prio: "chance" }, { key: "still", text: "3 lange nicht gefahren" }];
+    let r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, {}, "2026-09-30")));
+    assert.equal(JSON.stringify(r.sichtbar.map(x => x.key)), JSON.stringify(["rechn", "paket", "still", "chance"]));
+    const z = { [hb.hinweisSignatur(items[0])]: "2026-10-07", [hb.hinweisSignatur(items[1])]: "2026-10-07" };
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, z, "2026-09-30")));
+    assert.equal(JSON.stringify(r.versteckt.map(x => x.key)), JSON.stringify(["paket"]));   // Dringendes bleibt sichtbar
+    assert.ok(r.sichtbar.some(x => x.key === "rechn"));
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen([{ key: "paket", text: "2 Pakete knapp" }], z, "2026-09-30")));
+    assert.equal(r.versteckt.length, 0);                                                     // neuer Text -> wieder da
+    r = JSON.parse(JSON.stringify(hb.hinweiseOrdnen(items, z, "2026-10-08")));
+    assert.equal(r.versteckt.length, 0);                                                     // abgelaufen
+});
+test("Handlungsbedarf: Prüfungen in 7 Tagen mit Lücken", () => {
+    const ab = (datum, schritte) => ({ theorie: { bestanden: "2026-08-01" }, praxis: { bestanden: null, platz: { datum }, schritte } });
+    const s = [
+        { stu: { id: "a" }, ablauf: ab("2026-10-03", [{ key: "voraussetzungen", erledigt: false, offen: [{ text: "Sonderfahrten erfüllt" }, { text: "Unterlagen vollständig" }] }, { key: "reife", erledigt: true }, { key: "platz", erledigt: true }, { key: "termin", erledigt: false }, { key: "ergebnis", erledigt: false }]) },
+        { stu: { id: "b" }, ablauf: ab("2026-10-20", [{ key: "termin", erledigt: false }]) },           // zu weit weg
+        { stu: { id: "c" }, ablauf: ab("2026-10-01", [{ key: "voraussetzungen", erledigt: true }, { key: "termin", erledigt: true }, { key: "ergebnis", erledigt: false }]) }, // alles da
+    ];
+    const r = JSON.parse(JSON.stringify(hb.pruefungenMitLuecken(s, "2026-09-30")));
+    assert.equal(r.length, 1);
+    assert.equal(r[0].tage, 3);
+    assert.equal(JSON.stringify(r[0].offen), JSON.stringify(["Sonderfahrten", "Unterlagen", "Kalendereintrag"]));
+});
