@@ -645,3 +645,42 @@ test("Datenauskunft: Theorie-Anwesenheit, Ladefehler und Hinweis auf fehlende Ko
     const n = JSON.parse(JSON.stringify(da.datenauskunftAbschnitte({ vorname: "Tom" }, { theorie: null })));
     assert.match(JSON.stringify(n.find(x => x.titel === "Theorieunterricht")), /nicht geladen/);
 });
+
+// v2.69.0: Geführte Prüfungsakte
+const pa = require("./lade-app")(["pruefungsAblauf", "PRUEFUNG_TERMINART"]);
+test("Prüfungsakte: Schritte, aktueller Schritt, Wiederholung, geplanter Versuch", () => {
+    const heute = "2026-09-30";
+    const ok = [{ ok: true, text: "Theorie" }];
+    // 1. neuer Schüler
+    let a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1" }, { heute, unterlagenOffen: ["Sehtest"], praxisVoraus: [{ ok: false, text: "Theorie" }] })));
+    assert.equal(a.theorie.aktuell, "voraussetzungen");
+    assert.equal(JSON.stringify(a.praxis.schritte.map(x => x.key)), JSON.stringify(["voraussetzungen", "reife", "platz", "termin", "ergebnis"]));
+    assert.equal(JSON.stringify(a.theorie.schritte.map(x => x.key)), JSON.stringify(["voraussetzungen", "platz", "termin", "ergebnis"]));
+    // 2. Theorie bestanden, Reife da, Praxisplatz zugeteilt, Termin im Kalender
+    const stu = { id: "s1", exams: [{ id: "e1", art: "theorie", date: "2026-08-01", passed: true }], examReadiness: { ergebnis: "bestanden", datum: "2026-09-20" } };
+    const slots = [{ id: "p1", art: "praxis", status: "vergeben", student_id: "s1", datum: "2026-10-14", zeit: "09:30", ort: "TÜV" },
+                   { id: "p2", art: "praxis", status: "vergeben", student_id: "anderer", datum: "2026-10-10" }];
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: ok })));
+    assert.equal(a.theorie.bestanden, "2026-08-01");
+    assert.equal(a.theorie.aktuell, null);
+    assert.equal(a.praxis.platz.datum, "2026-10-14");
+    assert.equal(a.praxis.aktuell, "termin");
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: ok, termine: [{ art: "PF", start_at: "2026-10-14T07:30:00Z", status: "confirmed" }] })));
+    assert.equal(a.praxis.aktuell, "ergebnis");
+    // 3. Durchgefallen am Platztag -> Platz aufgelöst, Wiederholung
+    const nach = { ...stu, exams: [...stu.exams, { id: "e2", art: "praxis", date: "2026-10-14", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(nach, { heute: "2026-10-20", slots, praxisVoraus: ok })));
+    assert.equal(a.praxis.platz, null);
+    assert.equal(a.praxis.fehlversuche, 1);
+    assert.equal(a.praxis.aktuell, "platz");
+    assert.match(a.praxis.schritte.find(x => x.key === "platz").label, /2\. Versuch/);
+    // 4. geplanter Versuch ohne Prüfplatz-Liste
+    const geplant = { ...stu, exams: [...stu.exams, { id: "e3", art: "praxis", date: "2026-10-30", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(geplant, { heute, praxisVoraus: ok })));
+    assert.equal(a.praxis.platz.quelle, "eintrag");
+    assert.equal(a.praxis.platz.examId, "e3");
+    // 5. bestanden über die Führerschein-Liste
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", licenseSteps: { praxis_bestanden: { done: true, date: "2026-09-01" } } }, { heute })));
+    assert.equal(a.praxis.bestanden, "2026-09-01");
+    assert.ok(a.praxis.schritte.every(x => x.erledigt));
+});

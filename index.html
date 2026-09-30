@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.68.0";
+const APP_VERSION = "2.69.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.69.0", date: "September 2026", changes: [
+            "Neu: Prüfungsakte im Schülerprofil (Station „Prüfung“). Für Theorie und Praxis siehst du Schritt für Schritt, was dran ist: Voraussetzungen, Prüfungsreife, Prüfplatz, Kalender und Ergebnis – und erledigst jeden Schritt direkt dort",
+            "Wer einen Prüfplatz bekommt, gilt jetzt automatisch als „angemeldet“",
+        ] },
     { v: "2.68.0", date: "September 2026", changes: [
             "Neu: Schüler melden sich in ihrer App mit „Ich komme“ zu einer Theoriestunde an. Beim Check-in siehst du, wer angemeldet ist, und trägst sie mit einem Tipp als anwesend ein",
         ] },
@@ -13841,6 +13845,55 @@ function pruefungsakteVon(stu) {
             typ: e.typ === "zurueckgenommen" ? "schlecht" : "gut", von: e.von || "" });
     });
     return out.sort((a, b) => b.datum.localeCompare(a.datum));
+}
+// Geführte Prüfungsakte (v2.69.0, Produktplan #5): EIN Ablauf je Prüfung statt vier Datenstellen.
+// Abgeleitet aus vorhandenen Daten (exams[], examReadiness, licenseSteps, exam_slots, Termine) -
+// nichts wird doppelt gespeichert. Ein Prüfplatz gilt als erledigt ("aufgelöst"), sobald zu seinem
+// Datum ein Ergebnis in exams[] steht; danach beginnt eine Wiederholung wieder beim Prüfplatz.
+// ctx = { heute: "YYYY-MM-DD", slots: exam_slots, termine: Termine des Schülers,
+//         unterlagenOffen: [Label], praxisVoraus: [{ ok, text, hinweis }] }
+const PRUEFUNG_TERMINART = { theorie: "VT", praxis: "PF" };
+function pruefungsAblauf(stu, ctx) {
+    ctx = ctx || {};
+    const heute = ctx.heute || new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
+    const tag = d => { try { return /^\d{4}-\d{2}-\d{2}$/.test(String(d)) ? String(d) : new Date(d).toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" }); } catch (e) { return ""; } };
+    const exams = ((stu && stu.exams) || []).filter(e => e && e.date);
+    const steps = (stu && stu.licenseSteps) || {};
+    function eine(art) {
+        const eigene = exams.filter(e => e.art === art).slice().sort((a, b) => a.date.localeCompare(b.date));
+        const bestandenEx = eigene.find(e => e.passed);
+        let bestanden = bestandenEx ? bestandenEx.date.slice(0, 10) : null;
+        if (!bestanden && art === "theorie" && stu && stu.theorie && typeof stu.theorie === "string" && /^\d{4}-\d{2}-\d{2}/.test(stu.theorie))
+            bestanden = stu.theorie.slice(0, 10);
+        if (!bestanden && art === "theorie" && stu && stu.theorie === true)
+            bestanden = "ja";
+        if (!bestanden && art === "praxis" && steps.praxis_bestanden && steps.praxis_bestanden.done)
+            bestanden = steps.praxis_bestanden.date || "ja";
+        const fehlversuche = eigene.filter(e => !e.passed && e.date.slice(0, 10) < heute).length;
+        const ergebnisTage = new Set(eigene.filter(e => e.passed || e.date.slice(0, 10) < heute).map(e => e.date.slice(0, 10)));
+        // Offener Prüfplatz: zugeteilter Platz ohne Ergebnis an seinem Tag, sonst ein geplanter Versuch
+        const platzAusSlot = ((ctx.slots || []).filter(x => x && x.art === art && x.status === "vergeben" && x.student_id === (stu && stu.id) && x.datum && !ergebnisTage.has(x.datum))
+            .sort((a, b) => a.datum.localeCompare(b.datum))[0]) || null;
+        const geplant = eigene.find(e => !e.passed && e.date.slice(0, 10) >= heute);
+        const platz = bestanden ? null
+            : platzAusSlot ? { quelle: "slot", slot: platzAusSlot, datum: platzAusSlot.datum, zeit: platzAusSlot.zeit || "", ort: platzAusSlot.ort || "", examId: geplant && geplant.date.slice(0, 10) === platzAusSlot.datum ? geplant.id : null }
+            : geplant ? { quelle: "eintrag", slot: null, datum: geplant.date.slice(0, 10), zeit: "", ort: "", examId: geplant.id } : null;
+        const terminArt = PRUEFUNG_TERMINART[art];
+        const termin = platz ? (ctx.termine || []).find(a => a && a.art === terminArt && tag(a.start_at) === platz.datum && a.status !== "cancelled") || null : null;
+        const voraus = art === "theorie"
+            ? [{ ok: !(ctx.unterlagenOffen || []).length, text: "Unterlagen vollständig", hinweis: (ctx.unterlagenOffen || []).length ? "Fehlt: " + ctx.unterlagenOffen.join(", ") : "" }]
+            : (ctx.praxisVoraus || []);
+        const reifeOk = !!(stu && stu.examReadiness && stu.examReadiness.ergebnis !== "nicht_bestanden");
+        const schritte = [{ key: "voraussetzungen", label: "Voraussetzungen", erledigt: !!bestanden || voraus.every(v => v.ok), offen: voraus.filter(v => !v.ok) }];
+        if (art === "praxis")
+            schritte.push({ key: "reife", label: "Prüfungsreife festgestellt", erledigt: !!bestanden || reifeOk });
+        schritte.push({ key: "platz", label: fehlversuche && !bestanden ? "Prüfplatz (Wiederholung, " + (fehlversuche + 1) + ". Versuch)" : "Prüfplatz", erledigt: !!bestanden || !!platz });
+        schritte.push({ key: "termin", label: "Im Kalender eingetragen", erledigt: !!bestanden || !!termin });
+        schritte.push({ key: "ergebnis", label: "Ergebnis", erledigt: !!bestanden });
+        const aktuell = bestanden ? null : (schritte.find(x => !x.erledigt) || {}).key || null;
+        return { art, bestanden, fehlversuche, versuche: eigene.length, platz, termin, schritte, aktuell };
+    }
+    return { theorie: eine("theorie"), praxis: eine("praxis") };
 }
 // Lebensphase eines Schülers (Produktplan #4), abgeleitet aus vorhandenen Daten - keine eigene
 // Eingabe, die veralten könnte. Liefert Phase + genau EINEN nächsten Schritt.
@@ -26444,7 +26497,11 @@ function App() {
             const created = await dbInsertExamSlot(uid, { art: f.art, datum: f.datum, zeit: f.zeit, ort: f.ort });
             setExamSlots(prev => [...prev, created].sort((a, b) => a.datum.localeCompare(b.datum)));
             setExamSlotForm(null);
-            showToast("Prüfplatz erfasst.");
+            const fuer = f.fuer ? (studentsRef.current || []).find(x => x.id === f.fuer) : null;
+            if (fuer)
+                await assignExamSlot(created, fuer);
+            else
+                showToast("Prüfplatz erfasst.");
         }
         catch (e) {
             setExamSlotForm(prev => prev && ({ ...prev, busy: false }));
@@ -26459,9 +26516,18 @@ function App() {
             await dbUpdateExamSlot(slot.id, { student_id: student.id, status: "vergeben" });
             setExamSlots(prev => prev.map(s => s.id === slot.id ? { ...s, student_id: student.id, status: "vergeben" } : s));
             setExamSlotAssign({ slot: { ...slot, student_id: student.id, status: "vergeben" }, assignedTo: student });
+            // Prüfungsakte (v2.69.0): Zuteilung = angemeldet, damit Führerschein-Liste, Lebensphase
+            // und "bereit, nicht angemeldet" dasselbe sagen (vorher Audit F-N16, nur umgangen).
+            const key = slot.art === "theorie" ? "theorie_angemeldet" : "praxis_angemeldet";
+            schuelerAendernUndSpeichern(student.id, cur => {
+                const alt = (cur.licenseSteps || {})[key];
+                return alt && alt.done ? cur : { ...cur, licenseSteps: { ...(cur.licenseSteps || {}), [key]: { done: true, date: ymd(new Date()) } } };
+            });
+            return true;
         }
         catch (e) {
             showToast("Konnte nicht zugewiesen werden:\n" + fehlerText(e), "error");
+            return false;
         }
     }
     // Platz freigeben (Schüler kann kurzfristig nicht, oder Zuteilung war ein Irrtum) - öffnet
@@ -26896,6 +26962,126 @@ function App() {
        Die App speicherte bisher nur, OB eine Prüfung bestanden wurde – nicht, wie viele
        Versuche nötig waren. Damit war keine Erfolgsquote berechenbar, die die
        Fahrschulreform künftig zur Veröffentlichung verlangt. ── */
+    // ── Geführte Prüfungsakte (v2.69.0) ──
+    function pruefungsKontext(stu) {
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const r = pruefungsreife(stu, tplFor(vk).adk, tplFor(vk).strecken, sonderfahrtenSoll);
+        const offenBetrag = sumCharges(stu, Number(pricePerHour) || 0) - sumPayments(stu);
+        const unterlagenOffen = ["sehtest", "erstehilfe", "passfoto", "antrag"].filter(k => !licenseStepDone(stu, k))
+            .map(k => (LICENSE_STEPS.find(x => x.key === k) || { label: k }).label);
+        return { heute: ymd(new Date()), slots: examSlots || [], termine: (appts || []).filter(a => a.student_id === stu.id),
+            unterlagenOffen,
+            praxisVoraus: [
+                // Theorie gilt als bestanden, wenn der Führerschein-Stand ODER ein bestandener Versuch es
+                // sagt - sonst widerspräche die Praxis-Karte der Theorie-Karte direkt darüber.
+                { ok: !r.theorieOffen || (stu.exams || []).some(e => e && e.art === "theorie" && e.passed), text: "Theorieprüfung bestanden" },
+                { ok: r.offeneSonderfahrten.length === 0, text: "Sonderfahrten erfüllt", hinweis: r.offeneSonderfahrten.length ? r.offeneSonderfahrten.map(x => x.label).join(", ") + " offen" : "" },
+                { ok: unterlagenOffen.length === 0, text: "Unterlagen vollständig", hinweis: unterlagenOffen.length ? "Fehlt: " + unterlagenOffen.join(", ") : "" },
+                { ok: offenBetrag <= 0.005, text: "Konto ausgeglichen", hinweis: offenBetrag > 0.005 ? eurFmt(offenBetrag) + " offen" : "" },
+            ] };
+    }
+    async function pruefungInKalender(stu, art, platz) {
+        if (!platz || !platz.datum) return;
+        const start = platz.zeit || (art === "praxis" ? "09:00" : "10:00");
+        const dauer = art === "praxis" ? 55 : 60;
+        const created = await addAppt({ student_id: stu.id, start_at: combineDT(platz.datum, start), end_at: combineDT(platz.datum, addMinutesToTime(start, dauer)),
+            art: PRUEFUNG_TERMINART[art], status: "confirmed", title: "", note: platz.ort ? "Prüfung · " + platz.ort : "Prüfung" });
+        if (created)
+            showToast((art === "praxis" ? "Praxisprüfung" : "Theorieprüfung") + " steht im Kalender.");
+    }
+    async function pruefungErgebnis(stu, art, platz, bestanden) {
+        const datum = (platz && platz.datum) || ymd(new Date());
+        if (!await askConfirm({ title: bestanden ? "Bestanden eintragen?" : "Nicht bestanden eintragen?",
+                message: dispName(stu) + " · " + (art === "praxis" ? "Praxisprüfung" : "Theorieprüfung") + " am " + fmtDLong(datum) + (bestanden ? "" : "\n\nDanach geht es mit einem neuen Prüfplatz weiter."),
+                confirmLabel: "Eintragen", danger: false }))
+            return;
+        schuelerAendernUndSpeichern(stu.id, cur => {
+            let exams = cur.exams || [];
+            exams = platz && platz.examId
+                ? exams.map(e => e.id === platz.examId ? { ...e, passed: !!bestanden, date: datum } : e)
+                : [...exams, { id: uniqueId("ex"), art, date: datum, passed: !!bestanden }];
+            const extra = {};
+            // wie patchExam(): Führerschein-Stand mitziehen, nie ein vorhandenes Datum überschreiben
+            if (bestanden && art === "theorie" && !cur.theorie)
+                extra.theorie = datum;
+            const pb = (cur.licenseSteps || {}).praxis_bestanden;
+            if (bestanden && art === "praxis" && !(pb && pb.done))
+                extra.licenseSteps = { ...(cur.licenseSteps || {}), praxis_bestanden: { ...(pb || {}), done: true, date: datum } };
+            return { ...cur, exams, ...extra };
+        });
+        showToast(bestanden ? "Glückwunsch! Eingetragen." : "Eingetragen.");
+    }
+    function renderPruefungsakte() {
+        const ablauf = pruefungsAblauf(active, pruefungsKontext(active));
+        const heute = ymd(new Date());
+        const karte = (a) => {
+            const titel = a.art === "praxis" ? "Praxisprüfung" : "Theorieprüfung";
+            const freie = (examSlots || []).filter(x => x.art === a.art && x.status === "frei" && x.datum && x.datum >= heute).sort((x, y) => x.datum.localeCompare(y.datum));
+            const platzText = pl => fmtDLong(pl.datum) + (pl.zeit ? ", " + pl.zeit.slice(0, 5) + " Uhr" : "") + (pl.ort ? " · " + pl.ort : "");
+            const aktion = (label, onClick, primaer) => React.createElement("button", { className: "btn " + (primaer ? "btn-primary" : "btn-ghost"), style: { minHeight: 38, padding: "0 13px", fontSize: 13 }, onClick }, label);
+            const inhalt = (st) => {
+                if (st.key === "voraussetzungen")
+                    return st.offen && st.offen.length
+                        ? React.createElement("ul", { style: { margin: "4px 0 0", paddingLeft: 18, fontSize: 12.5, color: "var(--muted)", lineHeight: 1.55 } },
+                            st.offen.map((v, i) => React.createElement("li", { key: i }, v.text + (v.hinweis ? " – " + v.hinweis : ""))))
+                        : null;
+                if (st.key === "reife")
+                    return st.erledigt
+                        ? (active.examReadiness && React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 4 } },
+                            React.createElement("span", { style: { fontSize: 12.5, color: "var(--muted)" } }, "am " + fmtDLong(active.examReadiness.festgestelltAm || active.examReadiness.datum)),
+                            aktion("Bestätigung als PDF", druckeReifeBestaetigung)))
+                        : React.createElement("div", { style: { marginTop: 6 } }, aktion("Prüfungsreife feststellen", () => oeffneReifeForm(null), a.aktuell === "reife"));
+                if (st.key === "platz")
+                    return a.platz
+                        ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3 } }, platzText(a.platz))
+                        : React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 } },
+                            freie.slice(0, 3).map(sl => aktion("Platz " + platzText(sl) + " zuteilen", () => assignExamSlot(sl, active), false)),
+                            aktion(freie.length ? "Anderen Platz eintragen" : "Prüfplatz eintragen", () => setExamSlotForm({ art: a.art, datum: "", zeit: "", ort: "", fuer: active.id }), a.aktuell === "platz" && !freie.length));
+                if (st.key === "termin")
+                    return a.termin
+                        ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3 } }, new Date(a.termin.start_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) + " Uhr")
+                        : a.platz ? React.createElement("div", { style: { marginTop: 6 } }, aktion("In den Kalender eintragen", () => pruefungInKalender(active, a.art, a.platz), a.aktuell === "termin")) : null;
+                if (st.key === "ergebnis")
+                    return a.bestanden
+                        ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 3 } }, a.bestanden === "ja" ? "bestanden" : "bestanden am " + fmtDLong(a.bestanden))
+                        : a.platz ? React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 } },
+                            aktion("Bestanden", () => pruefungErgebnis(active, a.art, a.platz, true), a.aktuell === "ergebnis"),
+                            aktion("Nicht bestanden", () => pruefungErgebnis(active, a.art, a.platz, false), false)) : null;
+                return null;
+            };
+            return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginTop: 10 } },
+                React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginBottom: 6 } },
+                    React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, margin: 0 } }, titel),
+                    React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: a.bestanden ? "var(--sage-deep)" : "var(--muted)" } },
+                        a.bestanden ? "\u2713 bestanden" : a.fehlversuche ? a.fehlversuche + (a.fehlversuche === 1 ? " Fehlversuch" : " Fehlversuche") : "")),
+                React.createElement("ol", { style: { listStyle: "none", margin: 0, padding: 0 } },
+                    a.schritte.map((st, i) => {
+                        const jetzt = a.aktuell === st.key;
+                        return React.createElement("li", { key: st.key, "aria-current": jetzt ? "step" : undefined, style: { display: "flex", gap: 10, padding: "8px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                            React.createElement("span", { "aria-hidden": "true", style: { flex: "none", width: 22, height: 22, borderRadius: 99, display: "grid", placeItems: "center", fontSize: 12, fontWeight: 800, marginTop: 1,
+                                    background: st.erledigt ? "var(--sage-bg)" : jetzt ? "var(--orange)" : "transparent",
+                                    color: st.erledigt ? "var(--sage-deep)" : jetzt ? "#1c1305" : "var(--muted)",
+                                    border: st.erledigt || jetzt ? "none" : "1.5px solid var(--line)" } }, st.erledigt ? "\u2713" : String(i + 1)),
+                            React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+                                React.createElement("div", { style: { fontSize: 13.5, fontWeight: jetzt ? 800 : 600, color: st.erledigt ? "var(--ink-2)" : "var(--ink)" } },
+                                    st.label,
+                                    React.createElement("span", { style: SR_NUR }, st.erledigt ? ", erledigt" : jetzt ? ", jetzt dran" : ", offen")),
+                                !a.bestanden && inhalt(st)));
+                    })));
+        };
+        const akte = pruefungsakteVon(active);
+        return React.createElement(React.Fragment, null,
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "6px 2px 0" } },
+                "Der Weg zur Prüfung in einer Übersicht. Der orange Punkt zeigt, was jetzt dran ist."),
+            karte(ablauf.theorie),
+            karte(ablauf.praxis),
+            akte.length > 0 && React.createElement("div", { className: "card", style: { padding: "12px 15px", marginTop: 10 } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, margin: "0 0 6px" } }, "Verlauf"),
+                akte.map((e, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 10, fontSize: 12.5, padding: "5px 0", borderTop: i ? "1px solid var(--line)" : "none" } },
+                    React.createElement("span", { style: { color: "var(--muted)", flexShrink: 0, fontVariantNumeric: "tabular-nums", minWidth: 74 } }, new Date(e.datum + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" })),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0, fontWeight: e.typ === "neutral" ? 500 : 700, color: e.typ === "gut" ? "var(--green-ink, var(--green))" : e.typ === "schlecht" ? "var(--red-ink)" : "var(--ink-2)" } },
+                        e.text, e.von ? React.createElement("span", { style: { fontWeight: 400, color: "var(--muted)" } }, " · " + e.von) : null)))));
+    }
     function renderPruefungsversuche() {
         const exams = (active.exams || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
         function addExam(art) {
@@ -27626,13 +27812,20 @@ function App() {
                 tone: begleitErfuellt === 3 ? "sage" : "clay", chip: begleitErfuellt + "/3" },
             { key: "antrag", label: "Führersch.", icon: "🎓",
                 tone: amp.stufe === "gruen" ? "sage" : "orange", chip: licensePct + "%" },
+            // Prüfungsakte (v2.69.0): Chip = was bei der Praxisprüfung gerade dran ist
+            (() => {
+                const ab = pruefungsAblauf(active, pruefungsKontext(active)).praxis;
+                const kurz = { voraussetzungen: "Voraus.", reife: "Reife", platz: "Platz", termin: "Termin", ergebnis: "Ergebnis" };
+                return { key: "pruefung", label: "Prüfung", icon: "🏁", tone: ab.bestanden ? "sage" : ab.aktuell === "ergebnis" || ab.aktuell === "termin" ? "orange" : "sky",
+                    chip: ab.bestanden ? "bestanden" : ab.platz ? fmtD(ab.platz.datum) : (kurz[ab.aktuell] || "–") };
+            })(),
         ].filter(Boolean);
         function openStation(key) {
             setStudentTab(key);
             if (key === "theorie")
                 loadTheoryQuestions();
         }
-        const STATION_TITLES = { fahrten: "Fahrten & Kosten", antrag: "Führerschein", begleitung: "Begleitfahrten", theorie: "Theorie" };
+        const STATION_TITLES = { fahrten: "Fahrten & Kosten", antrag: "Führerschein", begleitung: "Begleitfahrten", theorie: "Theorie", pruefung: "Prüfungsakte" };
         function stationBody(key) {
             if (key === "fahrten")
                 return React.createElement(React.Fragment, null,
@@ -27650,6 +27843,8 @@ function App() {
                     kostenSection());
             if (key === "antrag")
                 return renderLicenseSteps();
+            if (key === "pruefung")
+                return renderPruefungsakte();
             if (key === "begleitung")
                 return renderBegleitfahrten();
             if (key === "theorie")
