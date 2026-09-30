@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.72.0";
+const APP_VERSION = "2.72.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.72.1", date: "September 2026", changes: [
+            "Beim Umstellen auf Guthaben-Abrechnung weist die App auf noch nicht berechnete Leistungen hin",
+            "Fehler behoben",
+        ] },
     { v: "2.72.0", date: "September 2026", changes: [
             "Startseite „Diese Woche“: Dringendes steht jetzt oben. Neu sind Hinweise auf Prüfungen in den nächsten 7 Tagen, bei denen noch etwas fehlt, und auf prüfungsreife Schüler ohne Prüfplatz",
             "Mit „Später“ blendest du einen Hinweis 7 Tage aus. Ändert sich etwas daran, ist er sofort wieder da",
@@ -13888,7 +13892,8 @@ function pruefungsakteVon(stu) {
 // ctx = { heute: "YYYY-MM-DD", slots: exam_slots, termine: Termine des Schülers,
 //         unterlagenOffen: [Label], praxisVoraus: [{ ok, text, hinweis }] }
 const PRUEFUNG_TERMINART = { theorie: "VT", praxis: "PF" };
-let pruefungKalenderLaeuft = false; // Doppeltipp-Sperre für "In den Kalender eintragen" (Review v2.69.1)
+let pruefungKalenderLaeuft = false;
+let aufladenLaeuft = false; // Doppeltipp-Sperre für "Guthaben aufladen" (Review v2.72.1) // Doppeltipp-Sperre für "In den Kalender eintragen" (Review v2.69.1)
 function pruefungsAblauf(stu, ctx) {
     ctx = ctx || {};
     const heute = ctx.heute || new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
@@ -16495,7 +16500,10 @@ function App() {
     const [uebergaben, setUebergaben] = useState({}); // { [studentId]: { von, am } }
     const [uebergabeGesehen, setUebergabeGesehen] = useState([]);
     // Handlungsbedarf (v2.72.0): zurückgestellte Hinweise { signatur: "YYYY-MM-DD" } je Gerät
-    const [hinweisZurueck, setHinweisZurueck] = useState(() => { try { return JSON.parse(localStorage.getItem("v3_hinweise_zurueck_" + (session && session.user && session.user.id)) || "{}") || {}; } catch (e) { return {}; } });
+    const [hinweisZurueck, setHinweisZurueck] = useState({});
+    useEffect(() => {
+        try { setHinweisZurueck(uid ? (JSON.parse(localStorage.getItem("v3_hinweise_zurueck_" + uid) || "{}") || {}) : {}); } catch (e) { setHinweisZurueck({}); }
+    }, [uid]);
     const [hinweiseAlle, setHinweiseAlle] = useState(false);
     useEffect(() => {
         if (!uid || IS_DEMO())
@@ -25957,7 +25965,18 @@ function App() {
             // Schalter setzt nur das Flag; dem Client wird dabei nichts geglaubt.
             React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 12 } },
                 React.createElement("label", { htmlFor: "field-abrechnung-schueler", style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, display: "block", marginBottom: 6 } }, "Abrechnung für diesen Schüler"),
-                React.createElement("select", { id: "field-abrechnung-schueler", value: active.abrechnungsModell || "", onChange: e => updateActive({ abrechnungsModell: e.target.value }),
+                React.createElement("select", { id: "field-abrechnung-schueler", value: active.abrechnungsModell || "", onChange: async e => {
+                        const neu = e.target.value;
+                        const wirdGuthaben = neu === "guthaben" || (neu === "" && ABRECHNUNG_STANDARD.modell === "guthaben");
+                        if (wirdGuthaben && abrechnungsModell(active) !== "guthaben") {
+                            const offenSumme = offeneLeistungenSumme(active, Number(pricePerHour) || 0);
+                            if (offenSumme > 0.005 && !await askConfirm({ title: "Erst abrechnen?",
+                                    message: "Für " + dispName(active) + " sind noch " + eurFmt(offenSumme) + " erbracht, aber nicht berechnet. Im Guthaben-Modell tauchen sie danach nicht mehr unter „noch nicht berechnet“ auf.\n\nAm besten vorher „+ Rechnung erstellen“.",
+                                    confirmLabel: "Trotzdem umstellen", danger: false }))
+                                return;
+                        }
+                        updateActive({ abrechnungsModell: neu });
+                    },
                         style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "11px 12px", fontSize: 16, background: "var(--card)", color: "var(--ink)" } },
                     React.createElement("option", { value: "" }, "Wie die Fahrschule (" + (ABRECHNUNG_STANDARD.modell === "guthaben" ? "Guthaben" : "offener Betrag") + ")"),
                     React.createElement("option", { value: "offen" }, "Offener Betrag – Rechnung über Leistungen"),
@@ -26047,7 +26066,7 @@ function App() {
                         React.createElement("path", { d: "M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" }),
                         React.createElement("circle", { cx: "12", cy: "13", r: "4" })),
                     React.createElement("input", { type: "file", accept: "image/*", capture: "environment", style: { display: "none" }, onChange: e => { handleReceiptImportFiles(e.target.files); e.target.value = ""; } }))),
-            packages.length > 0 && React.createElement("div", { style: { marginBottom: 20 } },
+            !guthabenModell && packages.length > 0 && React.createElement("div", { style: { marginBottom: 20 } },
                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 8 } }, "Oder ein Paket \u00FCbernehmen:"),
                 React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, packages.map((p, idx) => React.createElement("button", { key: idx, className: "btn btn-ghost", style: { padding: "8px 12px", fontSize: 13 }, onClick: async () => {
                         const ueHint = Number(p.includedUE) > 0 ? (" (" + ueFmt(p.includedUE) + " UE enthalten)") : "";
@@ -32027,6 +32046,8 @@ function App() {
         const betrag = paket ? Number(paket.amount) || 0 : parseBetrag(a.betrag);
         if (!(betrag > 0)) { setAufladen(x => x && ({ ...x, fehler: "Bitte einen Betrag über 0 € eingeben." })); return; }
         if (IS_DEMO()) { showToast("Demo-Ansicht: Rechnungen werden nicht erstellt."); return; }
+        if (aufladenLaeuft) return;
+        aufladenLaeuft = true;
         setAufladen(x => x && ({ ...x, busy: true, fehler: "" }));
         let inv, kostenIds = [];
         try {
@@ -32035,17 +32056,26 @@ function App() {
                 const patched = patchStudentNow(stu.id, cur => ({ ...cur, costItems: [...(cur.costItems || []), costItem],
                     packages: [...(cur.packages || []), { name: paket.name, amount: betrag, includedUE: Number(paket.includedUE) || 0, date: ymd(new Date()), costItemId: costItem.id }] }));
                 if (!patched) throw new Error("Schüler nicht gefunden");
+                kostenIds = [costItem.id];
                 // Der Posten muss auf dem Server stehen, bevor create_invoice ihn abrechnet
                 await dbUpdate(patched, ["costItems", "packages"]);
-                kostenIds = [costItem.id];
             }
-            inv = await dbCreateInvoice(stu.id, school.id, [{ label: paket ? paket.name + " (Guthaben)" : "Guthaben-Aufladung", amount: betrag, date: ymd(new Date()) }], [], kostenIds, paket ? "Paket – wird mit gefahrenen Stunden verrechnet" : "Guthaben-Aufladung – wird mit gefahrenen Stunden verrechnet");
+            inv = await dbCreateInvoice(stu.id, school.id, [{ label: paket ? paket.name + " (Guthaben)" : "Guthaben-Aufladung", amount: betrag, date: ymd(new Date()) }], [], kostenIds.slice(), paket ? "Paket – wird mit gefahrenen Stunden verrechnet" : "Guthaben-Aufladung – wird mit gefahrenen Stunden verrechnet");
         }
         catch (e) {
+            // Review v2.72.1: Paketposten ohne Rechnung wieder entfernen - sonst bliebe die Belastung
+            // stehen (im Guthaben-Modell nicht mehr abrechenbar) und ein zweiter Versuch doppelte sie.
+            if (kostenIds.length) {
+                const weg = patchStudentNow(stu.id, cur => ({ ...cur, costItems: (cur.costItems || []).filter(c => kostenIds.indexOf(c.id) < 0),
+                    packages: (cur.packages || []).filter(pk => kostenIds.indexOf(pk.costItemId) < 0) }));
+                if (weg) dbUpdate(weg, ["costItems", "packages"]).catch(() => scheduleSave(weg));
+            }
+            aufladenLaeuft = false;
             setAufladen(x => x && ({ ...x, busy: false }));
             showToast("Aufladen hat nicht geklappt\n" + fehlerText(e), "error");
             return;
         }
+        aufladenLaeuft = false;
         const faellig = rechnungFaellig(inv, zahlungszielTage);
         if (faellig) inv = { ...inv, faellig };
         rechnungLokalNachziehen(stu.id, inv, [], kostenIds);
@@ -33640,7 +33670,16 @@ function App() {
                                     React.createElement("label", { id: "field-abrechnungsmodell-label" }, "So rechnet deine Fahrschule ab"),
                                     React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "field-abrechnungsmodell-label", style: { marginTop: 6, marginBottom: 6 } },
                                         [["offen", "Offener Betrag"], ["guthaben", "Guthaben"]].map(o => React.createElement("button", { key: o[0], "aria-pressed": (inv.abrechnungsModell || "offen") === o[0],
-                                                className: (inv.abrechnungsModell || "offen") === o[0] ? "on" : "", onClick: () => saveInvoiceSettings({ abrechnungsModell: o[0] }) }, o[1]))),
+                                                className: (inv.abrechnungsModell || "offen") === o[0] ? "on" : "", onClick: async () => {
+                                                    if (o[0] === "guthaben" && (inv.abrechnungsModell || "offen") !== "guthaben") {
+                                                        const betroffen = (students || []).filter(x => x._isMine && !x.archived && !x.abrechnungsModell && offeneLeistungenSumme(x, Number(pricePerHour) || 0) > 0.005);
+                                                        if (betroffen.length && !await askConfirm({ title: "Erst abrechnen?",
+                                                                message: betroffen.length + (betroffen.length === 1 ? " Schüler hat" : " Schüler haben") + " noch erbrachte, aber nicht berechnete Leistungen (z.B. " + betroffen.slice(0, 3).map(dispName).join(", ") + "). Im Guthaben-Modell tauchen sie danach nicht mehr unter „noch nicht berechnet“ auf.\n\nAm besten vorher die Sammelrechnung unter Abrechnung nutzen.",
+                                                                confirmLabel: "Trotzdem umstellen", danger: false }))
+                                                            return;
+                                                    }
+                                                    saveInvoiceSettings({ abrechnungsModell: o[0] });
+                                                } }, o[1]))),
                                     React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
                                         (inv.abrechnungsModell || "offen") === "guthaben"
                                             ? "Schüler laden vorab auf (Betrag oder Paket). Die Rechnung entsteht beim Aufladen, gefahrene Stunden werden vom Guthaben abgezogen. Ist es aufgebraucht, siehst du einen Hinweis – buchen geht weiter."
