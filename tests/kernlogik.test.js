@@ -684,3 +684,23 @@ test("Prüfungsakte: Schritte, aktueller Schritt, Wiederholung, geplanter Versuc
     assert.equal(a.praxis.bestanden, "2026-09-01");
     assert.ok(a.praxis.schritte.every(x => x.erledigt));
 });
+test("Prüfungsakte: Fehlversuch am Prüfungstag zählt sofort, Theorie-Altwerte", () => {
+    const heute = "2026-10-14";
+    const slots = [{ id: "p1", art: "praxis", status: "vergeben", student_id: "s1", datum: "2026-10-14" }];
+    const stu = { id: "s1", theorie: "2026-08-01", examReadiness: { ergebnis: "bestanden" },
+        exams: [{ id: "e2", art: "praxis", date: "2026-10-14", passed: false, ergebnis: true }] };
+    let a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(stu, { heute, slots, praxisVoraus: [{ ok: true, text: "x" }] })));
+    assert.equal(a.praxis.fehlversuche, 1);
+    assert.equal(a.praxis.platz, null);
+    assert.equal(a.praxis.aktuell, "platz");
+    // ohne Kennzeichen (alte Liste) bleibt ein heutiger Versuch ein geplanter
+    const alt = { ...stu, exams: [{ id: "e3", art: "praxis", date: "2026-10-14", passed: false }] };
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf(alt, { heute, slots, praxisVoraus: [{ ok: true, text: "x" }] })));
+    assert.equal(a.praxis.fehlversuche, 0);
+    assert.equal(a.praxis.platz.examId, "e3");
+    // Theorie-Altwert ohne Datum gilt als bestanden
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", theorie: "bestanden" }, { heute })));
+    assert.equal(a.theorie.bestanden, "ja");
+    a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", theorie: "" }, { heute })));
+    assert.equal(a.theorie.bestanden, null);
+});

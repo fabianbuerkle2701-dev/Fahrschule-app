@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.69.0";
+const APP_VERSION = "2.69.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.69.1", date: "September 2026", changes: [
+            "Prüfungsakte: „Nicht bestanden“ zählt sofort, nicht erst am nächsten Tag",
+            "Fehler behoben",
+        ] },
     { v: "2.69.0", date: "September 2026", changes: [
             "Neu: Prüfungsakte im Schülerprofil (Station „Prüfung“). Für Theorie und Praxis siehst du Schritt für Schritt, was dran ist: Voraussetzungen, Prüfungsreife, Prüfplatz, Kalender und Ergebnis – und erledigst jeden Schritt direkt dort",
             "Wer einen Prüfplatz bekommt, gilt jetzt automatisch als „angemeldet“",
@@ -13853,6 +13857,7 @@ function pruefungsakteVon(stu) {
 // ctx = { heute: "YYYY-MM-DD", slots: exam_slots, termine: Termine des Schülers,
 //         unterlagenOffen: [Label], praxisVoraus: [{ ok, text, hinweis }] }
 const PRUEFUNG_TERMINART = { theorie: "VT", praxis: "PF" };
+let pruefungKalenderLaeuft = false; // Doppeltipp-Sperre für "In den Kalender eintragen" (Review v2.69.1)
 function pruefungsAblauf(stu, ctx) {
     ctx = ctx || {};
     const heute = ctx.heute || new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
@@ -13863,18 +13868,20 @@ function pruefungsAblauf(stu, ctx) {
         const eigene = exams.filter(e => e.art === art).slice().sort((a, b) => a.date.localeCompare(b.date));
         const bestandenEx = eigene.find(e => e.passed);
         let bestanden = bestandenEx ? bestandenEx.date.slice(0, 10) : null;
-        if (!bestanden && art === "theorie" && stu && stu.theorie && typeof stu.theorie === "string" && /^\d{4}-\d{2}-\d{2}/.test(stu.theorie))
-            bestanden = stu.theorie.slice(0, 10);
-        if (!bestanden && art === "theorie" && stu && stu.theorie === true)
-            bestanden = "ja";
+        if (!bestanden && art === "theorie" && stu && stu.theorie && stu.theorie !== "false")
+            bestanden = typeof stu.theorie === "string" && /^\d{4}-\d{2}-\d{2}/.test(stu.theorie) ? stu.theorie.slice(0, 10) : "ja";
         if (!bestanden && art === "praxis" && steps.praxis_bestanden && steps.praxis_bestanden.done)
             bestanden = steps.praxis_bestanden.date || "ja";
-        const fehlversuche = eigene.filter(e => !e.passed && e.date.slice(0, 10) < heute).length;
-        const ergebnisTage = new Set(eigene.filter(e => e.passed || e.date.slice(0, 10) < heute).map(e => e.date.slice(0, 10)));
+        // "ergebnis: true" setzt pruefungErgebnis(): dann ist ein nicht bestandener Versuch sofort ein
+        // Ergebnis, nicht erst ab dem Folgetag (Review v2.69.1). Ohne Kennzeichen (alte Liste
+        // "Prüfungsversuche") bleibt ein Versuch mit Datum ab heute ein geplanter.
+        const istErgebnis = e => e.passed || e.ergebnis === true || e.date.slice(0, 10) < heute;
+        const fehlversuche = eigene.filter(e => !e.passed && istErgebnis(e)).length;
+        const ergebnisTage = new Set(eigene.filter(istErgebnis).map(e => e.date.slice(0, 10)));
         // Offener Prüfplatz: zugeteilter Platz ohne Ergebnis an seinem Tag, sonst ein geplanter Versuch
         const platzAusSlot = ((ctx.slots || []).filter(x => x && x.art === art && x.status === "vergeben" && x.student_id === (stu && stu.id) && x.datum && !ergebnisTage.has(x.datum))
             .sort((a, b) => a.datum.localeCompare(b.datum))[0]) || null;
-        const geplant = eigene.find(e => !e.passed && e.date.slice(0, 10) >= heute);
+        const geplant = eigene.find(e => !istErgebnis(e));
         const platz = bestanden ? null
             : platzAusSlot ? { quelle: "slot", slot: platzAusSlot, datum: platzAusSlot.datum, zeit: platzAusSlot.zeit || "", ort: platzAusSlot.ort || "", examId: geplant && geplant.date.slice(0, 10) === platzAusSlot.datum ? geplant.id : null }
             : geplant ? { quelle: "eintrag", slot: null, datum: geplant.date.slice(0, 10), zeit: "", ort: "", examId: geplant.id } : null;
@@ -26521,7 +26528,7 @@ function App() {
             const key = slot.art === "theorie" ? "theorie_angemeldet" : "praxis_angemeldet";
             schuelerAendernUndSpeichern(student.id, cur => {
                 const alt = (cur.licenseSteps || {})[key];
-                return alt && alt.done ? cur : { ...cur, licenseSteps: { ...(cur.licenseSteps || {}), [key]: { done: true, date: ymd(new Date()) } } };
+                return alt && alt.done ? cur : { ...cur, licenseSteps: { ...(cur.licenseSteps || {}), [key]: { done: true, date: ymd(new Date()), quelle: "platz" } } };
             });
             return true;
         }
@@ -26532,9 +26539,25 @@ function App() {
     }
     // Platz freigeben (Schüler kann kurzfristig nicht, oder Zuteilung war ein Irrtum) - öffnet
     // sofort wieder die Kandidatenliste für denselben Platz, statt ihn kommentarlos leer zu lassen.
+    // Prüfungsakte (Review v2.69.1): nur ein durch die Zuteilung gesetztes "angemeldet" zurücknehmen -
+    // ein von Hand abgehaktes bleibt stehen.
+    function angemeldetAusPlatzZuruecknehmen(slot) {
+        if (!slot || !slot.student_id)
+            return;
+        const key = slot.art === "theorie" ? "theorie_angemeldet" : "praxis_angemeldet";
+        schuelerAendernUndSpeichern(slot.student_id, cur => {
+            const alt = (cur.licenseSteps || {})[key];
+            if (!alt || alt.quelle !== "platz")
+                return cur;
+            const steps = { ...(cur.licenseSteps || {}) };
+            delete steps[key];
+            return { ...cur, licenseSteps: steps };
+        });
+    }
     async function freeExamSlot(slot) {
         try {
             await dbUpdateExamSlot(slot.id, { student_id: null, status: "frei" });
+            angemeldetAusPlatzZuruecknehmen(slot);
             const freed = { ...slot, student_id: null, status: "frei" };
             setExamSlots(prev => prev.map(s => s.id === slot.id ? freed : s));
             setExamSlotAssign({ slot: freed, assignedTo: null });
@@ -26548,6 +26571,7 @@ function App() {
             return;
         try {
             await dbUpdateExamSlot(slot.id, { student_id: null, status: "abgesagt" });
+            angemeldetAusPlatzZuruecknehmen(slot);
             setExamSlots(prev => prev.map(s => s.id === slot.id ? { ...s, student_id: null, status: "abgesagt" } : s));
         }
         catch (e) {
@@ -26981,7 +27005,11 @@ function App() {
             ] };
     }
     async function pruefungInKalender(stu, art, platz) {
-        if (!platz || !platz.datum) return;
+        if (!platz || !platz.datum || pruefungKalenderLaeuft) return;
+        pruefungKalenderLaeuft = true;
+        try { await pruefungInKalenderAnlegen(stu, art, platz); } finally { pruefungKalenderLaeuft = false; }
+    }
+    async function pruefungInKalenderAnlegen(stu, art, platz) {
         const start = platz.zeit || (art === "praxis" ? "09:00" : "10:00");
         const dauer = art === "praxis" ? 55 : 60;
         const created = await addAppt({ student_id: stu.id, start_at: combineDT(platz.datum, start), end_at: combineDT(platz.datum, addMinutesToTime(start, dauer)),
@@ -26998,8 +27026,8 @@ function App() {
         schuelerAendernUndSpeichern(stu.id, cur => {
             let exams = cur.exams || [];
             exams = platz && platz.examId
-                ? exams.map(e => e.id === platz.examId ? { ...e, passed: !!bestanden, date: datum } : e)
-                : [...exams, { id: uniqueId("ex"), art, date: datum, passed: !!bestanden }];
+                ? exams.map(e => e.id === platz.examId ? { ...e, passed: !!bestanden, date: datum, ergebnis: true } : e)
+                : [...exams, { id: uniqueId("ex"), art, date: datum, passed: !!bestanden, ergebnis: true }];
             const extra = {};
             // wie patchExam(): Führerschein-Stand mitziehen, nie ein vorhandenes Datum überschreiben
             if (bestanden && art === "theorie" && !cur.theorie)
@@ -42095,7 +42123,7 @@ function TheorieKarte({ code, klasse, tS }) {
                         t.fehlt && React.createElement("span", { style: { display: "inline-block", marginTop: 4, fontSize: 11.5, fontWeight: 700, color: "var(--orange-deep)", background: "var(--orange-tint)", borderRadius: 99, padding: "2px 8px" } }, tS("th_fehlt")),
                         // Anmeldung (v2.68.0): "Ich komme" / "Angemeldet · Abmelden"
                         t.id && React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginTop: 7, flexWrap: "wrap" } },
-                            React.createElement("button", { className: "btn " + (t.angemeldet ? "btn-ghost" : "btn-primary"), "aria-pressed": !!t.angemeldet, disabled: busy === t.id,
+                            React.createElement("button", { className: "btn " + (t.angemeldet ? "btn-ghost" : "btn-primary"), "aria-busy": busy === t.id, disabled: busy === t.id,
                                     style: { minHeight: 36, padding: "0 12px", fontSize: 12.5 }, onClick: () => umschalten(t) },
                                 t.angemeldet ? "\u2713 " + tS("th_angemeldet") + " \u00B7 " + tS("th_abmelden") : tS("th_komme")),
                             t.anzahl > 0 && React.createElement("span", { style: { fontSize: 12, color: "var(--muted)" } }, tS("th_anzahl", { n: t.anzahl }))))))),
