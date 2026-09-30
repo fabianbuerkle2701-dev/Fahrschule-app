@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.70.0";
+const APP_VERSION = "2.71.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.71.0", date: "September 2026", changes: [
+            "Neu: Abrechnung mit Guthaben. In den Rechnungs-Einstellungen wählst du „Offener Betrag“ oder „Guthaben“. Bei Guthaben laden Schüler einen Betrag oder ein Paket auf, die Rechnung entsteht beim Aufladen und Fahrstunden werden vom Guthaben abgezogen",
+            "Je Schüler lässt sich die Abrechnung im Bereich Kasse abweichend einstellen",
+        ] },
     { v: "2.70.0", date: "September 2026", changes: [
             "Neu: Übergabe-Faktenblatt. Bekommst du einen Schüler von einem Kollegen, siehst du beim Öffnen auf einen Blick Ausbildungsstand, Sonderfahrten, Bewertungen, Schwächen, Unterlagen, Prüfungsstand und Kontostand. Jederzeit auch im Schüler-Menü (⋮)",
         ] },
@@ -9939,6 +9943,21 @@ function lessonsCharge(s, stdPrice) {
     // GESAMTE Summe unwiderruflich auf NaN kippen und die komplette Saldenanzeige verfälschen.
     return lessonBillables(s, stdPrice).reduce((sum, b) => sum + (Number.isFinite(b.amount) ? b.amount : 0), 0);
 }
+/* ════════ Abrechnungsmodell (v2.71.0) ════════
+   "offen"    = Rechnung über erbrachte Leistungen, danach Zahlung (bisheriges Verhalten).
+   "guthaben" = der Schüler lädt vorab auf (freier Betrag oder Paket). Die Rechnung entsteht beim
+                Aufladen; gefahrene Stunden und Posten werden danach nur noch vom Guthaben
+                abgezogen und NIE zusätzlich in Rechnung gestellt (sonst doppelt berechnet).
+   Standard legt der Fahrschul-Admin fest (invoice_settings.abrechnungsModell), je Schüler
+   abweichend über data.abrechnungsModell. Rechnerisch ändert sich nichts: Saldo = Posten -
+   Zahlungen, ein negativer Saldo ist das Guthaben. */
+const ABRECHNUNG_STANDARD = { modell: "offen" }; // setzt App() aus school.invoice_settings
+function abrechnungsModell(s) {
+    const eigen = s && s.abrechnungsModell;
+    if (eigen === "guthaben" || eigen === "offen")
+        return eigen;
+    return ABRECHNUNG_STANDARD.modell === "guthaben" ? "guthaben" : "offen";
+}
 /* ════════ Abrechnungs-Wächter: erbracht, aber noch nicht berechnet ════════ */
 // Die Kachel "Offene Forderungen" wirft zwei Zustände in eine Zahl: (a) berechnet, aber nicht
 // bezahlt - da muss der Schüler zahlen - und (b) erbracht, aber nie in Rechnung gestellt - da muss
@@ -9949,6 +9968,9 @@ function lessonsCharge(s, stdPrice) {
 // Paketgedeckte Stunden haben in lessonBillables bereits amount = 0 und fallen damit von selbst raus.
 function offeneLeistungen(s, stdPrice, abDatum) {
     const posten = [];
+    // Guthaben-Modell: die Rechnung kam schon beim Aufladen - nichts ist "nicht berechnet".
+    if (abrechnungsModell(s) === "guthaben")
+        return posten;
     lessonBillables(s, stdPrice).forEach(b => {
         if (b.lesson.invoiced || b.lesson.nichtBerechnen)
             return;
@@ -10196,6 +10218,8 @@ function rechnungsLeistungszeitraum(s, inv) {
 function rechnungsEntwurfZeilen(stu, price, ohneAusgenommene) {
     const rows = [];
     if (!stu) return rows;
+    // Guthaben-Modell: keine Rechnung über Leistungen (wurde beim Aufladen berechnet)
+    if (abrechnungsModell(stu) === "guthaben") return rows;
     const billableById = {};
     lessonBillables(stu, price).forEach(b => { billableById[b.lesson.id] = b.amount; });
     const byPrice = {};
@@ -15440,6 +15464,8 @@ function App() {
     const [wechselCode, setWechselCode] = useState(null);     // Schulwechsel: {stu, busy, error, code, bis}
     const [auskunft, setAuskunft] = useState(null);           // Datenauskunft (v2.64.0): {stu, dateien: undefined=lädt | null=Fehler | [], druck}
     const [faktenblatt, setFaktenblatt] = useState(null);     // Übergabe-Faktenblatt (v2.70.0): Schüler-ID oder null
+    const [aufladen, setAufladen] = useState(null);           // Guthaben aufladen (v2.71.0): {sid, betrag, paket, erhalten, busy}
+    ABRECHNUNG_STANDARD.modell = ((school && school.invoice_settings) || {}).abrechnungsModell === "guthaben" ? "guthaben" : "offen";
     const [wechselImport, setWechselImport] = useState(null); // Übergabecode einlösen: {code, busy, error, vorschau}
     const [unterlagenOpen, setUnterlagenOpen] = useState(false); // Liste "Prüfung naht, Unterlagen fehlen" auf der Startseite
     const [folgeschritte, setFolgeschritte] = useState(null); // null | { studentId, erledigt: {} } - "So geht es weiter" nach der Übernahme eines Interessenten
@@ -16698,6 +16724,7 @@ function App() {
         else if (wechselCode) { if (!wechselCode.busy) setWechselCode(null); }
         else if (auskunft) setAuskunft(null);
         else if (faktenblatt) setFaktenblatt(null);
+        else if (aufladen) { if (!aufladen.busy) setAufladen(null); }
         else if (wechselImport) { if (!wechselImport.busy) setWechselImport(null); }
         else if (unterlagenOpen) setUnterlagenOpen(false);
         else if (folgeschritte) setFolgeschritte(null);
@@ -16740,7 +16767,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16980,7 +17007,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -23186,6 +23213,12 @@ function App() {
         const testfahrtBereit = (students || []).filter(s => s._isMine && !s.archived && !s.pending
             && !(s.examReadiness && s.examReadiness.ergebnis === "bestanden")
             && ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen");
+        // Guthaben-Modell (v2.71.0): wer mehr verbraucht als aufgeladen hat - Hinweis, buchen geht weiter
+        const guthabenLeer = (students || []).filter(s => s._isMine && !s.archived && abrechnungsModell(s) === "guthaben"
+            && sumCharges(s, stdPrice) - sumPayments(s) > 0.005);
+        if (guthabenLeer.length > 0)
+            weekItems.push({ key: "guthaben", icon: icWallet, onClick: () => oeffneSchuelerReiter(guthabenLeer[0].id, "fahrten"),
+                text: guthabenLeer.length === 1 ? "Guthaben von " + dispName(guthabenLeer[0]) + " ist aufgebraucht" : guthabenLeer.length + " Schüler: Guthaben aufgebraucht" });
         // Übergabe-Faktenblatt (v2.70.0): neu zugeteilte Schüler, deren Faktenblatt noch ungelesen ist
         const neuUebergeben = (students || []).filter(s => s._isMine && !s.archived && uebergabeUngelesen(s));
         if (neuUebergeben.length > 0)
@@ -25642,6 +25675,7 @@ function App() {
         const charges = sumCharges(active, price);
         const paid = sumPayments(active);
         const open = charges - paid;
+        const guthabenModell = abrechnungsModell(active) === "guthaben";
         const items = active.costItems || [];
         const pays = active.payments || [];
         const lessons = active.drivenLessons || [];
@@ -25788,7 +25822,8 @@ function App() {
             React.createElement("div", { className: "card", style: { padding: "16px", marginBottom: 16, textAlign: "center",
                     background: open > 0 ? "var(--orange-soft)" : "var(--green-bg)",
                     border: "1.5px solid " + (open > 0 ? "var(--orange)" : "var(--green)") } },
-                React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)" } }, open > 0 ? "Offener Betrag" : (open < 0 ? "Guthaben" : "Vollständig bezahlt")),
+                React.createElement("div", { style: { fontSize: 11, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--muted)" } },
+                    guthabenModell ? (open > 0.005 ? "Guthaben aufgebraucht – fehlt" : "Guthaben") : (open > 0 ? "Offener Betrag" : (open < 0 ? "Guthaben" : "Vollständig bezahlt"))),
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 30, marginTop: 3,
                         color: open > 0 ? "var(--orange-deep)" : "var(--green)" } }, eurFmt(Math.abs(open))),
                 React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
@@ -25796,7 +25831,10 @@ function App() {
                     eurFmt(charges),
                     " \u00B7 bezahlt ",
                     eurFmt(paid)),
-                open > 0.005 && React.createElement("button", { className: "btn btn-primary", style: { marginTop: 12, gap: 7 }, onClick: sendReminder },
+                // Guthaben-Modell (v2.71.0): Aufladen statt Zahlungserinnerung
+                guthabenModell && React.createElement("button", { className: "btn " + (open > -0.005 ? "btn-primary" : "btn-ghost"), style: { marginTop: 12 },
+                        onClick: () => setAufladen({ sid: active.id, betrag: "", paket: null, erhalten: false, methode: "bar", busy: false, fehler: "" }) }, "Guthaben aufladen"),
+                !guthabenModell && open > 0.005 && React.createElement("button", { className: "btn btn-primary", style: { marginTop: 12, gap: 7 }, onClick: sendReminder },
                     React.createElement("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "currentColor" },
                         React.createElement("path", { d: "M12.04 2C6.58 2 2.13 6.45 2.13 11.91c0 1.75.46 3.45 1.32 4.95L2 22l5.25-1.38c1.45.79 3.08 1.21 4.79 1.21h.01c5.46 0 9.91-4.45 9.91-9.91 0-2.65-1.03-5.14-2.9-7.01A9.82 9.82 0 0 0 12.04 2zm0 1.67c2.2 0 4.27.86 5.82 2.42a8.18 8.18 0 0 1 2.41 5.82c0 4.54-3.7 8.24-8.24 8.24-1.52 0-3.01-.41-4.3-1.19l-.31-.18-3.19.84.85-3.11-.2-.32a8.16 8.16 0 0 1-1.25-4.36c0-4.54 3.7-8.24 8.24-8.24z" })),
                     naechsteStufe === 1 ? "Zahlungserinnerung senden" : (naechsteStufe + ". Erinnerung senden")),
@@ -25819,6 +25857,13 @@ function App() {
             // Wettbewerbers, ueber den sich Schueler oeffentlich beschweren. Die eigentliche
             // Pruefung passiert serverseitig in den Buchungs-RPCs (_open_invoiced_amount), dieser
             // Schalter setzt nur das Flag; dem Client wird dabei nichts geglaubt.
+            React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 12 } },
+                React.createElement("label", { htmlFor: "field-abrechnung-schueler", style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, display: "block", marginBottom: 6 } }, "Abrechnung für diesen Schüler"),
+                React.createElement("select", { id: "field-abrechnung-schueler", value: active.abrechnungsModell || "", onChange: e => updateActive({ abrechnungsModell: e.target.value }),
+                        style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 11, padding: "11px 12px", fontSize: 16, background: "var(--card)", color: "var(--ink)" } },
+                    React.createElement("option", { value: "" }, "Wie die Fahrschule (" + (ABRECHNUNG_STANDARD.modell === "guthaben" ? "Guthaben" : "offener Betrag") + ")"),
+                    React.createElement("option", { value: "offen" }, "Offener Betrag – Rechnung über Leistungen"),
+                    React.createElement("option", { value: "guthaben" }, "Guthaben – Rechnung beim Aufladen"))),
             React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 16 } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, marginBottom: 2 } }, "Guthaben-Modus"),
                 React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", marginBottom: 9, lineHeight: 1.45 } },
@@ -25961,7 +26006,10 @@ function App() {
                     // eine Pflicht noch einen Empfaenger, der etwas damit anfangen kann.
                     active.istFirmenkunde && !inv.stornoOf && !inv.cancelledBy && React.createElement("button", { onClick: e => { e.stopPropagation(); xrechnungHerunterladen(inv, active); }, title: "XRechnung (XML) herunterladen \u2013 Beta", style: { border: "none", background: "none", color: "var(--orange-deep)", padding: "4px 6px", fontSize: 12, fontWeight: 700, flexShrink: 0 } }, "XRechnung"),
                     !inv.cancelledBy && !inv.stornoOf && React.createElement("button", { onClick: e => { e.stopPropagation(); cancelInvoice(inv); }, "aria-label": "Rechnung stornieren", title: "Rechnung stornieren", style: { border: "none", background: "none", color: "var(--muted)", padding: "4px 6px", fontSize: 12, flexShrink: 0 } }, "Stornieren")))),
-            React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
+            guthabenModell
+                ? React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, margin: "-4px 2px 20px" } },
+                    "Guthaben-Abrechnung: Rechnungen entstehen beim Aufladen. Fahrstunden und Posten werden vom Guthaben abgezogen.")
+                : React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 20 }, onClick: openInvoiceDraft }, "+ Rechnung erstellen"),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Ausbildungsvertrag"),
             contracts.length === 0
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)", marginBottom: 10 } }, "Noch kein Vertrag erstellt.")
@@ -31869,6 +31917,48 @@ function App() {
             holen(sb.from("theory_attendance").select("thema,checked_at").eq("student_id", stu.id)),
         ]).then(([dateien, termine, theorie]) => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien, termine, theorie } : a));
     }
+    // Guthaben aufladen (v2.71.0): freier Betrag = Rechnung mit der Position "Guthaben-Aufladung"
+    // ohne Bezug zu Stunden; Paket = Posten + UE wie bisher, sofort in Rechnung gestellt.
+    // Auf Wunsch gleich als bezahlt erfassen (bar/Karte erhalten).
+    async function aufladenBestaetigen() {
+        const a = aufladen;
+        if (!a || a.busy || !school) return;
+        const stu = (studentsRef.current || []).find(x => x.id === a.sid);
+        if (!stu) return;
+        const paket = a.paket;
+        const betrag = paket ? Number(paket.amount) || 0 : parseBetrag(a.betrag);
+        if (!(betrag > 0)) { setAufladen(x => x && ({ ...x, fehler: "Bitte einen Betrag über 0 € eingeben." })); return; }
+        if (IS_DEMO()) { showToast("Demo-Ansicht: Rechnungen werden nicht erstellt."); return; }
+        setAufladen(x => x && ({ ...x, busy: true, fehler: "" }));
+        let inv, kostenIds = [];
+        try {
+            if (paket) {
+                const costItem = neuerKostenposten({ label: paket.name, amount: betrag });
+                const patched = patchStudentNow(stu.id, cur => ({ ...cur, costItems: [...(cur.costItems || []), costItem],
+                    packages: [...(cur.packages || []), { name: paket.name, amount: betrag, includedUE: Number(paket.includedUE) || 0, date: ymd(new Date()), costItemId: costItem.id }] }));
+                if (!patched) throw new Error("Schüler nicht gefunden");
+                // Der Posten muss auf dem Server stehen, bevor create_invoice ihn abrechnet
+                await dbUpdate(patched, ["costItems", "packages"]);
+                kostenIds = [costItem.id];
+            }
+            inv = await dbCreateInvoice(stu.id, school.id, [{ label: paket ? paket.name + " (Guthaben)" : "Guthaben-Aufladung", amount: betrag, date: ymd(new Date()) }], [], kostenIds, paket ? "Paket – wird mit gefahrenen Stunden verrechnet" : "Guthaben-Aufladung – wird mit gefahrenen Stunden verrechnet");
+        }
+        catch (e) {
+            setAufladen(x => x && ({ ...x, busy: false }));
+            showToast("Aufladen hat nicht geklappt\n" + fehlerText(e), "error");
+            return;
+        }
+        const faellig = rechnungFaellig(inv, zahlungszielTage);
+        if (faellig) inv = { ...inv, faellig };
+        rechnungLokalNachziehen(stu.id, inv, [], kostenIds);
+        if (a.erhalten)
+            schuelerAendernUndSpeichern(stu.id, cur => ({ ...cur, payments: [...(cur.payments || []), { id: uniqueId("pay"), date: ymd(new Date()), amount: betrag, method: a.methode || "bar", invoiceId: inv.id }] }));
+        setAufladen(null);
+        showToast(eurFmt(betrag) + " aufgeladen · Rechnung " + inv.number);
+        setDruckSchueler(stu);
+        setInvoicePreview(inv);
+        doPrint("invoice");
+    }
     function uebergabeKontext(stu) {
         const vk = stu.klasse || DEFAULT_KLASSE;
         const pk = pruefungsKontext(stu);
@@ -33447,6 +33537,17 @@ function App() {
                                 React.createElement("label", { className: "check", style: { margin: "10px 2px 4px" } },
                                     React.createElement("input", { type: "checkbox", checked: !!inv.kleinunternehmer, onChange: e => saveInvoiceSettings({ kleinunternehmer: e.target.checked }) }),
                                     "Kleinunternehmer nach § 19 UStG (keine Umsatzsteuer wird ausgewiesen)"),
+                                // Abrechnungsmodell der Fahrschule (v2.71.0) - je Schüler änderbar
+                                React.createElement("div", { className: "field", style: { marginTop: 10 } },
+                                    React.createElement("label", { id: "field-abrechnungsmodell-label" }, "So rechnet deine Fahrschule ab"),
+                                    React.createElement("div", { className: "seg", role: "group", "aria-labelledby": "field-abrechnungsmodell-label", style: { marginTop: 6, marginBottom: 6 } },
+                                        [["offen", "Offener Betrag"], ["guthaben", "Guthaben"]].map(o => React.createElement("button", { key: o[0], "aria-pressed": (inv.abrechnungsModell || "offen") === o[0],
+                                                className: (inv.abrechnungsModell || "offen") === o[0] ? "on" : "", onClick: () => saveInvoiceSettings({ abrechnungsModell: o[0] }) }, o[1]))),
+                                    React.createElement("div", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5 } },
+                                        (inv.abrechnungsModell || "offen") === "guthaben"
+                                            ? "Schüler laden vorab auf (Betrag oder Paket). Die Rechnung entsteht beim Aufladen, gefahrene Stunden werden vom Guthaben abgezogen. Ist es aufgebraucht, siehst du einen Hinweis – buchen geht weiter."
+                                            : "Fahrstunden und Posten werden erfasst und später in Rechnung gestellt, der Schüler zahlt den offenen Betrag.",
+                                        " Für einzelne Schüler lässt sich das im Bereich Kasse ändern.")),
                                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
                                         React.createElement("label", null, "Steuernummer",
@@ -37093,6 +37194,41 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        // Guthaben aufladen (v2.71.0)
+        aufladen && (() => {
+            const stu = (students || []).find(x => x.id === aufladen.sid);
+            if (!stu) return null;
+            const betrag = aufladen.paket ? Number(aufladen.paket.amount) || 0 : parseBetrag(aufladen.betrag);
+            const ok = betrag > 0;
+            return React.createElement("div", { onClick: () => { if (!aufladen.busy) setAufladen(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Guthaben aufladen",
+                    style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 480, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                        padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                    React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                    React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 4 } }, "Guthaben aufladen"),
+                    React.createElement("p", { style: { fontSize: 13, color: "var(--muted)", margin: "0 0 14px" } }, dispName(stu) + " · es entsteht eine Rechnung über den Betrag."),
+                    React.createElement("div", { className: "field", style: { marginBottom: 10 } },
+                        React.createElement("label", { htmlFor: "field-aufladen-betrag" }, "Betrag"),
+                        React.createElement("input", { id: "field-aufladen-betrag", inputMode: "decimal", placeholder: "z.B. 500", value: aufladen.paket ? String(aufladen.paket.amount).replace(".", ",") : aufladen.betrag, disabled: !!aufladen.paket || aufladen.busy,
+                            onChange: e => { const v = e.target.value; setAufladen(x => x && ({ ...x, betrag: v, fehler: "" })); } })),
+                    !aufladen.paket && React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 } },
+                        [200, 500, 1000].map(b => React.createElement("button", { key: b, type: "button", className: "btn btn-ghost", style: { padding: "6px 12px", fontSize: 13 }, onClick: () => setAufladen(x => x && ({ ...x, betrag: String(b), fehler: "" })) }, eurFmt(b)))),
+                    (packages || []).length > 0 && React.createElement("div", { style: { marginBottom: 14 } },
+                        React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginBottom: 6 } }, "Oder ein Paket:"),
+                        React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+                            packages.map((pk, i) => {
+                                const on = aufladen.paket && aufladen.paket.name === pk.name && Number(aufladen.paket.amount) === Number(pk.amount);
+                                return React.createElement("button", { key: i, type: "button", className: "btn " + (on ? "btn-primary" : "btn-ghost"), "aria-pressed": !!on, style: { padding: "6px 12px", fontSize: 13 },
+                                    onClick: () => setAufladen(x => x && ({ ...x, paket: on ? null : pk, fehler: "" })) }, pk.name + " · " + eurFmt(pk.amount) + (Number(pk.includedUE) > 0 ? " (" + ueFmt(pk.includedUE) + " UE)" : ""));
+                            }))),
+                    React.createElement("label", { className: "check", style: { margin: "4px 2px 14px" } },
+                        React.createElement("input", { type: "checkbox", checked: !!aufladen.erhalten, onChange: e => { const v = e.target.checked; setAufladen(x => x && ({ ...x, erhalten: v })); } }),
+                        "Betrag schon erhalten (bar oder Karte) – gleich als bezahlt erfassen"),
+                    aufladen.fehler && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", marginBottom: 10 } }, aufladen.fehler),
+                    React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 8 }, disabled: !ok || aufladen.busy, onClick: aufladenBestaetigen },
+                        aufladen.busy ? "Wird erstellt…" : (ok ? "Rechnung über " + eurFmt(betrag) + " erstellen" : "Betrag eingeben")),
+                    React.createElement("button", { className: "btn btn-ghost btn-block", disabled: aufladen.busy, onClick: () => setAufladen(null) }, "Abbrechen")));
+        })(),
         // Übergabe-Faktenblatt als Fenster (v2.70.0) - aus dem Schüler-Menü oder der Startseite
         faktenblatt && (() => {
             const stu = (students || []).find(x => x.id === faktenblatt);

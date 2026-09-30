@@ -733,3 +733,24 @@ test("Übergabe-Faktenblatt: nur Abweichungen, Warnungen markiert", () => {
     const leer = JSON.parse(JSON.stringify(uf.uebergabeFakten({}, {})));
     assert.ok(leer.every(x => x.wert.trim() !== ""));
 });
+
+// v2.71.0: Abrechnungsmodell Guthaben
+const gm = require("./lade-app")(["abrechnungsModell", "ABRECHNUNG_STANDARD", "offeneLeistungen", "rechnungsEntwurfZeilen", "sumCharges", "sumPayments"]);
+test("Guthaben-Modell: nichts ist „nicht berechnet“, Saldo bleibt Posten minus Zahlungen", () => {
+    const stu = { drivenLessons: [{ id: "l1", date: "2026-09-01", minutes: 45 }], costItems: [{ id: "c1", label: "Grundbetrag", amount: 300 }],
+        payments: [{ amount: 500, invoiceId: "inv1" }] };
+    gm.ABRECHNUNG_STANDARD.modell = "offen";
+    assert.equal(gm.abrechnungsModell(stu), "offen");
+    assert.equal(gm.offeneLeistungen(stu, 60).length, 2);          // Standard: Stunde + Posten offen
+    assert.ok(gm.rechnungsEntwurfZeilen(stu, 60).length > 0);
+    gm.ABRECHNUNG_STANDARD.modell = "guthaben";
+    assert.equal(gm.abrechnungsModell(stu), "guthaben");
+    assert.equal(gm.offeneLeistungen(stu, 60).length, 0);          // kommt nicht in „nicht berechnet“
+    assert.equal(gm.rechnungsEntwurfZeilen(stu, 60).length, 0);    // keine zweite Rechnung über Leistungen
+    assert.equal(Math.round((gm.sumCharges(stu, 60) - gm.sumPayments(stu)) * 100) / 100, -140); // 140 € Guthaben übrig
+    // Ausnahme je Schüler (z.B. Firmenkunde) schlägt den Standard
+    assert.equal(gm.abrechnungsModell({ ...stu, abrechnungsModell: "offen" }), "offen");
+    assert.equal(gm.offeneLeistungen({ ...stu, abrechnungsModell: "offen" }, 60).length, 2);
+    gm.ABRECHNUNG_STANDARD.modell = "offen";
+    assert.equal(gm.abrechnungsModell({ abrechnungsModell: "guthaben" }), "guthaben");
+});
