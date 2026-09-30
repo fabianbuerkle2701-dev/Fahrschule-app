@@ -704,3 +704,32 @@ test("Prüfungsakte: Fehlversuch am Prüfungstag zählt sofort, Theorie-Altwerte
     a = JSON.parse(JSON.stringify(pa.pruefungsAblauf({ id: "s1", theorie: "" }, { heute })));
     assert.equal(a.theorie.bestanden, null);
 });
+
+// v2.70.0: Übergabe-Faktenblatt
+const uf = require("./lade-app")(["uebergabeFakten", "letzteBewertungen", "wiederkehrendeSchwaechenAus", "LESSON_FIELDS", "SMILEYS"]);
+test("Übergabe-Faktenblatt: nur Abweichungen, Warnungen markiert", () => {
+    const stu = { manualHours: "4", lastNote: "Spurwechsel links üben", sehhilfe: true,
+        drivenLessons: [{ date: "2026-09-01", minutes: 90 }, { date: "2026-09-20", minutes: 45 }],
+        lessons: [
+            { date: "2026-09-20", ratings: { verkehr: 3, tempo: 1 } },
+            { date: "2026-09-10", ratings: { tempo: 1 } },
+            { date: "2026-09-01", ratings: { tempo: 2 } } ] };
+    const ctx = { pct: 72.4, phase: "In Ausbildung", offenBetrag: 90, unterlagenOffen: ["Sehtest"], theorieBestanden: false,
+        sonder: [{ label: "Überland", ue: 3, sollUe: 5, erfuellt: false, langeFahrtDabei: true }, { label: "Autobahn", ue: 4, sollUe: 4, erfuellt: true, langeFahrtDabei: false }],
+        praxis: { bestanden: null, aktuell: "reife", schritte: [{ key: "reife", label: "Prüfungsreife festgestellt" }], platz: null, fehlversuche: 0 } };
+    const z = JSON.parse(JSON.stringify(uf.uebergabeFakten(stu, ctx)));
+    const w = l => (z.find(x => x.label === l) || {});
+    assert.equal(w("Ausbildungsstand").wert, "72 % · In Ausbildung");
+    assert.equal(w("Fahrstunden").wert, "3 UE (+ 4 vorher) · zuletzt 20.9.2026");
+    assert.equal(w("Sonderfahrten").wert, "Überland 3/5 UE, Autobahn 4/4 UE (Doppelstunde fehlt)");
+    assert.equal(w("Sonderfahrten").ton, "warn");
+    assert.equal(w("Letzte Bewertung").wert, "Geschwindigkeitsanpassung: schlecht");
+    assert.equal(w("Wiederkehrend schwach").wert, "Geschwindigkeitsanpassung");
+    assert.equal(w("Nächstes Mal").wert, "Spurwechsel links üben");
+    assert.equal(w("Konto").ton, "warn");
+    assert.equal(w("Praxisprüfung").wert, "als Nächstes: Prüfungsreife festgestellt");
+    assert.equal(w("Besonderheiten").wert, "Sehhilfe");
+    // leerer Schüler: keine leeren Zeilen
+    const leer = JSON.parse(JSON.stringify(uf.uebergabeFakten({}, {})));
+    assert.ok(leer.every(x => x.wert.trim() !== ""));
+});

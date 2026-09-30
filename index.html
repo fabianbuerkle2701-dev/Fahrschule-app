@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.69.1";
+const APP_VERSION = "2.70.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.70.0", date: "September 2026", changes: [
+            "Neu: Übergabe-Faktenblatt. Bekommst du einen Schüler von einem Kollegen, siehst du beim Öffnen auf einen Blick Ausbildungsstand, Sonderfahrten, Bewertungen, Schwächen, Unterlagen, Prüfungsstand und Kontostand. Jederzeit auch im Schüler-Menü (⋮)",
+        ] },
     { v: "2.69.1", date: "September 2026", changes: [
             "Prüfungsakte: „Nicht bestanden“ zählt sofort, nicht erst am nächsten Tag",
             "Fehler behoben",
@@ -13936,6 +13939,53 @@ function lebensphaseVon(stu, info) {
         return { key: "ausbildung", label: "In Ausbildung", schritt: !erledigt("antrag") ? "Antrag bei der Führerscheinstelle anstoßen" : null };
     return { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" };
 }
+// Übergabe-Faktenblatt (v2.70.0, Produktplan Teil I): was ein Fahrlehrer beim Übernehmen eines
+// Schülers wissen muss - aus den Daten berechnet, ohne KI. Nur Abweichungen statt Vollständigkeit.
+// ctx = { pct, phase, sonder: sonderfahrtenBilanz(), unterlagenOffen: [Label], offenBetrag,
+//         theorieBestanden: bool, praxis: pruefungsAblauf().praxis }
+function uebergabeFakten(stu, ctx) {
+    stu = stu || {};
+    ctx = ctx || {};
+    const zeilen = [];
+    const plus = (label, wert, ton) => { if (wert != null && String(wert).trim() !== "") zeilen.push({ label, wert: String(wert), ton: ton || "" }); };
+    const datum = d => { try { return new Date(String(d).length === 10 ? d + "T12:00:00" : d).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }); } catch (e) { return ""; } };
+    plus("Ausbildungsstand", [ctx.pct != null ? Math.round(ctx.pct) + " %" : "", ctx.phase || ""].filter(Boolean).join(" · "));
+    const gefahren = (stu.drivenLessons || []).filter(Boolean);
+    const minuten = gefahren.reduce((t, l) => t + (Number(l.minutes) || 0), 0);
+    const letzte = gefahren.map(l => l.date || "").filter(Boolean).sort().pop();
+    const vorher = parseInt(stu.manualHours, 10) || 0;
+    plus("Fahrstunden", (Math.round(minuten / 45 * 10) / 10).toLocaleString("de-DE") + " UE" + (vorher ? " (+ " + vorher + " vorher)" : "") + (letzte ? " · zuletzt " + datum(letzte) : ""));
+    const sonder = ctx.sonder || [];
+    if (sonder.length) {
+        const offen = sonder.filter(x => !x.erfuellt || !x.langeFahrtDabei);
+        plus("Sonderfahrten", offen.length
+            ? offen.map(x => x.label + " " + (Math.round((x.ue || 0) * 10) / 10).toLocaleString("de-DE") + "/" + (x.sollUe || 0) + " UE" + (x.erfuellt && !x.langeFahrtDabei ? " (Doppelstunde fehlt)" : "")).join(", ")
+            : "alle erfüllt", offen.length ? "warn" : "gut");
+    }
+    const letzteWertung = letzteBewertungen(stu);
+    if (letzteWertung) {
+        const ab = LESSON_FIELDS.filter(f => letzteWertung[f.id] && letzteWertung[f.id] !== 3)
+            .map(f => f.label + ": " + ((SMILEYS.find(x => x.v === letzteWertung[f.id]) || {}).label || ""));
+        plus("Letzte Bewertung", ab.length ? ab.join(", ") : "alles gut", ab.length ? "warn" : "gut");
+    }
+    const schwach = wiederkehrendeSchwaechenAus(stu.lessons);
+    if (schwach.length)
+        plus("Wiederkehrend schwach", schwach.map(x => x.feld).join(", "), "warn");
+    plus("Nächstes Mal", (stu.lastNote || "").trim());
+    const unt = ctx.unterlagenOffen || [];
+    plus("Unterlagen", unt.length ? "fehlt: " + unt.join(", ") : "vollständig", unt.length ? "warn" : "gut");
+    plus("Theorieprüfung", ctx.theorieBestanden ? "bestanden" : "offen", ctx.theorieBestanden ? "gut" : "");
+    const pr = ctx.praxis;
+    if (pr) {
+        const schritt = pr.bestanden ? "bestanden" : ((pr.schritte || []).find(x => x.key === pr.aktuell) || {}).label || "";
+        plus("Praxisprüfung", (pr.bestanden ? "bestanden" : "als Nächstes: " + schritt) + (pr.platz ? " · Platz am " + datum(pr.platz.datum) : "") + (pr.fehlversuche ? " · " + pr.fehlversuche + (pr.fehlversuche === 1 ? " Fehlversuch" : " Fehlversuche") : ""),
+            pr.bestanden ? "gut" : "");
+    }
+    const offen = Number(ctx.offenBetrag) || 0;
+    plus("Konto", offen > 0.005 ? offen.toLocaleString("de-DE", { style: "currency", currency: "EUR" }) + " offen" : "ausgeglichen", offen > 0.005 ? "warn" : "gut");
+    plus("Besonderheiten", [stu.sehhilfe ? "Sehhilfe" : "", (stu.bemerkungen || "").trim()].filter(Boolean).join(" · "));
+    return zeilen;
+}
 // Schüler-App: genau EIN nächster Schritt (Produktplan #16). kommend = künftige eigene Termine,
 // aufsteigend. Reihenfolge: Prüfungsfahrt steht an > Unterlagen fehlen > kein nächster Termin.
 function naechsterSchrittSchueler(stu, kommend, jetzt) {
@@ -15389,6 +15439,7 @@ function App() {
     const [arbeitszeitOpen, setArbeitszeitOpen] = useState(false); // eigener Arbeitszeitnachweis (§ 12 FahrlG)
     const [wechselCode, setWechselCode] = useState(null);     // Schulwechsel: {stu, busy, error, code, bis}
     const [auskunft, setAuskunft] = useState(null);           // Datenauskunft (v2.64.0): {stu, dateien: undefined=lädt | null=Fehler | [], druck}
+    const [faktenblatt, setFaktenblatt] = useState(null);     // Übergabe-Faktenblatt (v2.70.0): Schüler-ID oder null
     const [wechselImport, setWechselImport] = useState(null); // Übergabecode einlösen: {code, busy, error, vorschau}
     const [unterlagenOpen, setUnterlagenOpen] = useState(false); // Liste "Prüfung naht, Unterlagen fehlen" auf der Startseite
     const [folgeschritte, setFolgeschritte] = useState(null); // null | { studentId, erledigt: {} } - "So geht es weiter" nach der Übernahme eines Interessenten
@@ -16359,6 +16410,23 @@ function App() {
             setExamSlotsErr(fehlerText(e)); });
         return () => { cancelled = true; };
     }, [uid]);
+    // Übergaben an mich (v2.70.0): Schüler, die mir in den letzten 90 Tagen zugeteilt wurden -
+    // für die Karte "Neu bei dir" mit dem Faktenblatt. "Gelesen" merkt sich das Gerät.
+    const [uebergaben, setUebergaben] = useState({}); // { [studentId]: { von, am } }
+    const [uebergabeGesehen, setUebergabeGesehen] = useState([]);
+    useEffect(() => {
+        if (!uid || IS_DEMO())
+            return;
+        try { setUebergabeGesehen(JSON.parse(localStorage.getItem("v3_uebergabe_gesehen_" + uid) || "[]") || []); } catch (e) { }
+        let weg = false;
+        sb.rpc("meine_uebergaben").then(({ data, error }) => {
+            if (weg || error) return;
+            const m = {};
+            (data || []).forEach(r => { m[r.student_id] = { von: r.von_name || "", am: r.am }; });
+            setUebergaben(m);
+        }, () => { });
+        return () => { weg = true; };
+    }, [uid]);
     // Gutscheine der eigenen Fahrschule laden.
     useEffect(() => {
         if (!school || !school.id) { setVouchers([]); return; }
@@ -16629,6 +16697,7 @@ function App() {
         else if (arbeitszeitOpen) setArbeitszeitOpen(false);
         else if (wechselCode) { if (!wechselCode.busy) setWechselCode(null); }
         else if (auskunft) setAuskunft(null);
+        else if (faktenblatt) setFaktenblatt(null);
         else if (wechselImport) { if (!wechselImport.busy) setWechselImport(null); }
         else if (unterlagenOpen) setUnterlagenOpen(false);
         else if (folgeschritte) setFolgeschritte(null);
@@ -16671,7 +16740,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -16911,7 +16980,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -23117,6 +23186,11 @@ function App() {
         const testfahrtBereit = (students || []).filter(s => s._isMine && !s.archived && !s.pending
             && !(s.examReadiness && s.examReadiness.ergebnis === "bestanden")
             && ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen");
+        // Übergabe-Faktenblatt (v2.70.0): neu zugeteilte Schüler, deren Faktenblatt noch ungelesen ist
+        const neuUebergeben = (students || []).filter(s => s._isMine && !s.archived && uebergabeUngelesen(s));
+        if (neuUebergeben.length > 0)
+            weekItems.push({ key: "uebergabe", icon: icClock, accent: true, onClick: () => setFaktenblatt(neuUebergeben[0].id),
+                text: neuUebergeben.length === 1 ? dispName(neuUebergeben[0]) + " ist neu bei dir – Faktenblatt lesen" : neuUebergeben.length + " Schüler neu bei dir – Faktenblatt lesen" });
         if (testfahrtBereit.length > 0)
             weekItems.push({ key: "testfahrt", icon: icClock, accent: true, onClick: () => { setSearch(""); setListFilter("reif"); setView("liste"); },
                 text: testfahrtBereit.length === 1 ? "1 Schüler bereit für die Testfahrt zur Prüfungsreife" : testfahrtBereit.length + " Schüler bereit für die Testfahrt zur Prüfungsreife" });
@@ -27897,7 +27971,17 @@ function App() {
                     active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); archivierenUmschalten(active); } }, active.archived ? "Aus Archiv zurückholen (wieder aktiv)" : "Als bestanden archivieren"),
                     active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); generateHandoverSummary(active); } }, "KI-Übergabe-Einschätzung erstellen"),
                     React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); wechselCodeStarten(active); } }, "Fahrschulwechsel: Übergabecode"),
-                    active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); datenauskunftOeffnen(active); } }, "Datenauskunft (DSGVO)"))),
+                    active._isMine && React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); datenauskunftOeffnen(active); } }, "Datenauskunft (DSGVO)"),
+                    React.createElement("button", { className: "tabpop-item", onClick: () => { setTabMenu(null); setFaktenblatt(active.id); } }, "Übergabe-Faktenblatt"))),
+            // Übergabe-Faktenblatt (v2.70.0): einmal groß, bis "Gelesen" getippt ist
+            uebergabeUngelesen(active) && React.createElement("div", { className: "card", role: "region", "aria-label": "Neu bei dir", style: { padding: "14px 15px", margin: "4px 0 14px", borderColor: "var(--orange)" } },
+                React.createElement("div", { className: "home-eyebrow" }, "Neu bei dir"),
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, margin: "4px 0 2px" } }, "Übergabe" + (uebergaben[active.id].von ? " von " + uebergaben[active.id].von : "")),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 0 10px" } }, "Am " + new Date(uebergaben[active.id].am).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) + " zugeteilt. Das Wichtigste auf einen Blick:"),
+                faktenblattInhalt(active),
+                React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 } },
+                    React.createElement("button", { className: "btn btn-primary", style: { minHeight: 40, padding: "0 16px", fontSize: 13.5 }, onClick: () => uebergabeGelesen(active) }, "Gelesen"),
+                    React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 40, padding: "0 14px", fontSize: 13 }, onClick: () => generateHandoverSummary(active) }, "KI-Einschätzung dazu"))),
             // Segment-Control auch hier (spec 7.4): ohne sie wäre der Kosten-Einstieg aus dem
             // Segment eine Sackgasse - man käme nicht per Segment zurück in ADK/Strecken/Übersicht.
             studentSegments(),
@@ -31784,6 +31868,32 @@ function App() {
             holen(sb.from("appointments").select("start_at,end_at,art,status,abholort,ziel,note").eq("student_id", stu.id)),
             holen(sb.from("theory_attendance").select("thema,checked_at").eq("student_id", stu.id)),
         ]).then(([dateien, termine, theorie]) => setAuskunft(a => a && a.stu.id === stu.id ? { ...a, dateien, termine, theorie } : a));
+    }
+    function uebergabeKontext(stu) {
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const pk = pruefungsKontext(stu);
+        const ab = pruefungsAblauf(stu, pk);
+        const ph = lebensphase(stu);
+        return { pct: gesamtPct(stu), phase: ph ? ph.label : "", sonder: sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll),
+            unterlagenOffen: pk.unterlagenOffen, offenBetrag: sumCharges(stu, Number(pricePerHour) || 0) - sumPayments(stu),
+            theorieBestanden: !!ab.theorie.bestanden, praxis: ab.praxis };
+    }
+    function uebergabeUngelesen(stu) {
+        const u = stu && uebergaben[stu.id];
+        return !!(u && uebergabeGesehen.indexOf(stu.id + "|" + u.am) < 0);
+    }
+    function uebergabeGelesen(stu) {
+        const u = stu && uebergaben[stu.id];
+        if (!u) return;
+        const neu = uebergabeGesehen.concat([stu.id + "|" + u.am]).slice(-300);
+        setUebergabeGesehen(neu);
+        try { localStorage.setItem("v3_uebergabe_gesehen_" + uid, JSON.stringify(neu)); } catch (e) { }
+    }
+    function faktenblattInhalt(stu) {
+        const zeilen = uebergabeFakten(stu, uebergabeKontext(stu));
+        return React.createElement("div", null, zeilen.map((z, i) => React.createElement("div", { key: z.label, style: { display: "flex", gap: 12, padding: "7px 0", borderTop: i ? "1px solid var(--line)" : "none", fontSize: 13.5, lineHeight: 1.45 } },
+            React.createElement("div", { style: { flex: "none", width: 118, color: "var(--muted)", fontSize: 12.5 } }, z.label),
+            React.createElement("div", { style: { flex: 1, minWidth: 0, fontWeight: z.ton ? 600 : 500, color: z.ton === "warn" ? "var(--amber-ink, var(--ink))" : z.ton === "gut" ? "var(--green-ink, var(--ink))" : "var(--ink)", overflowWrap: "anywhere" } }, z.wert))));
     }
     function auskunftCtx(a) {
         const stu = a.stu;
@@ -36983,6 +37093,25 @@ function App() {
                             React.createElement("button", { onClick: erinnern, className: "btn btn-ghost", style: { flexShrink: 0, padding: "6px 10px", fontSize: 12.5, color: s.tel ? "#128C3E" : "var(--muted)" } }, "Erinnern"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setStillOpen(false) }, "Schlie\u00DFen"))),
+        // Übergabe-Faktenblatt als Fenster (v2.70.0) - aus dem Schüler-Menü oder der Startseite
+        faktenblatt && (() => {
+            const stu = (students || []).find(x => x.id === faktenblatt);
+            if (!stu) return null;
+            const u = uebergaben[stu.id];
+            return React.createElement("div", { onClick: () => setFaktenblatt(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Übergabe-Faktenblatt",
+                    style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+                React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                        padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+                    React.createElement("div", { style: { width: 36, height: 4, background: "var(--line)", borderRadius: 99, margin: "0 auto 16px" } }),
+                    React.createElement("h3", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 20, marginBottom: 4 } }, dispName(stu)),
+                    React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 0 12px" } },
+                        u ? "Übergabe" + (u.von ? " von " + u.von : "") + " am " + new Date(u.am).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin" }) : "Faktenblatt – aus den gespeicherten Daten berechnet"),
+                    faktenblattInhalt(stu),
+                    React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 } },
+                        uebergabeUngelesen(stu) && React.createElement("button", { className: "btn btn-primary", style: { flex: "1 1 140px" }, onClick: () => { uebergabeGelesen(stu); setFaktenblatt(null); } }, "Gelesen"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: "1 1 140px" }, onClick: () => { setActiveId(stu.id); setView("daten"); setStudentTab("profil"); setFaktenblatt(null); } }, "Zum Schüler"),
+                        React.createElement("button", { className: "btn btn-ghost", style: { flex: "1 1 100%" }, onClick: () => setFaktenblatt(null) }, "Schließen"))));
+        })(),
         // Datenauskunft (v2.64.0, Produktplan #28)
         auskunft && (() => {
             const stu = auskunft.stu;
