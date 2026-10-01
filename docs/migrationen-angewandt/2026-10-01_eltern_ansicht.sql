@@ -1,0 +1,8 @@
+-- Eltern-Ansicht (v2.83.0, Produktplan #15), angewandt 2026-10-01 per Supabase-Migration "eltern_ansicht".
+-- Der SCHÜLER gibt frei (Einwilligung bei ihm) und kann jederzeit sperren. Sichtbar: Vorname, Klasse,
+-- Ausbildungsstand (Rohdaten wie "Mein Fortschritt"), Theorie bestanden, nächste 8 bestätigte Termine
+-- (Datum, Zeit, Art; ohne PRIVAT/ST/STI). Nicht sichtbar: Nachname, Bewertungen, Notizen, Kosten,
+-- Abholorte, Kontaktdaten. Token: 36 Hex-Zeichen (gen_random_bytes(18)), neuer Link ersetzt den alten,
+-- höchstens 10 neue Links pro Tag. Geprüft per Rollback-Test (kein Nachname/keine Notiz in der Antwort,
+-- falsche PIN abgelehnt, nach Sperren null) und im Browser mit Test-Schüler (danach entfernt).
+-- Vollständiger SQL-Text: siehe Supabase-Migration "eltern_ansicht" (list_migrations).

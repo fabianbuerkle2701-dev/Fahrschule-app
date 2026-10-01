@@ -891,3 +891,130 @@ test("Rückruf aus dem Chat: letzte drei Fragen als Notiz, höchstens 500 Zeiche
     assert.equal(f([1, 2, 3, 4].map(i => ({ role: "user", text: "F" + i }))), "F2 · F3 · F4");
     assert.equal(f([{ role: "user", text: "x".repeat(800) }]).length, 500);
 });
+
+test("Kalender drucken: Zeitraum, Kurznamen, Termine je Tag", () => {
+    const k = require("./lade-app")(["kalenderDruckZeitraum", "kalenderDruckTage", "kurzName"]);
+    const heute = new Date("2026-10-01T10:00:00Z"); // Donnerstag
+    const w = k.kalenderDruckZeitraum("woche", heute);
+    assert.equal(w.von, "2026-09-28"); assert.equal(w.bis, "2026-10-04"); assert.equal(w.monat, false);
+    assert.match(w.titel, /^KW 40 · 28\.09\.–04\.10\.2026$/);
+    assert.equal(k.kalenderDruckZeitraum("naechste", heute).von, "2026-10-05");
+    const m = k.kalenderDruckZeitraum("monat", heute);
+    assert.equal(m.von, "2026-09-28"); assert.equal(m.bis, "2026-11-01"); assert.equal(m.monatErster, "2026-10-01"); assert.equal(m.monatLetzter, "2026-10-31");
+    assert.equal(k.kalenderDruckZeitraum("naechsterMonat", heute).monatErster, "2026-11-01");
+    assert.equal(k.kurzName("Lena Berger"), "Lena B."); assert.equal(k.kurzName("Anna Maria von Stein"), "Anna S."); assert.equal(k.kurzName("Ida"), "Ida");
+    const U = "§URLAUB§", S = "§SONST§";
+    const termine = [
+        { start_at: "2026-09-29T14:00:00Z", end_at: "2026-09-29T14:45:00Z", title: "Lena Berger", art: "ÜST", status: "confirmed", abholort: "Innenstadt" },
+        { start_at: "2026-09-29T07:00:00Z", end_at: "2026-09-29T07:45:00Z", title: "Ida Lorenz", art: "AB", status: "confirmed" },
+        { start_at: "2026-09-30T08:00:00Z", title: "Jonas Weber", art: "ÜST", status: "pending" },
+        { start_at: "2026-09-30T09:00:00Z", title: "Frei", art: "ÜST", status: "offered" },
+        { start_at: "2026-10-01T22:00:00Z", end_at: "2026-10-03T21:59:00Z", title: "Urlaub", note: U, status: "confirmed" },
+        { start_at: "2026-09-28T10:00:00Z", end_at: "2026-09-28T11:00:00Z", title: "Büro", note: S + "x", art: "ÜST", status: "confirmed" },
+    ];
+    const t = k.kalenderDruckTage(termine, w.von, w.bis, { kurzNamen: true, abholort: true, urlaubMark: U, sonstMark: S });
+    assert.equal(t.length, 7);
+    const di = t[1].eintraege;
+    assert.deepEqual(JSON.parse(JSON.stringify(di.map(e => [e.zeit, e.titel, e.art, e.ort]))), [["09:00–09:45", "Ida L.", "AB", ""], ["16:00–16:45", "Lena B.", "ÜST", "Innenstadt"]]);
+    assert.equal(t[2].eintraege.length, 0, "Anfrage ohne Haken und offered fehlen");
+    assert.equal(t[3].eintraege.length, 0); assert.equal(t[4].eintraege[0].typ, "urlaub"); assert.equal(t[5].eintraege[0].titel, "Urlaub");
+    assert.equal(t[0].eintraege[0].typ, "sonst"); assert.equal(t[0].eintraege[0].titel, "Büro");
+    const mitAnfragen = k.kalenderDruckTage(termine, w.von, w.bis, { anfragen: true });
+    assert.equal(mitAnfragen[2].eintraege[0].typ, "anfrage");
+});
+
+test("Prüfungstag: heutige Prüfungen, Phase, Ergebnis, Checkliste", () => {
+    const k = require("./lade-app")(["pruefungstagEintraege", "pruefungstagCheckliste"]);
+    const heute = "2026-10-02";
+    const stu = [{ id: "s1", vorname: "Lena", sehhilfe: true, exams: [] }, { id: "s2", vorname: "Ida", exams: [{ art: "theorie", date: heute, passed: true, ergebnis: true }] }];
+    const termine = [
+        { id: "a1", student_id: "s1", art: "PF", status: "confirmed", start_at: "2026-10-02T08:00:00Z", end_at: "2026-10-02T08:55:00Z" },
+        { id: "a2", student_id: "s2", art: "VT", status: "confirmed", start_at: "2026-10-02T06:00:00Z", end_at: "2026-10-02T07:00:00Z" },
+        { id: "a3", student_id: "s1", art: "ÜST", status: "confirmed", start_at: "2026-10-02T10:00:00Z" },
+        { id: "a4", student_id: "s1", art: "PF", status: "pending", start_at: "2026-10-02T12:00:00Z" },
+        { id: "a5", student_id: "s1", art: "PF", status: "confirmed", start_at: "2026-10-03T08:00:00Z" },
+        { id: "a6", student_id: "fremd", art: "PF", status: "confirmed", start_at: "2026-10-02T09:00:00Z" },
+    ];
+    const vor = k.pruefungstagEintraege(termine, stu, heute, new Date("2026-10-02T07:30:00Z").getTime());
+    assert.deepEqual(rein(vor.map(e => [e.appt.id, e.art, e.phase, e.ergebnis])), [["a2", "theorie", "nachher", true], ["a1", "praxis", "vorher", null]]);
+    const laeuft = k.pruefungstagEintraege(termine, stu, heute, new Date("2026-10-02T08:20:00Z").getTime());
+    assert.equal(laeuft[1].phase, "laeuft");
+    const c = k.pruefungstagCheckliste("praxis", stu[0], ["Sehtest"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(c)), ["Personalausweis oder Reisepass", "Brille oder Kontaktlinsen", "Ausbildungsnachweis", "Fahrzeug bereit (getankt, Papiere an Bord)", "Fehlt laut Akte: Sehtest"]);
+    assert.equal(k.pruefungstagCheckliste("theorie", {}, ["A", "B"])[1], "Fehlt laut Akte: A, B");
+    assert.deepEqual(JSON.parse(JSON.stringify(k.pruefungstagCheckliste("theorie", stu[0], []))), ["Personalausweis oder Reisepass"]);
+});
+
+test("Theorie-Stand: Stufen, nächster Schritt, Theorie bremst", () => {
+    const f = require("./lade-app")(["theorieStandVon"]).theorieStandVon;
+    const heute = "2026-10-02";
+    assert.equal(f({ theorie: "2026-09-01" }, { heute }).stufe, "bestanden");
+    assert.match(f({ theorie: "2026-09-01" }, { heute }).text, /^Bestanden am 01\.09\.2026$/);
+    assert.equal(f({ theorie: "false" }, { heute }).stufe, "offen");
+    assert.equal(f({}, { heute, vtTermin: "2026-10-10" }).stufe, "termin");
+    assert.equal(f({}, { heute, vtTermin: "2026-09-10" }).stufe, "offen", "vergangener VT-Termin zählt nicht");
+    assert.equal(f({ licenseSteps: { theorie_angemeldet: { done: true } } }, { heute }).stufe, "angemeldet");
+    const sicher = { licenseSteps: { antrag: { done: true } }, theoryMockExams: [{ passed: false }, { passed: true }, { passed: true }, { passed: true }] };
+    assert.equal(f(sicher, { heute }).stufe, "bereit");
+    assert.equal(f(sicher, { heute }).schritt, "Zur Theorieprüfung anmelden");
+    assert.equal(f({}, { heute }).schritt, "Antrag bei der Führerscheinstelle stellen");
+    const b = f({ licenseSteps: { antrag: { done: true } }, exams: [{ art: "theorie", ergebnis: true, passed: false }] }, { heute, ueGefahren: 24 });
+    assert.equal(b.bremst, true); assert.equal(b.text, "1 Fehlversuch"); assert.match(b.schritt, /Praxis ist schon weit/);
+    assert.equal(f({}, { heute, ueGefahren: 19 }).bremst, false);
+    assert.equal(f({}, { heute, lernPct: 92 }).stufe, "bereit"); assert.equal(f({}, { heute, lernPct: 92 }).text, "Lernstand 92 %");
+    assert.equal(f({}, { heute, lernPct: 60 }).stufe, "offen");
+    assert.equal(f({ theoryMockExams: [{ passed: false }] }, { heute }).probeText, "1 Probeprüfung, zuletzt nicht bestanden");
+});
+
+test("Theorie-Lernstand: Breite und Wiederholung zählen, falsch setzt zurück", () => {
+    const k = require("./lade-app")(["theorieLernstand", "theorieFach"]);
+    const qs = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+    assert.equal(k.theorieLernstand({}, qs).pct, 0);
+    // eine Frage 1x richtig = 25 % von einer Frage = 6 % gesamt
+    assert.equal(k.theorieLernstand({ a: { correct: true, box: 2 } }, qs).pct, 6);
+    // eine Frage sitzt (Fach 5) = 25 % gesamt
+    const r = k.theorieLernstand({ a: { correct: true, box: 5 } }, qs);
+    assert.equal(r.pct, 25); assert.equal(r.sitzt, 1);
+    // alle sitzen = 100 %
+    assert.equal(k.theorieLernstand({ a: { correct: true, box: 5 }, b: { correct: true, box: 5 }, c: { correct: true, box: 5 }, d: { correct: true, box: 5 } }, qs).pct, 100);
+    // falsch beantwortet = Fach 1 = 0, zählt aber als beantwortet
+    const f = k.theorieLernstand({ a: { correct: false, box: 1 }, b: { marked: true } }, qs);
+    assert.equal(f.pct, 0); assert.equal(f.beantwortet, 1); assert.equal(f.gelernt, 0);
+    // Altdaten ohne Fach: richtig = Fach 2
+    assert.equal(k.theorieFach({ correct: true }), 2); assert.equal(k.theorieFach({ correct: false }), 1); assert.equal(k.theorieFach({ marked: true }), 0);
+    assert.equal(k.theorieLernstand({}, []).pct, 0);
+});
+
+test("Nutzungsstatistik: Ereignisnamen sind kurz, klein und ohne Sonderzeichen", () => {
+    const n = require("./lade-app")(["nutzungName"]).nutzungName;
+    assert.equal(n("bereich:Kalender"), "bereich:kalender");
+    assert.equal(n("einstellung:Führerschein Übersicht"), "einstellung:fuehrerschein_uebersicht");
+    assert.equal(n("x".repeat(80)).length, 60);
+    assert.match(n("druck:<script>"), /^[a-z0-9_:.\-]+$/);
+});
+
+test("Fahrsimulator: Terminart SIM zählt als Fahrstunde, nie als Sonderfahrt", () => {
+    const k = require("./lade-app")(["APPT_ART", "SONDERFAHRT_ARTEN", "ART_ZAEHLT_STANDARD_NICHT", "arbeitszeitArt", "ART_GROUP_OF"]);
+    const sim = k.APPT_ART.find(a => a.code === "SIM");
+    assert.ok(sim, "SIM fehlt in APPT_ART");
+    assert.equal(sim.countsAsLesson, undefined);
+    assert.equal(k.ART_ZAEHLT_STANDARD_NICHT.indexOf("SIM"), -1);
+    assert.equal(k.SONDERFAHRT_ARTEN.some(s => s.code === "SIM"), false);
+    assert.equal(k.ART_GROUP_OF.SIM, "Fahrstunden");
+    assert.equal(k.arbeitszeitArt({ art: "SIM", status: "confirmed" }), "praxis");
+});
+
+test("Kalender drucken als Zeitstrahl: Überlappungen nebeneinander, Stundenbereich", () => {
+    const k = require("./lade-app")(["kalenderDruckSpuren", "kalenderDruckStunden", "kalenderDruckTage"]);
+    const e = (id, s, en) => ({ id, typ: "termin", startMin: s, endMin: en });
+    // 9:00-9:45 allein; 10:00-11:30 und 11:00-11:45 überlappen; 11:30-12:15 passt in Spur 0 nach 11:30
+    const r = k.kalenderDruckSpuren([e("a", 540, 585), e("b", 600, 690), e("c", 660, 705), e("d", 690, 735), { typ: "urlaub", titel: "Urlaub" }]);
+    const m = {}; r.forEach(x => { m[x.e.id] = [x.spur, x.spuren]; });
+    assert.deepEqual(rein(m), { a: [0, 1], b: [0, 2], c: [1, 2], d: [0, 2] });
+    assert.equal(r.length, 4, "Urlaub ist kein Block");
+    assert.deepEqual(rein(k.kalenderDruckStunden([{ eintraege: [e("x", 600, 645)] }])), { von: 8, bis: 18 });
+    assert.deepEqual(rein(k.kalenderDruckStunden([{ eintraege: [e("x", 390, 435), e("y", 1200, 1290)] }])), { von: 6, bis: 22 });
+    // Minuten kommen aus kalenderDruckTage (Berliner Zeit)
+    const t = k.kalenderDruckTage([{ start_at: "2026-09-29T07:00:00Z", end_at: "2026-09-29T07:45:00Z", title: "Ida Lorenz", art: "AB", status: "confirmed" }], "2026-09-28", "2026-10-04", {});
+    assert.equal(t[1].eintraege[0].startMin, 540); assert.equal(t[1].eintraege[0].endMin, 585);
+});
