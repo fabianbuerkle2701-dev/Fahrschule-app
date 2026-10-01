@@ -843,3 +843,12 @@ test("Vor der Fahrt: Antrag-Erinnerung bei den ersten Fahrstunden", () => {
     assert.equal(JSON.stringify(p), JSON.stringify(["Antrag bei der Führerscheinstelle noch nicht gestellt"]));
     assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: false }).length, 0);
 });
+
+// v2.77.0: Buchungsseite – WhatsApp-Nummer
+const wn = require("./lade-app")(["waNummerOeffentlich"]);
+test("Buchungsseite: Telefonnummer wird WhatsApp-tauglich", () => {
+    assert.equal(wn.waNummerOeffentlich("0171 123 45-67"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich("+49 171 1234567"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich("0049 171 1234567"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich(""), "");
+});
