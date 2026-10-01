@@ -938,12 +938,16 @@
      @media screen verborgen. Querformat setzt kalenderDrucken() nur für diesen einen Druck per
      eingefügtem @page. Der geschützte @media-print-Block bleibt so unangetastet. */
   .kal-druck{display:none}
-  body[data-print="kalender"] .kal-druck{display:flex!important}
+  body[data-print="kalender"] .kal-druck{display:block!important}
   body[data-print="kalender"] .print-sheet{display:none!important}
   @media screen{body .kal-druck,body[data-print] .kal-druck{display:none!important}}
   /* v2.91.0: feste Blattgröße A4 quer (281 x 194 mm Druckbereich bei 8 mm Rand). Druckt ein Gerät
      nur hochkant (iPhone/PDF), dreht kalenderDrucken() das Blatt per eingefügtem Stil um 90°. */
-  .kal-druck{flex-direction:column;width:277mm;height:186mm;overflow:hidden;font-family:'Plus Jakarta Sans',system-ui,sans-serif;color:#1d1a17;background:#fff;
+  /* v2.91.1: 255 x 168 mm passt bei Rändern bis 21 mm (quer wie gedreht) auf EINE Seite A4. Mit 277 x 186 bzw.
+     268 x 180 mm entstand Seite 2 - Chrome lässt auf A4 quer nur knapp 180 mm Höhe frei (per PDF gemessen). Außen .kal-druck (Seitenbox), innen .kd-blatt (Inhalt, wird bei
+     Hochkant-Druck gedreht, ohne seitlich überzustehen). */
+  .kal-druck{width:255mm;height:168mm;overflow:hidden;position:relative;break-inside:avoid;page-break-inside:avoid;break-after:avoid;page-break-after:avoid}
+  .kd-blatt{display:flex;flex-direction:column;width:255mm;height:168mm;overflow:hidden;font-family:'Plus Jakarta Sans',system-ui,sans-serif;color:#1d1a17;background:#fff;
     -webkit-print-color-adjust:exact;print-color-adjust:exact;font-size:9px}
   .kd-kopf{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;padding-bottom:4mm;margin-bottom:3mm;border-bottom:.6mm solid #1d1a17;flex-shrink:0}
   .kd-marke{display:flex;align-items:center;gap:3mm}
@@ -3741,7 +3745,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.91.0";
+const APP_VERSION = "2.91.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3893,6 +3897,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.91.1", date: "Oktober 2026", changes: [
+            "Kalender drucken: Die Woche passt jetzt immer auf eine Seite im Querformat",
+        ] },
     { v: "2.91.0", date: "Oktober 2026", changes: [
             "Kalender drucken sieht jetzt viel besser aus: die Woche als Zeitstrahl wie im Kalender, mit Stunden, farbigen Terminen und Abholort – immer im Querformat, auch wenn das Gerät nur hochkant druckt",
         ] },
@@ -32387,7 +32394,7 @@ function App() {
                     React.createElement("span", { style: { color: "var(--muted)", fontSize: 13, transform: calToolsOpen ? "rotate(180deg)" : "none", transition: "transform .15s" } }, "▾")),
                 calToolsOpen && React.createElement("div", { style: { borderTop: "1px solid var(--line)", padding: "14px" } },
                     React.createElement("button", { className: "btn btn-ghost", style: { width: "100%", justifyContent: "flex-start", gap: 9, marginBottom: 6 },
-                            onClick: () => setKalDruckWahl({ zeitraum: "woche", anfragen: false, kurzNamen: true, abholort: true }) },
+                            onClick: () => setKalDruckWahl({ zeitraum: "woche", anfragen: false, kurzNamen: true, abholort: true, drehen: istApple() }) },
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" },
                             React.createElement("path", { d: "M6 9V2h12v7" }),
                             React.createElement("path", { d: "M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" }),
@@ -35532,8 +35539,20 @@ function App() {
             // Querformat. Ignoriert ein Gerät das (iPhone, "als PDF sichern") und druckt hochkant,
             // wird das Blatt um 90° gedreht - auf dem Papier ist es dann trotzdem quer. Der Medien-Teil ist
             // absichtlich zusammengesetzt: pruefe.js schützt jeden Druck-Medienblock im Quelltext.
-            seite.textContent = "@page{size:A4 landscape;margin:8mm}"
-                + "@media " + "print and (orientation:portrait){body[data-print=\"kalender\"] .kal-druck{position:absolute!important;left:0;top:0;transform-origin:0 0;transform:translateX(186mm) rotate(90deg)}}";
+            // Nur das Kalenderblatt drucken: alles andere aus #root und <body> ausblenden, Höhen
+            // freigeben (#root hat sonst min-height:100vh) - jede zusätzliche Höhe erzeugte Seite 2.
+            const M = "@media " + "print";
+            // Querformat: Chrome wertet "orientation" beim Drucken gegen ein hochkantes Standardblatt aus
+            // (per PDF nachgewiesen, 2026-10-01) - die Drehung hängt deshalb an der Wahl im Fenster
+            // (auf iPhone/iPad vorbelegt, iOS druckt immer hochkant), nicht an einer Medienabfrage.
+            seite.textContent = (w.drehen ? "@page{size:A4 portrait;margin:10mm}" : "@page{size:A4 landscape;margin:10mm}")
+                + M + "{html,body{margin:0!important;padding:0!important;height:auto!important;min-height:0!important;background:#fff!important}"
+                + "body[data-print=\"kalender\"]>*:not(#root){display:none!important}"
+                + "body[data-print=\"kalender\"] #root{min-height:0!important;height:auto!important}"
+                + "body[data-print=\"kalender\"] #root>*:not(:has(.kal-druck)){display:none!important}"
+                + "body[data-print=\"kalender\"] #root>*>*:not(.kal-druck){display:none!important}}"
+                + (w.drehen ? M + "{body[data-print=\"kalender\"] .kal-druck{width:168mm!important;height:255mm!important}"
+                    + "body[data-print=\"kalender\"] .kd-blatt{position:absolute;left:0;top:0;transform-origin:0 0;transform:translateX(168mm) rotate(90deg)}}" : "");
             let fertig = false;
             const aufraeumen = () => {
                 if (fertig) return;
@@ -35589,7 +35608,7 @@ function App() {
             const pos = m => Math.max(0, Math.min(100, (m - von * 60) / spanne * 100));
             const stunden = [];
             for (let h = von; h <= bis; h++) stunden.push(h);
-            return React.createElement("div", { className: "kal-druck", "aria-hidden": "true" }, kopf,
+            return React.createElement("div", { className: "kal-druck", "aria-hidden": "true" }, React.createElement("div", { className: "kd-blatt" }, kopf,
                 React.createElement("div", { className: "kd-zs" },
                     React.createElement("div", { className: "kd-zs-ecke" }),
                     tage.map((t, i) => {
@@ -35621,7 +35640,7 @@ function App() {
                                     (e.art || e.ort) && React.createElement("span", { className: "a" }, [e.art, e.ort ? "Abholung: " + e.ort : ""].filter(Boolean).join(" · ")));
                             }));
                     })),
-                fuss);
+                fuss));
         }
         const WT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
         const reihen = Math.ceil(tage.length / 7);
@@ -35631,7 +35650,7 @@ function App() {
             e.typ === "urlaub" ? e.titel : React.createElement(React.Fragment, null,
                 React.createElement("span", { className: "z" }, e.zeit.slice(0, 5)),
                 React.createElement("span", { className: "n" }, e.titel + (e.typ === "anfrage" ? " (Anfrage)" : ""))));
-        return React.createElement("div", { className: "kal-druck", "aria-hidden": "true" }, kopf,
+        return React.createElement("div", { className: "kal-druck", "aria-hidden": "true" }, React.createElement("div", { className: "kd-blatt" }, kopf,
             React.createElement("div", { className: "kd-raster", style: { gridTemplateRows: "auto repeat(" + reihen + ", minmax(0,1fr))" } },
                 WT.map(w => React.createElement("div", { key: "wt" + w, className: "kd-wt" }, w)),
                 tage.map((t, i) => {
@@ -35642,7 +35661,7 @@ function App() {
                         !t.aussen && sichtbar.map(eintrag),
                         !t.aussen && sichtbar.length < t.eintraege.length && React.createElement("div", { className: "kd-mehr" }, "+ " + (t.eintraege.length - sichtbar.length) + " weitere"));
                 })),
-            fuss);
+            fuss));
     }
     /* ── Print sheets ── */
     function printSheet() {
@@ -38534,13 +38553,13 @@ function App() {
                         React.createElement("button", { key: k, role: "radio", "aria-checked": kalDruckWahl.zeitraum === k ? "true" : "false", onClick: () => setKalDruckWahl(x => ({ ...x, zeitraum: k })),
                             style: { minHeight: 48, borderRadius: 12, fontWeight: 700, fontSize: 14, border: "1.5px solid " + (kalDruckWahl.zeitraum === k ? "var(--orange)" : "var(--line)"),
                                 background: kalDruckWahl.zeitraum === k ? "var(--orange-soft)" : "var(--field-bg)", color: kalDruckWahl.zeitraum === k ? "var(--orange-ink)" : "var(--ink)" } }, l))),
-                [["kurzNamen", "Namen abkürzen (z. B. „Lena B.“)"], ["abholort", "Abholort zeigen (nur Wochenansicht)"], ["anfragen", "Offene Anfragen mitdrucken"]].map(([k, l]) =>
+                [["kurzNamen", "Namen abkürzen (z. B. „Lena B.“)"], ["abholort", "Abholort zeigen (nur Wochenansicht)"], ["anfragen", "Offene Anfragen mitdrucken"], ["drehen", "Für Hochkant-Drucker drehen (iPhone/iPad)"]].map(([k, l]) =>
                     React.createElement("label", { key: k, style: { display: "flex", alignItems: "center", gap: 10, minHeight: 44, fontSize: 14, cursor: "pointer" } },
                         React.createElement("input", { type: "checkbox", checked: !!kalDruckWahl[k], onChange: e => setKalDruckWahl(x => ({ ...x, [k]: e.target.checked })), style: { width: 20, height: 20, accentColor: "var(--orange)" } }),
                         l)),
                 React.createElement("button", { className: "btn btn-primary btn-block", style: { marginTop: 12 }, onClick: kalenderDrucken }, "Drucken"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setKalDruckWahl(null) }, "Abbrechen"),
-                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 10, textAlign: "center" } }, "Querformat ist voreingestellt. Druckt dein Gerät trotzdem hochkant, wähle im Druckfenster „Querformat“."))),
+                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 10, textAlign: "center" } }, "Das Blatt passt immer auf eine Seite quer. iPhone und iPad drucken nur hochkant – dafür ist „drehen“ dort schon an, auf dem Papier ist es dann trotzdem quer."))),
         buchungsseiteEdit && React.createElement("div", { onClick: () => { if (!buchungsseiteEdit.busy) setBuchungsseiteEdit(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Buchungsseite anpassen",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 520, borderTopLeftRadius: 24, borderTopRightRadius: 24,
