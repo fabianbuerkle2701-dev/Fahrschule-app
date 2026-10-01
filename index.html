@@ -3620,7 +3620,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.85.0";
+const APP_VERSION = "2.86.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3767,6 +3767,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.86.0", date: "Oktober 2026", changes: [
+            "Neu: Theorie-Lernstand in Prozent je Schüler. Er steigt, je mehr Fragen gelernt und je öfter sie hintereinander richtig beantwortet wurden – eine falsche Antwort lässt ihn wieder sinken",
+            "Fehler behoben",
+        ] },
     { v: "2.85.0", date: "Oktober 2026", changes: [
             "Neu: Theorie-Stand deiner Schüler (im Theoriepilot). Du siehst auf einen Blick, wer die Theorie noch offen hat, wer angemeldet ist und was als Nächstes zu tun ist. Die Startseite meldet, wenn jemand schon viel gefahren ist, die Theorie aber fehlt",
         ] },
@@ -14236,6 +14240,41 @@ function pruefungstagEintraege(termine, schueler, heuteYmd, jetztMs) {
 // ctx = { ueGefahren (gefahrene Fahrstunden wie in der Schülerliste), vtTermin (YYYY-MM-DD | null), heute }
 // stufe: "bestanden" | "termin" | "angemeldet" | "bereit" | "offen"
 const THEORIE_BREMST_UE = 20;
+// Theorie-Lernstand in Prozent (v2.86.0, Fabian: "je mehr gelernt und je öfter richtig, desto höher").
+// Grundlage ist das Lernfach je Frage aus public_theory_answer_submit: richtig = ein Fach höher
+// (bis 5), falsch = zurück auf Fach 1. Wert je Frage: Fach 1/nicht beantwortet 0, Fach 2 = 25 %
+// (1× richtig), 3 = 50 %, 4 = 75 %, 5 = 100 % (4× in Folge richtig = "sitzt"). Der Lernstand ist
+// der Durchschnitt über ALLE Fragen der Klasse - er steigt also nur mit Breite UND Wiederholung.
+function theorieFach(e) {
+    if (!e || e.correct == null) return 0;
+    const b = parseInt(e.box, 10);
+    if (b >= 1 && b <= 5) return b;
+    return e.correct ? 2 : 1;
+}
+function theorieLernstand(progress, fragen) {
+    progress = progress || {};
+    const qs = fragen || [];
+    let summe = 0, sitzt = 0, gelernt = 0, beantwortet = 0;
+    qs.forEach(q => {
+        const f = theorieFach(progress[q.id]);
+        if (f > 0) beantwortet++;
+        if (f >= 2) { gelernt++; summe += (f - 1) / 4; }
+        if (f >= 5) sitzt++;
+    });
+    return { pct: qs.length ? Math.round(summe / qs.length * 100) : 0, sitzt, gelernt, beantwortet, gesamt: qs.length };
+}
+// Alle aktiven Übungsfragen laden - in Seiten, weil die Datenbank höchstens 1000 Zeilen je Abfrage
+// liefert (bis v2.85 wurden so nur 1000 von rund 3400 Fragen geladen und jede Prozentzahl stimmte nicht).
+async function ladeTheorieFragenAlle() {
+    const alle = [];
+    for (let von = 0; von < 20000; von += 1000) {
+        const { data, error } = await sb.from("theory_questions").select("id, topic_key, klasse, points, question").eq("active", true).order("id", { ascending: true }).range(von, von + 999);
+        if (error) throw error;
+        alle.push(...(data || []));
+        if (!data || data.length < 1000) break;
+    }
+    return alle;
+}
 function theorieStandVon(stu, ctx) {
     stu = stu || {};
     ctx = ctx || {};
@@ -14254,6 +14293,8 @@ function theorieStandVon(stu, ctx) {
         return { ...base, stufe: "termin", text: "Prüfung am " + new Date(ctx.vtTermin + "T12:00:00").toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }), schritt: "", bremst: false };
     if (ls.theorie_angemeldet && ls.theorie_angemeldet.done)
         return { ...base, stufe: "angemeldet", text: "Angemeldet", schritt: "Prüfungstermin eintragen", bremst };
+    if (ctx.lernPct != null && ctx.lernPct >= 90)
+        return { ...base, stufe: "bereit", text: "Lernstand " + ctx.lernPct + " %", schritt: antrag ? "Zur Theorieprüfung anmelden" : "Antrag stellen, dann anmelden", bremst };
     if (letzte.length >= 3 && letzte.every(x => x.passed))
         return { ...base, stufe: "bereit", text: "Probeprüfungen sicher", schritt: antrag ? "Zur Theorieprüfung anmelden" : "Antrag stellen, dann anmelden", bremst };
     return { ...base, stufe: "offen", text: fehlversuche ? fehlversuche + (fehlversuche === 1 ? " Fehlversuch" : " Fehlversuche") : "Noch offen",
@@ -16075,6 +16116,14 @@ function App() {
     const [studentFileUploading, setStudentFileUploading] = useState(false);
     useEffect(() => { setStudentFiles(null); }, [activeId]);
     const [view, setView] = useState("home");
+    // Theorie-Stand im Theoriepilot braucht die Fragen für den Lernstand (v2.86.0)
+    // Steht bewusst HINTER const [view] - davor wirft schon das Abhängigkeits-Array (TDZ, 2026-10-01).
+    const theoFragenLaedtRef = useRef(false);
+    useEffect(() => {
+        if (view !== "theoriepilot" || theoryQuestions !== null || theoFragenLaedtRef.current) return;
+        theoFragenLaedtRef.current = true;
+        ladeTheorieFragenAlle().then(d => setTheoryQuestions(d || []), () => setTheoryQuestions([])).finally(() => { theoFragenLaedtRef.current = false; });
+    }, [view, theoryQuestions]);
     const [tourStep, setTourStep] = useState(0);
     const [tourOn, setTourOn] = useState(true);
     const [tourDone, setTourDone] = useState(false);
@@ -21785,13 +21834,9 @@ function App() {
     const loadTheoryQuestions = () => {
         if (theoryQuestions !== null)
             return;
-        sb.from("theory_questions").select("id, topic_key, klasse, points, question").eq("active", true).then(({ data, error }) => {
-            if (error) {
-                console.error(error);
-                setTheoryQuestions([]);
-                return;
-            }
-            setTheoryQuestions(data || []);
+        ladeTheorieFragenAlle().then(data => setTheoryQuestions(data || []), error => {
+            console.error(error);
+            setTheoryQuestions([]);
         });
     };
     // Denselben Filter wie public_theory_questions(code, p_klasse) anwenden, bevor theoryQuestions
@@ -24749,7 +24794,11 @@ function App() {
         });
         const RANG = { termin: 1, angemeldet: 2, bereit: 3, offen: 4, bestanden: 9 };
         return (students || []).filter(s => s._isMine && !s.archived && !s.pending)
-            .map(s => ({ stu: s, std: countStunden(s) + (parseInt(s.manualHours, 10) || 0) })).map(x => ({ ...x, st: theorieStandVon(x.stu, { ueGefahren: x.std, vtTermin: vt[x.stu.id] || null, heute }) }))
+            .map(s => ({ stu: s, std: countStunden(s) + (parseInt(s.manualHours, 10) || 0) })).map(x => {
+                const tq = theoryQuestionsFor(x.stu);
+                const lern = tq && tq.length && theoryAnsweredCount(x.stu.theoryProgress || {}, tq) > 0 ? theorieLernstand(x.stu.theoryProgress, tq) : null;
+                return { ...x, lern, st: theorieStandVon(x.stu, { ueGefahren: x.std, vtTermin: vt[x.stu.id] || null, heute, lernPct: lern ? lern.pct : null }) };
+            })
             .sort((a, b) => (b.st.bremst - a.st.bremst) || (RANG[a.st.stufe] - RANG[b.st.stufe]) || dispName(a.stu).localeCompare(dispName(b.stu), "de"));
     }
     function theorieStandKarte() {
@@ -24772,12 +24821,12 @@ function App() {
                     React.createElement("span", { style: { flex: 1, minWidth: 0 } },
                         React.createElement("span", { style: { display: "block", fontSize: 14, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, dispName(x.stu)),
                         React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } },
-                            [x.std + " Std. gefahren", x.st.probeText].filter(Boolean).join(" · "))),
+                            [x.std + " Std. gefahren", x.lern ? "Lernstand " + x.lern.pct + " %" : "", x.st.probeText].filter(Boolean).join(" · "))),
                     React.createElement("span", { style: { textAlign: "right", flexShrink: 0, maxWidth: "55%" } },
                         React.createElement("span", { style: { display: "block", fontSize: 12.5, fontWeight: 700, color: farbe(x.st) } }, x.st.text),
                         x.st.schritt && React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 1, lineHeight: 1.35 } }, x.st.schritt)))),
             offen.length > 40 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", paddingTop: 8 } }, "… und " + (offen.length - 40) + " weitere"),
-            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } }, "Probeprüfungen erscheinen, sobald deine Schüler in der App üben. Antippen öffnet die Prüfungsakte."));
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } }, "Lernstand: je mehr Fragen gelernt und je öfter in Folge richtig beantwortet, desto höher (4× richtig = sitzt). Erscheint, sobald ein Schüler in der App übt. Antippen öffnet die Prüfungsakte."));
     }
     function renderTheoriepilot() {
         function topicRow(klasse, topicKey, title, showBorder) {
@@ -28310,26 +28359,30 @@ function App() {
         const byTopic = {};
         tq.forEach(q => (byTopic[q.topic_key] = byTopic[q.topic_key] || []).push(q));
         const topics = Object.keys(byTopic);
-        const gesamtGemeistert = tq.filter(q => progress[q.id] && progress[q.id].correct).length;
-        const gesamtPct = Math.round((gesamtGemeistert / tq.length) * 100);
-        const beantwortet = theoryAnsweredCount(progress, tq);
+        const lern = theorieLernstand(progress, tq);
+        const beantwortet = lern.beantwortet;
         return React.createElement(React.Fragment, null,
             nachweis,
             React.createElement("div", { className: "card home-tile", style: { marginBottom: 14, cursor: "default" } },
-                React.createElement("div", { className: "home-num" }, gesamtPct + "%"),
-                React.createElement("div", { className: "home-eyebrow", style: { marginTop: 5 } }, "Theorie gemeistert · " + gesamtGemeistert + " / " + tq.length + " Fragen")),
+                React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 14 } },
+                    React.createElement(Ring, { pct: lern.pct, size: 58 }),
+                    React.createElement("div", { style: { minWidth: 0 } },
+                        React.createElement("div", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 18 } }, "Theorie-Lernstand"),
+                        React.createElement("div", { className: "home-eyebrow", style: { marginTop: 3 } }, lern.pct >= 90 ? "Bereit für die Prüfung" : lern.pct >= 50 ? "Auf gutem Weg" : lern.beantwortet ? "Am Lernen" : "Noch nicht angefangen"))),
+                React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 10, lineHeight: 1.5 } },
+                    lern.sitzt + " von " + lern.gesamt + " Fragen sitzen (4× in Folge richtig) · " + lern.gelernt + " gelernt · " + lern.beantwortet + " beantwortet")),
             beantwortet === 0
                 ? React.createElement("div", { className: "card", style: { padding: "18px 14px", textAlign: "center", fontSize: 13.5, color: "var(--muted)" } }, dispName(active) + " hat im Fahrschülerbereich noch nicht Theorie geübt.")
                 : React.createElement("div", { className: "card", style: { padding: "4px 15px" } },
                     topics.map((topic, ti) => {
                         const qs = byTopic[topic];
                         const gemeistert = qs.filter(q => progress[q.id] && progress[q.id].correct).length;
-                        const pct = Math.round((gemeistert / qs.length) * 100);
+                        const pct = theorieLernstand(progress, qs).pct;
                         const beantwortetTopic = theoryAnsweredCount(progress, qs);
                         // Schwaches Sachgebiet: mind. 2 Fragen beantwortet, aber unter 60% davon gemeistert -
                         // derselbe "genug Datenpunkte, aber auffällig schlecht"-Schwellenwert-Gedanke wie bei
                         // wiederkehrendeSchwaechen() für Fahrstunden, nur auf die Theorie-Sachgebiete übertragen.
-                        const schwach = beantwortetTopic >= 2 && pct < 60;
+                        const schwach = beantwortetTopic >= 2 && Math.round((gemeistert / qs.length) * 100) < 60; // unverändert: Anteil "zuletzt richtig"
                         const tone = ["sage", "clay", "sky", "orange"][ti % 4];
                         const bg = "var(--" + tone + (tone === "orange" ? "-soft" : "-bg") + ")";
                         const fg = tone === "orange" ? "var(--orange-deep)" : "var(--" + tone + "-deep)";

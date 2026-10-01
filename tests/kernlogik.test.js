@@ -961,5 +961,26 @@ test("Theorie-Stand: Stufen, nächster Schritt, Theorie bremst", () => {
     const b = f({ licenseSteps: { antrag: { done: true } }, exams: [{ art: "theorie", ergebnis: true, passed: false }] }, { heute, ueGefahren: 24 });
     assert.equal(b.bremst, true); assert.equal(b.text, "1 Fehlversuch"); assert.match(b.schritt, /Praxis ist schon weit/);
     assert.equal(f({}, { heute, ueGefahren: 19 }).bremst, false);
+    assert.equal(f({}, { heute, lernPct: 92 }).stufe, "bereit"); assert.equal(f({}, { heute, lernPct: 92 }).text, "Lernstand 92 %");
+    assert.equal(f({}, { heute, lernPct: 60 }).stufe, "offen");
     assert.equal(f({ theoryMockExams: [{ passed: false }] }, { heute }).probeText, "1 Probeprüfung, zuletzt nicht bestanden");
+});
+
+test("Theorie-Lernstand: Breite und Wiederholung zählen, falsch setzt zurück", () => {
+    const k = require("./lade-app")(["theorieLernstand", "theorieFach"]);
+    const qs = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }];
+    assert.equal(k.theorieLernstand({}, qs).pct, 0);
+    // eine Frage 1x richtig = 25 % von einer Frage = 6 % gesamt
+    assert.equal(k.theorieLernstand({ a: { correct: true, box: 2 } }, qs).pct, 6);
+    // eine Frage sitzt (Fach 5) = 25 % gesamt
+    const r = k.theorieLernstand({ a: { correct: true, box: 5 } }, qs);
+    assert.equal(r.pct, 25); assert.equal(r.sitzt, 1);
+    // alle sitzen = 100 %
+    assert.equal(k.theorieLernstand({ a: { correct: true, box: 5 }, b: { correct: true, box: 5 }, c: { correct: true, box: 5 }, d: { correct: true, box: 5 } }, qs).pct, 100);
+    // falsch beantwortet = Fach 1 = 0, zählt aber als beantwortet
+    const f = k.theorieLernstand({ a: { correct: false, box: 1 }, b: { marked: true } }, qs);
+    assert.equal(f.pct, 0); assert.equal(f.beantwortet, 1); assert.equal(f.gelernt, 0);
+    // Altdaten ohne Fach: richtig = Fach 2
+    assert.equal(k.theorieFach({ correct: true }), 2); assert.equal(k.theorieFach({ correct: false }), 1); assert.equal(k.theorieFach({ marked: true }), 0);
+    assert.equal(k.theorieLernstand({}, []).pct, 0);
 });
