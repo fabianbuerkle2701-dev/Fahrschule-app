@@ -1003,3 +1003,18 @@ test("Fahrsimulator: Terminart SIM zählt als Fahrstunde, nie als Sonderfahrt", 
     assert.equal(k.ART_GROUP_OF.SIM, "Fahrstunden");
     assert.equal(k.arbeitszeitArt({ art: "SIM", status: "confirmed" }), "praxis");
 });
+
+test("Kalender drucken als Zeitstrahl: Überlappungen nebeneinander, Stundenbereich", () => {
+    const k = require("./lade-app")(["kalenderDruckSpuren", "kalenderDruckStunden", "kalenderDruckTage"]);
+    const e = (id, s, en) => ({ id, typ: "termin", startMin: s, endMin: en });
+    // 9:00-9:45 allein; 10:00-11:30 und 11:00-11:45 überlappen; 11:30-12:15 passt in Spur 0 nach 11:30
+    const r = k.kalenderDruckSpuren([e("a", 540, 585), e("b", 600, 690), e("c", 660, 705), e("d", 690, 735), { typ: "urlaub", titel: "Urlaub" }]);
+    const m = {}; r.forEach(x => { m[x.e.id] = [x.spur, x.spuren]; });
+    assert.deepEqual(rein(m), { a: [0, 1], b: [0, 2], c: [1, 2], d: [0, 2] });
+    assert.equal(r.length, 4, "Urlaub ist kein Block");
+    assert.deepEqual(rein(k.kalenderDruckStunden([{ eintraege: [e("x", 600, 645)] }])), { von: 8, bis: 18 });
+    assert.deepEqual(rein(k.kalenderDruckStunden([{ eintraege: [e("x", 390, 435), e("y", 1200, 1290)] }])), { von: 6, bis: 22 });
+    // Minuten kommen aus kalenderDruckTage (Berliner Zeit)
+    const t = k.kalenderDruckTage([{ start_at: "2026-09-29T07:00:00Z", end_at: "2026-09-29T07:45:00Z", title: "Ida Lorenz", art: "AB", status: "confirmed" }], "2026-09-28", "2026-10-04", {});
+    assert.equal(t[1].eintraege[0].startMin, 540); assert.equal(t[1].eintraege[0].endMin, 585);
+});
