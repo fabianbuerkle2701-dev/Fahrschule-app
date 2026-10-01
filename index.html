@@ -493,6 +493,8 @@
     background:#FF9300;color:#221C17;margin-top:-2px}
   .app-toast.fehler .app-toast-icon{background:#E5484D;color:#fff}
   .app-toast-titel{font-family:var(--font-d);font-weight:700;font-size:14px;line-height:1.4;overflow-wrap:anywhere}
+  .app-toast-aktion{font-size:12.5px;font-weight:800;margin-top:4px;opacity:.9}
+  .app-toast.mit-aktion{cursor:pointer}
   .app-toast-detail{margin-top:2px;font-size:12.5px;line-height:1.4;color:rgba(255,255,255,.72);overflow-wrap:anywhere;
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .card.soft{background:var(--surface-soft);border-color:transparent}
@@ -3576,7 +3578,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.78.0";
+const APP_VERSION = "2.79.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3723,6 +3725,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.79.0", date: "Oktober 2026", changes: [
+            "Neu: Der Kalender aktualisiert sich jetzt von selbst. Bucht ein Schüler, wünscht er eine Absage oder übernimmt er einen freien Termin, siehst du es sofort – mit kurzer Meldung, ein Tipp darauf öffnet den Kalender",
+        ] },
     { v: "2.78.0", date: "Oktober 2026", changes: [
             "Der Dunkelmodus ist deutlich heller und angenehmer zu lesen",
         ] },
@@ -8157,6 +8162,28 @@ async function adminFetchTeacherTemplate(ownerUid) {
     return rowToTplByKlasse(data);
 }
 /* ════════ Termine / Kalender ════════ */
+// Live-Kalender (v2.79.0): Text für eine Änderung, die nicht vom eigenen Gerät kam. alt = der
+// Termin, wie die App ihn bisher kennt (null = neu), neu = Zeile aus der Datenbank. Nur was der
+// Fahrlehrer wissen muss, liefert einen Text; alles andere aktualisiert den Kalender still.
+function liveTerminZeit(iso) {
+    const d = new Date(iso);
+    if (isNaN(d)) return "";
+    return d.toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" }).replace(",", "")
+        + ", " + d.toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" });
+}
+function liveTerminMeldung(alt, neu) {
+    if (!neu || !neu.id) return null;
+    const wer = String(neu.title || "").trim() || "Ohne Namen";
+    const wann = liveTerminZeit(neu.start_at);
+    const zeile = wer + (wann ? " · " + wann : "");
+    if (!alt && neu.status === "pending")
+        return { titel: "Neue Terminanfrage", text: "Neue Terminanfrage\n" + zeile, kurz: "Anfrage " + wer };
+    if (alt && alt.status !== "cancel_requested" && neu.status === "cancel_requested")
+        return { titel: "Absage-Wunsch", text: "Absage-Wunsch\n" + zeile, kurz: "Absage " + wer };
+    if (alt && alt.status === "offered" && neu.status === "confirmed")
+        return { titel: "Freien Termin übernommen", text: "Freien Termin übernommen\n" + zeile, kurz: "Übernommen " + wer };
+    return null;
+}
 async function fetchAppointments(uid) {
     const { data, error } = await sb.from("appointments").select("*").eq("owner", uid).order("start_at", { ascending: true });
     if (error) {
@@ -10541,8 +10568,8 @@ let _toastSetter = null, _confirmSetter = null, _promptSetter = null;
 // Steht gerade eine Rückfrage (askConfirm/askPrompt) offen? Die Zurück-Wischgeste hängt am
 // document und kennt den Dialog sonst nicht - sie schloss die Seite HINTER der offenen Rückfrage.
 let _rueckfrageOffen = false;
-function showToast(msg, tone) { if (_toastSetter)
-    _toastSetter({ msg, tone: tone || "info", key: uniqueId("toast") }); }
+function showToast(msg, tone, onTap) { if (_toastSetter)
+    _toastSetter({ msg, tone: tone || "info", key: uniqueId("toast"), onTap: typeof onTap === "function" ? onTap : null }); }
 // Übersetzt die rohe Meldung eines fehlgeschlagenen Aufrufs in einen Satz, mit dem der Fahrlehrer
 // etwas anfangen kann. Vorher wurde an über 50 Stellen "\n" + e.message angehängt, und e.message
 // ist meist wörtlich das, was PostgREST/Supabase liefert: "Failed to fetch", "JWT expired",
@@ -10674,7 +10701,7 @@ function ToastConfirmHost() {
             const zeilen = String(toast.msg || "").split("\n").map(z => z.trim()).filter(Boolean);
             const titel = (zeilen[0] || "").replace(/:$/, "");
             const detail = zeilen.slice(1).join(" ");
-            return React.createElement("div", { key: toast.key, role: fehler ? "alert" : "status", "aria-live": fehler ? "assertive" : "polite", "aria-atomic": "true", onClick: () => setToast(null), title: "Zum Ausblenden tippen", className: "kb-lift app-toast" + (fehler ? " fehler" : "") },
+            return React.createElement("div", { key: toast.key, role: fehler ? "alert" : "status", "aria-live": fehler ? "assertive" : "polite", "aria-atomic": "true", onClick: () => { setToast(null); if (toast.onTap) toast.onTap(); }, title: toast.onTap ? "Zum Ansehen tippen" : "Zum Ausblenden tippen", className: "kb-lift app-toast" + (fehler ? " fehler" : "") + (toast.onTap ? " mit-aktion" : "") },
                 React.createElement("span", { className: "app-toast-icon", "aria-hidden": "true" },
                     React.createElement("svg", { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 3, strokeLinecap: "round", strokeLinejoin: "round" },
                         fehler
@@ -10682,7 +10709,8 @@ function ToastConfirmHost() {
                             : React.createElement("polyline", { points: "5 12.5 10 17 19 7.5" }))),
                 React.createElement("div", { style: { minWidth: 0 } },
                     React.createElement("div", { className: "app-toast-titel" }, titel),
-                    detail && React.createElement("div", { className: "app-toast-detail" }, detail)));
+                    detail && React.createElement("div", { className: "app-toast-detail" }, detail),
+                    toast.onTap && React.createElement("div", { className: "app-toast-aktion" }, "Ansehen ›")));
         })(),
         confirmState && React.createElement("div", { onClick: () => dismiss(), className: "modal-overlay", role: "alertdialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 2000, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))" } },
@@ -17907,6 +17935,54 @@ function App() {
             cancelled = true;
             document.removeEventListener("visibilitychange", refresh);
             window.removeEventListener("focus", refresh);
+        };
+    }, [uid]);
+    // Live-Kalender (v2.79.0): neue Anfragen, Absage-Wünsche und übernommene freie Termine
+    // erscheinen sofort, ohne dass die App erst in den Hintergrund und zurück muss. Supabase
+    // Realtime liefert nur Zeilen, die dieser Fahrlehrer per RLS sehen darf (owner = uid).
+    // Gelöschte Termine kommen weiter über das Neuladen beim Zurückkehren (DELETE-Ereignisse
+    // lassen sich nicht nach owner filtern). Mehrere Ereignisse kurz hintereinander = ein Neuladen.
+    useEffect(() => {
+        if (!uid || IS_DEMO())
+            return;
+        let aus = false, timer = null, meldungen = [];
+        function nachladen() {
+            timer = null;
+            if (aus) return;
+            if (apptWritesRef.current > 0) { timer = setTimeout(nachladen, 1500); return; }
+            const ms = meldungen;
+            meldungen = [];
+            const gen = apptGenRef.current;
+            fetchAppointments(uid).then(list => {
+                if (aus) return;
+                applyFetchedAppts(list, gen);
+                if (ms.length === 1)
+                    showToast(ms[0].text, "info", () => setView("kalender"));
+                else if (ms.length > 1)
+                    showToast(ms.length + " neue Meldungen im Kalender\n" + ms.map(m => m.kurz).join(" · "), "info", () => setView("kalender"));
+            }).catch(() => { });
+        }
+        function eingang(p) {
+            const neu = p && p.new;
+            if (!neu || !neu.id || aus) return;
+            // Eigene Änderung auf diesem Gerät läuft gerade - keine Meldung, nur nachladen
+            if (apptWritesRef.current === 0) {
+                const alt = (apptsRef.current || []).find(a => a.id === neu.id) || null;
+                const m = liveTerminMeldung(alt, neu);
+                if (m && !meldungen.some(x => x.text === m.text)) meldungen.push(m);
+            }
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(nachladen, 700);
+        }
+        const filter = "owner=eq." + uid;
+        const ch = sb.channel("termine_" + uid)
+            .on("postgres_changes", { event: "INSERT", schema: "public", table: "appointments", filter }, eingang)
+            .on("postgres_changes", { event: "UPDATE", schema: "public", table: "appointments", filter }, eingang)
+            .subscribe();
+        return () => {
+            aus = true;
+            if (timer) clearTimeout(timer);
+            sb.removeChannel(ch);
         };
     }, [uid]);
     // Wenn die App wieder in den Vordergrund kommt: Schülerliste neu laden. Die Liste wird sonst
