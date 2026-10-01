@@ -3620,7 +3620,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.86.0";
+const APP_VERSION = "2.87.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3767,6 +3767,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.87.0", date: "Oktober 2026", changes: [
+            "Kleine Verbesserungen im Hintergrund",
+        ] },
     { v: "2.86.0", date: "Oktober 2026", changes: [
             "Neu: Theorie-Lernstand in Prozent je Schüler. Er steigt, je mehr Fragen gelernt und je öfter sie hintereinander richtig beantwortet wurden – eine falsche Antwort lässt ihn wieder sinken",
             "Fehler behoben",
@@ -7525,6 +7528,44 @@ async function saveSchool(school) {
 /* ════════ Admin (nur für Fabian) ════════ */
 // Wird nach dem SQL-Schritt mit der echten User-UID gefüllt:
 const ADMIN_UID = "96530a9f-28ae-4ac6-9cfa-26de392ecf05";
+// Nutzungsstatistik ohne Personenbezug (v2.87.0, Produktplan #40). Im Speicher wird nur
+// {ereignis: anzahl} gesammelt und etwa jede Minute als Tagessumme gesendet (nutzung_zaehlen) -
+// ohne Konto, Fahrschule, Schüler, Uhrzeit oder Gerät. Nur für angemeldete Fahrlehrer, nie in der Demo.
+let _nutzungAktiv = false;
+let _nutzung = {};
+function nutzungName(e) {
+    return String(e || "").toLowerCase().replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss").replace(/[^a-z0-9_:.\-]/g, "_").slice(0, 60);
+}
+function nutzung(ereignis) {
+    if (!_nutzungAktiv) return;
+    const k = nutzungName(ereignis);
+    if (!k) return;
+    _nutzung[k] = (_nutzung[k] || 0) + 1;
+}
+function nutzungSenden() {
+    const keys = Object.keys(_nutzung);
+    if (!keys.length || !_nutzungAktiv) return;
+    const paket = _nutzung;
+    _nutzung = {};
+    try { sb.rpc("nutzung_zaehlen", { p_ereignisse: paket }).then(() => { }, () => { }); } catch (e) { }
+}
+// KI- und Server-Funktionen zählen, ohne jede Aufrufstelle anzufassen: nur der Funktionsname.
+(function () {
+    try {
+        const orig = window.fetch;
+        if (!orig || orig.__nutzung) return;
+        const neu = function (input, init) {
+            try {
+                const url = typeof input === "string" ? input : (input && input.url) || "";
+                const m = url.match(/\/\.netlify\/functions\/([a-z0-9-]+)/i);
+                if (m) nutzung("fn:" + m[1]);
+            } catch (e) { }
+            return orig.apply(this, arguments);
+        };
+        neu.__nutzung = true;
+        window.fetch = neu;
+    } catch (e) { }
+})();
 function isAdmin(session) {
     const u = session && session.user;
     if (!u)
@@ -16900,6 +16941,19 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    // Nutzungsstatistik (v2.87.0): aktiv nur angemeldet und nicht in der Demo
+    _nutzungAktiv = !!uid && !IS_DEMO();
+    useEffect(() => {
+        if (!uid || IS_DEMO()) return;
+        const t = setInterval(nutzungSenden, 60000);
+        const weg = () => { if (document.visibilityState === "hidden") nutzungSenden(); };
+        document.addEventListener("visibilitychange", weg);
+        window.addEventListener("pagehide", nutzungSenden);
+        return () => { clearInterval(t); document.removeEventListener("visibilitychange", weg); window.removeEventListener("pagehide", nutzungSenden); nutzungSenden(); };
+    }, [uid]);
+    useEffect(() => { nutzung("bereich:" + view); }, [view]);
+    useEffect(() => { if (view === "daten" && studentTab) nutzung("station:" + studentTab); }, [view, studentTab]);
+    useEffect(() => { if (settingsScreen) nutzung("einstellung:" + settingsScreen); }, [settingsScreen]);
     // Unterlagen, die Schüler selbst geschickt haben und die noch niemand geprüft hat (v2.80.0).
     // Steht bewusst HINTER const uid - davor wirft schon das Abhängigkeits-Array [uid] (TDZ).
     // RLS liefert nur Dateien von Schülern, die dieser Fahrlehrer sieht.
@@ -18866,6 +18920,7 @@ function App() {
     }
     async function schuelerDateiGeprueft(f) {
         if (!f || !active) return;
+        nutzung("aktion:unterlage_geprueft");
         const studentId = active.id;
         const { error } = await sb.rpc("student_file_geprueft", { p_id: f.id });
         if (error) { showToast("Konnte nicht gespeichert werden:\n" + fehlerText(error), "error"); return; }
@@ -28021,6 +28076,7 @@ function App() {
             }));
     }
     async function pruefungErgebnis(stu, art, platz, bestanden) {
+        nutzung("aktion:pruefung_ergebnis");
         const datum = (platz && platz.datum) || ymd(new Date());
         if (!await askConfirm({ title: bestanden ? "Bestanden eintragen?" : "Nicht bestanden eintragen?",
                 message: dispName(stu) + " · " + (art === "praxis" ? "Praxisprüfung" : "Theorieprüfung") + " am " + fmtDLong(datum) + (bestanden ? "" : "\n\nDanach geht es mit einem neuen Prüfplatz weiter."),
@@ -33173,6 +33229,7 @@ function App() {
                 // Vorschau, wohin der Bezahlen-Knopf mit diesem Eintrag führt
                 paypalLinkEdit && paypalZiel(paypalLinkEdit) && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 8, wordBreak: "break-all" } },
                     paypalZiel(paypalLinkEdit).email ? "Bezahlen an PayPal-Konto " + paypalZiel(paypalLinkEdit).email : "Bezahlen-Knopf öffnet " + paypalZiel(paypalLinkEdit).href)),
+            React.createElement(NutzungKarte, null),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Alle registrierten Konten"),
             adminAccounts === null
                 ? React.createElement("div", { className: "card", style: { padding: "16px 14px", marginBottom: 18, textAlign: "center" } },
@@ -34632,6 +34689,7 @@ function App() {
                             React.createElement("div", { style: { marginTop: 6 } }, "Deine Daten werden sicher in der Cloud gespeichert und sind auf allen deinen Geräten verfügbar, wenn du dich anmeldest."))))));
     }
     function doPrint(mode) {
+        nutzung("druck:" + mode);
         setPrintChoice(false);
         document.body.setAttribute("data-print", mode);
         setTimeout(() => {
@@ -35276,6 +35334,7 @@ function App() {
     function kalenderDrucken() {
         const w = kalDruckWahl;
         if (!w) return;
+        nutzung("druck:kalender_" + w.zeitraum);
         setKalDruckWahl(null);
         setKalDruck({ ...w, erstellt: Date.now() });
         setTimeout(() => {
@@ -43464,6 +43523,47 @@ function ElternPage({ token }) {
         React.createElement("div", { style: { fontSize: 11, color: "var(--muted)", textAlign: "center", marginTop: 10, display: "flex", gap: 10, justifyContent: "center" } },
             React.createElement("a", { href: oeffentlicheBasisUrl() + "/?datenschutz=1", style: { color: "inherit" } }, "Datenschutz"), "·",
             React.createElement("a", { href: oeffentlicheBasisUrl() + "/?impressum=1", style: { color: "inherit" } }, "Impressum")));
+}
+// Admin: anonyme Nutzung der letzten Tage (v2.87.0)
+const NUTZUNG_NAMEN = { home: "Startseite", liste: "Schülerliste", kalender: "Kalender", daten: "Schülerakte", adk: "ADK", strecken: "Strecken", tagebuch: "Fahrstunden",
+    uebersicht: "Übersicht", einstellungen: "Einstellungen", auswertung: "Auswertung", interessenten: "Interessenten", fuhrpark: "Fuhrpark", tagesgeschaeft: "Tagesgeschäft",
+    teamkalender: "Team-Kalender", schulboard: "Fahrschul-Dashboard", theoriepilot: "Theoriepilot", videos: "Videos", pruefungssimliste: "Prüfungssimulation", schaltkompetenzliste: "Schaltkompetenz" };
+function nutzungLabel(k) {
+    const [art, rest] = [k.split(":")[0], k.split(":").slice(1).join(":")];
+    const vor = { bereich: "Bereich", station: "Schülerakte", einstellung: "Einstellung", druck: "Druck", aktion: "Aktion", fn: "Server/KI" }[art] || art;
+    return vor + " · " + (art === "bereich" && NUTZUNG_NAMEN[rest] ? NUTZUNG_NAMEN[rest] : rest);
+}
+function NutzungKarte() {
+    const [tage, setTage] = React.useState(30);
+    const [st, setSt] = React.useState(null); // null | {busy, error, rows}
+    const laden = (t) => {
+        setSt({ busy: true, error: "", rows: [] });
+        sb.rpc("nutzung_auswertung", { p_tage: t }).then(({ data, error }) => setSt({ busy: false, error: error ? (error.message || "Fehler") : "", rows: data || [] }), e => setSt({ busy: false, error: String(e && e.message || e), rows: [] }));
+    };
+    const rows = (st && st.rows) || [];
+    const max = Math.max(1, ...rows.map(r => Number(r.anzahl) || 0));
+    const gruppen = ["bereich", "station", "einstellung", "aktion", "druck", "fn"];
+    return React.createElement("div", { style: { marginBottom: 18 } },
+        React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Nutzung (anonym)"),
+        React.createElement("div", { className: "card", style: { padding: "14px 15px" } },
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 0 10px", lineHeight: 1.5 } }, "Wie oft Bereiche und Funktionen in allen Konten benutzt wurden – nur Tagessummen, ohne Konto, Fahrschule oder Schüler."),
+            React.createElement("div", { className: "seg", style: { marginBottom: 10 } },
+                [7, 30, 90].map(t => React.createElement("button", { key: t, className: tage === t ? "on" : "", onClick: () => { setTage(t); laden(t); } }, t + " Tage"))),
+            !st && React.createElement("button", { className: "btn btn-ghost", onClick: () => laden(tage) }, "Auswertung laden"),
+            st && st.busy && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Lädt…"),
+            st && st.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)" } }, st.error),
+            st && !st.busy && !st.error && rows.length === 0 && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)" } }, "Noch keine Daten – gezählt wird ab dieser Version."),
+            st && !st.busy && rows.length > 0 && gruppen.map(g => {
+                const teil = rows.filter(r => String(r.ereignis).split(":")[0] === g);
+                if (!teil.length) return null;
+                return React.createElement("div", { key: g, style: { marginTop: 10 } },
+                    teil.map(r => React.createElement("div", { key: r.ereignis, style: { display: "grid", gridTemplateColumns: "minmax(0,1fr) 54px", gap: 8, alignItems: "center", padding: "3px 0" } },
+                        React.createElement("div", { style: { minWidth: 0 } },
+                            React.createElement("div", { style: { fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, nutzungLabel(r.ereignis)),
+                            React.createElement("div", { style: { height: 5, borderRadius: 99, background: "var(--field-bg)", marginTop: 3 } },
+                                React.createElement("div", { style: { width: Math.max(2, Math.round((Number(r.anzahl) || 0) / max * 100)) + "%", height: "100%", borderRadius: 99, background: "var(--orange)" } }))),
+                        React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, textAlign: "right", fontVariantNumeric: "tabular-nums" }, title: "an " + r.tage + " Tagen" }, String(r.anzahl)))));
+            })));
 }
 function PayerPage({ code }) {
     const [data, setData] = React.useState(undefined); // undefined=lädt, null=ungültig, "fehler"=nicht erreichbar, {}=geladen

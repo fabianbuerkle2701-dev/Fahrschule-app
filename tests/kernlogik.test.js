@@ -984,3 +984,11 @@ test("Theorie-Lernstand: Breite und Wiederholung zählen, falsch setzt zurück",
     assert.equal(k.theorieFach({ correct: true }), 2); assert.equal(k.theorieFach({ correct: false }), 1); assert.equal(k.theorieFach({ marked: true }), 0);
     assert.equal(k.theorieLernstand({}, []).pct, 0);
 });
+
+test("Nutzungsstatistik: Ereignisnamen sind kurz, klein und ohne Sonderzeichen", () => {
+    const n = require("./lade-app")(["nutzungName"]).nutzungName;
+    assert.equal(n("bereich:Kalender"), "bereich:kalender");
+    assert.equal(n("einstellung:Führerschein Übersicht"), "einstellung:fuehrerschein_uebersicht");
+    assert.equal(n("x".repeat(80)).length, 60);
+    assert.match(n("druck:<script>"), /^[a-z0-9_:.\-]+$/);
+});

@@ -1,0 +1,6 @@
+-- Nutzungsstatistik ohne Personenbezug (v2.87.0, Produktplan #40), angewandt 2026-10-01 als Migration "nutzung_anonym".
+-- Tabelle nutzung_tag(tag, ereignis, anzahl) - kein Konto, keine Fahrschule, kein Schüler, keine IP.
+-- nutzung_zaehlen(jsonb): nur angemeldete Konten (anon hat kein Ausführungsrecht), Namen ^[a-z0-9_:.-]{1,60}$,
+-- höchstens 60 Ereignisse und 200 pro Ereignis je Aufruf. nutzung_auswertung(tage): nur das zentrale Admin-Konto.
+-- Geprüft per Rollback-Test: fremdes Konto sieht nichts, ungültige Namen/negative/Text verworfen, Deckel 200.
+-- Vollständiger SQL-Text: Supabase list_migrations → "nutzung_anonym".
