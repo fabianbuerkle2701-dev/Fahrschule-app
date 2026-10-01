@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.74.0";
+const APP_VERSION = "2.75.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.75.0", date: "Oktober 2026", changes: [
+            "Neu: Navigation zum Abholort. Im Termin startest du mit einem Tipp die Karten-App, auf der Startseite öffnet „Route“ alle Abholorte von heute nacheinander in Google Maps",
+        ] },
     { v: "2.74.0", date: "Oktober 2026", changes: [
             "Monatsabrechnung der Fahrlehrer: je Fahrlehrer steht jetzt, was laut Kalender anfiel – Fahrstunden, Sonderfahrten, Prüfungen, Theorie, Sonstiges und Urlaub/Krank. Alles lässt sich als Excel-Liste speichern",
         ] },
@@ -13978,6 +13981,36 @@ function lebensphaseVon(stu, info) {
         return { key: "ausbildung", label: "In Ausbildung", schritt: !erledigt("antrag") ? "Antrag bei der Führerscheinstelle anstoßen" : null };
     return { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" };
 }
+// Navigation zum Abholort / Tagesroute (v2.75.0). Ein Standortname ("Innenstadt") wird zur
+// Adresse des Standorts aufgelöst, sonst gilt der eingetragene Text als Adresse.
+function navAdresse(ort, standorte) {
+    const t = String(ort || "").trim();
+    if (!t) return "";
+    const st = (standorte || []).find(l => l && l.name && l.name.trim().toLowerCase() === t.toLowerCase());
+    if (st) {
+        const adr = [String(st.street || "").trim(), [st.zip, st.city].filter(x => x && String(x).trim()).join(" ")].filter(Boolean).join(", ");
+        return adr || t;
+    }
+    return t;
+}
+function istApple() {
+    try { return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); } catch (e) { return false; }
+}
+function navLink(adresse, apple) {
+    const a = encodeURIComponent(String(adresse || "").trim());
+    return apple ? "https://maps.apple.com/?daddr=" + a + "&dirflg=d" : "https://www.google.com/maps/dir/?api=1&destination=" + a + "&travelmode=driving";
+}
+// Mehrere Stopps in Reihenfolge (Start = aktueller Standort). Google erlaubt bis zu 9 Zwischenziele;
+// gleiche Adressen direkt hintereinander zählen einmal.
+function routeLink(adressen) {
+    const liste = [];
+    (adressen || []).forEach(a => { const t = String(a || "").trim(); if (t && liste[liste.length - 1] !== t) liste.push(t); });
+    if (!liste.length) return "";
+    const ziel = liste[liste.length - 1];
+    const zwischen = liste.slice(0, -1).slice(0, 9);
+    return "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(ziel) + "&travelmode=driving"
+        + (zwischen.length ? "&waypoints=" + zwischen.map(encodeURIComponent).join("%7C") : "");
+}
 // "Vor der Fahrt" (v2.73.0, Produktplan Teil E): was der Fahrlehrer beim Antippen einer Fahrstunde
 // wissen muss, ohne etwas zu tippen. Nur Abweichungen und Offenes, höchstens 6 Punkte.
 // ctx = { lernziel: lernzielFuer() | null, sonder: sonderfahrtenBilanz(), pruefungDatum, offenBetrag,
@@ -23567,7 +23600,18 @@ function App() {
                         React.createElement("span", { className: "home-h3 home-v2-display", style: { fontSize: 16 } },
                             "Heute",
                             heute.length ? " · " + heute.length + (heute.length === 1 ? " Termin" : " Termine") : ""),
-                        React.createElement("button", { onClick: () => setView("kalender"), className: "btn-text" }, "Alle anzeigen ›")),
+                        React.createElement("span", { style: { display: "inline-flex", gap: 14, alignItems: "baseline" } },
+                            // Route (v2.75.0): verbleibende Termine von heute mit Abholort, in Reihenfolge
+                            (() => {
+                                const jetztMs = Date.now();
+                                const stopps = heuteFahrten.filter(a => String(a.abholort || "").trim() && new Date(a.end_at || a.start_at).getTime() > jetztMs)
+                                    .map(a => navAdresse(a.abholort, locations));
+                                if (!stopps.length) return null;
+                                return React.createElement("a", { href: stopps.length === 1 ? navLink(stopps[0], istApple()) : routeLink(stopps), target: "_blank", rel: "noopener noreferrer", className: "btn-text",
+                                        "aria-label": stopps.length === 1 ? "Navigation zum nächsten Abholort" : "Route über " + stopps.length + " Abholorte von heute", style: { textDecoration: "none" } },
+                                    stopps.length === 1 ? "Navigation ›" : "Route (" + stopps.length + ") ›");
+                            })(),
+                            React.createElement("button", { onClick: () => setView("kalender"), className: "btn-text" }, "Alle anzeigen ›"))),
                     heute.length === 0 && React.createElement("div", { className: "card", style: { fontSize: 13.5, color: "var(--ink-2)" } }, "Keine Termine heute. Genieß den freien Tag!"),
                     (heuteExpanded ? heute : heute.slice(0, 4)).map((a) => {
                         const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
@@ -38456,6 +38500,17 @@ function App() {
                                 React.createElement("span", { "aria-hidden": "true", style: { flex: "none", width: 6, height: 6, borderRadius: 99, marginTop: 8,
                                     background: pt.ton === "warn" ? "var(--amber)" : pt.ton === "ziel" ? "var(--orange)" : "var(--line)" } }),
                                 React.createElement("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, pt.text)))));
+                })(),
+                // Navigation (v2.75.0): direkt zum Abholort bzw. Ort des Termins
+                apptChoice.status !== "pending" && String(apptChoice.abholort || "").trim() && (() => {
+                    const adr = navAdresse(apptChoice.abholort, locations);
+                    return React.createElement("a", { href: navLink(adr, istApple()), target: "_blank", rel: "noopener noreferrer", className: "btn btn-ghost btn-block",
+                            style: { marginBottom: 10, gap: 8, textDecoration: "none", flexDirection: "column", alignItems: "center", lineHeight: 1.25 } },
+                        React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
+                            React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" },
+                                React.createElement("polygon", { points: "3 11 22 2 13 21 11 13 3 11" })),
+                            "Zum Abholort navigieren"),
+                        React.createElement("span", { style: { fontSize: 12, fontWeight: 500, color: "var(--muted)" } }, adr));
                 })(),
                 // Offene Anfrage (v2.63.1): dieselben Aktionen wie in der Anfragen-Liste oben im Kalender
                 apptChoice.status === "pending" && React.createElement(React.Fragment, null,

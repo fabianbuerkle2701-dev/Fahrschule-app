@@ -824,3 +824,17 @@ test("Monatsabrechnung: Aufschlüsselung je Fahrlehrer aus dem Kalender", () => 
     assert.equal(r.b.fahrstunden, 45);
     assert.equal(ma.monatsAufschluesselungText(r.a), "Fahrstunden 2 UE · Sonderfahrten 2 UE · 1 Prüfung · Theorie 1,5 Std. · Sonstiges 1,5 Std. · Urlaub/Krank 1 Tag");
 });
+
+// v2.75.0: Navigation
+const nv = require("./lade-app")(["navAdresse", "navLink", "routeLink"]);
+test("Navigation: Standortname wird Adresse, Links für Apple/Google, Route mit Zwischenzielen", () => {
+    const st = [{ name: "Innenstadt", street: "Hauptstr. 1", zip: "77652", city: "Offenburg" }, { name: "Nord" }];
+    assert.equal(nv.navAdresse("innenstadt", st), "Hauptstr. 1, 77652 Offenburg");
+    assert.equal(nv.navAdresse("Nord", st), "Nord");                       // Standort ohne Adresse
+    assert.equal(nv.navAdresse("Bahnhof Offenburg", st), "Bahnhof Offenburg");
+    assert.equal(nv.navAdresse("  ", st), "");
+    assert.equal(nv.navLink("Bahnhof Offenburg", true), "https://maps.apple.com/?daddr=Bahnhof%20Offenburg&dirflg=d");
+    assert.equal(nv.navLink("Bahnhof Offenburg", false), "https://www.google.com/maps/dir/?api=1&destination=Bahnhof%20Offenburg&travelmode=driving");
+    assert.equal(nv.routeLink(["A", "A", "B", "C"]), "https://www.google.com/maps/dir/?api=1&destination=C&travelmode=driving&waypoints=A%7CB");
+    assert.equal(nv.routeLink([]), "");
+});
