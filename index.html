@@ -3620,7 +3620,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.83.0";
+const APP_VERSION = "2.84.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3767,6 +3767,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.84.0", date: "Oktober 2026", changes: [
+            "Neu: Prüfungstag. Steht heute eine Prüfung im Kalender, zeigt die Startseite oben eine Checkliste (Ausweis, Brille, Ausbildungsnachweis, Fahrzeug) und danach „Bestanden“ / „Nicht bestanden“ mit einem Tipp – mit Glückwunsch per WhatsApp oder direktem Weg zum neuen Prüfplatz",
+        ] },
     { v: "2.83.0", date: "Oktober 2026", changes: [
             "Neu: Schüler können in ihrer App einen Link für ihre Eltern erstellen. Die Eltern sehen damit den Ausbildungsstand und die nächsten Termine – ohne Noten, Notizen oder Kosten. Der Schüler kann den Link jederzeit sperren",
         ] },
@@ -14201,6 +14204,39 @@ function pruefungsakteVon(stu) {
 // ctx = { heute: "YYYY-MM-DD", slots: exam_slots, termine: Termine des Schülers,
 //         unterlagenOffen: [Label], praxisVoraus: [{ ok, text, hinweis }] }
 const PRUEFUNG_TERMINART = { theorie: "VT", praxis: "PF" };
+// Prüfungstag (v2.84.0): heutige Prüfungstermine mit Schüler, Phase und schon eingetragenem Ergebnis.
+// Prüfung = Terminart VT (Theorie) oder PF/T1/T2/T3 (Praxis). phase: "vorher" | "laeuft" | "nachher".
+const PRUEFUNGSTAG_PRAXIS_ARTEN = ["PF", "T1", "T2", "T3"];
+function pruefungstagEintraege(termine, schueler, heuteYmd, jetztMs) {
+    const out = [];
+    (termine || []).forEach(a => {
+        if (!a || !a.start_at || (a.status && a.status !== "confirmed" && a.status !== "cancel_requested"))
+            return;
+        const art = a.art === "VT" ? "theorie" : PRUEFUNGSTAG_PRAXIS_ARTEN.indexOf(a.art) >= 0 ? "praxis" : null;
+        if (!art || ymd(a.start_at) !== heuteYmd)
+            return;
+        const stu = (schueler || []).find(x => x && x.id === (a._matchedStudentId || a.student_id));
+        if (!stu)
+            return;
+        const start = new Date(a.start_at).getTime(), ende = a.end_at ? new Date(a.end_at).getTime() : start + 60 * 60000;
+        const ex = (stu.exams || []).filter(e => e && e.art === art && e.date === heuteYmd && (e.ergebnis || e.passed));
+        const ergebnis = ex.length ? !!ex[ex.length - 1].passed : null;
+        out.push({ appt: a, stu, art, ergebnis, phase: jetztMs < start ? "vorher" : jetztMs < ende ? "laeuft" : "nachher" });
+    });
+    return out.sort((x, y) => new Date(x.appt.start_at) - new Date(y.appt.start_at));
+}
+// Was mitmuss - kurz, zum Abhaken. fehlend = offene Unterlagen laut Akte (Labels).
+function pruefungstagCheckliste(art, stu, fehlend) {
+    const l = ["Personalausweis oder Reisepass"];
+    if (art === "praxis") {
+        if (stu && stu.sehhilfe) l.push("Brille oder Kontaktlinsen");
+        l.push("Ausbildungsnachweis");
+        l.push("Fahrzeug bereit (getankt, Papiere an Bord)");
+    }
+    if ((fehlend || []).length)
+        l.push("Fehlt laut Akte: " + fehlend.join(", "));
+    return l;
+}
 let pruefungKalenderLaeuft = false;
 let aufladenLaeuft = false; // Doppeltipp-Sperre für "Guthaben aufladen" (Review v2.72.1) // Doppeltipp-Sperre für "In den Kalender eintragen" (Review v2.69.1)
 function pruefungsAblauf(stu, ctx) {
@@ -16382,6 +16418,7 @@ function App() {
     const [calToolsOpen, setCalToolsOpen] = useState(false);
     // Kalender drucken (v2.82.0): Auswahl-Fenster und gerade gedrucktes Blatt
     const [kalDruckWahl, setKalDruckWahl] = useState(null); // null | {zeitraum, anfragen, kurzNamen, abholort}
+    const [ptHaken, setPtHaken] = useState(() => { try { return JSON.parse(localStorage.getItem("v3_pt_haken") || "{}") || {}; } catch (e) { return {}; } });
     const [kalDruck, setKalDruck] = useState(null); // Klappmenü: Buchungslink, Screenshot-Import, Urlaub
     const [qrModal, setQrModal] = useState(false); // QR-Code des Buchungslinks anzeigen (z.B. zum Aushängen/Ausdrucken)
     const [pendingOpen, setPendingOpen] = useState(false); // Klappzustand der offenen Terminvorschläge
@@ -23926,6 +23963,8 @@ function App() {
                 // Zweites Profilbild neben der Begrüßung entfernt (v2.62.4): das in der Kopfleiste reicht.
             // Umschalter Mein Tag / Fahrschule (nur Fahrschul-Admins)
             modusUmschalter,
+            // Prüfungstag (v2.84.0): an Tagen mit eigener Prüfung ganz oben
+            pruefungstagKarte(),
             // Einrichtungskarte für neue Konten (v2.59.0)
             einrichtungsKarte(),
             // 1b) Nächster Termin als eigene Hero-Karte (spec 5.4: .card.soft, 3 Icon-Zeilen,
@@ -27792,6 +27831,63 @@ function App() {
             art: PRUEFUNG_TERMINART[art], status: "confirmed", title: "", note: platz.ort ? "Prüfung · " + platz.ort : "Prüfung" });
         if (created)
             showToast((art === "praxis" ? "Praxisprüfung" : "Theorieprüfung") + " steht im Kalender.");
+    }
+    // Prüfungstag-Karte (v2.84.0): oben auf der Startseite, nur an Tagen mit eigener Prüfung
+    function ptHakenSetzen(apptId, i) {
+        setPtHaken(alt => {
+            const l = (alt[apptId] || []).slice();
+            const pos = l.indexOf(i);
+            if (pos >= 0) l.splice(pos, 1); else l.push(i);
+            const neu = { ...alt, [apptId]: l };
+            try { localStorage.setItem("v3_pt_haken", JSON.stringify(neu)); } catch (e) { }
+            return neu;
+        });
+    }
+    function pruefungstagKarte() {
+        const heute = ymd(new Date());
+        const liste = pruefungstagEintraege((appts || []).filter(a => a.owner == null || a.owner === uid || IS_DEMO()), (students || []).filter(s => s._isMine), heute, Date.now());
+        if (!liste.length) return null;
+        return React.createElement("div", { className: "card", role: "region", "aria-label": "Prüfungstag", style: { padding: "14px 16px", marginBottom: 12, borderLeft: "4px solid var(--red)" } },
+            React.createElement("div", { className: "eyebrow", style: { margin: "0 0 8px", color: "var(--red-ink)" } }, liste.length === 1 ? "Heute Prüfung" : "Heute " + liste.length + " Prüfungen"),
+            liste.map((e, idx) => {
+                const a = e.appt, stu = e.stu;
+                const titel = (e.art === "praxis" ? "Praxisprüfung" : "Theorieprüfung") + (a.art && a.art !== "PF" && a.art !== "VT" ? " (" + a.art + ")" : "");
+                const ort = String(a.note || "").replace(/^Prüfung\s*·\s*/, "").replace(/^Prüfung$/, "");
+                const kontext = pruefungsKontext(stu);
+                const check = pruefungstagCheckliste(e.art, stu, kontext.unterlagenOffen);
+                const haken = ptHaken[a.id] || [];
+                const vorname = String(stu.vorname || dispName(stu)).trim();
+                const ablauf = pruefungsAblauf(stu, kontext)[e.art];
+                const platz = ablauf && ablauf.platz && ablauf.platz.datum === heute ? ablauf.platz : { datum: heute };
+                const btn = (label, onClick, primaer, extra) => React.createElement("button", { className: "btn " + (primaer ? "btn-primary" : "btn-ghost"), onClick, style: { minHeight: 40, padding: "0 14px", fontSize: 13.5, flex: "1 1 120px", ...(extra || {}) } }, label);
+                return React.createElement("div", { key: a.id || idx, style: { borderTop: idx ? "1px solid var(--line)" : "none", paddingTop: idx ? 12 : 0, marginTop: idx ? 12 : 0 } },
+                    React.createElement("div", { style: { display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" } },
+                        React.createElement("span", { className: "home-v2-display", style: { fontWeight: 800, fontSize: 18 } }, hm(a.start_at) + " · " + dispName(stu)),
+                        React.createElement("span", { style: { fontSize: 13, color: "var(--muted)" } }, titel + (ort ? " · " + ort : ""))),
+                    e.ergebnis === true
+                        ? React.createElement(React.Fragment, null,
+                            React.createElement("div", { role: "status", style: { margin: "10px 0", fontWeight: 800, color: "var(--green-ink)", fontSize: 15 } }, "Bestanden 🎉"),
+                            React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+                                stu.tel && btn("Glückwunsch per WhatsApp", () => window.open("https://wa.me/" + waNumber(stu.tel) + "?text=" + encodeURIComponent("Herzlichen Glückwunsch zur bestandenen " + (e.art === "praxis" ? "Prüfung" : "Theorieprüfung") + ", " + vorname + "! 🎉 " + (e.art === "praxis" ? "Allzeit gute und sichere Fahrt!" : "Jetzt geht's mit der Praxis weiter.") + ((school && school.name) ? " – " + school.name : "")), "_blank", "noopener"), false, { color: "#128C3E" }),
+                                e.art === "praxis" && btn("Schlussrechnung", () => oeffneSchuelerReiter(stu.id, "fahrten"), false)))
+                        : e.ergebnis === false
+                            ? React.createElement(React.Fragment, null,
+                                React.createElement("div", { role: "status", style: { margin: "10px 0", fontWeight: 800, color: "var(--red-ink)", fontSize: 15 } }, "Nicht bestanden"),
+                                React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+                                    btn("Neuen Prüfplatz", () => oeffneSchuelerReiter(stu.id, "pruefung"), true),
+                                    e.art === "praxis" && btn("Übungsstunde planen", () => { setView("kalender"); }, false)))
+                            : React.createElement(React.Fragment, null,
+                                e.phase === "vorher" && React.createElement("ul", { style: { listStyle: "none", margin: "10px 0 0", padding: 0 } },
+                                    check.map((c, i) => React.createElement("li", { key: i },
+                                        React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 10, minHeight: 36, fontSize: 13.5, cursor: "pointer", color: c.indexOf("Fehlt") === 0 ? "var(--amber-ink, var(--ink))" : "var(--ink)",
+                                                textDecoration: haken.indexOf(i) >= 0 ? "line-through" : "none", opacity: haken.indexOf(i) >= 0 ? .6 : 1 } },
+                                            React.createElement("input", { type: "checkbox", checked: haken.indexOf(i) >= 0, onChange: () => ptHakenSetzen(a.id, i), style: { width: 20, height: 20, accentColor: "var(--orange)", flexShrink: 0 } }),
+                                            c)))),
+                                e.phase === "laeuft" && React.createElement("div", { style: { margin: "10px 0 2px", fontSize: 13.5, color: "var(--ink-2)" } }, "Läuft gerade – viel Erfolg, " + vorname + "!"),
+                                e.phase !== "vorher" && React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 } },
+                                    btn("Bestanden", () => pruefungErgebnis(stu, e.art, platz, true), true),
+                                    btn("Nicht bestanden", () => pruefungErgebnis(stu, e.art, platz, false), false))));
+            }));
     }
     async function pruefungErgebnis(stu, art, platz, bestanden) {
         const datum = (platz && platz.datum) || ymd(new Date());

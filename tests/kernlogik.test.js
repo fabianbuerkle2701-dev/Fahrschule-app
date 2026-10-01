@@ -922,3 +922,25 @@ test("Kalender drucken: Zeitraum, Kurznamen, Termine je Tag", () => {
     const mitAnfragen = k.kalenderDruckTage(termine, w.von, w.bis, { anfragen: true });
     assert.equal(mitAnfragen[2].eintraege[0].typ, "anfrage");
 });
+
+test("Prüfungstag: heutige Prüfungen, Phase, Ergebnis, Checkliste", () => {
+    const k = require("./lade-app")(["pruefungstagEintraege", "pruefungstagCheckliste"]);
+    const heute = "2026-10-02";
+    const stu = [{ id: "s1", vorname: "Lena", sehhilfe: true, exams: [] }, { id: "s2", vorname: "Ida", exams: [{ art: "theorie", date: heute, passed: true, ergebnis: true }] }];
+    const termine = [
+        { id: "a1", student_id: "s1", art: "PF", status: "confirmed", start_at: "2026-10-02T08:00:00Z", end_at: "2026-10-02T08:55:00Z" },
+        { id: "a2", student_id: "s2", art: "VT", status: "confirmed", start_at: "2026-10-02T06:00:00Z", end_at: "2026-10-02T07:00:00Z" },
+        { id: "a3", student_id: "s1", art: "ÜST", status: "confirmed", start_at: "2026-10-02T10:00:00Z" },
+        { id: "a4", student_id: "s1", art: "PF", status: "pending", start_at: "2026-10-02T12:00:00Z" },
+        { id: "a5", student_id: "s1", art: "PF", status: "confirmed", start_at: "2026-10-03T08:00:00Z" },
+        { id: "a6", student_id: "fremd", art: "PF", status: "confirmed", start_at: "2026-10-02T09:00:00Z" },
+    ];
+    const vor = k.pruefungstagEintraege(termine, stu, heute, new Date("2026-10-02T07:30:00Z").getTime());
+    assert.deepEqual(rein(vor.map(e => [e.appt.id, e.art, e.phase, e.ergebnis])), [["a2", "theorie", "nachher", true], ["a1", "praxis", "vorher", null]]);
+    const laeuft = k.pruefungstagEintraege(termine, stu, heute, new Date("2026-10-02T08:20:00Z").getTime());
+    assert.equal(laeuft[1].phase, "laeuft");
+    const c = k.pruefungstagCheckliste("praxis", stu[0], ["Sehtest"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(c)), ["Personalausweis oder Reisepass", "Brille oder Kontaktlinsen", "Ausbildungsnachweis", "Fahrzeug bereit (getankt, Papiere an Bord)", "Fehlt laut Akte: Sehtest"]);
+    assert.equal(k.pruefungstagCheckliste("theorie", {}, ["A", "B"])[1], "Fehlt laut Akte: A, B");
+    assert.deepEqual(JSON.parse(JSON.stringify(k.pruefungstagCheckliste("theorie", stu[0], []))), ["Personalausweis oder Reisepass"]);
+});
