@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.73.0";
+const APP_VERSION = "2.77.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,7 +3718,7 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
-    { v: "2.73.0", date: "September 2026", changes: [
+    { v: "2.77.0", date: "Oktober 2026", changes: [
             "Fehlermeldungen heißen überall gleich: „Speichern nicht möglich“, „Löschen nicht möglich“ – darunter der Grund in verständlichem Deutsch statt der englischen Meldung des Servers",
             "Fehler sind jetzt in jeder Ansicht als Fehler gekennzeichnet und stehen lange genug zum Lesen",
             "Fehlende Eingaben und GPS-Hinweise sehen nicht mehr aus wie ein Fehler – es ist nichts kaputt, es fehlt nur etwas",
@@ -3726,6 +3726,22 @@ const CHANGELOG = [
             "Läuft die Anmeldung ab, sagt die App das mit einem Fenster und einem Knopf „Jetzt anmelden“, statt jede Eingabe in eine Fehlermeldung laufen zu lassen",
             "Ohne Netz sagt die Meldung das auch dann, wenn der Server gar nichts zurückmeldet",
             "Bestätigungen wie „Link kopiert“ werden jetzt auch von Screenreadern vorgelesen",
+        ] },
+    { v: "2.76.1", date: "Oktober 2026", changes: [
+            "„Schlussrechnung fehlt“ erscheint nur noch, wenn der Schüler wirklich noch etwas schuldet",
+        ] },
+    { v: "2.76.0", date: "Oktober 2026", changes: [
+            "Die Startseite erinnert jetzt an fehlende Schlussrechnungen nach bestandener Prüfung und an Anfragen, die seit über 2 Tagen auf Antwort warten",
+            "„Vor der Fahrt“ erinnert bei den ersten Fahrstunden an den Antrag bei der Führerscheinstelle",
+        ] },
+    { v: "2.75.0", date: "Oktober 2026", changes: [
+            "Neu: Navigation zum Abholort. Im Termin startest du mit einem Tipp die Karten-App, auf der Startseite öffnet „Route“ alle Abholorte von heute nacheinander in Google Maps",
+        ] },
+    { v: "2.74.0", date: "Oktober 2026", changes: [
+            "Monatsabrechnung der Fahrlehrer: je Fahrlehrer steht jetzt, was laut Kalender anfiel – Fahrstunden, Sonderfahrten, Prüfungen, Theorie, Sonstiges und Urlaub/Krank. Alles lässt sich als Excel-Liste speichern",
+        ] },
+    { v: "2.73.0", date: "Oktober 2026", changes: [
+            "Neu: „Vor der Fahrt“. Tippst du im Kalender auf eine Fahrstunde, siehst du sofort das Ziel, die Notiz „Nächstes Mal“, Auffälligkeiten aus den letzten Stunden, den Stand der Sonderfahrt und Warnungen vor einer nahen Prüfung",
         ] },
     { v: "2.72.1", date: "September 2026", changes: [
             "Beim Umstellen auf Guthaben-Abrechnung weist die App auf noch nicht berechnete Leistungen hin",
@@ -14134,6 +14150,85 @@ function lebensphaseVon(stu, info) {
         return { key: "ausbildung", label: "In Ausbildung", schritt: !erledigt("antrag") ? "Antrag bei der Führerscheinstelle anstoßen" : null };
     return { key: "start", label: "Start", schritt: "Erste Fahrstunde planen" };
 }
+// Navigation zum Abholort / Tagesroute (v2.75.0). Ein Standortname ("Innenstadt") wird zur
+// Adresse des Standorts aufgelöst, sonst gilt der eingetragene Text als Adresse.
+function navAdresse(ort, standorte) {
+    const t = String(ort || "").trim();
+    if (!t) return "";
+    const st = (standorte || []).find(l => l && l.name && l.name.trim().toLowerCase() === t.toLowerCase());
+    if (st) {
+        const adr = [String(st.street || "").trim(), [st.zip, st.city].filter(x => x && String(x).trim()).join(" ")].filter(Boolean).join(", ");
+        return adr || t;
+    }
+    return t;
+}
+function istApple() {
+    try { return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); } catch (e) { return false; }
+}
+function navLink(adresse, apple) {
+    const a = encodeURIComponent(String(adresse || "").trim());
+    return apple ? "https://maps.apple.com/?daddr=" + a + "&dirflg=d" : "https://www.google.com/maps/dir/?api=1&destination=" + a + "&travelmode=driving";
+}
+// Mehrere Stopps in Reihenfolge (Start = aktueller Standort). Google erlaubt bis zu 9 Zwischenziele;
+// gleiche Adressen direkt hintereinander zählen einmal.
+function routeLink(adressen) {
+    const liste = [];
+    (adressen || []).forEach(a => { const t = String(a || "").trim(); if (t && liste[liste.length - 1] !== t) liste.push(t); });
+    if (!liste.length) return "";
+    const ziel = liste[liste.length - 1];
+    const zwischen = liste.slice(0, -1).slice(0, 9);
+    return "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(ziel) + "&travelmode=driving"
+        + (zwischen.length ? "&waypoints=" + zwischen.map(encodeURIComponent).join("%7C") : "");
+}
+// "Vor der Fahrt" (v2.73.0, Produktplan Teil E): was der Fahrlehrer beim Antippen einer Fahrstunde
+// wissen muss, ohne etwas zu tippen. Nur Abweichungen und Offenes, höchstens 6 Punkte.
+// ctx = { lernziel: lernzielFuer() | null, sonder: sonderfahrtenBilanz(), pruefungDatum, offenBetrag,
+//         unterlagenOffen: [Label], heute }
+function vorDerFahrtPunkte(stu, appt, ctx) {
+    stu = stu || {};
+    ctx = ctx || {};
+    const out = [];
+    const lz = ctx.lernziel;
+    if (lz && lz.text)
+        out.push({ text: (lz.typ === "warn" ? "Achtung: " : "Ziel: ") + lz.text, ton: lz.typ === "warn" ? "warn" : "ziel" });
+    // Automatik #19 (v2.76.0): bei den ersten Fahrstunden an den Antrag erinnern - die Bearbeitung
+    // bei der Führerscheinstelle dauert oft Wochen und hält sonst später die Prüfung auf.
+    if (ctx.antragFehlt)
+        out.push({ text: "Antrag bei der Führerscheinstelle noch nicht gestellt", ton: "warn" });
+    const notiz = (stu.lastNote || "").trim();
+    if (notiz && !(lz && lz.text && lz.text.trim() === notiz))
+        out.push({ text: "Nächstes Mal: " + notiz, ton: "" });
+    const lw = letzteBewertungen(stu);
+    if (lw) {
+        const ab = LESSON_FIELDS.filter(f => lw[f.id] && lw[f.id] !== 3)
+            .map(f => f.label + " " + ((SMILEYS.find(x => x.v === lw[f.id]) || {}).label || ""));
+        if (ab.length)
+            out.push({ text: "Zuletzt: " + ab.join(", "), ton: LESSON_FIELDS.some(f => lw[f.id] === 1) ? "warn" : "" });
+    }
+    if (!(lz && lz.typ === "warn")) {
+        const schwach = wiederkehrendeSchwaechenAus(stu.lessons);
+        if (schwach.length)
+            out.push({ text: "Wiederkehrend auffällig: " + schwach.map(x => x.feld).join(", "), ton: "warn" });
+    }
+    const sf = appt && (ctx.sonder || []).find(x => x.code === appt.art);
+    if (sf)
+        out.push({ text: sf.label + ": " + (Math.round((sf.ue || 0) * 10) / 10).toLocaleString("de-DE") + " von " + (sf.sollUe || 0) + " UE"
+            + (sf.erfuellt && !sf.langeFahrtDabei ? " – Doppelstunde fehlt noch" : sf.erfuellt ? " – erfüllt" : ""), ton: sf.erfuellt && sf.langeFahrtDabei ? "" : "ziel" });
+    const heute = ctx.heute || "";
+    if (ctx.pruefungDatum && ctx.pruefungDatum >= heute) {
+        const tage = Math.round((new Date(ctx.pruefungDatum + "T12:00:00Z") - new Date(heute + "T12:00:00Z")) / 86400000);
+        if (tage <= 14) {
+            const d = new Date(ctx.pruefungDatum + "T12:00:00").toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "2-digit", month: "2-digit" });
+            out.push({ text: "Prüfung am " + d + (tage === 0 ? " (heute)" : tage === 1 ? " (morgen)" : " (in " + tage + " Tagen)"), ton: "ziel" });
+            const unt = ctx.unterlagenOffen || [];
+            if (unt.length)
+                out.push({ text: "Fehlt noch: " + unt.join(", "), ton: "warn" });
+            if ((Number(ctx.offenBetrag) || 0) > 0.005)
+                out.push({ text: (Number(ctx.offenBetrag)).toLocaleString("de-DE", { style: "currency", currency: "EUR" }) + " offen vor der Prüfung", ton: "warn" });
+        }
+    }
+    return out.slice(0, 6);
+}
 // Handlungsbedarf (v2.72.0, Produktplan Top-10 #2): EINE Liste, eine Reihenfolge. Jeder Eintrag
 // hat eine Stufe - "dringend" (heute handeln), "bald" (diese Woche), "chance" (kein Muss).
 // "Später" stellt einen Eintrag 7 Tage zurück; die Signatur enthält den Text, damit er sofort
@@ -23500,6 +23595,23 @@ function App() {
         if (ohnePlatz.length > 0)
             weekItems.push({ key: "platzfehlt", prio: "bald", accent: true, icon: icClock, onClick: () => oeffneSchuelerReiter(ohnePlatz[0].stu.id, "pruefung"),
                 text: ohnePlatz.length === 1 ? dispName(ohnePlatz[0].stu) + " ist prüfungsreif – Prüfplatz besorgen" : ohnePlatz.length + " Schüler prüfungsreif ohne Prüfplatz" });
+        // Automatik #27 (v2.76.0): bestanden, aber noch Leistungen nicht berechnet -> Schlussrechnung,
+        // auch bei schon archivierten Schülern (sonst geht der Umsatz still verloren)
+        const schlussOffen = (students || []).filter(s => s._isMine && !s.pending
+            && ((s.exams || []).some(e => e && e.art === "praxis" && e.passed) || licenseStepDone(s, "praxis_bestanden")))
+            // Nur wenn der Schüler auch tatsächlich noch etwas schuldet (Review v2.76.1): Schulen, die
+            // bar kassieren ohne Rechnung in der App, sähen sonst jeden bezahlten Schüler hier.
+            .map(s => ({ stu: s, betrag: Math.min(offeneLeistungenSumme(s, stdPrice), sumCharges(s, stdPrice) - sumPayments(s)) })).filter(x => x.betrag > 0.005);
+        if (schlussOffen.length > 0)
+            weekItems.push({ key: "schluss", prio: "bald", icon: icWallet, onClick: () => oeffneSchuelerReiter(schlussOffen[0].stu.id, "fahrten"),
+                text: schlussOffen.length === 1 ? dispName(schlussOffen[0].stu) + " hat bestanden – Schlussrechnung fehlt" : schlussOffen.length + " bestandene Schüler: Schlussrechnung fehlt",
+                amountText: eurFmt(schlussOffen.reduce((t, x) => t + x.betrag, 0)) });
+        // Automatik #13 (v2.76.0): neue Anfragen, die seit über 48 Stunden niemand beantwortet hat
+        const anfragen48 = (interessenten || []).filter(it => it && (it.status || "offen") === "offen" && !it.follow_up_am && it.created_at
+            && Date.now() - new Date(it.created_at).getTime() > 48 * 3600000);
+        if (anfragen48.length > 0)
+            weekItems.push({ key: "anfragen48", prio: "bald", icon: icClock, onClick: () => setView("interessenten"),
+                text: anfragen48.length === 1 ? "1 Anfrage seit über 2 Tagen ohne Antwort" : anfragen48.length + " Anfragen seit über 2 Tagen ohne Antwort" });
         const hinweise = hinweiseOrdnen(weekItems, hinweisZurueck, heuteYmd);
         const hinweisZeilen = hinweiseAlle ? hinweise.sichtbar.concat(hinweise.versteckt) : hinweise.sichtbar;
         function hinweisZurueckstellen(it) {
@@ -23695,7 +23807,18 @@ function App() {
                         React.createElement("span", { className: "home-h3 home-v2-display", style: { fontSize: 16 } },
                             "Heute",
                             heute.length ? " · " + heute.length + (heute.length === 1 ? " Termin" : " Termine") : ""),
-                        React.createElement("button", { onClick: () => setView("kalender"), className: "btn-text" }, "Alle anzeigen ›")),
+                        React.createElement("span", { style: { display: "inline-flex", gap: 14, alignItems: "baseline" } },
+                            // Route (v2.75.0): verbleibende Termine von heute mit Abholort, in Reihenfolge
+                            (() => {
+                                const jetztMs = Date.now();
+                                const stopps = heuteFahrten.filter(a => String(a.abholort || "").trim() && new Date(a.end_at || a.start_at).getTime() > jetztMs)
+                                    .map(a => navAdresse(a.abholort, locations));
+                                if (!stopps.length) return null;
+                                return React.createElement("a", { href: stopps.length === 1 ? navLink(stopps[0], istApple()) : routeLink(stopps), target: "_blank", rel: "noopener noreferrer", className: "btn-text",
+                                        "aria-label": stopps.length === 1 ? "Navigation zum nächsten Abholort" : "Route über " + stopps.length + " Abholorte von heute", style: { textDecoration: "none" } },
+                                    stopps.length === 1 ? "Navigation ›" : "Route (" + stopps.length + ") ›");
+                            })(),
+                            React.createElement("button", { onClick: () => setView("kalender"), className: "btn-text" }, "Alle anzeigen ›"))),
                     heute.length === 0 && React.createElement("div", { className: "card", style: { fontSize: 13.5, color: "var(--ink-2)" } }, "Keine Termine heute. Genieß den freien Tag!"),
                     (heuteExpanded ? heute : heute.slice(0, 4)).map((a) => {
                         const stu = a.student_id ? students.find(x => x.id === a.student_id) : null;
@@ -32264,6 +32387,16 @@ function App() {
         setInvoicePreview(inv);
         doPrint("invoice");
     }
+    function vorDerFahrtKontext(stu, appt) {
+        const vk = stu.klasse || DEFAULT_KLASSE;
+        const pk = pruefungsKontext(stu);
+        const pr = pruefungsAblauf(stu, pk).praxis;
+        return { lernziel: lernzielFuer(appt, stu), sonder: sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll),
+            pruefungDatum: !pr.bestanden && pr.platz ? pr.platz.datum : null,
+            offenBetrag: sumCharges(stu, Number(pricePerHour) || 0) - sumPayments(stu),
+            unterlagenOffen: pk.unterlagenOffen, heute: ymd(new Date()),
+            antragFehlt: !licenseStepDone(stu, "antrag") && (stu.drivenLessons || []).length < 3 };
+    }
     function uebergabeKontext(stu) {
         const vk = stu.klasse || DEFAULT_KLASSE;
         const pk = pruefungsKontext(stu);
@@ -38562,6 +38695,32 @@ function App() {
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17 } }, apptChoice.status === "offered" ? "Warteliste-Angebot" : apptChoice.status === "pending" ? "Terminanfrage: " + (apptStudentName(apptChoice) || apptChoice.title || "ohne Namen") : (apptStudentName(apptChoice) || "Termin")),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 3, marginBottom: 18 } },
                     fmtDLong(apptChoice.start_at) + ", " + hm(apptChoice.start_at) + (apptChoice.status === "pending" && apptChoice.end_at ? " bis " + hm(apptChoice.end_at) : "") + " Uhr"),
+                // Vor der Fahrt (v2.73.0): Briefing zum Schüler, nur bei Fahrstunden mit Schüler
+                apptChoice.status !== "pending" && apptChoice.art !== "TH" && !String(apptChoice.note || "").startsWith(SONST_MARK) && (() => {
+                    const stu = (students || []).find(x => x.id === (apptChoice._matchedStudentId || apptChoice.student_id));
+                    if (!stu) return null;
+                    const punkte = vorDerFahrtPunkte(stu, apptChoice, vorDerFahrtKontext(stu, apptChoice));
+                    if (!punkte.length) return null;
+                    return React.createElement("div", { role: "region", "aria-label": "Vor der Fahrt", style: { background: "var(--field-bg)", borderRadius: 14, padding: "11px 13px", margin: "-6px 0 16px" } },
+                        React.createElement("div", { style: { fontSize: 11, fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 5 } }, "Vor der Fahrt"),
+                        React.createElement("ul", { style: { listStyle: "none", margin: 0, padding: 0 } },
+                            punkte.map((pt, i) => React.createElement("li", { key: i, style: { display: "flex", gap: 8, fontSize: 13.5, lineHeight: 1.45, padding: "3px 0",
+                                    color: pt.ton === "warn" ? "var(--amber-ink, var(--ink))" : "var(--ink)", fontWeight: pt.ton ? 600 : 500 } },
+                                React.createElement("span", { "aria-hidden": "true", style: { flex: "none", width: 6, height: 6, borderRadius: 99, marginTop: 8,
+                                    background: pt.ton === "warn" ? "var(--amber)" : pt.ton === "ziel" ? "var(--orange)" : "var(--line)" } }),
+                                React.createElement("span", { style: { minWidth: 0, overflowWrap: "anywhere" } }, pt.text)))));
+                })(),
+                // Navigation (v2.75.0): direkt zum Abholort bzw. Ort des Termins
+                apptChoice.status !== "pending" && String(apptChoice.abholort || "").trim() && (() => {
+                    const adr = navAdresse(apptChoice.abholort, locations);
+                    return React.createElement("a", { href: navLink(adr, istApple()), target: "_blank", rel: "noopener noreferrer", className: "btn btn-ghost btn-block",
+                            style: { marginBottom: 10, gap: 8, textDecoration: "none", flexDirection: "column", alignItems: "center", lineHeight: 1.25 } },
+                        React.createElement("span", { style: { display: "inline-flex", alignItems: "center", gap: 8 } },
+                            React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" },
+                                React.createElement("polygon", { points: "3 11 22 2 13 21 11 13 3 11" })),
+                            "Zum Abholort navigieren"),
+                        React.createElement("span", { style: { fontSize: 12, fontWeight: 500, color: "var(--muted)" } }, adr));
+                })(),
                 // Offene Anfrage (v2.63.1): dieselben Aktionen wie in der Anfragen-Liste oben im Kalender
                 apptChoice.status === "pending" && React.createElement(React.Fragment, null,
                     React.createElement("button", { className: "btn btn-primary btn-block", style: { marginBottom: 10 },
@@ -45584,6 +45743,48 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
 }
+// Monatsabrechnung, Aufschlüsselung laut Kalender (v2.74.0, Produktplan Teil K): je Fahrlehrer
+// Minuten nach Gruppe (Fahrstunden, Sonderfahrten, Prüfungen, Theorie, Sonstiges) und Tage mit
+// Urlaub/Krank - aus school_arbeitszeit (bestätigte Termine, typ urlaub/privat/sonstige).
+// Keine Lohnabrechnung, nur die Grundlage dafür. Privates zählt nirgends.
+const MONAT_SONSTIGE_ARTEN = ["ST", "STI", "VS"];
+function monatsAufschluesselung(termine) {
+    const je = {};
+    const tag = d => new Date(d).toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
+    (termine || []).forEach(t => {
+        if (!t || !t.lehrer_id || !t.start_at || t.typ === "privat")
+            return;
+        const x = je[t.lehrer_id] || (je[t.lehrer_id] = { fahrstunden: 0, sonderfahrten: 0, pruefungen: 0, pruefungMin: 0, theorie: 0, sonstiges: 0, urlaubTage: [] });
+        if (t.typ === "urlaub") {
+            const d = tag(t.start_at);
+            if (x.urlaubTage.indexOf(d) < 0) x.urlaubTage.push(d);
+            return;
+        }
+        const min = t.end_at ? Math.max(0, Math.round((new Date(t.end_at) - new Date(t.start_at)) / 60000)) : 45;
+        if (t.typ === "sonstige" || MONAT_SONSTIGE_ARTEN.indexOf(t.art) >= 0) { x.sonstiges += min; return; }
+        const gruppe = ART_GROUP_OF[t.art] || "Fahrstunden";
+        if (gruppe === "Sonderfahrten") x.sonderfahrten += min;
+        else if (gruppe === "Prüfungsteile") { x.pruefungen += 1; x.pruefungMin += min; }
+        else if (gruppe === "Theorie") x.theorie += min;
+        else x.fahrstunden += min;
+    });
+    Object.keys(je).forEach(k => { je[k].urlaubTage = je[k].urlaubTage.length; });
+    return je;
+}
+// Eine Zeile Text daraus ("Fahrstunden 30 UE · Sonderfahrten 6 UE · 2 Prüfungen · Theorie 8 Std. · ...")
+function monatsAufschluesselungText(x) {
+    if (!x) return "";
+    const ue = m => (Math.round(m / 45 * 10) / 10).toLocaleString("de-DE") + " UE";
+    const std = m => (Math.round(m / 60 * 10) / 10).toLocaleString("de-DE") + " Std.";
+    return [
+        x.fahrstunden ? "Fahrstunden " + ue(x.fahrstunden) : "",
+        x.sonderfahrten ? "Sonderfahrten " + ue(x.sonderfahrten) : "",
+        x.pruefungen ? x.pruefungen + (x.pruefungen === 1 ? " Prüfung" : " Prüfungen") : "",
+        x.theorie ? "Theorie " + std(x.theorie) : "",
+        x.sonstiges ? "Sonstiges " + std(x.sonstiges) : "",
+        x.urlaubTage ? "Urlaub/Krank " + x.urlaubTage + (x.urlaubTage === 1 ? " Tag" : " Tage") : "",
+    ].filter(Boolean).join(" · ");
+}
 async function fetchSchoolArbeitszeit(schoolId, vonISO, bisISO) {
     const { data, error } = await sb.rpc("school_arbeitszeit", { p_school_id: schoolId, p_von: vonISO, p_bis: bisISO });
     if (error) throw new Error(fehlerText(error));
@@ -45938,6 +46139,17 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
             .catch(e => { if (on) setState({ busy: false, error: e.message || "Fehler beim Laden", rows: [] }); });
         return () => { on = false; };
     }, [schoolId, jahr, monat]);
+    // Aufschlüsselung laut Kalender (v2.74.0) - Fehler hier blendet nur die Zusatzzeile aus
+    const [kalender, setKalender] = React.useState(null);
+    React.useEffect(() => {
+        if (!schoolId || IS_DEMO()) { setKalender(null); return; }
+        let on = true;
+        const von = new Date(jahr, monat - 1, 1), bis = new Date(jahr, monat, 1);
+        fetchSchoolArbeitszeit(schoolId, von.toISOString(), bis.toISOString())
+            .then(t => { if (on) setKalender(monatsAufschluesselung(t)); })
+            .catch(() => { if (on) setKalender(null); });
+        return () => { on = false; };
+    }, [schoolId, jahr, monat]);
 
     const monatWechseln = (delta) => {
         const d = new Date(jahr, monat - 1 + delta, 1);
@@ -45998,6 +46210,8 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
                                         ? "Kein Vergütungsmodell hinterlegt"
                                         : (x.modell.modell === "fest_ue" ? (eurFmt(x.modell.satz) + " je UE") : (x.modell.satz + " % vom Umsatz")),
                                     x.ohneTermin > 0 ? (" · " + x.ohneTermin + " Std. ohne Termin, dem Schüler-Fahrlehrer zugeordnet") : ""),
+                                kalender && kalender[x.id] && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.45 } },
+                                    React.createElement("span", { style: { color: "var(--muted)" } }, "Laut Kalender: "), monatsAufschluesselungText(kalender[x.id])),
                                 istAdmin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 9px", fontSize: 11.5, marginTop: 6 },
                                         onClick: () => setModellEdit({ id: x.id, name: x.name, modell: x.modell.modell || "", satz: x.modell.satz == null ? "" : String(x.modell.satz) }) },
                                     x.verguetung == null ? "Vergütung festlegen" : "Vergütung ändern"))) ),
@@ -46008,8 +46222,16 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
                         ohneModell > 0 && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px 8px" } },
                             ohneModell === 1 ? "Für einen Fahrlehrer ist kein Vergütungsmodell hinterlegt - er zählt nicht in die Summe."
                                              : ("Für " + ohneModell + " Fahrlehrer ist kein Vergütungsmodell hinterlegt - sie zählen nicht in die Summe.")),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: () => {
+                                const r1 = m => Math.round(m * 10) / 10;
+                                csvHerunterladen("monatsabrechnung_" + jahr + "-" + String(monat).padStart(2, "0") + ".csv",
+                                    ["Fahrlehrer", "Fahrstunden (Fahrtenbuch)", "UE", "Umsatz (€)", "Vergütung (€)", "Kalender: Fahrstunden UE", "Kalender: Sonderfahrten UE", "Kalender: Prüfungen", "Kalender: Theorie Std.", "Kalender: Sonstiges Std.", "Kalender: Urlaub/Krank Tage"],
+                                    liste.map(x => { const k = (kalender && kalender[x.id]) || {};
+                                        return [x.name, x.stunden, r1(x.ue), Math.round(x.umsatz * 100) / 100, x.verguetung == null ? "" : Math.round(x.verguetung * 100) / 100,
+                                            r1((k.fahrstunden || 0) / 45), r1((k.sonderfahrten || 0) / 45), k.pruefungen || 0, r1((k.theorie || 0) / 60), r1((k.sonstiges || 0) / 60), k.urlaubTage || 0]; }));
+                            } }, "Als Excel-Liste speichern (CSV)"),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
-                            "Abrechnungsgrundlage, keine Lohnabrechnung: Steuern und Sozialabgaben sind hier nicht berücksichtigt.")),
+                            "Abrechnungsgrundlage, keine Lohnabrechnung: Steuern und Sozialabgaben sind hier nicht berücksichtigt. „Laut Kalender“ zählt bestätigte Termine des Monats.")),
         modellEdit && React.createElement("div", { onClick: () => setModellEdit(null), className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 180, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },

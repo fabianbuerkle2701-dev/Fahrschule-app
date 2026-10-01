@@ -782,3 +782,64 @@ test("Handlungsbedarf: Prüfungen in 7 Tagen mit Lücken", () => {
     assert.equal(r[0].tage, 3);
     assert.equal(JSON.stringify(r[0].offen), JSON.stringify(["Sonderfahrten", "Unterlagen", "Kalendereintrag"]));
 });
+
+// v2.73.0: Vor der Fahrt
+const vf = require("./lade-app")(["vorDerFahrtPunkte", "letzteBewertungen", "wiederkehrendeSchwaechenAus", "LESSON_FIELDS", "SMILEYS"]);
+test("Vor der Fahrt: Ziel, Notiz ohne Dopplung, Abweichungen, Sonderfahrt, Prüfungswarnungen", () => {
+    const stu = { lastNote: "Spurwechsel links", lessons: [{ date: "2026-09-28", ratings: { tempo: 1, verkehr: 3, komm: 2 } }] };
+    const appt = { art: "AB" };
+    const ctx = { lernziel: { typ: "ziel", text: "Spurwechsel links" }, heute: "2026-10-01",
+        sonder: [{ code: "AB", label: "Autobahnfahrt", ue: 2, sollUe: 4, erfuellt: false, langeFahrtDabei: false }],
+        pruefungDatum: "2026-10-06", offenBetrag: 120, unterlagenOffen: ["Antrag"] };
+    const p = JSON.parse(JSON.stringify(vf.vorDerFahrtPunkte(stu, appt, ctx))).map(x => x.text);
+    assert.equal(p[0], "Ziel: Spurwechsel links");
+    assert.ok(!p.some(t => t.startsWith("Nächstes Mal")));                 // identisch mit dem Ziel -> nicht doppelt
+    assert.equal(p[1], "Zuletzt: Geschwindigkeitsanpassung schlecht, Kommunikation mittel");
+    assert.equal(p[2], "Autobahnfahrt: 2 von 4 UE");
+    assert.equal(p[3], "Prüfung am 06.10. (in 5 Tagen)");
+    assert.equal(p[4], "Fehlt noch: Antrag");
+    assert.equal(p[5].replace(/\s/g, " "), "120,00 € offen vor der Prüfung");
+    // Prüfung zu weit weg -> keine Prüfungspunkte; ohne Daten -> leer
+    assert.ok(!JSON.stringify(vf.vorDerFahrtPunkte(stu, appt, { ...ctx, pruefungDatum: "2026-11-30" })).includes("Prüfung am"));
+    assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, {}).length, 0);
+});
+
+// v2.74.0: Monatsabrechnung laut Kalender
+const ma = require("./lade-app")(["monatsAufschluesselung", "monatsAufschluesselungText", "ART_GROUP_OF", "MONAT_SONSTIGE_ARTEN"]);
+test("Monatsabrechnung: Aufschlüsselung je Fahrlehrer aus dem Kalender", () => {
+    const t = [
+        { lehrer_id: "a", start_at: "2026-09-01T08:00:00Z", end_at: "2026-09-01T09:30:00Z", art: "ÜST" },   // 90
+        { lehrer_id: "a", start_at: "2026-09-02T08:00:00Z", end_at: "2026-09-02T09:30:00Z", art: "AB" },    // 90 Sonder
+        { lehrer_id: "a", start_at: "2026-09-03T08:00:00Z", end_at: "2026-09-03T08:55:00Z", art: "PF" },    // Prüfung
+        { lehrer_id: "a", start_at: "2026-09-04T16:00:00Z", end_at: "2026-09-04T17:30:00Z", art: "TH" },    // 90 Theorie
+        { lehrer_id: "a", start_at: "2026-09-05T08:00:00Z", end_at: "2026-09-05T09:00:00Z", art: "ST" },    // 60 Sonstiges
+        { lehrer_id: "a", start_at: "2026-09-06T08:00:00Z", end_at: "2026-09-06T08:30:00Z", art: "ÜST", typ: "sonstige" }, // 30 Sonstiges
+        { lehrer_id: "a", start_at: "2026-09-07T00:00:00+02:00", end_at: "2026-09-07T23:59:00+02:00", typ: "urlaub" },
+        { lehrer_id: "a", start_at: "2026-09-07T00:00:00+02:00", end_at: "2026-09-07T23:59:00+02:00", typ: "urlaub" }, // gleicher Tag
+        { lehrer_id: "a", start_at: "2026-09-08T08:00:00Z", end_at: "2026-09-08T12:00:00Z", art: "PRIVAT", typ: "privat" },
+        { lehrer_id: "b", start_at: "2026-09-01T08:00:00Z", art: "SF" },                                    // ohne Ende = 45
+    ];
+    const r = JSON.parse(JSON.stringify(ma.monatsAufschluesselung(t)));
+    assert.equal(JSON.stringify(r.a), JSON.stringify({ fahrstunden: 90, sonderfahrten: 90, pruefungen: 1, pruefungMin: 55, theorie: 90, sonstiges: 90, urlaubTage: 1 }));
+    assert.equal(r.b.fahrstunden, 45);
+    assert.equal(ma.monatsAufschluesselungText(r.a), "Fahrstunden 2 UE · Sonderfahrten 2 UE · 1 Prüfung · Theorie 1,5 Std. · Sonstiges 1,5 Std. · Urlaub/Krank 1 Tag");
+});
+
+// v2.75.0: Navigation
+const nv = require("./lade-app")(["navAdresse", "navLink", "routeLink"]);
+test("Navigation: Standortname wird Adresse, Links für Apple/Google, Route mit Zwischenzielen", () => {
+    const st = [{ name: "Innenstadt", street: "Hauptstr. 1", zip: "77652", city: "Offenburg" }, { name: "Nord" }];
+    assert.equal(nv.navAdresse("innenstadt", st), "Hauptstr. 1, 77652 Offenburg");
+    assert.equal(nv.navAdresse("Nord", st), "Nord");                       // Standort ohne Adresse
+    assert.equal(nv.navAdresse("Bahnhof Offenburg", st), "Bahnhof Offenburg");
+    assert.equal(nv.navAdresse("  ", st), "");
+    assert.equal(nv.navLink("Bahnhof Offenburg", true), "https://maps.apple.com/?daddr=Bahnhof%20Offenburg&dirflg=d");
+    assert.equal(nv.navLink("Bahnhof Offenburg", false), "https://www.google.com/maps/dir/?api=1&destination=Bahnhof%20Offenburg&travelmode=driving");
+    assert.equal(nv.routeLink(["A", "A", "B", "C"]), "https://www.google.com/maps/dir/?api=1&destination=C&travelmode=driving&waypoints=A%7CB");
+    assert.equal(nv.routeLink([]), "");
+});
+test("Vor der Fahrt: Antrag-Erinnerung bei den ersten Fahrstunden", () => {
+    const p = JSON.parse(JSON.stringify(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: true }))).map(x => x.text);
+    assert.equal(JSON.stringify(p), JSON.stringify(["Antrag bei der Führerscheinstelle noch nicht gestellt"]));
+    assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: false }).length, 0);
+});
