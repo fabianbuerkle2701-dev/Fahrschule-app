@@ -992,3 +992,14 @@ test("Nutzungsstatistik: Ereignisnamen sind kurz, klein und ohne Sonderzeichen",
     assert.equal(n("x".repeat(80)).length, 60);
     assert.match(n("druck:<script>"), /^[a-z0-9_:.\-]+$/);
 });
+
+test("Fahrsimulator: Terminart SIM zählt als Fahrstunde, nie als Sonderfahrt", () => {
+    const k = require("./lade-app")(["APPT_ART", "SONDERFAHRT_ARTEN", "ART_ZAEHLT_STANDARD_NICHT", "arbeitszeitArt", "ART_GROUP_OF"]);
+    const sim = k.APPT_ART.find(a => a.code === "SIM");
+    assert.ok(sim, "SIM fehlt in APPT_ART");
+    assert.equal(sim.countsAsLesson, undefined);
+    assert.equal(k.ART_ZAEHLT_STANDARD_NICHT.indexOf("SIM"), -1);
+    assert.equal(k.SONDERFAHRT_ARTEN.some(s => s.code === "SIM"), false);
+    assert.equal(k.ART_GROUP_OF.SIM, "Fahrstunden");
+    assert.equal(k.arbeitszeitArt({ art: "SIM", status: "confirmed" }), "praxis");
+});
