@@ -843,3 +843,33 @@ test("Vor der Fahrt: Antrag-Erinnerung bei den ersten Fahrstunden", () => {
     assert.equal(JSON.stringify(p), JSON.stringify(["Antrag bei der Führerscheinstelle noch nicht gestellt"]));
     assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: false }).length, 0);
 });
+
+// v2.77.0: Buchungsseite – WhatsApp-Nummer
+const wn = require("./lade-app")(["waNummerOeffentlich"]);
+test("Buchungsseite: Telefonnummer wird WhatsApp-tauglich", () => {
+    assert.equal(wn.waNummerOeffentlich("0171 123 45-67"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich("+49 171 1234567"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich("0049 171 1234567"), "491711234567");
+    assert.equal(wn.waNummerOeffentlich(""), "");
+});
+
+test("Live-Kalender: nur Anfragen, Absage-Wünsche und übernommene freie Termine melden", () => {
+    const m = require("./lade-app")(["liveTerminMeldung"]).liveTerminMeldung;
+    const neu = { id: "a1", title: "Lena Berger", start_at: "2026-10-02T13:30:00Z", status: "pending" };
+    const r = m(null, neu);
+    assert.equal(r.titel, "Neue Terminanfrage");
+    assert.match(r.text, /^Neue Terminanfrage\nLena Berger · Fr\.? 02\.10\., 15:30$/);
+    // schon bekannt (z.B. eigener Vorschlag) -> keine Meldung
+    assert.equal(m({ id: "a1", status: "pending" }, neu), null);
+    // vom Fahrlehrer bestätigt -> still
+    assert.equal(m({ id: "a1", status: "pending" }, { ...neu, status: "confirmed" }), null);
+    // Absage-Wunsch, aber nur beim Wechsel
+    assert.equal(m({ id: "a1", status: "confirmed" }, { ...neu, status: "cancel_requested" }).titel, "Absage-Wunsch");
+    assert.equal(m({ id: "a1", status: "cancel_requested" }, { ...neu, status: "cancel_requested" }), null);
+    // freier Termin übernommen
+    assert.equal(m({ id: "a1", status: "offered" }, { ...neu, status: "confirmed" }).titel, "Freien Termin übernommen");
+    // neuer bestätigter Termin (anderes Gerät) -> still; kaputte Zeile -> null
+    assert.equal(m(null, { ...neu, status: "confirmed" }), null);
+    assert.equal(m(null, null), null);
+    assert.equal(m(null, { ...neu, title: "" }).text.startsWith("Neue Terminanfrage\nOhne Namen"), true);
+});
