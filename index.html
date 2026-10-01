@@ -3578,7 +3578,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.79.0";
+const APP_VERSION = "2.80.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3725,6 +3725,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.80.0", date: "Oktober 2026", changes: [
+            "Neu: Schüler können Sehtest, Erste-Hilfe-Nachweis und Passfoto selbst als Foto in ihrer App schicken. Du siehst es auf der Startseite und hakst es in der Schülerakte mit einem Tipp ab",
+        ] },
     { v: "2.79.0", date: "Oktober 2026", changes: [
             "Neu: Der Kalender aktualisiert sich jetzt von selbst. Bucht ein Schüler, wünscht er eine Absage oder übernimmt er einen freien Termin, siehst du es sofort – mit kurzer Meldung, ein Tipp darauf öffnet den Kalender",
         ] },
@@ -8768,6 +8771,82 @@ async function publicStudentSonderfahrtenStatus(code, name, pin) {
 // Bewusst eine eigene RPC statt public_student_overview zu erweitern - deren Rückgabetyp zu
 // ändern erzwingt DROP+CREATE der zentralen Portal-Datenquelle. Gibt null zurück, wenn der
 // Schüler nicht eindeutig per Name+PIN identifiziert werden konnte.
+// Unterlagen vom Schüler (v2.80.0, Top-10 #7): Schüler schicken Sehtest, Erste-Hilfe-Nachweis,
+// Passfoto und Antrag als Foto/PDF. Ablauf (siehe Migration 2026-10-01_schueler_upload.sql):
+// Einmal-Ticket per Login holen -> Datei genau unter u-<ticket>.<endung> ablegen (Storage-Regel
+// erlaubt anon nur das) -> "fertig" legt die Zeile in student_files an. Bilder werden vorher auf
+// höchstens 2000 px verkleinert (JPEG), PDFs bleiben unverändert (bis 10 MB).
+const SCHUELER_UPLOAD_ARTEN = ["sehtest", "erstehilfe", "passfoto", "antrag"];
+async function bildFuerUpload(file) {
+    const typ = String((file && file.type) || "").toLowerCase();
+    if (typ === "application/pdf")
+        return { blob: file, endung: "pdf" };
+    if (!/^image\//.test(typ))
+        throw new Error("typ");
+    const url = URL.createObjectURL(file);
+    try {
+        const img = await new Promise((ok, nein) => { const i = new Image(); i.onload = () => ok(i); i.onerror = () => nein(new Error("bild")); i.src = url; });
+        const f = Math.min(1, 2000 / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const c = document.createElement("canvas");
+        c.width = Math.max(1, Math.round((img.naturalWidth || 1) * f));
+        c.height = Math.max(1, Math.round((img.naturalHeight || 1) * f));
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const blob = await new Promise(ok => c.toBlob(ok, "image/jpeg", 0.82));
+        if (!blob)
+            throw new Error("bild");
+        return { blob, endung: "jpg" };
+    }
+    finally {
+        URL.revokeObjectURL(url);
+    }
+}
+// Liefert "ok" oder einen Fehlerschlüssel (typ, bild, gross, zuviele, voll, login, netz).
+async function schuelerUnterlageHochladen(code, name, pin, kategorie, file) {
+    if (!file || SCHUELER_UPLOAD_ARTEN.indexOf(kategorie) < 0)
+        return "typ";
+    let teil;
+    try {
+        teil = await bildFuerUpload(file);
+    }
+    catch (e) {
+        return e && e.message === "typ" ? "typ" : "bild";
+    }
+    if (teil.blob.size > 10 * 1024 * 1024)
+        return "gross";
+    try {
+        const { data: tk, error: e1 } = await sbPublic.rpc("public_student_upload_ticket", { code, p_name: name, p_pin: pin, p_category: kategorie });
+        if (e1 || !tk)
+            return "netz";
+        if (tk.fehler)
+            return ["zuviele", "voll", "login"].indexOf(tk.fehler) >= 0 ? tk.fehler : "netz";
+        const pfad = tk.ordner + "/u-" + tk.token + "." + teil.endung;
+        const { error: e2 } = await sbPublic.storage.from("student-files").upload(pfad, teil.blob, { upsert: false, contentType: teil.endung === "pdf" ? "application/pdf" : "image/jpeg" });
+        if (e2)
+            return "netz";
+        const { data: r, error: e3 } = await sbPublic.rpc("public_student_upload_fertig", { code, p_name: name, p_pin: pin, p_token: tk.token, p_dateiname: String(file.name || "").slice(0, 120) });
+        if (e3)
+            return "netz";
+        return r === "ok" ? "ok" : r === "gross" ? "gross" : r === "login" ? "login" : "netz";
+    }
+    catch (e) {
+        return "netz";
+    }
+}
+async function publicStudentUploads(code, name, pin) {
+    const { data, error } = await sbPublic.rpc("public_student_uploads", { code, p_name: name, p_pin: pin });
+    if (error)
+        return null;
+    return Array.isArray(data) ? data : null;
+}
+// Stand je Unterlage aus Schülersicht: "wartet" (geschickt, Fahrlehrer hat noch nicht geprüft),
+// "geprueft" oder null (nichts geschickt). Maßgeblich ist die jüngste Sendung.
+function schuelerUploadStand(uploads, kategorie) {
+    const l = (uploads || []).filter(u => u && u.category === kategorie);
+    if (!l.length)
+        return null;
+    const neu = l.reduce((a, b) => (String(b.am || "") > String(a.am || "") ? b : a));
+    return neu.geprueft ? "geprueft" : "wartet";
+}
 async function publicStudentPaymentStatus(code, name, pin) {
     const { data, error } = await sbPublic.rpc("public_student_payment_status", { code, p_name: name, p_pin: pin });
     if (error) {
@@ -12136,7 +12215,7 @@ const STUDENT_I18N = {
         meine_erfolge: "Meine Erfolge",
         ach_erste_stunde: "Erste Fahrstunde", ach_zehn_stunden: "10 Fahrstunden",
         ach_erste_strecke: "Erste Strecke aufgezeichnet", ach_theorie: "Theorie bestanden",
-        ns_titel: "Dein nächster Schritt", ns_unterlagen: "Kümmere dich um: {liste}.", ns_termin: "Noch kein nächster Termin – schlag deinem Fahrlehrer einen vor.", ns_termin_btn: "Termin vorschlagen", ns_ansehen: "Ansehen", ns_pruefung: "Deine Prüfung ist in {n} Tagen.", ns_pruefung_morgen: "Deine Prüfung ist morgen.", ns_pruefung_heute: "Heute ist deine Prüfung – viel Erfolg!", unt_titel: "Unterlagen für die Prüfung", unt_sehtest: "Sehtest", unt_erstehilfe: "Erste-Hilfe-Kurs", unt_passfoto: "Biometrisches Passfoto", unt_antrag: "Antrag bei der Führerscheinstelle", unt_alle: "Alles beisammen", unt_offen: "{n} offen", unt_hinweis: "Der Antrag dauert bei der Führerscheinstelle oft einige Wochen – am besten früh stellen. Sag deinem Fahrlehrer Bescheid, wenn du etwas erledigt hast.",
+        ns_titel: "Dein nächster Schritt", ns_unterlagen: "Kümmere dich um: {liste}.", ns_termin: "Noch kein nächster Termin – schlag deinem Fahrlehrer einen vor.", ns_termin_btn: "Termin vorschlagen", ns_ansehen: "Ansehen", ns_pruefung: "Deine Prüfung ist in {n} Tagen.", ns_pruefung_morgen: "Deine Prüfung ist morgen.", ns_pruefung_heute: "Heute ist deine Prüfung – viel Erfolg!", unt_titel: "Unterlagen für die Prüfung", unt_sehtest: "Sehtest", unt_erstehilfe: "Erste-Hilfe-Kurs", unt_passfoto: "Biometrisches Passfoto", unt_antrag: "Antrag bei der Führerscheinstelle", unt_alle: "Alles beisammen", unt_offen: "{n} offen", unt_foto: "Foto senden", unt_laedt: "Wird gesendet…", unt_wartet: "Gesendet – wird geprüft", unt_ok: "Danke! Dein Fahrlehrer sieht es jetzt und hakt es ab.", unt_err_netz: "Senden hat nicht geklappt. Bitte versuch es noch einmal.", unt_err_typ: "Bitte ein Foto oder eine PDF-Datei wählen.", unt_err_bild: "Dieses Bild lässt sich nicht öffnen. Mach am besten ein neues Foto.", unt_err_gross: "Die Datei ist zu groß (höchstens 10 MB).", unt_err_zuviele: "Zu viele Versuche. Bitte warte eine Stunde.", unt_err_voll: "Du hast schon sehr viele Dateien geschickt. Bitte sprich mit deinem Fahrlehrer.", unt_err_login: "Deine Anmeldung ist abgelaufen. Bitte melde dich neu an.", unt_foto_aria: "Foto senden: {was}", unt_hinweis: "Der Antrag dauert bei der Führerscheinstelle oft einige Wochen – am besten früh stellen. Sag deinem Fahrlehrer Bescheid, wenn du etwas erledigt hast.",
         ach_halbzeit: "Halbzeit erreicht", ach_fast_fertig: "Kurz vor der Prüfung",
         ach_komplett: "{titel} komplett",
         nachrichten: "Nachrichten",
@@ -12533,7 +12612,7 @@ const STUDENT_I18N = {
         meine_erfolge: "My achievements",
         ach_erste_stunde: "First driving lesson", ach_zehn_stunden: "10 driving lessons",
         ach_erste_strecke: "First route recorded", ach_theorie: "Theory test passed",
-        ns_titel: "Your next step", ns_unterlagen: "Take care of: {liste}.", ns_termin: "No next lesson yet – suggest one to your instructor.", ns_termin_btn: "Suggest a time", ns_ansehen: "View", ns_pruefung: "Your test is in {n} days.", ns_pruefung_morgen: "Your test is tomorrow.", ns_pruefung_heute: "Your test is today – good luck!", unt_titel: "Documents for your test", unt_sehtest: "Eye test", unt_erstehilfe: "First aid course", unt_passfoto: "Biometric passport photo", unt_antrag: "Application at the licensing office", unt_alle: "All done", unt_offen: "{n} open", unt_hinweis: "The licensing office often needs several weeks for the application – best to submit it early. Let your instructor know when you have done something.",
+        ns_titel: "Your next step", ns_unterlagen: "Take care of: {liste}.", ns_termin: "No next lesson yet – suggest one to your instructor.", ns_termin_btn: "Suggest a time", ns_ansehen: "View", ns_pruefung: "Your test is in {n} days.", ns_pruefung_morgen: "Your test is tomorrow.", ns_pruefung_heute: "Your test is today – good luck!", unt_titel: "Documents for your test", unt_sehtest: "Eye test", unt_erstehilfe: "First aid course", unt_passfoto: "Biometric passport photo", unt_antrag: "Application at the licensing office", unt_alle: "All done", unt_offen: "{n} open", unt_foto: "Send photo", unt_laedt: "Sending…", unt_wartet: "Sent – being checked", unt_ok: "Thanks! Your instructor can see it now and will tick it off.", unt_err_netz: "Sending failed. Please try again.", unt_err_typ: "Please choose a photo or a PDF file.", unt_err_bild: "This image can't be opened. Please take a new photo.", unt_err_gross: "The file is too large (max. 10 MB).", unt_err_zuviele: "Too many attempts. Please wait an hour.", unt_err_voll: "You have already sent a lot of files. Please talk to your instructor.", unt_err_login: "Your login has expired. Please log in again.", unt_foto_aria: "Send photo: {was}", unt_hinweis: "The licensing office often needs several weeks for the application – best to submit it early. Let your instructor know when you have done something.",
         ach_halbzeit: "Halfway there", ach_fast_fertig: "Almost ready for the test",
         ach_komplett: "{titel} complete",
         nachrichten: "Messages",
@@ -12928,7 +13007,7 @@ const STUDENT_I18N = {
         meine_erfolge: "Başarılarım",
         ach_erste_stunde: "İlk direksiyon dersi", ach_zehn_stunden: "10 direksiyon dersi",
         ach_erste_strecke: "İlk güzergah kaydedildi", ach_theorie: "Teorik sınav geçildi",
-        ns_titel: "Bir sonraki adımın", ns_unterlagen: "Şunlarla ilgilen: {liste}.", ns_termin: "Henüz bir sonraki ders yok – eğitmenine bir randevu öner.", ns_termin_btn: "Randevu öner", ns_ansehen: "Görüntüle", ns_pruefung: "Sınavına {n} gün kaldı.", ns_pruefung_morgen: "Sınavın yarın.", ns_pruefung_heute: "Sınavın bugün – bol şans!", unt_titel: "Sınav için belgeler", unt_sehtest: "Göz testi", unt_erstehilfe: "İlk yardım kursu", unt_passfoto: "Biyometrik vesikalık fotoğraf", unt_antrag: "Ehliyet dairesine başvuru", unt_alle: "Hepsi tamam", unt_offen: "{n} eksik", unt_hinweis: "Ehliyet dairesinde başvuru çoğu zaman birkaç hafta sürer – en iyisi erkenden yapmak. Bir şeyi tamamladığında eğitmenine haber ver.",
+        ns_titel: "Bir sonraki adımın", ns_unterlagen: "Şunlarla ilgilen: {liste}.", ns_termin: "Henüz bir sonraki ders yok – eğitmenine bir randevu öner.", ns_termin_btn: "Randevu öner", ns_ansehen: "Görüntüle", ns_pruefung: "Sınavına {n} gün kaldı.", ns_pruefung_morgen: "Sınavın yarın.", ns_pruefung_heute: "Sınavın bugün – bol şans!", unt_titel: "Sınav için belgeler", unt_sehtest: "Göz testi", unt_erstehilfe: "İlk yardım kursu", unt_passfoto: "Biyometrik vesikalık fotoğraf", unt_antrag: "Ehliyet dairesine başvuru", unt_alle: "Hepsi tamam", unt_offen: "{n} eksik", unt_foto: "Fotoğraf gönder", unt_laedt: "Gönderiliyor…", unt_wartet: "Gönderildi – kontrol ediliyor", unt_ok: "Teşekkürler! Eğitmenin şimdi görüyor ve onaylayacak.", unt_err_netz: "Gönderilemedi. Lütfen tekrar dene.", unt_err_typ: "Lütfen bir fotoğraf veya PDF dosyası seç.", unt_err_bild: "Bu resim açılamıyor. Lütfen yeni bir fotoğraf çek.", unt_err_gross: "Dosya çok büyük (en fazla 10 MB).", unt_err_zuviele: "Çok fazla deneme. Lütfen bir saat bekle.", unt_err_voll: "Zaten çok fazla dosya gönderdin. Lütfen eğitmeninle konuş.", unt_err_login: "Oturumunun süresi doldu. Lütfen tekrar giriş yap.", unt_foto_aria: "Fotoğraf gönder: {was}", unt_hinweis: "Ehliyet dairesinde başvuru çoğu zaman birkaç hafta sürer – en iyisi erkenden yapmak. Bir şeyi tamamladığında eğitmenine haber ver.",
         ach_halbzeit: "Yarı yolu geçtin", ach_fast_fertig: "Sınava neredeyse hazırsın",
         ach_komplett: "{titel} tamamlandı",
         nachrichten: "Mesajlar",
@@ -13323,7 +13402,7 @@ const STUDENT_I18N = {
         meine_erfolge: "Мои достижения",
         ach_erste_stunde: "Первое занятие по вождению", ach_zehn_stunden: "10 занятий по вождению",
         ach_erste_strecke: "Первый маршрут записан", ach_theorie: "Теоретический экзамен сдан",
-        ns_titel: "Твой следующий шаг", ns_unterlagen: "Позаботься о: {liste}.", ns_termin: "Следующего занятия пока нет – предложи инструктору время.", ns_termin_btn: "Предложить время", ns_ansehen: "Открыть", ns_pruefung: "До экзамена осталось дней: {n}.", ns_pruefung_morgen: "Экзамен завтра.", ns_pruefung_heute: "Экзамен сегодня – удачи!", unt_titel: "Документы для экзамена", unt_sehtest: "Проверка зрения", unt_erstehilfe: "Курс первой помощи", unt_passfoto: "Биометрическое фото", unt_antrag: "Заявление в ведомство по водительским правам", unt_alle: "Всё готово", unt_offen: "Осталось: {n}", unt_hinweis: "Рассмотрение заявления часто занимает несколько недель – лучше подать его заранее. Сообщи инструктору, когда что-то сделаешь.",
+        ns_titel: "Твой следующий шаг", ns_unterlagen: "Позаботься о: {liste}.", ns_termin: "Следующего занятия пока нет – предложи инструктору время.", ns_termin_btn: "Предложить время", ns_ansehen: "Открыть", ns_pruefung: "До экзамена осталось дней: {n}.", ns_pruefung_morgen: "Экзамен завтра.", ns_pruefung_heute: "Экзамен сегодня – удачи!", unt_titel: "Документы для экзамена", unt_sehtest: "Проверка зрения", unt_erstehilfe: "Курс первой помощи", unt_passfoto: "Биометрическое фото", unt_antrag: "Заявление в ведомство по водительским правам", unt_alle: "Всё готово", unt_offen: "Осталось: {n}", unt_foto: "Отправить фото", unt_laedt: "Отправка…", unt_wartet: "Отправлено – на проверке", unt_ok: "Спасибо! Инструктор уже видит это и отметит пункт.", unt_err_netz: "Не удалось отправить. Попробуй ещё раз.", unt_err_typ: "Выбери фото или PDF-файл.", unt_err_bild: "Это изображение не открывается. Сделай новое фото.", unt_err_gross: "Файл слишком большой (макс. 10 МБ).", unt_err_zuviele: "Слишком много попыток. Подожди час.", unt_err_voll: "Ты уже отправил много файлов. Поговори с инструктором.", unt_err_login: "Сеанс истёк. Войди снова.", unt_foto_aria: "Отправить фото: {was}", unt_hinweis: "Рассмотрение заявления часто занимает несколько недель – лучше подать его заранее. Сообщи инструктору, когда что-то сделаешь.",
         ach_halbzeit: "Половина пути пройдена", ach_fast_fertig: "Почти готов(а) к экзамену",
         ach_komplett: "{titel} завершено",
         nachrichten: "Сообщения",
@@ -16554,6 +16633,29 @@ function App() {
         return () => sub.subscription.unsubscribe();
     }, []);
     const uid = session && session.user ? session.user.id : null;
+    // Unterlagen, die Schüler selbst geschickt haben und die noch niemand geprüft hat (v2.80.0).
+    // Steht bewusst HINTER const uid - davor wirft schon das Abhängigkeits-Array [uid] (TDZ).
+    // RLS liefert nur Dateien von Schülern, die dieser Fahrlehrer sieht.
+    const [schuelerUploads, setSchuelerUploads] = useState([]);
+    useEffect(() => {
+        if (!uid || IS_DEMO()) { setSchuelerUploads([]); return; }
+        let aus = false, zuletzt = 0;
+        function laden() {
+            if (document.visibilityState !== "visible" || Date.now() - zuletzt < 30000) return;
+            zuletzt = Date.now();
+            sb.from("student_files").select("id, student_id, category, created_at").eq("von_schueler", true).is("geprueft_at", null)
+                .order("created_at", { ascending: false }).limit(50)
+                .then(({ data, error }) => { if (!aus && !error) setSchuelerUploads(data || []); }, () => { });
+        }
+        laden();
+        document.addEventListener("visibilitychange", laden);
+        return () => { aus = true; document.removeEventListener("visibilitychange", laden); };
+    }, [uid]);
+    // Im Bereich "Antrag" die Dokumente gleich laden, wenn dort etwas Neues vom Schüler liegt
+    useEffect(() => {
+        if (studentTab === "antrag" && studentFiles === null && activeId && schuelerUploads.some(u => u.student_id === activeId))
+            loadStudentFiles();
+    }, [activeId, studentTab, schuelerUploads.length, studentFiles === null]);
     // Offline-Warteschlange (siehe warteschlangeVormerken): Stand im Speicher + Anzeige-Zähler.
     const warteschlangeRef = useRef({});
     const uidRef = useRef(uid);
@@ -18494,6 +18596,21 @@ function App() {
             setStudentFileUploading(false);
         }
     }
+    async function schuelerDateiGeprueft(f) {
+        if (!f || !active) return;
+        const studentId = active.id;
+        const { error } = await sb.rpc("student_file_geprueft", { p_id: f.id });
+        if (error) { showToast("Konnte nicht gespeichert werden:\n" + fehlerText(error), "error"); return; }
+        const abhaken = LICENSE_STEPS.some(st => st.key === f.category) && !licenseStepDone(active, f.category);
+        if (abhaken && activeIdRef.current === studentId) {
+            const steps = active.licenseSteps || {};
+            updateActive({ licenseSteps: { ...steps, [f.category]: { ...(steps[f.category] || {}), done: true, date: ymd(new Date()) } } });
+        }
+        if (activeIdRef.current === studentId)
+            setStudentFiles(list => list && list.map(x => x.id === f.id ? { ...x, geprueft_at: new Date().toISOString() } : x));
+        setSchuelerUploads(l => l.filter(x => x.id !== f.id));
+        showFlash(abhaken ? "✓ Geprüft und abgehakt" : "✓ Geprüft");
+    }
     async function handleStudentFileDelete(f) {
         if (!await askConfirm({ message: "Datei \"" + f.filename + "\" endgültig löschen?" }))
             return;
@@ -18506,6 +18623,7 @@ function App() {
             // nicht verlässlich sofort aus, siehe studentsRef.)
             if (activeIdRef.current === studentId)
                 setStudentFiles(list => (list || []).filter(x => x.id !== f.id));
+            setSchuelerUploads(l => l.filter(x => x.id !== f.id));
         }
         catch (e) {
             showToast("Löschen fehlgeschlagen:\n" + (e.message || e), "error");
@@ -23552,6 +23670,17 @@ function App() {
         if (anfragen48.length > 0)
             weekItems.push({ key: "anfragen48", prio: "bald", icon: icClock, onClick: () => setView("interessenten"),
                 text: anfragen48.length === 1 ? "1 Anfrage seit über 2 Tagen ohne Antwort" : anfragen48.length + " Anfragen seit über 2 Tagen ohne Antwort" });
+        // Unterlagen vom Schüler (v2.80.0): geschickt, aber noch nicht geprüft
+        const uploadsMeine = schuelerUploads.filter(u => (students || []).some(s => s.id === u.student_id && s._isMine));
+        if (uploadsMeine.length > 0) {
+            const erst = uploadsMeine[0];
+            const stuU = (students || []).find(s => s.id === erst.student_id);
+            const katU = (STUDENT_FILE_CATEGORIES.find(k => k.id === erst.category) || {}).label || "Unterlage";
+            const schuelerAnz = new Set(uploadsMeine.map(u => u.student_id)).size;
+            weekItems.push({ key: "uploads", prio: "bald", icon: icDoc, onClick: () => oeffneSchuelerReiter(erst.student_id, "antrag"),
+                text: uploadsMeine.length === 1 ? dispName(stuU) + " hat „" + katU + "“ geschickt – ansehen und abhaken"
+                    : uploadsMeine.length + " neue Unterlagen von " + (schuelerAnz === 1 ? dispName(stuU) : schuelerAnz + " Schülern") + " – ansehen und abhaken" });
+        }
         const hinweise = hinweiseOrdnen(weekItems, hinweisZurueck, heuteYmd);
         const hinweisZeilen = hinweiseAlle ? hinweise.sichtbar.concat(hinweise.versteckt) : hinweise.sichtbar;
         function hinweisZurueckstellen(it) {
@@ -27433,7 +27562,13 @@ function App() {
     function renderStudentFiles() {
         return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 16 } },
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15, marginBottom: 2 } }, "Dokumente"),
-            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Sehtest, Erste-Hilfe-Nachweis, Passfoto & Co. als Foto oder PDF hinterlegen."),
+            React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, "Sehtest, Erste-Hilfe-Nachweis, Passfoto & Co. als Foto oder PDF hinterlegen. Schüler können sie auch selbst in ihrer App schicken."),
+            (() => {
+                const neu = schuelerUploads.filter(u => u.student_id === active.id);
+                if (!neu.length || studentFiles !== null) return null;
+                return React.createElement("div", { role: "status", style: { fontSize: 13, fontWeight: 650, color: "var(--orange-ink)", marginBottom: 10 } },
+                    (neu.length === 1 ? "1 neue Unterlage" : neu.length + " neue Unterlagen") + " vom Schüler – zum Ansehen „Dokumente laden“");
+            })(),
             studentFiles === null
                 ? React.createElement("button", { className: "btn btn-ghost", onClick: loadStudentFiles }, "Dokumente laden")
                 : React.createElement(React.Fragment, null,
@@ -27452,6 +27587,11 @@ function App() {
                                             React.createElement("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" }),
                                             React.createElement("path", { d: "M14 2v6h6" })),
                                         React.createElement("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, f.filename)),
+                                    // Vom Schüler geschickt (v2.80.0): kennzeichnen und mit einem Tipp prüfen + abhaken
+                                    f.von_schueler && (f.geprueft_at
+                                        ? React.createElement("span", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", flexShrink: 0 } }, "vom Schüler · geprüft")
+                                        : React.createElement("button", { className: "btn btn-primary", onClick: () => schuelerDateiGeprueft(f), style: { flexShrink: 0, minHeight: 36, padding: "0 12px", fontSize: 12.5 } },
+                                            LICENSE_STEPS.some(st => st.key === f.category) && !licenseStepDone(active, f.category) ? "Passt – abhaken" : "Geprüft")),
                                     React.createElement("button", { className: "icon-x", onClick: () => handleStudentFileDelete(f), "aria-label": "Löschen", style: { color: "var(--red)", fontSize: 15, padding: "2px 6px", flexShrink: 0 } }, "×"))));
                         }),
                     React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" } },
@@ -41864,6 +42004,30 @@ function StudentArea({ code, info, appMode, onSprache }) {
         return "";
     } });
     const [data, setData] = React.useState(null); // Überblick nach erfolgreichem Login
+    // Unterlagen vom Schüler (v2.80.0): was schon geschickt wurde + laufender Upload
+    const [uploads, setUploads] = React.useState(null);
+    const [uploadBusy, setUploadBusy] = React.useState("");
+    const [uploadMsg, setUploadMsg] = React.useState(null); // null | {ok, text}
+    const angemeldet = !!data;
+    React.useEffect(() => {
+        if (!angemeldet) { setUploads(null); setUploadMsg(null); return; }
+        let an = true;
+        publicStudentUploads(code, name.trim(), pin.trim()).then(l => { if (an) setUploads(l || []); }).catch(() => { });
+        return () => { an = false; };
+    }, [angemeldet, code]);
+    async function unterlageSenden(kategorie, file) {
+        if (!file || uploadBusy) return;
+        setUploadBusy(kategorie);
+        setUploadMsg(null);
+        const r = await schuelerUnterlageHochladen(code, name.trim(), pin.trim(), kategorie, file);
+        setUploadBusy("");
+        if (r === "ok") {
+            setUploads(l => [{ category: kategorie, am: new Date().toISOString(), geprueft: false }].concat(l || []));
+            setUploadMsg({ ok: true, text: t("unt_ok") });
+        }
+        else
+            setUploadMsg({ ok: false, text: t("unt_err_" + r) });
+    }
     // Selbsteinschätzung zu einer Fahrstunde (siehe lesson_reflections/public_lesson_reflection_submit).
     // Die Fahrlehrer-Bewertung dieser Stunde bleibt bis zur Abgabe unsichtbar (teacherRatings kommt
     // erst danach vom Server zurück) - genau deshalb erst NACH dem Abschicken neu laden, statt die
@@ -42412,9 +42576,18 @@ function StudentArea({ code, info, appMode, onSprache }) {
                 React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 } },
                     React.createElement("div", { role: "heading", "aria-level": 3, style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, t("unt_titel")),
                     React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: offen ? "var(--amber-ink)" : "var(--green-ink)", flexShrink: 0 } }, offen ? t("unt_offen", { n: offen }) : t("unt_alle"))),
-                punkte.map(k => React.createElement("div", { key: k, style: { display: "flex", alignItems: "center", gap: 9, padding: "6px 0", fontSize: 14 } },
+                punkte.map(k => React.createElement("div", { key: k, style: { display: "flex", alignItems: "center", gap: 9, padding: "6px 0", fontSize: 14, minHeight: 44 } },
                     React.createElement("span", { role: "img", "aria-label": stu.unterlagen[k] ? t("sr_erledigt") : t("sr_offen"), style: { width: 18, flexShrink: 0, fontWeight: 800, color: stu.unterlagen[k] ? "var(--green)" : "var(--amber)" } }, stu.unterlagen[k] ? "✓" : "○"),
-                    React.createElement("span", { style: { color: stu.unterlagen[k] ? "var(--ink-2)" : "var(--ink)", fontWeight: stu.unterlagen[k] ? 500 : 650 } }, t("unt_" + k)))),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0, color: stu.unterlagen[k] ? "var(--ink-2)" : "var(--ink)", fontWeight: stu.unterlagen[k] ? 500 : 650 } }, t("unt_" + k)),
+                    // Foto schicken (v2.80.0) - der Antrag wird bei der Behörde gestellt, dafür gibt es nichts zu fotografieren
+                    !stu.unterlagen[k] && k !== "antrag" && uploads !== null && (schuelerUploadStand(uploads, k) === "wartet"
+                        ? React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "var(--muted)", flexShrink: 0, textAlign: "right" } }, t("unt_wartet"))
+                        : React.createElement("label", { className: "btn btn-ghost", "aria-label": t("unt_foto_aria", { was: t("unt_" + k) }), style: { flexShrink: 0, minHeight: 40, padding: "0 12px", fontSize: 13, cursor: uploadBusy ? "default" : "pointer", opacity: uploadBusy && uploadBusy !== k ? .5 : 1 } },
+                            uploadBusy === k ? t("unt_laedt") : t("unt_foto"),
+                            React.createElement("input", { type: "file", accept: "image/*,application/pdf", disabled: !!uploadBusy, style: { position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" },
+                                onChange: e => { const f = e.target.files && e.target.files[0]; e.target.value = ""; if (f) unterlageSenden(k, f); } }))))),
+                uploadMsg && React.createElement("div", { role: uploadMsg.ok ? "status" : "alert", style: { fontSize: 13, fontWeight: 600, lineHeight: 1.45, marginTop: 6, padding: "8px 10px", borderRadius: 10,
+                        background: uploadMsg.ok ? "var(--green-soft)" : "var(--danger-bg)", color: uploadMsg.ok ? "var(--green-ink)" : "var(--red-ink)" } }, uploadMsg.text),
                 offen > 0 && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", lineHeight: 1.5, marginTop: 6 } }, t("unt_hinweis")));
         })(),
         React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 14 } },

@@ -873,3 +873,13 @@ test("Live-Kalender: nur Anfragen, Absage-Wünsche und übernommene freie Termin
     assert.equal(m(null, null), null);
     assert.equal(m(null, { ...neu, title: "" }).text.startsWith("Neue Terminanfrage\nOhne Namen"), true);
 });
+
+test("Unterlagen vom Schüler: Stand je Unterlage aus der jüngsten Sendung", () => {
+    const st = require("./lade-app")(["schuelerUploadStand"]).schuelerUploadStand;
+    assert.equal(st(null, "sehtest"), null);
+    assert.equal(st([{ category: "passfoto", am: "2026-10-01T10:00:00Z", geprueft: false }], "sehtest"), null);
+    assert.equal(st([{ category: "sehtest", am: "2026-10-01T10:00:00Z", geprueft: false }], "sehtest"), "wartet");
+    // erst geprüft, dann neues Foto geschickt -> wartet wieder
+    assert.equal(st([{ category: "sehtest", am: "2026-10-01T10:00:00Z", geprueft: true }, { category: "sehtest", am: "2026-10-02T10:00:00Z", geprueft: false }], "sehtest"), "wartet");
+    assert.equal(st([{ category: "sehtest", am: "2026-10-03T10:00:00Z", geprueft: true }, { category: "sehtest", am: "2026-10-02T10:00:00Z", geprueft: false }], "sehtest"), "geprueft");
+});
