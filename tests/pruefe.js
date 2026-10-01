@@ -32,5 +32,27 @@ for (let i = frueh; frueh > 0 && i < z.length; i++) {
     if (/^    (const|let) .*=\s*(React\.)?use(State|Ref|Effect|Memo|Callback|Reducer|LayoutEffect)\(/.test(z[i]) || /^    (React\.)?use(Effect|LayoutEffect)\(/.test(z[i])) hooks.push(i + 1);
 }
 console.log("Hooks nach frühem Return (Zeilen): " + (hooks.length ? hooks.join(", ") : "keine")); if (hooks.length) ok = false;
+// TDZ-Prüfung (2026-10-01, nach zwei weißen Bildschirmen durch [uid] und [view]): Abhängigkeits-
+// Arrays von Hooks in App() werden beim RENDERN ausgewertet. Steht dort ein const, das erst weiter
+// unten in App() deklariert wird, wirft React "Cannot access ... before initialization" - pruefe.js
+// prüfte bisher nur Syntax, die Demo zeigte es erst im Browser. Funktionen sind gehoben und zählen nicht.
+const appEnde = (() => { for (let i = appStart + 1; i < z.length; i++) if (/^}/.test(z[i])) return i; return z.length; })();
+const dekl = {};
+for (let i = appStart + 1; i < appEnde; i++) {
+    const m = z[i].match(/^    (?:const|let) (?:\[([^\]]+)\]|\{([^}]+)\}|([A-Za-z_$][\w$]*))\s*=/);
+    if (!m) continue;
+    const namen = m[3] ? [m[3]] : (m[1] || m[2]).split(",").map(x => x.split(":").pop().split("=")[0].trim()).filter(Boolean);
+    namen.forEach(n => { if (/^[A-Za-z_$][\w$]*$/.test(n) && dekl[n] === undefined) dekl[n] = i; });
+}
+const tdz = [];
+for (let i = appStart + 1; i < appEnde; i++) {
+    const m = z[i].match(/^    \}, \[([^\]]*)\]\);/) || z[i].match(/^    (?:const|let) .*=\s*(?:React\.)?use(?:Memo|Callback)\(.*, \[([^\]]*)\]\);\s*(?:\/\/.*)?$/)
+        || z[i].match(/^    (?:React\.)?use(?:Effect|LayoutEffect)\(.*, \[([^\]]*)\]\);\s*(?:\/\/.*)?$/);
+    if (!m) continue;
+    m[1].split(",").map(x => (x.trim().match(/^[A-Za-z_$][\w$]*/) || [""])[0]).filter(Boolean).forEach(n => {
+        if (dekl[n] !== undefined && dekl[n] > i) tdz.push((i + 1) + ": " + n + " (deklariert in Zeile " + (dekl[n] + 1) + ")");
+    });
+}
+console.log("Abhängigkeiten vor ihrer Deklaration (TDZ): " + (tdz.length ? "\n  " + tdz.join("\n  ") : "keine")); if (tdz.length) ok = false;
 console.log(ok ? "ALLES OK" : "FEHLER");
 process.exit(ok ? 0 : 1);
