@@ -3578,7 +3578,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.80.0";
+const APP_VERSION = "2.81.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3725,6 +3725,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.81.0", date: "Oktober 2026", changes: [
+            "Neu: Wer auf deiner Buchungsseite im Chat Fragen stellt, kann jetzt einen Rückruf anfordern. Die Anfrage landet mit Telefonnummer und den gestellten Fragen bei deinen Interessenten und erscheint auf der Startseite",
+        ] },
     { v: "2.80.0", date: "Oktober 2026", changes: [
             "Neu: Schüler können Sehtest, Erste-Hilfe-Nachweis und Passfoto selbst als Foto in ihrer App schicken. Du siehst es auf der Startseite und hakst es in der Schülerakte mit einem Tipp ab",
         ] },
@@ -8846,6 +8849,19 @@ function schuelerUploadStand(uploads, kategorie) {
         return null;
     const neu = l.reduce((a, b) => (String(b.am || "") > String(a.am || "") ? b : a));
     return neu.geprueft ? "geprueft" : "wartet";
+}
+// Rückruf-Wunsch aus dem Chat (v2.81.0, Produktplan #9): die letzten Fragen des Besuchers als
+// Notiz für den Fahrlehrer - höchstens drei, zusammen höchstens 500 Zeichen.
+function chatFragenText(msgs) {
+    const fragen = (msgs || []).filter(m => m && m.role === "user" && String(m.text || "").trim())
+        .map(m => String(m.text).trim().replace(/\s+/g, " "));
+    return fragen.slice(-3).join(" · ").slice(0, 500);
+}
+async function publicRueckrufAusChat(code, vorname, tel, klasse, fragen, einwilligung) {
+    const { data, error } = await sbPublic.rpc("public_rueckruf_aus_chat", { code, p_vorname: vorname, p_tel: tel, p_klasse: klasse || "", p_fragen: fragen || "", p_einwilligung: !!einwilligung });
+    if (error)
+        return "netz";
+    return typeof data === "string" ? data : "netz";
 }
 async function publicStudentPaymentStatus(code, name, pin) {
     const { data, error } = await sbPublic.rpc("public_student_payment_status", { code, p_name: name, p_pin: pin });
@@ -23664,6 +23680,12 @@ function App() {
             weekItems.push({ key: "schluss", prio: "bald", icon: icWallet, onClick: () => oeffneSchuelerReiter(schlussOffen[0].stu.id, "fahrten"),
                 text: schlussOffen.length === 1 ? dispName(schlussOffen[0].stu) + " hat bestanden – Schlussrechnung fehlt" : schlussOffen.length + " bestandene Schüler: Schlussrechnung fehlt",
                 amountText: eurFmt(schlussOffen.reduce((t, x) => t + x.betrag, 0)) });
+        // Rückruf-Wunsch aus dem Chat (v2.81.0): frisch eingegangen, noch nicht bearbeitet
+        const rueckrufe = (interessenten || []).filter(it => it && it.quelle === "chat" && (it.status || "offen") === "offen" && !it.follow_up_am && it.created_at
+            && Date.now() - new Date(it.created_at).getTime() <= 48 * 3600000);
+        if (rueckrufe.length > 0)
+            weekItems.push({ key: "rueckruf", prio: "bald", icon: icClock, accent: true, onClick: () => setView("interessenten"),
+                text: rueckrufe.length === 1 ? (rueckrufe[0].vorname || "Jemand") + " möchte zurückgerufen werden (aus dem Chat)" : rueckrufe.length + " Rückruf-Wünsche aus dem Chat" });
         // Automatik #13 (v2.76.0): neue Anfragen, die seit über 48 Stunden niemand beantwortet hat
         const anfragen48 = (interessenten || []).filter(it => it && (it.status || "offen") === "offen" && !it.follow_up_am && it.created_at
             && Date.now() - new Date(it.created_at).getTime() > 48 * 3600000);
@@ -43459,6 +43481,20 @@ function BookingPage({ code, appMode, onLogout }) {
     const [chatInput, setChatInput] = React.useState("");
     const [chatBusy, setChatBusy] = React.useState(false);
     const [chatErr, setChatErr] = React.useState("");
+    // Rückruf-Wunsch (v2.81.0): null | {offen, vorname, tel, klasse, ja, busy, fehler, fertig}
+    const [rueckruf, setRueckruf] = React.useState(null);
+    async function rueckrufSenden() {
+        const f = rueckruf;
+        if (!f || f.busy) return;
+        if (!String(f.vorname || "").trim()) { setRueckruf(x => ({ ...x, fehler: "Bitte gib deinen Vornamen an." })); return; }
+        if (String(f.tel || "").replace(/\D/g, "").length < 6) { setRueckruf(x => ({ ...x, fehler: "Bitte gib eine Telefonnummer an, unter der wir dich erreichen." })); return; }
+        if (!f.ja) { setRueckruf(x => ({ ...x, fehler: "Bitte bestätige, dass wir dich dafür kontaktieren dürfen." })); return; }
+        setRueckruf(x => ({ ...x, busy: true, fehler: "" }));
+        const r = await publicRueckrufAusChat(code, f.vorname.trim(), f.tel.trim(), f.klasse, chatFragenText(chatMsgs), true);
+        const texte = { demo: "Das ist die Demo-Fahrschule – hier kommt keine Anfrage an.", zuviele: "Heute sind schon sehr viele Anfragen eingegangen. Bitte ruf die Fahrschule direkt an.",
+            tel: "Bitte prüfe die Telefonnummer.", name: "Bitte gib deinen Vornamen an.", einwilligung: "Bitte bestätige, dass wir dich dafür kontaktieren dürfen." };
+        setRueckruf(x => x && (r === "ok" ? { ...x, busy: false, fertig: true } : { ...x, busy: false, fehler: texte[r] || "Senden hat nicht geklappt. Bitte versuch es noch einmal." }));
+    }
     const chatListRef = React.useRef(null);
     React.useEffect(() => {
         if (chatListRef.current)
@@ -44642,7 +44678,35 @@ function BookingPage({ code, appMode, onLogout }) {
                     chatMsgs.map((m, i) => React.createElement("div", { key: i, style: { display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 8 } },
                         React.createElement("div", { style: { maxWidth: "82%", padding: "9px 12px", borderRadius: 14, fontSize: 13.5, lineHeight: 1.45,
                                 background: m.role === "user" ? "var(--orange)" : "var(--field-bg)", color: m.role === "user" ? "#fff" : "var(--ink)" } }, React.createElement("span", { style: SR_NUR }, m.role === "user" ? "Du: " : "Assistent: "), m.text))),
-                    chatBusy && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, "…")),
+                    chatBusy && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)" } }, "…"),
+                    // Rückruf-Wunsch (v2.81.0): nur auf der öffentlichen Seite, nicht für angemeldete
+                    // Schüler, und erst nach der ersten Antwort - dann weiß der Besucher, ob der Chat reicht.
+                    !appMode && !chatBusy && chatMsgs.some(m => m.role === "assistant") && (() => { try { return !localStorage.getItem("v3_sa_pin_" + code); } catch (e) { return true; } })() && (
+                        rueckruf && rueckruf.fertig
+                            ? React.createElement("div", { role: "status", style: { background: "var(--green-soft)", color: "var(--green-ink)", borderRadius: 12, padding: "10px 12px", fontSize: 13, fontWeight: 600, lineHeight: 1.45, marginTop: 4 } },
+                                "Danke! " + ((info && info.school_name) || "Die Fahrschule") + " ruft dich zurück.")
+                            : !(rueckruf && rueckruf.offen)
+                                ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10, background: "var(--field-bg)", borderRadius: 12, padding: "9px 10px 9px 12px", marginTop: 4 } },
+                                    React.createElement("div", { style: { flex: 1, fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.4 } }, "Lieber persönlich? Wir rufen dich zurück."),
+                                    React.createElement("button", { className: "btn btn-ghost", style: { flexShrink: 0, minHeight: 40, padding: "0 12px", fontSize: 13 },
+                                        onClick: () => setRueckruf({ offen: true, vorname: "", tel: "", klasse: "", ja: false, busy: false, fehler: "", fertig: false }) }, "Rückruf anfordern"))
+                                : React.createElement("div", { role: "group", "aria-label": "Rückruf anfordern", style: { background: "var(--field-bg)", borderRadius: 12, padding: "12px", marginTop: 4 } },
+                                    React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 13.5, marginBottom: 8 } }, "Rückruf anfordern"),
+                                    React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" } },
+                                        React.createElement("input", { type: "text", autoComplete: "given-name", "aria-label": "Vorname", placeholder: "Vorname", value: rueckruf.vorname, maxLength: 80,
+                                            onChange: e => setRueckruf(x => ({ ...x, vorname: e.target.value })), style: { flex: "1 1 120px", minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "10px 11px", fontSize: 16, background: "var(--card)", color: "var(--ink)" } }),
+                                        React.createElement("input", { type: "text", "aria-label": "Führerscheinklasse (optional)", placeholder: "Klasse, z. B. B", value: rueckruf.klasse, maxLength: 10,
+                                            onChange: e => setRueckruf(x => ({ ...x, klasse: e.target.value })), style: { flex: "0 1 110px", minWidth: 0, border: "1.5px solid var(--line)", borderRadius: 10, padding: "10px 11px", fontSize: 16, background: "var(--card)", color: "var(--ink)" } })),
+                                    React.createElement("input", { type: "tel", autoComplete: "tel", "aria-label": "Telefonnummer", placeholder: "Telefonnummer", value: rueckruf.tel, maxLength: 40,
+                                        onChange: e => setRueckruf(x => ({ ...x, tel: e.target.value })), style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 10, padding: "10px 11px", fontSize: 16, background: "var(--card)", color: "var(--ink)", marginBottom: 8 } }),
+                                    React.createElement("label", { style: { display: "flex", gap: 9, alignItems: "flex-start", fontSize: 12, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 10, cursor: "pointer" } },
+                                        React.createElement("input", { type: "checkbox", checked: !!rueckruf.ja, onChange: e => setRueckruf(x => ({ ...x, ja: e.target.checked })), style: { width: 20, height: 20, flexShrink: 0, marginTop: 1, accentColor: "var(--orange)" } }),
+                                        React.createElement("span", null, "Die Fahrschule darf mich unter dieser Nummer zurückrufen und sieht dafür meine Fragen aus diesem Chat. ",
+                                            React.createElement("a", { href: window.location.origin + "/?datenschutz=1", target: "_blank", rel: "noopener noreferrer", style: { color: "var(--orange-deep)", fontWeight: 600 } }, "Datenschutz"))),
+                                    rueckruf.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", marginBottom: 8 } }, rueckruf.fehler),
+                                    React.createElement("div", { style: { display: "flex", gap: 8 } },
+                                        React.createElement("button", { className: "btn btn-primary", style: { flex: 1 }, disabled: rueckruf.busy, onClick: rueckrufSenden }, rueckruf.busy ? "Wird gesendet…" : "Rückruf anfordern"),
+                                        React.createElement("button", { className: "btn btn-ghost", disabled: rueckruf.busy, onClick: () => setRueckruf(null) }, "Abbrechen"))))),
                 chatErr && React.createElement("div", { role: "alert", style: { background: "var(--red-soft)", color: "var(--red-ink)", borderRadius: 10, padding: "8px 10px", fontSize: 12.5, marginBottom: 8, flexShrink: 0 } }, chatErr),
                 React.createElement("div", { style: { display: "flex", gap: 8, flexShrink: 0 } },
                     React.createElement("input", { type: "text", value: chatInput, "aria-label": "Deine Frage", placeholder: "Deine Frage…", disabled: chatBusy,

@@ -883,3 +883,11 @@ test("Unterlagen vom Schüler: Stand je Unterlage aus der jüngsten Sendung", ()
     assert.equal(st([{ category: "sehtest", am: "2026-10-01T10:00:00Z", geprueft: true }, { category: "sehtest", am: "2026-10-02T10:00:00Z", geprueft: false }], "sehtest"), "wartet");
     assert.equal(st([{ category: "sehtest", am: "2026-10-03T10:00:00Z", geprueft: true }, { category: "sehtest", am: "2026-10-02T10:00:00Z", geprueft: false }], "sehtest"), "geprueft");
 });
+
+test("Rückruf aus dem Chat: letzte drei Fragen als Notiz, höchstens 500 Zeichen", () => {
+    const f = require("./lade-app")(["chatFragenText"]).chatFragenText;
+    assert.equal(f([]), "");
+    assert.equal(f([{ role: "user", text: "a" }, { role: "assistant", text: "x" }, { role: "user", text: "  b  \n c " }]), "a · b c");
+    assert.equal(f([1, 2, 3, 4].map(i => ({ role: "user", text: "F" + i }))), "F2 · F3 · F4");
+    assert.equal(f([{ role: "user", text: "x".repeat(800) }]).length, 500);
+});
