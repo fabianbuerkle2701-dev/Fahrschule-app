@@ -3620,7 +3620,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.84.0";
+const APP_VERSION = "2.85.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3767,6 +3767,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.85.0", date: "Oktober 2026", changes: [
+            "Neu: Theorie-Stand deiner Schüler (im Theoriepilot). Du siehst auf einen Blick, wer die Theorie noch offen hat, wer angemeldet ist und was als Nächstes zu tun ist. Die Startseite meldet, wenn jemand schon viel gefahren ist, die Theorie aber fehlt",
+        ] },
     { v: "2.84.0", date: "Oktober 2026", changes: [
             "Neu: Prüfungstag. Steht heute eine Prüfung im Kalender, zeigt die Startseite oben eine Checkliste (Ausweis, Brille, Ausbildungsnachweis, Fahrzeug) und danach „Bestanden“ / „Nicht bestanden“ mit einem Tipp – mit Glückwunsch per WhatsApp oder direktem Weg zum neuen Prüfplatz",
         ] },
@@ -14226,6 +14229,36 @@ function pruefungstagEintraege(termine, schueler, heuteYmd, jetztMs) {
     return out.sort((x, y) => new Date(x.appt.start_at) - new Date(y.appt.start_at));
 }
 // Was mitmuss - kurz, zum Abhaken. fehlend = offene Unterlagen laut Akte (Labels).
+// Theorie-Stand (v2.85.0, Produktplan #17): wo steht ein Schüler bei der Theorie und was ist der
+// nächste Schritt? Aus den Daten, die es wirklich gibt: bestanden, angemeldet, Prüfungstermin (VT),
+// Antrag, Fehlversuche, Probeprüfungen (theoryMockExams, nur falls in der App geübt) und die schon
+// gefahrenen UE ("Theorie bremst": viel Praxis, Theorie noch offen).
+// ctx = { ueGefahren (gefahrene Fahrstunden wie in der Schülerliste), vtTermin (YYYY-MM-DD | null), heute }
+// stufe: "bestanden" | "termin" | "angemeldet" | "bereit" | "offen"
+const THEORIE_BREMST_UE = 20;
+function theorieStandVon(stu, ctx) {
+    stu = stu || {};
+    ctx = ctx || {};
+    const theorie = String(stu.theorie || "");
+    const fehlversuche = (stu.exams || []).filter(e => e && e.art === "theorie" && e.ergebnis && !e.passed).length;
+    const probe = Array.isArray(stu.theoryMockExams) ? stu.theoryMockExams.filter(Boolean) : [];
+    const letzte = probe.slice(-3);
+    const probeText = probe.length ? probe.length + (probe.length === 1 ? " Probeprüfung" : " Probeprüfungen") + ", zuletzt " + (letzte[letzte.length - 1].passed ? "bestanden" : "nicht bestanden") : "";
+    const base = { fehlversuche, probeAnzahl: probe.length, probeText };
+    if (theorie && theorie !== "false")
+        return { ...base, stufe: "bestanden", text: "Bestanden" + (/^\d{4}-\d{2}-\d{2}/.test(theorie) ? " am " + new Date(theorie.slice(0, 10) + "T12:00:00").toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit", year: "numeric" }) : ""), schritt: "", bremst: false };
+    const ls = stu.licenseSteps || {};
+    const antrag = !!(ls.antrag && ls.antrag.done);
+    const bremst = (Number(ctx.ueGefahren) || 0) >= THEORIE_BREMST_UE;
+    if (ctx.vtTermin && (!ctx.heute || ctx.vtTermin >= ctx.heute))
+        return { ...base, stufe: "termin", text: "Prüfung am " + new Date(ctx.vtTermin + "T12:00:00").toLocaleDateString("de-DE", { day: "2-digit", month: "2-digit" }), schritt: "", bremst: false };
+    if (ls.theorie_angemeldet && ls.theorie_angemeldet.done)
+        return { ...base, stufe: "angemeldet", text: "Angemeldet", schritt: "Prüfungstermin eintragen", bremst };
+    if (letzte.length >= 3 && letzte.every(x => x.passed))
+        return { ...base, stufe: "bereit", text: "Probeprüfungen sicher", schritt: antrag ? "Zur Theorieprüfung anmelden" : "Antrag stellen, dann anmelden", bremst };
+    return { ...base, stufe: "offen", text: fehlversuche ? fehlversuche + (fehlversuche === 1 ? " Fehlversuch" : " Fehlversuche") : "Noch offen",
+        schritt: !antrag ? "Antrag bei der Führerscheinstelle stellen" : bremst ? "Theorieprüfung angehen – die Praxis ist schon weit" : "Lernen und anmelden, sobald es sitzt", bremst };
+}
 function pruefungstagCheckliste(art, stu, fehlend) {
     const l = ["Personalausweis oder Reisepass"];
     if (art === "praxis") {
@@ -23796,6 +23829,12 @@ function App() {
         const testfahrtBereit = (students || []).filter(s => s._isMine && !s.archived && !s.pending
             && !(s.examReadiness && s.examReadiness.ergebnis === "bestanden")
             && ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen");
+        // Theorie bremst (v2.85.0): viel Praxis gefahren, Theorie weder bestanden noch angemeldet/terminiert
+        const theorieBremst = theorieStandListe().filter(x => x.st.bremst && x.st.stufe !== "angemeldet");
+        if (theorieBremst.length > 0)
+            weekItems.push({ key: "theoriebremst", icon: icClock, onClick: () => setView("theoriepilot"),
+                text: theorieBremst.length === 1 ? dispName(theorieBremst[0].stu) + ": Theorie noch offen, aber schon " + theorieBremst[0].std + " Fahrstunden"
+                    : theorieBremst.length + " Schüler: Theorie noch offen, aber schon " + THEORIE_BREMST_UE + "+ Fahrstunden" });
         // Guthaben-Modell (v2.71.0): wer mehr verbraucht als aufgeladen hat - Hinweis, buchen geht weiter
         const guthabenLeer = (students || []).filter(s => s._isMine && !s.archived && abrechnungsModell(s) === "guthaben"
             && sumCharges(s, stdPrice) - sumPayments(s) > 0.005);
@@ -24698,6 +24737,48 @@ function App() {
                                 } } }, "Ablehnen"))))));
     }
     /* ── Karte: Live-Tracking & Stecknadeln ── */
+    // Theorie-Stand deiner Schüler (v2.85.0): wer hängt bei der Theorie, und was ist zu tun?
+    function theorieStandListe() {
+        const heute = ymd(new Date());
+        const vt = {};
+        (appts || []).forEach(a => {
+            if (a && a.art === "VT" && a.status !== "pending" && a.status !== "offered" && a.student_id) {
+                const d = ymd(a.start_at);
+                if (d >= heute && (!vt[a.student_id] || d < vt[a.student_id])) vt[a.student_id] = d;
+            }
+        });
+        const RANG = { termin: 1, angemeldet: 2, bereit: 3, offen: 4, bestanden: 9 };
+        return (students || []).filter(s => s._isMine && !s.archived && !s.pending)
+            .map(s => ({ stu: s, std: countStunden(s) + (parseInt(s.manualHours, 10) || 0) })).map(x => ({ ...x, st: theorieStandVon(x.stu, { ueGefahren: x.std, vtTermin: vt[x.stu.id] || null, heute }) }))
+            .sort((a, b) => (b.st.bremst - a.st.bremst) || (RANG[a.st.stufe] - RANG[b.st.stufe]) || dispName(a.stu).localeCompare(dispName(b.stu), "de"));
+    }
+    function theorieStandKarte() {
+        const liste = theorieStandListe();
+        if (!liste.length) return null;
+        const offen = liste.filter(x => x.st.stufe !== "bestanden");
+        const bestanden = liste.length - offen.length;
+        const bremst = offen.filter(x => x.st.bremst).length;
+        const farbe = st => st.stufe === "termin" ? "var(--green-ink)" : st.stufe === "bereit" ? "var(--green-ink)" : st.stufe === "angemeldet" ? "var(--blue)" : st.bremst ? "var(--red-ink)" : "var(--muted)";
+        return React.createElement("div", { className: "card", style: { padding: "14px 15px", marginBottom: 18 } },
+            React.createElement("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 10, marginBottom: 2 } },
+                React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 16, margin: 0 } }, "Theorie-Stand deiner Schüler"),
+                React.createElement("span", { style: { fontSize: 12, color: "var(--muted)", flexShrink: 0 } }, bestanden + " von " + liste.length + " bestanden")),
+            React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 0 8px", lineHeight: 1.5 } },
+                bremst ? bremst + (bremst === 1 ? " Schüler hat" : " Schüler haben") + " schon " + THEORIE_BREMST_UE + " oder mehr Fahrstunden, die Theorie aber noch offen – die bremst sonst die Prüfung." : "Wer bei der Theorie wo steht – der nächste Schritt steht rechts."),
+            offen.length === 0
+                ? React.createElement("div", { style: { fontSize: 13.5, color: "var(--green-ink)", fontWeight: 650, padding: "6px 0" } }, "Alle haben die Theorie bestanden.")
+                : offen.slice(0, 40).map((x, i) => React.createElement("button", { key: x.stu.id, onClick: () => oeffneSchuelerReiter(x.stu.id, "pruefung"),
+                        style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "10px 2px", textAlign: "left", background: "none", border: "none", borderTop: i ? "1px solid var(--line)" : "none", cursor: "pointer", color: "var(--ink)" } },
+                    React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("span", { style: { display: "block", fontSize: 14, fontWeight: 650, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, dispName(x.stu)),
+                        React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)", marginTop: 1 } },
+                            [x.std + " Std. gefahren", x.st.probeText].filter(Boolean).join(" · "))),
+                    React.createElement("span", { style: { textAlign: "right", flexShrink: 0, maxWidth: "55%" } },
+                        React.createElement("span", { style: { display: "block", fontSize: 12.5, fontWeight: 700, color: farbe(x.st) } }, x.st.text),
+                        x.st.schritt && React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "var(--muted)", marginTop: 1, lineHeight: 1.35 } }, x.st.schritt)))),
+            offen.length > 40 && React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", paddingTop: 8 } }, "… und " + (offen.length - 40) + " weitere"),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 0 0", lineHeight: 1.5 } }, "Probeprüfungen erscheinen, sobald deine Schüler in der App üben. Antippen öffnet die Prüfungsakte."));
+    }
     function renderTheoriepilot() {
         function topicRow(klasse, topicKey, title, showBorder) {
             return React.createElement("button", { key: topicKey, onClick: () => openTheoryTopic(klasse, topicKey, title), style: { width: "100%", display: "flex", alignItems: "center", gap: 10, padding: "12px 2px", textAlign: "left",
@@ -24710,6 +24791,7 @@ function App() {
                 React.createElement("div", { className: "home-eyebrow" }, "Theoriepilot"),
                 React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 23, marginTop: 5 } }, "Theorieunterricht"),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginTop: 4, lineHeight: 1.5 } }, "Methoden, Medien und Lernstandskontrollen zu jedem Thema, von Fahrlehrern geteilt und von einem Fahrschul-Admin freigegeben – danach für alle Fahrlehrer in der App sichtbar.")),
+            theorieStandKarte(),
             isSchoolAdmin && !canModerateApp && React.createElement(Collapsible, { title: "Beiträge prüfen", subtitle: "Als Fahrschul-Admin freigeben oder ablehnen" }, renderTheoryReviewCard()),
             React.createElement("div", { className: "eyebrow", style: { marginTop: 0 } }, "Grundstoff \u00B7 alle Klassen (12 Themen)"),
             React.createElement("div", { className: "card", style: { padding: "4px 14px", marginBottom: 18 } },

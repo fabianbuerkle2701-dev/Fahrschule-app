@@ -944,3 +944,22 @@ test("Prüfungstag: heutige Prüfungen, Phase, Ergebnis, Checkliste", () => {
     assert.equal(k.pruefungstagCheckliste("theorie", {}, ["A", "B"])[1], "Fehlt laut Akte: A, B");
     assert.deepEqual(JSON.parse(JSON.stringify(k.pruefungstagCheckliste("theorie", stu[0], []))), ["Personalausweis oder Reisepass"]);
 });
+
+test("Theorie-Stand: Stufen, nächster Schritt, Theorie bremst", () => {
+    const f = require("./lade-app")(["theorieStandVon"]).theorieStandVon;
+    const heute = "2026-10-02";
+    assert.equal(f({ theorie: "2026-09-01" }, { heute }).stufe, "bestanden");
+    assert.match(f({ theorie: "2026-09-01" }, { heute }).text, /^Bestanden am 01\.09\.2026$/);
+    assert.equal(f({ theorie: "false" }, { heute }).stufe, "offen");
+    assert.equal(f({}, { heute, vtTermin: "2026-10-10" }).stufe, "termin");
+    assert.equal(f({}, { heute, vtTermin: "2026-09-10" }).stufe, "offen", "vergangener VT-Termin zählt nicht");
+    assert.equal(f({ licenseSteps: { theorie_angemeldet: { done: true } } }, { heute }).stufe, "angemeldet");
+    const sicher = { licenseSteps: { antrag: { done: true } }, theoryMockExams: [{ passed: false }, { passed: true }, { passed: true }, { passed: true }] };
+    assert.equal(f(sicher, { heute }).stufe, "bereit");
+    assert.equal(f(sicher, { heute }).schritt, "Zur Theorieprüfung anmelden");
+    assert.equal(f({}, { heute }).schritt, "Antrag bei der Führerscheinstelle stellen");
+    const b = f({ licenseSteps: { antrag: { done: true } }, exams: [{ art: "theorie", ergebnis: true, passed: false }] }, { heute, ueGefahren: 24 });
+    assert.equal(b.bremst, true); assert.equal(b.text, "1 Fehlversuch"); assert.match(b.schritt, /Praxis ist schon weit/);
+    assert.equal(f({}, { heute, ueGefahren: 19 }).bremst, false);
+    assert.equal(f({ theoryMockExams: [{ passed: false }] }, { heute }).probeText, "1 Probeprüfung, zuletzt nicht bestanden");
+});
