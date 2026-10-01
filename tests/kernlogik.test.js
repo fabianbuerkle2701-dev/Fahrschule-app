@@ -891,3 +891,34 @@ test("Rückruf aus dem Chat: letzte drei Fragen als Notiz, höchstens 500 Zeiche
     assert.equal(f([1, 2, 3, 4].map(i => ({ role: "user", text: "F" + i }))), "F2 · F3 · F4");
     assert.equal(f([{ role: "user", text: "x".repeat(800) }]).length, 500);
 });
+
+test("Kalender drucken: Zeitraum, Kurznamen, Termine je Tag", () => {
+    const k = require("./lade-app")(["kalenderDruckZeitraum", "kalenderDruckTage", "kurzName"]);
+    const heute = new Date("2026-10-01T10:00:00Z"); // Donnerstag
+    const w = k.kalenderDruckZeitraum("woche", heute);
+    assert.equal(w.von, "2026-09-28"); assert.equal(w.bis, "2026-10-04"); assert.equal(w.monat, false);
+    assert.match(w.titel, /^KW 40 · 28\.09\.–04\.10\.2026$/);
+    assert.equal(k.kalenderDruckZeitraum("naechste", heute).von, "2026-10-05");
+    const m = k.kalenderDruckZeitraum("monat", heute);
+    assert.equal(m.von, "2026-09-28"); assert.equal(m.bis, "2026-11-01"); assert.equal(m.monatErster, "2026-10-01"); assert.equal(m.monatLetzter, "2026-10-31");
+    assert.equal(k.kalenderDruckZeitraum("naechsterMonat", heute).monatErster, "2026-11-01");
+    assert.equal(k.kurzName("Lena Berger"), "Lena B."); assert.equal(k.kurzName("Anna Maria von Stein"), "Anna S."); assert.equal(k.kurzName("Ida"), "Ida");
+    const U = "§URLAUB§", S = "§SONST§";
+    const termine = [
+        { start_at: "2026-09-29T14:00:00Z", end_at: "2026-09-29T14:45:00Z", title: "Lena Berger", art: "ÜST", status: "confirmed", abholort: "Innenstadt" },
+        { start_at: "2026-09-29T07:00:00Z", end_at: "2026-09-29T07:45:00Z", title: "Ida Lorenz", art: "AB", status: "confirmed" },
+        { start_at: "2026-09-30T08:00:00Z", title: "Jonas Weber", art: "ÜST", status: "pending" },
+        { start_at: "2026-09-30T09:00:00Z", title: "Frei", art: "ÜST", status: "offered" },
+        { start_at: "2026-10-01T22:00:00Z", end_at: "2026-10-03T21:59:00Z", title: "Urlaub", note: U, status: "confirmed" },
+        { start_at: "2026-09-28T10:00:00Z", end_at: "2026-09-28T11:00:00Z", title: "Büro", note: S + "x", art: "ÜST", status: "confirmed" },
+    ];
+    const t = k.kalenderDruckTage(termine, w.von, w.bis, { kurzNamen: true, abholort: true, urlaubMark: U, sonstMark: S });
+    assert.equal(t.length, 7);
+    const di = t[1].eintraege;
+    assert.deepEqual(JSON.parse(JSON.stringify(di.map(e => [e.zeit, e.titel, e.art, e.ort]))), [["09:00–09:45", "Ida L.", "AB", ""], ["16:00–16:45", "Lena B.", "ÜST", "Innenstadt"]]);
+    assert.equal(t[2].eintraege.length, 0, "Anfrage ohne Haken und offered fehlen");
+    assert.equal(t[3].eintraege.length, 0); assert.equal(t[4].eintraege[0].typ, "urlaub"); assert.equal(t[5].eintraege[0].titel, "Urlaub");
+    assert.equal(t[0].eintraege[0].typ, "sonst"); assert.equal(t[0].eintraege[0].titel, "Büro");
+    const mitAnfragen = k.kalenderDruckTage(termine, w.von, w.bis, { anfragen: true });
+    assert.equal(mitAnfragen[2].eintraege[0].typ, "anfrage");
+});
