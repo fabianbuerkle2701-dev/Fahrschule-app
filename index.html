@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.73.0";
+const APP_VERSION = "2.74.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.74.0", date: "Oktober 2026", changes: [
+            "Monatsabrechnung der Fahrlehrer: je Fahrlehrer steht jetzt, was laut Kalender anfiel – Fahrstunden, Sonderfahrten, Prüfungen, Theorie, Sonstiges und Urlaub/Krank. Alles lässt sich als Excel-Liste speichern",
+        ] },
     { v: "2.73.0", date: "Oktober 2026", changes: [
             "Neu: „Vor der Fahrt“. Tippst du im Kalender auf eine Fahrstunde, siehst du sofort das Ziel, die Notiz „Nächstes Mal“, Auffälligkeiten aus den letzten Stunden, den Stand der Sonderfahrt und Warnungen vor einer nahen Prüfung",
         ] },
@@ -45476,6 +45479,48 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
                         })(),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 16 }, onClick: () => setAkte(null) }, "Schließen"))));
 }
+// Monatsabrechnung, Aufschlüsselung laut Kalender (v2.74.0, Produktplan Teil K): je Fahrlehrer
+// Minuten nach Gruppe (Fahrstunden, Sonderfahrten, Prüfungen, Theorie, Sonstiges) und Tage mit
+// Urlaub/Krank - aus school_arbeitszeit (bestätigte Termine, typ urlaub/privat/sonstige).
+// Keine Lohnabrechnung, nur die Grundlage dafür. Privates zählt nirgends.
+const MONAT_SONSTIGE_ARTEN = ["ST", "STI", "VS"];
+function monatsAufschluesselung(termine) {
+    const je = {};
+    const tag = d => new Date(d).toLocaleDateString("sv-SE", { timeZone: "Europe/Berlin" });
+    (termine || []).forEach(t => {
+        if (!t || !t.lehrer_id || !t.start_at || t.typ === "privat")
+            return;
+        const x = je[t.lehrer_id] || (je[t.lehrer_id] = { fahrstunden: 0, sonderfahrten: 0, pruefungen: 0, pruefungMin: 0, theorie: 0, sonstiges: 0, urlaubTage: [] });
+        if (t.typ === "urlaub") {
+            const d = tag(t.start_at);
+            if (x.urlaubTage.indexOf(d) < 0) x.urlaubTage.push(d);
+            return;
+        }
+        const min = t.end_at ? Math.max(0, Math.round((new Date(t.end_at) - new Date(t.start_at)) / 60000)) : 45;
+        if (t.typ === "sonstige" || MONAT_SONSTIGE_ARTEN.indexOf(t.art) >= 0) { x.sonstiges += min; return; }
+        const gruppe = ART_GROUP_OF[t.art] || "Fahrstunden";
+        if (gruppe === "Sonderfahrten") x.sonderfahrten += min;
+        else if (gruppe === "Prüfungsteile") { x.pruefungen += 1; x.pruefungMin += min; }
+        else if (gruppe === "Theorie") x.theorie += min;
+        else x.fahrstunden += min;
+    });
+    Object.keys(je).forEach(k => { je[k].urlaubTage = je[k].urlaubTage.length; });
+    return je;
+}
+// Eine Zeile Text daraus ("Fahrstunden 30 UE · Sonderfahrten 6 UE · 2 Prüfungen · Theorie 8 Std. · ...")
+function monatsAufschluesselungText(x) {
+    if (!x) return "";
+    const ue = m => (Math.round(m / 45 * 10) / 10).toLocaleString("de-DE") + " UE";
+    const std = m => (Math.round(m / 60 * 10) / 10).toLocaleString("de-DE") + " Std.";
+    return [
+        x.fahrstunden ? "Fahrstunden " + ue(x.fahrstunden) : "",
+        x.sonderfahrten ? "Sonderfahrten " + ue(x.sonderfahrten) : "",
+        x.pruefungen ? x.pruefungen + (x.pruefungen === 1 ? " Prüfung" : " Prüfungen") : "",
+        x.theorie ? "Theorie " + std(x.theorie) : "",
+        x.sonstiges ? "Sonstiges " + std(x.sonstiges) : "",
+        x.urlaubTage ? "Urlaub/Krank " + x.urlaubTage + (x.urlaubTage === 1 ? " Tag" : " Tage") : "",
+    ].filter(Boolean).join(" · ");
+}
 async function fetchSchoolArbeitszeit(schoolId, vonISO, bisISO) {
     const { data, error } = await sb.rpc("school_arbeitszeit", { p_school_id: schoolId, p_von: vonISO, p_bis: bisISO });
     if (error) throw new Error(fehlerText(error));
@@ -45830,6 +45875,17 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
             .catch(e => { if (on) setState({ busy: false, error: e.message || "Fehler beim Laden", rows: [] }); });
         return () => { on = false; };
     }, [schoolId, jahr, monat]);
+    // Aufschlüsselung laut Kalender (v2.74.0) - Fehler hier blendet nur die Zusatzzeile aus
+    const [kalender, setKalender] = React.useState(null);
+    React.useEffect(() => {
+        if (!schoolId || IS_DEMO()) { setKalender(null); return; }
+        let on = true;
+        const von = new Date(jahr, monat - 1, 1), bis = new Date(jahr, monat, 1);
+        fetchSchoolArbeitszeit(schoolId, von.toISOString(), bis.toISOString())
+            .then(t => { if (on) setKalender(monatsAufschluesselung(t)); })
+            .catch(() => { if (on) setKalender(null); });
+        return () => { on = false; };
+    }, [schoolId, jahr, monat]);
 
     const monatWechseln = (delta) => {
         const d = new Date(jahr, monat - 1 + delta, 1);
@@ -45890,6 +45946,8 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
                                         ? "Kein Vergütungsmodell hinterlegt"
                                         : (x.modell.modell === "fest_ue" ? (eurFmt(x.modell.satz) + " je UE") : (x.modell.satz + " % vom Umsatz")),
                                     x.ohneTermin > 0 ? (" · " + x.ohneTermin + " Std. ohne Termin, dem Schüler-Fahrlehrer zugeordnet") : ""),
+                                kalender && kalender[x.id] && React.createElement("div", { style: { fontSize: 12, color: "var(--ink-2)", marginTop: 4, lineHeight: 1.45 } },
+                                    React.createElement("span", { style: { color: "var(--muted)" } }, "Laut Kalender: "), monatsAufschluesselungText(kalender[x.id])),
                                 istAdmin && React.createElement("button", { className: "btn btn-ghost", style: { padding: "4px 9px", fontSize: 11.5, marginTop: 6 },
                                         onClick: () => setModellEdit({ id: x.id, name: x.name, modell: x.modell.modell || "", satz: x.modell.satz == null ? "" : String(x.modell.satz) }) },
                                     x.verguetung == null ? "Vergütung festlegen" : "Vergütung ändern"))) ),
@@ -45900,8 +45958,16 @@ function Monatsabrechnung({ schoolId, istAdmin, stdPreis }) {
                         ohneModell > 0 && React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px 8px" } },
                             ohneModell === 1 ? "Für einen Fahrlehrer ist kein Vergütungsmodell hinterlegt - er zählt nicht in die Summe."
                                              : ("Für " + ohneModell + " Fahrlehrer ist kein Vergütungsmodell hinterlegt - sie zählen nicht in die Summe.")),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 }, onClick: () => {
+                                const r1 = m => Math.round(m * 10) / 10;
+                                csvHerunterladen("monatsabrechnung_" + jahr + "-" + String(monat).padStart(2, "0") + ".csv",
+                                    ["Fahrlehrer", "Fahrstunden (Fahrtenbuch)", "UE", "Umsatz (€)", "Vergütung (€)", "Kalender: Fahrstunden UE", "Kalender: Sonderfahrten UE", "Kalender: Prüfungen", "Kalender: Theorie Std.", "Kalender: Sonstiges Std.", "Kalender: Urlaub/Krank Tage"],
+                                    liste.map(x => { const k = (kalender && kalender[x.id]) || {};
+                                        return [x.name, x.stunden, r1(x.ue), Math.round(x.umsatz * 100) / 100, x.verguetung == null ? "" : Math.round(x.verguetung * 100) / 100,
+                                            r1((k.fahrstunden || 0) / 45), r1((k.sonderfahrten || 0) / 45), k.pruefungen || 0, r1((k.theorie || 0) / 60), r1((k.sonstiges || 0) / 60), k.urlaubTage || 0]; }));
+                            } }, "Als Excel-Liste speichern (CSV)"),
                         React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", lineHeight: 1.5, margin: "0 2px" } },
-                            "Abrechnungsgrundlage, keine Lohnabrechnung: Steuern und Sozialabgaben sind hier nicht berücksichtigt.")),
+                            "Abrechnungsgrundlage, keine Lohnabrechnung: Steuern und Sozialabgaben sind hier nicht berücksichtigt. „Laut Kalender“ zählt bestätigte Termine des Monats.")),
         modellEdit && React.createElement("div", { onClick: () => setModellEdit(null), className: "modal-overlay", role: "dialog", "aria-modal": "true",
                 style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 180, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 400, borderRadius: 20, padding: "22px 20px" } },

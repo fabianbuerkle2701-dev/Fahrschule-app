@@ -803,3 +803,24 @@ test("Vor der Fahrt: Ziel, Notiz ohne Dopplung, Abweichungen, Sonderfahrt, Prüf
     assert.ok(!JSON.stringify(vf.vorDerFahrtPunkte(stu, appt, { ...ctx, pruefungDatum: "2026-11-30" })).includes("Prüfung am"));
     assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, {}).length, 0);
 });
+
+// v2.74.0: Monatsabrechnung laut Kalender
+const ma = require("./lade-app")(["monatsAufschluesselung", "monatsAufschluesselungText", "ART_GROUP_OF", "MONAT_SONSTIGE_ARTEN"]);
+test("Monatsabrechnung: Aufschlüsselung je Fahrlehrer aus dem Kalender", () => {
+    const t = [
+        { lehrer_id: "a", start_at: "2026-09-01T08:00:00Z", end_at: "2026-09-01T09:30:00Z", art: "ÜST" },   // 90
+        { lehrer_id: "a", start_at: "2026-09-02T08:00:00Z", end_at: "2026-09-02T09:30:00Z", art: "AB" },    // 90 Sonder
+        { lehrer_id: "a", start_at: "2026-09-03T08:00:00Z", end_at: "2026-09-03T08:55:00Z", art: "PF" },    // Prüfung
+        { lehrer_id: "a", start_at: "2026-09-04T16:00:00Z", end_at: "2026-09-04T17:30:00Z", art: "TH" },    // 90 Theorie
+        { lehrer_id: "a", start_at: "2026-09-05T08:00:00Z", end_at: "2026-09-05T09:00:00Z", art: "ST" },    // 60 Sonstiges
+        { lehrer_id: "a", start_at: "2026-09-06T08:00:00Z", end_at: "2026-09-06T08:30:00Z", art: "ÜST", typ: "sonstige" }, // 30 Sonstiges
+        { lehrer_id: "a", start_at: "2026-09-07T00:00:00+02:00", end_at: "2026-09-07T23:59:00+02:00", typ: "urlaub" },
+        { lehrer_id: "a", start_at: "2026-09-07T00:00:00+02:00", end_at: "2026-09-07T23:59:00+02:00", typ: "urlaub" }, // gleicher Tag
+        { lehrer_id: "a", start_at: "2026-09-08T08:00:00Z", end_at: "2026-09-08T12:00:00Z", art: "PRIVAT", typ: "privat" },
+        { lehrer_id: "b", start_at: "2026-09-01T08:00:00Z", art: "SF" },                                    // ohne Ende = 45
+    ];
+    const r = JSON.parse(JSON.stringify(ma.monatsAufschluesselung(t)));
+    assert.equal(JSON.stringify(r.a), JSON.stringify({ fahrstunden: 90, sonderfahrten: 90, pruefungen: 1, pruefungMin: 55, theorie: 90, sonstiges: 90, urlaubTage: 1 }));
+    assert.equal(r.b.fahrstunden, 45);
+    assert.equal(ma.monatsAufschluesselungText(r.a), "Fahrstunden 2 UE · Sonderfahrten 2 UE · 1 Prüfung · Theorie 1,5 Std. · Sonstiges 1,5 Std. · Urlaub/Krank 1 Tag");
+});
