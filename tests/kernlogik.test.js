@@ -782,3 +782,24 @@ test("Handlungsbedarf: Prüfungen in 7 Tagen mit Lücken", () => {
     assert.equal(r[0].tage, 3);
     assert.equal(JSON.stringify(r[0].offen), JSON.stringify(["Sonderfahrten", "Unterlagen", "Kalendereintrag"]));
 });
+
+// v2.73.0: Vor der Fahrt
+const vf = require("./lade-app")(["vorDerFahrtPunkte", "letzteBewertungen", "wiederkehrendeSchwaechenAus", "LESSON_FIELDS", "SMILEYS"]);
+test("Vor der Fahrt: Ziel, Notiz ohne Dopplung, Abweichungen, Sonderfahrt, Prüfungswarnungen", () => {
+    const stu = { lastNote: "Spurwechsel links", lessons: [{ date: "2026-09-28", ratings: { tempo: 1, verkehr: 3, komm: 2 } }] };
+    const appt = { art: "AB" };
+    const ctx = { lernziel: { typ: "ziel", text: "Spurwechsel links" }, heute: "2026-10-01",
+        sonder: [{ code: "AB", label: "Autobahnfahrt", ue: 2, sollUe: 4, erfuellt: false, langeFahrtDabei: false }],
+        pruefungDatum: "2026-10-06", offenBetrag: 120, unterlagenOffen: ["Antrag"] };
+    const p = JSON.parse(JSON.stringify(vf.vorDerFahrtPunkte(stu, appt, ctx))).map(x => x.text);
+    assert.equal(p[0], "Ziel: Spurwechsel links");
+    assert.ok(!p.some(t => t.startsWith("Nächstes Mal")));                 // identisch mit dem Ziel -> nicht doppelt
+    assert.equal(p[1], "Zuletzt: Geschwindigkeitsanpassung schlecht, Kommunikation mittel");
+    assert.equal(p[2], "Autobahnfahrt: 2 von 4 UE");
+    assert.equal(p[3], "Prüfung am 06.10. (in 5 Tagen)");
+    assert.equal(p[4], "Fehlt noch: Antrag");
+    assert.equal(p[5].replace(/\s/g, " "), "120,00 € offen vor der Prüfung");
+    // Prüfung zu weit weg -> keine Prüfungspunkte; ohne Daten -> leer
+    assert.ok(!JSON.stringify(vf.vorDerFahrtPunkte(stu, appt, { ...ctx, pruefungDatum: "2026-11-30" })).includes("Prüfung am"));
+    assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, {}).length, 0);
+});
