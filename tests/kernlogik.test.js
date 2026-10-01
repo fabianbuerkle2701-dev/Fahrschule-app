@@ -838,3 +838,8 @@ test("Navigation: Standortname wird Adresse, Links für Apple/Google, Route mit 
     assert.equal(nv.routeLink(["A", "A", "B", "C"]), "https://www.google.com/maps/dir/?api=1&destination=C&travelmode=driving&waypoints=A%7CB");
     assert.equal(nv.routeLink([]), "");
 });
+test("Vor der Fahrt: Antrag-Erinnerung bei den ersten Fahrstunden", () => {
+    const p = JSON.parse(JSON.stringify(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: true }))).map(x => x.text);
+    assert.equal(JSON.stringify(p), JSON.stringify(["Antrag bei der Führerscheinstelle noch nicht gestellt"]));
+    assert.equal(vf.vorDerFahrtPunkte({}, { art: "ÜST" }, { antragFehlt: false }).length, 0);
+});

@@ -3573,7 +3573,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.75.0";
+const APP_VERSION = "2.76.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3718,6 +3718,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.76.0", date: "Oktober 2026", changes: [
+            "Die Startseite erinnert jetzt an fehlende Schlussrechnungen nach bestandener Prüfung und an Anfragen, die seit über 2 Tagen auf Antwort warten",
+            "„Vor der Fahrt“ erinnert bei den ersten Fahrstunden an den Antrag bei der Führerscheinstelle",
+        ] },
     { v: "2.75.0", date: "Oktober 2026", changes: [
             "Neu: Navigation zum Abholort. Im Termin startest du mit einem Tipp die Karten-App, auf der Startseite öffnet „Route“ alle Abholorte von heute nacheinander in Google Maps",
         ] },
@@ -14022,6 +14026,10 @@ function vorDerFahrtPunkte(stu, appt, ctx) {
     const lz = ctx.lernziel;
     if (lz && lz.text)
         out.push({ text: (lz.typ === "warn" ? "Achtung: " : "Ziel: ") + lz.text, ton: lz.typ === "warn" ? "warn" : "ziel" });
+    // Automatik #19 (v2.76.0): bei den ersten Fahrstunden an den Antrag erinnern - die Bearbeitung
+    // bei der Führerscheinstelle dauert oft Wochen und hält sonst später die Prüfung auf.
+    if (ctx.antragFehlt)
+        out.push({ text: "Antrag bei der Führerscheinstelle noch nicht gestellt", ton: "warn" });
     const notiz = (stu.lastNote || "").trim();
     if (notiz && !(lz && lz.text && lz.text.trim() === notiz))
         out.push({ text: "Nächstes Mal: " + notiz, ton: "" });
@@ -23405,6 +23413,21 @@ function App() {
         if (ohnePlatz.length > 0)
             weekItems.push({ key: "platzfehlt", prio: "bald", accent: true, icon: icClock, onClick: () => oeffneSchuelerReiter(ohnePlatz[0].stu.id, "pruefung"),
                 text: ohnePlatz.length === 1 ? dispName(ohnePlatz[0].stu) + " ist prüfungsreif – Prüfplatz besorgen" : ohnePlatz.length + " Schüler prüfungsreif ohne Prüfplatz" });
+        // Automatik #27 (v2.76.0): bestanden, aber noch Leistungen nicht berechnet -> Schlussrechnung,
+        // auch bei schon archivierten Schülern (sonst geht der Umsatz still verloren)
+        const schlussOffen = (students || []).filter(s => s._isMine && !s.pending
+            && ((s.exams || []).some(e => e && e.art === "praxis" && e.passed) || licenseStepDone(s, "praxis_bestanden")))
+            .map(s => ({ stu: s, betrag: offeneLeistungenSumme(s, stdPrice) })).filter(x => x.betrag > 0.005);
+        if (schlussOffen.length > 0)
+            weekItems.push({ key: "schluss", prio: "bald", icon: icWallet, onClick: () => oeffneSchuelerReiter(schlussOffen[0].stu.id, "fahrten"),
+                text: schlussOffen.length === 1 ? dispName(schlussOffen[0].stu) + " hat bestanden – Schlussrechnung fehlt" : schlussOffen.length + " bestandene Schüler: Schlussrechnung fehlt",
+                amountText: eurFmt(schlussOffen.reduce((t, x) => t + x.betrag, 0)) });
+        // Automatik #13 (v2.76.0): neue Anfragen, die seit über 48 Stunden niemand beantwortet hat
+        const anfragen48 = (interessenten || []).filter(it => it && (it.status || "offen") === "offen" && !it.follow_up_am && it.created_at
+            && Date.now() - new Date(it.created_at).getTime() > 48 * 3600000);
+        if (anfragen48.length > 0)
+            weekItems.push({ key: "anfragen48", prio: "bald", icon: icClock, onClick: () => setView("interessenten"),
+                text: anfragen48.length === 1 ? "1 Anfrage seit über 2 Tagen ohne Antwort" : anfragen48.length + " Anfragen seit über 2 Tagen ohne Antwort" });
         const hinweise = hinweiseOrdnen(weekItems, hinweisZurueck, heuteYmd);
         const hinweisZeilen = hinweiseAlle ? hinweise.sichtbar.concat(hinweise.versteckt) : hinweise.sichtbar;
         function hinweisZurueckstellen(it) {
@@ -32189,7 +32212,8 @@ function App() {
         return { lernziel: lernzielFuer(appt, stu), sonder: sonderfahrtenBilanz(stu, vk, sonderfahrtenSoll),
             pruefungDatum: !pr.bestanden && pr.platz ? pr.platz.datum : null,
             offenBetrag: sumCharges(stu, Number(pricePerHour) || 0) - sumPayments(stu),
-            unterlagenOffen: pk.unterlagenOffen, heute: ymd(new Date()) };
+            unterlagenOffen: pk.unterlagenOffen, heute: ymd(new Date()),
+            antragFehlt: !licenseStepDone(stu, "antrag") && (stu.drivenLessons || []).length < 3 };
     }
     function uebergabeKontext(stu) {
         const vk = stu.klasse || DEFAULT_KLASSE;
