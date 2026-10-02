@@ -11,3 +11,5 @@
 --   Altfälle mit Flags ohne Schule bereinigt.
 -- public_enroll_student: gesperrt, wenn bereiche_aus 'anmeldung' enthält.
 -- school_offene_posten: Büro bekommt Fahrstunden ohne note/notiz/signature.
+-- Regressionsprüfung: students_teacher_update übernimmt bei Server-Rechnungen ein dort fehlendes "faellig" vom Gerät
+-- (Migration teacher_update_faellig_behalten; Rollback-Test: faellig 2026-10-16 bleibt, Fahrstunden 2, Rechnung 1).
