@@ -95,16 +95,20 @@ async function pruefeSchule(sbFetch, uid) {
 async function sammleDateipfade(serviceKey, targetUid) {
   const sbFetch = restFetch(serviceKey);
   const uid = encodeURIComponent(targetUid);
-  const [studentFilesResp, staffFilesResp, videosResp] = await Promise.all([
+  // theory-files (Audit 2026-10-02): eigene Theorie-Materialien fallen per CASCADE aus theory_resources,
+  // die Dateien blieben vorher im Bucket liegen.
+  const [studentFilesResp, staffFilesResp, videosResp, theorieResp] = await Promise.all([
     sbFetch("student_files?select=storage_path,students!inner(owner)&students.owner=eq." + uid),
     sbFetch("staff_files?instructor_uid=eq." + uid + "&select=storage_path"),
     sbFetch("videos?owner=eq." + uid + "&select=storage_path"),
+    sbFetch("theory_resources?proposed_by=eq." + uid + "&file_path=not.is.null&select=file_path"),
   ]);
-  if (!studentFilesResp.ok || !staffFilesResp.ok || !videosResp.ok) return null;
+  if (!studentFilesResp.ok || !staffFilesResp.ok || !videosResp.ok || !theorieResp.ok) return null;
   return [
     ["student-files", ((await studentFilesResp.json()) || []).map((r) => r.storage_path)],
     ["staff-files", ((await staffFilesResp.json()) || []).map((r) => r.storage_path)],
     ["videos", ((await videosResp.json()) || []).map((r) => r.storage_path)],
+    ["theory-files", ((await theorieResp.json()) || []).map((r) => r.file_path).filter(Boolean)],
   ];
 }
 
@@ -150,11 +154,24 @@ async function loescheDateien(serviceKey, buckets) {
 // NO ACTION - ist inzwischen doch jemand beigetreten, scheitert der DELETE und die Schule bleibt.
 // Ergebnis: { ok: true } oder { ok: false, status }.
 async function loescheLeereSchule(serviceKey, schoolId) {
-  const resp = await restFetch(serviceKey)("schools?id=eq." + encodeURIComponent(schoolId), {
+  // Belege der Ausgaben (Bucket "belege", Ordner = school_id): Pfade vorher einsammeln - nach dem
+  // Löschen der Schule fällt die Tabelle ausgaben per CASCADE und der Index wäre weg (Audit 2026-10-02).
+  const sbFetch = restFetch(serviceKey);
+  let belege = [];
+  try {
+    const b = await sbFetch("ausgaben?school_id=eq." + encodeURIComponent(schoolId) + "&beleg_pfad=not.is.null&select=beleg_pfad");
+    if (b.ok) belege = ((await b.json()) || []).map((r) => r.beleg_pfad).filter(Boolean);
+  } catch (e) { /* Belege bleiben dann liegen, steht im Log */ }
+  const resp = await sbFetch("schools?id=eq." + encodeURIComponent(schoolId), {
     method: "DELETE",
     headers: { Prefer: "return=minimal" },
   });
-  return resp.ok ? { ok: true } : { ok: false, status: resp.status };
+  if (!resp.ok) return { ok: false, status: resp.status };
+  if (belege.length) {
+    const { speicherFehler } = await loescheDateien(serviceKey, [["belege", belege]]);
+    if (speicherFehler.length) console.error("loescheLeereSchule: Belege der Fahrschule " + schoolId + " blieben liegen: " + speicherFehler.join(", "));
+  }
+  return { ok: true };
 }
 
 module.exports = { SUPABASE_URL, pruefeBlocker, sammleDateipfade, loescheAuthKonto, loescheDateien, loescheLeereSchule };

@@ -82,7 +82,7 @@ exports.handler = async function (event, context) {
   if (!phrase) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Stichwort übergeben" }) };
   }
-  const recent = Array.isArray(body.recent) ? body.recent.slice(0, 3) : [];
+  const recent = Array.isArray(body.recent) ? body.recent.filter((l) => l && typeof l === "object").slice(0, 3) : [];
   // Nur die Array-Laenge war gekappt, die Freitextfelder darin nicht - ein Aufruf mit nur 3
   // Eintraegen, aber beliebig langen thema/gut/schlecht-Strings konnte die Prompt-Groesse
   // trotzdem unbegrenzt hochtreiben (gleiche Fehlerklasse wie bei student-handover-summary.js).
@@ -143,7 +143,7 @@ Wichtig zu "ratings": Bewerte NUR Bereiche (verkehr=Verkehrsbeobachtung, positio
       body: JSON.stringify(payload),
     });
 
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

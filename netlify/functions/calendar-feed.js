@@ -142,7 +142,7 @@ exports.handler = async function (event) {
     const lines = [
       "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Allindrive//Kalender-Abo//DE",
       "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
-      "X-WR-CALNAME:" + icsEscape(calName + " – Fahrstunden"),
+      foldLine("X-WR-CALNAME:" + icsEscape(calName + " – Fahrstunden")),
       "X-WR-TIMEZONE:Europe/Berlin",
       "REFRESH-INTERVAL;VALUE=DURATION:PT1H",
       "X-PUBLISHED-TTL:PT1H",

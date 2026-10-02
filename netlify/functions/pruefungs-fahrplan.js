@@ -194,7 +194,7 @@ Sprich den Fahrlehrer direkt an, sachlich und knapp. Er entscheidet, welche Term
           + "\n\nFreie Fenster je Tag bis zur Prüfung:\n" + JSON.stringify(tage, null, 2) }],
       }),
     });
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

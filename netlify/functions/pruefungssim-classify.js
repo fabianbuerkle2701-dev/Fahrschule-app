@@ -63,9 +63,9 @@ exports.handler = async function (event, context) {
   // sonst könnte ein Aufruf mit riesigem Text oder Katalog die Anthropic-Tokenkosten eines
   // einzelnen Calls unbegrenzt hochtreiben.
   const text = (body.text || "").toString().trim().slice(0, 800);
-  const fahraufgaben = Array.isArray(body.fahraufgaben) ? body.fahraufgaben.slice(0, 50) : [];
-  const kompetenzbereiche = Array.isArray(body.kompetenzbereiche) ? body.kompetenzbereiche.slice(0, 50) : [];
-  const schweregrade = Array.isArray(body.schweregrade) ? body.schweregrade.slice(0, 50) : [];
+  const fahraufgaben = Array.isArray(body.fahraufgaben) ? body.fahraufgaben.filter((f) => f && typeof f === "object").slice(0, 50) : [];
+  const kompetenzbereiche = Array.isArray(body.kompetenzbereiche) ? body.kompetenzbereiche.filter((f) => f && typeof f === "object").slice(0, 50) : [];
+  const schweregrade = Array.isArray(body.schweregrade) ? body.schweregrade.filter((f) => f && typeof f === "object").slice(0, 50) : [];
   if (!text) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Text übergeben" }) };
   if (!fahraufgaben.length || !kompetenzbereiche.length || !schweregrade.length) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kataloge fehlen" }) };
@@ -118,7 +118,7 @@ Regeln:
         messages: [{ role: "user", content: "Beobachtung: " + text }],
       }),
     });
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

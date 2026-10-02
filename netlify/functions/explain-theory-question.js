@@ -77,6 +77,17 @@ exports.handler = async function (event, context) {
 
   // Tageslimit wie beim Buchungs-Chat: die Function ist bewusst ohne Login erreichbar
   // (Schüler haben keinen Supabase-Account), darf aber keine offene Kostenfalle sein.
+  // Zusätzlich je Aufrufer (eines von 64 IP-Fächern, wie booking-chat.js): sonst konnte eine einzige
+  // curl-Schleife mit dem öffentlichen Code die Erklärungen für alle Schüler bis Mitternacht abschalten.
+  const reqHeaders = event.headers || {};
+  const clientIp = (reqHeaders["x-nf-client-connection-ip"] || reqHeaders["client-ip"] || reqHeaders["x-forwarded-for"] || "").toString().split(",")[0].trim();
+  if (clientIp) {
+    const fach = parseInt(require("crypto").createHash("sha256").update(clientIp).digest("hex").slice(0, 8), 16) % 64;
+    const ipAllowed = await rpc("public_chat_rate_limit", { code, max_per_day: 40, p_feature: "explain-theory-question-ip" + fach });
+    if (ipAllowed !== true) {
+      return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute ist die Zahl der Erklärungen erschöpft. Morgen geht es weiter." }) };
+    }
+  }
   const allowed = await rpc("public_chat_rate_limit", { code, max_per_day: 120, p_feature: "explain-theory-question" });
   if (allowed !== true) {
     return { statusCode: 429, headers, body: JSON.stringify({ error: "Für heute ist die Zahl der Erklärungen erschöpft. Morgen geht es weiter." }) };

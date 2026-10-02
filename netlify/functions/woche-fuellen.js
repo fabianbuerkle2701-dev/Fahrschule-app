@@ -169,7 +169,7 @@ Sprich den Fahrlehrer sachlich und knapp an. Er entscheidet, was wirklich vorges
           + "\n\nEigene Fahrschüler:\n" + JSON.stringify(schueler, null, 2) }],
       }),
     });
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

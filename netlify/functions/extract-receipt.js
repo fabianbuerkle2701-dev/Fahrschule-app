@@ -73,8 +73,9 @@ exports.handler = async function (event, context) {
   if (images.length === 0) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Bild übergeben" }) };
   }
-  if (images.some((img) => typeof img === "string" && img.length > 11 * 1024 * 1024)) {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: "Bild ist zu groß (max. 8 MB)." }) };
+  if (images.reduce((t, img) => t + (typeof img === "string" ? img.length : 0), 0) > 5.5 * 1024 * 1024
+      || images.some((img) => typeof img === "string" && /^data:/.test(img) && !/^data:image\/(jpeg|png|gif|webp);base64,/i.test(img))) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Die Bilder sind zu groß oder im falschen Format (JPEG, PNG, GIF oder WebP, zusammen höchstens 4 MB)." }) };
   }
 
   const imageBlocks = images.map((img) => {
@@ -128,7 +129,7 @@ Wichtig: Wenn mehrere Positionen auf dem Beleg stehen, nimm für "label" eine ku
       body: JSON.stringify(payload),
     });
 
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

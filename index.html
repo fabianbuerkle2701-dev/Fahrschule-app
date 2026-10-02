@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.100.3";
+const APP_VERSION = "2.100.4";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.100.4", date: "Oktober 2026", changes: [
+            "Fotos (Anmeldeformular, ADK-Karte, Kalender, Beleg) werden vor dem Auslesen verkleinert – auch mehrere Handyfotos auf einmal klappen jetzt",
+            "Fehler behoben",
+        ] },
     { v: "2.100.3", date: "Oktober 2026", changes: [
             "Beim Import einer Schülerliste wird „Theorie bestanden: ja/x“ übernommen",
             "Fehler behoben",
@@ -20664,12 +20668,33 @@ function App() {
         showToast("Bonus gutgeschrieben: " + eurFmt(referralReward) + " für " + dispName(stu) + " und " + dispName(referrer) + ".");
     }
     // Screenshot-Import: Bilder zu Base64, an Netlify-Funktion schicken, Schüler anlegen
+    // Fotos vor dem Senden an die KI-Funktionen verkleinern (Audit 2026-10-02): Handyfotos in voller
+    // Größe sprengten die 6-MB-Grenze von Netlify bzw. die ~5-MB-Bildgrenze der KI. Längste Seite 1600 px,
+    // JPEG - für Text auf Formularen/Belegen reicht das. PDFs und nicht lesbare Formate bleiben unverändert.
     function fileToDataUrl(file) {
-        return new Promise((res, rej) => {
+        const roh = () => new Promise((res, rej) => {
             const r = new FileReader();
             r.onload = () => res(r.result);
             r.onerror = () => rej(new Error("Bild konnte nicht gelesen werden"));
             r.readAsDataURL(file);
+        });
+        if (!file || !/^image\//i.test(file.type || ""))
+            return roh();
+        return new Promise(res => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onerror = () => { URL.revokeObjectURL(url); roh().then(res, () => res("")); };
+            img.onload = () => {
+                const f = Math.min(1, 1600 / Math.max(img.width || 1, img.height || 1));
+                const c = document.createElement("canvas");
+                c.width = Math.max(1, Math.round(img.width * f)); c.height = Math.max(1, Math.round(img.height * f));
+                const ctx = c.getContext("2d");
+                ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height);
+                ctx.drawImage(img, 0, 0, c.width, c.height);
+                URL.revokeObjectURL(url);
+                try { res(c.toDataURL("image/jpeg", 0.85)); } catch (e) { roh().then(res, () => res("")); }
+            };
+            img.src = url;
         });
     }
     async function handleImportFiles(fileList) {
@@ -20687,8 +20712,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 setImportState({ busy: false, error: (out && out.error) || "Auslesen fehlgeschlagen", data: null });
                 return;
             }
@@ -20716,8 +20741,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 setInteressentImport({ busy: false, error: (out && out.error) || "Auslesen fehlgeschlagen" });
                 return;
             }
@@ -20751,8 +20776,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images, today, students: roster }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 setCalImport({ busy: false, error: (out && out.error) || "Auslesen fehlgeschlagen", items: null });
                 return;
             }
@@ -20906,8 +20931,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ images, sections }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 let msg = (out && out.error) || "Auslesen fehlgeschlagen";
                 if (out && out.raw) {
                     msg += "\n\nRohantwort:\n" + String(out.raw).slice(0, 500);
@@ -21560,8 +21585,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ message: text, students: roster, today, adk: adkCatalog, strecken: streckenCatalog, currency: "EUR" }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 setAssistant(a => ({ ...(a || {}), busy: false, error: (out && out.error) || "Anfrage fehlgeschlagen", proposal: null }));
                 return;
             }
@@ -21734,8 +21759,8 @@ function App() {
                 headers: { "Content-Type": "application/json", ...(await authHeader()) },
                 body: JSON.stringify({ student: buildHandoverPayload(stu) }),
             });
-            const out = await resp.json();
-            if (!resp.ok) {
+            const out = await resp.json().catch(() => null); // Fehlerseite ohne JSON (Audit 2026-10-02)
+            if (!resp.ok || !out) {
                 setHandoverModal(m => m ? ({ ...m, busy: false, error: (out && out.error) || "Anfrage fehlgeschlagen" }) : m);
                 return;
             }

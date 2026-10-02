@@ -15,3 +15,4 @@
 -- (Migration teacher_update_faellig_behalten; Rollback-Test: faellig 2026-10-16 bleibt, Fahrstunden 2, Rechnung 1).
 -- voucher_redeem: Zahlung mit id + erfasstVon 'server' + payments-Markierung; students_teacher_update übernimmt
 -- Server-Zahlungen wie Büro-Zahlungen (Migration voucher_zahlung_geschuetzt; Rollback-Test: altes Gerät -> 1 Zahlung, kein Doppel).
+-- Audit Netlify 2026-10-02: public_chat_rate_limit erlaubt Feature explain-theory-question-ip<0-63> (Migration rate_limit_explain_ip).

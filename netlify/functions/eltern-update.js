@@ -122,7 +122,7 @@ ${JSON.stringify(student, null, 2)}`;
       // nicht nötig.
       body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 700, thinking: { type: "disabled" }, system, messages: [{ role: "user", content: "Schreib die Nachricht." }] }),
     });
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

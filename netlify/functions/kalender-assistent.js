@@ -74,8 +74,8 @@ exports.handler = async function (event, context) {
     sonderfahrt: v && v.sonderfahrt ? cs(v.sonderfahrt, 40) : null,
     klasse: cs(v && v.klasse, 20),
     hinweise: Array.isArray(v && v.hinweise) ? v.hinweise.slice(0, 8).map((h) => cs(h, 200)) : [],
-    leerlaufDavorMin: v && v.leerlaufDavorMin == null ? null : cn(v.leerlaufDavorMin),
-    leerlaufDanachMin: v && v.leerlaufDanachMin == null ? null : cn(v.leerlaufDanachMin),
+    leerlaufDavorMin: (!v || v.leerlaufDavorMin == null) ? null : cn(v.leerlaufDavorMin),
+    leerlaufDanachMin: (!v || v.leerlaufDanachMin == null) ? null : cn(v.leerlaufDanachMin),
     bestaetigteAmTag: cn(v && v.bestaetigteAmTag),
     minutenAmTag: cn(v && v.minutenAmTag),
     schuelerFahrstunden: cn(v && v.schuelerFahrstunden),
@@ -170,7 +170,7 @@ Sprich den Fahrlehrer direkt an, sachlich und knapp. Die Entscheidung trifft am 
           + "\n\nOffene Terminvorschläge:\n" + JSON.stringify(vorschlaege, null, 2) }],
       }),
     });
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };

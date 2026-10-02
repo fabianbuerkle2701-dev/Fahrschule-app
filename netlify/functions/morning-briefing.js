@@ -267,7 +267,7 @@ Regeln, unbedingt einhalten:
         if (typeof s.fortschritt === "number") teile.push("ADK/Strecken " + s.fortschritt + "%");
         teile.push("Theorie " + (s.theorie ? "bestanden" : "offen"));
         if (s.stand) teile.push(s.stand);
-        if (s.offenerBetrag > 0) teile.push("offener Betrag " + s.offenerBetrag.toFixed(2).replace(".", ",") + " €");
+        if (typeof s.offenerBetrag === "number" && s.offenerBetrag > 0) teile.push("offener Betrag " + s.offenerBetrag.toFixed(2).replace(".", ",") + " €");
         if (s.notiz) teile.push("Notiz von der letzten Stunde: \"" + s.notiz + "\"");
         zeilen.push("- " + s.zeit + " " + s.name + ": " + teile.join(", "));
       });

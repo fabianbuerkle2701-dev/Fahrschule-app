@@ -79,8 +79,9 @@ exports.handler = async function (event, context) {
   // Serverseitiger Größen-Deckel pro Bild, zusätzlich zum Client-Check ("Bild ist zu groß (max.
   // 8 MB)", siehe index.html) - diese Funktion ist auch direkt ohne Frontend aufrufbar, das
   // Client-Limit allein reicht also nicht.
-  if (images.some((img) => typeof img === "string" && img.length > 11 * 1024 * 1024)) {
-    return { statusCode: 400, headers, body: JSON.stringify({ error: "Bild ist zu groß (max. 8 MB)." }) };
+  if (images.reduce((t, img) => t + (typeof img === "string" ? img.length : 0), 0) > 5.5 * 1024 * 1024
+      || images.some((img) => typeof img === "string" && /^data:/.test(img) && !/^data:image\/(jpeg|png|gif|webp);base64,/i.test(img))) {
+    return { statusCode: 400, headers, body: JSON.stringify({ error: "Die Bilder sind zu groß oder im falschen Format (JPEG, PNG, GIF oder WebP, zusammen höchstens 4 MB)." }) };
   }
 
   // Bild-Bausteine für Claude aufbereiten (Base64 ohne data:-Präfix)
@@ -148,7 +149,7 @@ Wichtig: Bei "Schüler: Vorname Nachname" zerlege den Namen korrekt in vorname u
       body: JSON.stringify(payload),
     });
 
-    const data = await resp.json();
+    const data = (await resp.json().catch(() => null)) || {}; // Fehlerseite ohne JSON (Audit 2026-10-02)
     if (!resp.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : "KI-Anfrage fehlgeschlagen";
       return { statusCode: 502, headers, body: JSON.stringify({ error: msg }) };
