@@ -1,0 +1,13 @@
+-- Audit Runde 2, 2026-10-02 (Migrationen audit_ausbildung_datenschutz, papierkorb_nebendaten, audit_verwaltung_fixes;
+-- Volltext: list_migrations)
+-- student_data_delete: + sepaAnfrage, uebernahme, lastNoteAt, ersterwerb; löscht lesson_reflections, theorie_anmeldungen,
+--   schueler_mitteilungen; widerruft Eltern-Links; leert schueler_wechsel.snapshot. (SEPA-Mandat bleibt: Produktentscheidung.)
+-- pg_cron wechsel-snapshots-leeren 03:35: eingelöste/abgelaufene Wechsel-Schnappschüsse nach 30 Tagen leeren.
+-- wechsel_erstellen: Fahrstunden inkl. uebernahme.fahrstunden, customCounts mitnehmen.
+-- schueler_nebendaten(p_student) / schueler_nebendaten_zurueck(p_student, p_daten): Papierkorb sichert/restauriert
+--   theory_attendance, lesson_reflections, theorie_anmeldungen (Rollback-Test: 2 gesichert, 2 zurück).
+-- school_assign_student / school_share_student: Büro-Konten als Ziel abgelehnt.
+-- _guard_profile_privilege_flags: Schulwechsel -> school_office false; Schule verlassen -> auch school_admin false;
+--   Altfälle mit Flags ohne Schule bereinigt.
+-- public_enroll_student: gesperrt, wenn bereiche_aus 'anmeldung' enthält.
+-- school_offene_posten: Büro bekommt Fahrstunden ohne note/notiz/signature.

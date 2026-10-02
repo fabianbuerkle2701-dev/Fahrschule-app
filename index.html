@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.100.2";
+const APP_VERSION = "2.100.3";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.100.3", date: "Oktober 2026", changes: [
+            "Beim Import einer Schülerliste wird „Theorie bestanden: ja/x“ übernommen",
+            "Fehler behoben",
+        ] },
     { v: "2.100.2", date: "Oktober 2026", changes: [
             "Simulatorstunden werden mit dem Simulator-Preis aus der Preisliste berechnet, wenn einer eingetragen ist",
             "Fehler behoben",
@@ -7238,11 +7242,12 @@ async function joinSchoolByCode(code) {
 // die Berechtigung dafür regelt die update-Regel der schools-Tabelle)
 async function regenerateInviteCode(schoolId) {
     const fresh = secureCode(8);
-    const { error } = await sb.from("schools").update({ invite_code: fresh }).eq("id", schoolId);
+    // updated_at mit zurückholen: sonst hielt die nächste Speicherung die Schule für "anderswo geändert"
+    const { data, error } = await sb.from("schools").update({ invite_code: fresh }).eq("id", schoolId).select("updated_at").maybeSingle();
     if (error) {
         throw new Error(error.message || "Code konnte nicht gespeichert werden");
     }
-    return fresh;
+    return { code: fresh, updated_at: data && data.updated_at };
 }
 async function fetchMySchool(uid) {
     // profile -> school_id -> school
@@ -10030,7 +10035,7 @@ function schaltkompetenzSummary(items) {
 function archivVorschlaege(students, appts, naechsteTermine, jetzt) {
     const heute = jetzt || new Date();
     const vorJahr = ymd(new Date(heute.getTime() - 365 * 86400000));
-    const letzteVon = x => [lastActivity(x), x.created_at ? ymd(x.created_at) : ""]
+    const letzteVon = x => [lastActivity(x), (x._createdAt || x.created_at) ? ymd(x._createdAt || x.created_at) : ""]
         .concat((x.drivenLessons || []).map(l => (l && l.date) || ""))
         .concat((appts || []).filter(a => a.student_id === x.id && new Date(a.start_at) < heute).map(a => ymd(a.start_at)))
         .filter(Boolean).sort().pop() || "";
@@ -14632,6 +14637,14 @@ function fahrtenbuchAusAbschluss(stu, appt, date, extra) {
     }
     return out;
 }
+// Notiz "Nächstes Mal" gilt als erledigt, sobald danach eine Fahrstunde gefahren wurde (Audit 2026-10-02:
+// vorher nur im geöffneten Schüler geprüft, "Vor der Fahrt" und Faktenblatt zeigten sie weiter).
+function lastNoteErledigt(stu) {
+    if (!stu || !(stu.lastNote || "").trim() || !stu.lastNoteAt)
+        return false;
+    const seit = ymd(stu.lastNoteAt);
+    return (stu.drivenLessons || []).some(l => l && l.date && l.date > seit);
+}
 // Bewertungen des jüngsten Fahrtenbuch-Eintrags mit mindestens einer Bewertung ("Wie letztes Mal").
 function letzteBewertungen(stu) {
     const mitWertung = (stu && stu.lessons || []).filter(l => l && l.ratings && Object.keys(l.ratings).some(k => l.ratings[k]))
@@ -14942,7 +14955,7 @@ function vorDerFahrtPunkte(stu, appt, ctx) {
     // bei der Führerscheinstelle dauert oft Wochen und hält sonst später die Prüfung auf.
     if (ctx.antragFehlt)
         out.push({ text: "Antrag bei der Führerscheinstelle noch nicht gestellt", ton: "warn" });
-    const notiz = (stu.lastNote || "").trim();
+    const notiz = lastNoteErledigt(stu) ? "" : (stu.lastNote || "").trim();
     if (notiz && !(lz && lz.text && lz.text.trim() === notiz))
         out.push({ text: "Nächstes Mal: " + notiz, ton: "" });
     const lw = letzteBewertungen(stu);
@@ -15058,7 +15071,7 @@ function uebergabeFakten(stu, ctx) {
     const schwach = wiederkehrendeSchwaechenAus(stu.lessons);
     if (schwach.length)
         plus("Wiederkehrend schwach", schwach.map(x => x.feld).join(", "), "warn");
-    plus("Nächstes Mal", (stu.lastNote || "").trim());
+    plus("Nächstes Mal", lastNoteErledigt(stu) ? "" : (stu.lastNote || "").trim());
     const unt = ctx.unterlagenOffen || [];
     plus("Unterlagen", unt.length ? "fehlt: " + unt.join(", ") : "vollständig", unt.length ? "warn" : "gut");
     plus("Theorieprüfung", ctx.theorieBestanden ? "bestanden" : "offen", ctx.theorieBestanden ? "gut" : "");
@@ -17322,6 +17335,11 @@ function App() {
             let rest = ws;
             verwaist.forEach(id => { rest = warteschlangeErledigt(rest, id); });
             warteschlangeSetzen(rest);
+            // Nicht still verwerfen (Audit 2026-10-02): sagen, welche Offline-Änderungen nicht ankamen
+            const namen = verwaist.map(id => (studentsRef.current || []).find(x => x.id === id))
+                .filter(Boolean).map(x => [x.vorname, x.name].filter(Boolean).join(" ")).filter(Boolean);
+            showToast("Offline erfasste Änderungen an " + (namen.length ? namen.join(", ") : "einem Schüler")
+                + " konnten nicht gespeichert werden – der Schüler ist nicht mehr bei dir (umgehängt oder Freigabe entzogen). Bitte gib sie dem jetzt zuständigen Fahrlehrer weiter.", "error");
         }
         const weg = new Set(verwaist);
         return updateStudents(prev => {
@@ -19712,7 +19730,7 @@ function App() {
             // Preisliste nach dem Tag der Fahrstunde, nicht nach dem Tag der Bestätigung
             const ausListe = preisAusPreisliste(school, stu.klasse, appt.art || "ÜST", date || ymd(new Date()));
             const price = ausListe != null ? ausListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour));
-            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "" }];
+            const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "", klasse: stu.klasse || DEFAULT_KLASSE }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
             if (extra && extra.folge) {
                 const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST", fahrzeug: (appt.fahrzeug && vehicles.some(v => v.id === appt.fahrzeug && !v.inactive)) ? appt.fahrzeug : fahrzeugVorschlag() };
@@ -19961,7 +19979,7 @@ function App() {
         }
         else {
             const id = "L" + Date.now() + Math.random().toString(36).slice(2, 6);
-            const driven = [...(stu.drivenLessons || []), { id, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal, art: lessonForm.art || "" }];
+            const driven = [...(stu.drivenLessons || []), { id, date: lessonForm.date, time: lessonForm.time, minutes, price: priceVal, art: lessonForm.art || "", klasse: stu.klasse || DEFAULT_KLASSE }];
             writeStudent({ ...stu, drivenLessons: driven });
         }
         setLessonForm(null);
@@ -20464,6 +20482,8 @@ function App() {
                 const created = await dbInsert(uid, row.daten || {});
                 if (!created)
                     throw new Error("Schüler konnte nicht angelegt werden");
+                // Theorie-Anwesenheit, Selbsteinschätzungen, Theorie-Anmeldungen zurückspielen (Audit 2026-10-02)
+                if (row.extra && row.extra.neben) { try { await sb.rpc("schueler_nebendaten_zurueck", { p_student: created.id, p_daten: row.extra.neben }); } catch (e) { } }
                 const neu = updateStudents(prev => [...(prev || []), created]);
                 saveCache(uid, neu);
                 // Termine, die beim Löschen gelöst wurden und noch da sind, wieder anhängen
@@ -21066,7 +21086,7 @@ function App() {
             handy: cell(map.handy), festnetz: cell(map.festnetz), email: cell(map.email),
             adresse: [[cell(map.adresse), cell(map.hausnr)].filter(Boolean).join(" "), [cell(map.plz), cell(map.ort)].filter(Boolean).join(" ")].filter(Boolean).join(", "),
             anmeldedatum: normDatum(cell(map.anmeldedatum)),
-            klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)),
+            klasse: cell(map.klasse), theorie_bestanden: normDatum(cell(map.theorie_bestanden)) || (/^(ja|j|x|✓|✔|true|1|yes|bestanden)$/i.test(String(cell(map.theorie_bestanden) == null ? "" : cell(map.theorie_bestanden)).trim()) ? "ja" : ""),
             stunden_gesamt: zahlAusZelle(cell(map.stunden_gesamt)),
             ueberlandfahrten: zahlAusZelle(cell(map.ueberland)), autobahnfahrten: zahlAusZelle(cell(map.autobahn)),
             beleuchtungsfahrten: zahlAusZelle(cell(map.nacht)) };
@@ -21444,7 +21464,7 @@ function App() {
         draft.tel = d.handy || "";
         draft.festnetz = d.festnetz || "";
         draft.ausbildungsbeginn = deToIso(d.anmeldedatum);
-        draft.theorie = deToIso(d.theorie_bestanden);
+        draft.theorie = d.theorie_bestanden === "ja" ? "ja" : deToIso(d.theorie_bestanden);
         draft.anschrift = d.adresse || "";
         if (d.sehhilfe)
             draft.sehhilfe = true;
@@ -21740,7 +21760,7 @@ function App() {
             const id = "L" + Date.now() + Math.random().toString(36).slice(2, 6);
             const minutes = parseInt(p.minutes, 10) || 0;
             const preisListe = preisAusPreisliste(school, stu.klasse, "ÜST", p.date || today0());
-            const driven = [...(stu.drivenLessons || []), { id, date: p.date || today0(), time: p.time || "", minutes,
+            const driven = [...(stu.drivenLessons || []), { id, date: p.date || today0(), time: p.time || "", minutes, klasse: stu.klasse || DEFAULT_KLASSE,
                     price: preisListe != null ? preisListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)) }];
             writeStudent({ ...stu, drivenLessons: driven });
             setActiveId(stu.id);
@@ -22049,10 +22069,14 @@ function App() {
         // Daten merken, um sie bei Bedarf wiederherstellen zu können (aktueller Stand, nicht die
         // beim Antippen übergebene Kopie).
         const backup = { ...((studentsRef.current || []).find(x => x.id === s.id) || s) };
+        // Theorie-Anwesenheit, Selbsteinschätzungen, Theorie-Anmeldungen hängen per CASCADE am Schüler
+        // und wären nach dem Löschen weg - mit in den Papierkorb (Audit 2026-10-02).
+        let neben = null;
+        if (!IS_DEMO()) { try { const r = await sb.rpc("schueler_nebendaten", { p_student: s.id }); if (!r.error) neben = r.data || null; } catch (e) { } }
         // Papierkorb (v2.58.0): Kopie samt Terminbezug - beim Wiederherstellen werden die dann noch
         // vorhandenen, gelösten Termine wieder angehängt.
         const pkId = await papierkorbAblegen(uid, "schueler", s.id, dispName(backup), backup,
-            { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length });
+            { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length, neben });
         try {
             await dbDelete(s.id);
         }
@@ -22106,10 +22130,11 @@ function App() {
             if (!created) {
                 // Kopie zurück in den Papierkorb, damit nichts verloren geht
                 if (pkId)
-                    await papierkorbAblegen(uid, "schueler", s.id, name, backup, { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length });
+                    await papierkorbAblegen(uid, "schueler", s.id, name, backup, { termine: termine.map(a => ({ id: a.id, title: a.title || "" })), dokumente: dateipfade.length, neben });
                 showToast("Wiederherstellen hat nicht geklappt" + (pkId ? "\nDer Schüler bleibt im Papierkorb." : ""), "error");
                 return;
             }
+            if (neben) { try { await sb.rpc("schueler_nebendaten_zurueck", { p_student: created.id, p_daten: neben }); } catch (e) { } }
             const neu = updateStudents(prev => [...(prev || []), created]);
             saveCache(uid, neu);
             setActiveId(created.id);
@@ -22136,12 +22161,7 @@ function App() {
        Bewusst ein spaeterer Tag und nicht derselbe: der uebliche Ablauf ist Stunde eintragen,
        dann die Notiz fuers naechste Mal schreiben - die darf nicht sofort wieder verschwinden.
        Alte Notizen ohne Zeitstempel bleiben unangetastet, dort fehlt die Grundlage. */
-    function notizErledigt(stu) {
-        if (!stu || !(stu.lastNote || "").trim() || !stu.lastNoteAt)
-            return false;
-        const seit = ymd(stu.lastNoteAt);
-        return (stu.drivenLessons || []).some(l => l && l.date && l.date > seit);
-    }
+    function notizErledigt(stu) { return lastNoteErledigt(stu); }
 
     function homeModusWaehlen(m) {
         setHomeModus(m);
@@ -34662,12 +34682,15 @@ function App() {
                                     if (!await askConfirm({ message: "Neuen Einladungscode erzeugen? Der alte Code funktioniert danach nicht mehr." }))
                                         return;
                                     try {
-                                        const fresh = await regenerateInviteCode(school.id);
+                                        const neu = await regenerateInviteCode(school.id);
+                                        const fresh = neu.code;
                                         // Funktional (prev => ...) statt {...school, ...} - Confirm-Dialog und
                                         // regenerateInviteCode können beide beliebig lange dauern, in der Zeit an
                                         // anderer Stelle geänderte Felder würden mit dem vor dem Dialog
                                         // eingefangenen "school" sonst stillschweigend verworfen.
-                                        writeSchool(prev => ({ ...prev, invite_code: fresh }));
+                                        // nur lokal übernehmen (schon gespeichert) - writeSchool würde mit altem
+                                        // updated_at einen Scheinkonflikt melden (Audit 2026-10-02)
+                                        putSchool(prev => prev && ({ ...prev, invite_code: fresh, ...(neu.updated_at ? { updated_at: neu.updated_at } : {}) }));
                                         showFlash("✓ Neuer Code erzeugt");
                                     }
                                     catch (e) {
@@ -47204,17 +47227,23 @@ function ausgabenCsvZeilen(alle, kleinunternehmer) {
 // Foto verkleinern (JPEG, längste Seite 1800 px); PDF und nicht lesbare Formate bleiben, wie sie sind
 function belegVorbereiten(file) {
     return new Promise(resolve => {
-        if (!file || !/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type || "")) { resolve({ blob: file, typ: (file && file.type) || "application/pdf" }); return; }
+        // Ohne Typ (z. B. .heic unter Windows) nach der Endung entscheiden, nie blind als PDF ablegen
+        const endung = String((file && file.name) || "").toLowerCase().split(".").pop();
+        const typNachEndung = { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", heic: "image/heic", heif: "image/heic" }[endung] || "";
+        const typ = String((file && file.type) || typNachEndung).replace("image/heif", "image/heic");
+        if (!file || !/^image\/(jpeg|png|webp|heic)$/i.test(typ)) { resolve({ blob: file, typ: typ || "application/pdf" }); return; }
         const url = URL.createObjectURL(file);
         const img = new Image();
-        img.onerror = () => { URL.revokeObjectURL(url); resolve({ blob: file, typ: file.type }); };
+        img.onerror = () => { URL.revokeObjectURL(url); resolve({ blob: file, typ }); };
         img.onload = () => {
             const m = 1800, f = Math.min(1, m / Math.max(img.width, img.height));
             const c = document.createElement("canvas");
             c.width = Math.round(img.width * f); c.height = Math.round(img.height * f);
-            c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+            const ctx = c.getContext("2d");
+            ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, c.width, c.height); // transparente PNG nicht schwarz werden lassen
+            ctx.drawImage(img, 0, 0, c.width, c.height);
             URL.revokeObjectURL(url);
-            c.toBlob(b => resolve(b ? { blob: b, typ: "image/jpeg" } : { blob: file, typ: file.type }), "image/jpeg", 0.82);
+            c.toBlob(b => resolve(b ? { blob: b, typ: "image/jpeg" } : { blob: file, typ }), "image/jpeg", 0.82);
         };
         img.src = url;
     });
@@ -47233,19 +47262,23 @@ function AusgabenAnsicht({ schoolId, fahrzeuge, kleinunternehmer, schulName, onF
     const [monat, setMonat] = React.useState(null);     // "2026-03" = Liste auf einen Monat beschränken
     const [form, setForm] = React.useState(null);
     const dateiRef = React.useRef(null);
+    const aktuellesJahrRef = React.useRef(null);
     // Escape/Zurück-Geste laufen über closeTopOverlay in App
     if (blattRef) blattRef.current = { offen: !!form, schliessen: () => setForm(f => (f && f.busy) ? f : null) };
     const laden = React.useCallback(() => {
         if (IS_DEMO()) { setDaten({ busy: false, ...ausgabenDemo(jahr) }); return; }
         setDaten(d => ({ ...d, busy: true, error: "" }));
+        const fuerJahr = jahr;
+        aktuellesJahrRef.current = jahr;
         Promise.all([
             sb.from("ausgaben").select("*").eq("school_id", schoolId).gte("datum", jahr + "-01-01").lte("datum", jahr + "-12-31").order("datum", { ascending: false }),
             sb.rpc("school_einnahmen_monate", { p_school_id: schoolId, p_jahr: jahr }),
         ]).then(([a, e]) => {
+            if (aktuellesJahrRef.current !== fuerJahr) return; // inzwischen anderes Jahr gewählt
             if (a.error) throw a.error;
             if (e.error) throw e.error;
             setDaten({ busy: false, ausgaben: a.data || [], einnahmen: e.data || {} });
-        }).catch(err => setDaten({ busy: false, error: fehlerText(err) }));
+        }).catch(err => { if (aktuellesJahrRef.current === fuerJahr) setDaten({ busy: false, error: fehlerText(err) }); });
     }, [schoolId, jahr]);
     React.useEffect(() => { laden(); }, [laden]);
     const u = gewinnUebersicht({ ausgaben: daten.ausgaben, fahrzeuge, einnahmen: daten.einnahmen, jahr });
@@ -47260,7 +47293,7 @@ function AusgabenAnsicht({ schoolId, fahrzeuge, kleinunternehmer, schulName, onF
     }
     async function speichern() {
         const f = form;
-        const betrag = parseFloat(String(f.betrag).replace(/\./g, "").replace(",", "."));
+        const betrag = parseBetrag(f.betrag); // "12.50" = 12,50 € (nicht 1.250 €), "1.200" = 1.200 €
         if (!f.datum) { setForm({ ...f, error: "Bitte ein Datum wählen." }); return; }
         if (!(betrag > 0) || betrag >= 1000000) { setForm({ ...f, error: "Bitte einen gültigen Betrag eingeben." }); return; }
         if (IS_DEMO()) { demoBlock("Demo-Ansicht: Ausgaben werden nicht gespeichert."); return; }
@@ -47375,7 +47408,7 @@ function AusgabenAnsicht({ schoolId, fahrzeuge, kleinunternehmer, schulName, onF
                 " beim Fahrzeug ein – sie zählen hier automatisch mit.")
             : null);
     const f = form;
-    const ust = f && f.ust != null ? ustAufteilen(String(f.betrag).replace(/\./g, "").replace(",", "."), f.ust) : null;
+    const ust = f && f.ust != null ? ustAufteilen(parseBetrag(f.betrag), f.ust) : null;
     return React.createElement("div", { className: "pad readable-shell", style: { paddingBottom: 28 } },
         React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap", margin: "4px 2px 2px" } },
             React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, "Ausgaben & Gewinn"),
@@ -47423,7 +47456,7 @@ function AusgabenAnsicht({ schoolId, fahrzeuge, kleinunternehmer, schulName, onF
                 f.error && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", marginBottom: 10 } }, f.error),
                 React.createElement("button", { className: "btn btn-primary btn-block", disabled: f.busy, onClick: speichern }, f.busy ? "Wird gespeichert…" : "Speichern"),
                 f.id && React.createElement("button", { className: "btn btn-ghost btn-block", disabled: f.busy, style: { marginTop: 8, color: "var(--red-ink)" },
-                    onClick: () => loeschen({ id: f.id, kategorie: f.kategorie, betrag: parseFloat(String(f.betrag).replace(/\./g, "").replace(",", ".")) || 0, datum: f.datum, beleg_pfad: f.belegPfad }) }, "Löschen"),
+                    onClick: () => loeschen({ id: f.id, kategorie: f.kategorie, betrag: parseBetrag(f.betrag) || 0, datum: f.datum, beleg_pfad: f.belegPfad }) }, "Löschen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: f.busy, style: { marginTop: 8 }, onClick: () => setForm(null) }, "Abbrechen"))));
 }
 function IcBeleg() {
@@ -47640,10 +47673,11 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
             istAdmin ? fetchVerguetungen(schoolId) : Promise.resolve([]),
             fetchSchoolStudentsOverview(schoolId),
             fetchSchoolAssignmentLog(schoolId, 40),
-        ]).then(([lehrer, leistungen, pruefungen, offene, verguetung, schueler, protokoll]) => {
+            fetchSchoolBueroIds(schoolId).catch(() => []),
+        ]).then(([lehrer, leistungen, pruefungen, offene, verguetung, schueler, protokoll, buero]) => {
             const vgMap = {};
             (verguetung || []).forEach(v => { if (v.verguetung && v.verguetung.modell) vgMap[v.teacher_id] = v.verguetung; });
-            setDaten({ busy: false, error: "", lehrer, leistungen, pruefungen, offene, vgMap, schueler, protokoll });
+            setDaten({ busy: false, error: "", lehrer, leistungen, pruefungen, offene, vgMap, schueler, protokoll, buero: buero || [] });
         }).catch(e => setDaten({ busy: false, error: fehlerText(e) }));
     }, [schoolId, istAdmin]);
     React.useEffect(() => { laden(); }, [laden]);
@@ -47797,7 +47831,8 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
                 React.createElement("div", { style: { fontSize: 13.5, color: "var(--ink-2)", lineHeight: 1.5, marginBottom: 12 } }, daten.error),
                 React.createElement("button", { className: "btn btn-ghost", onClick: laden }, "Erneut versuchen")));
 
-    const lehrerWahl = a.lehrer.map(t => ({ id: t.id, label: t.display_name || t.email.split("@")[0], email: t.email }));
+    // Büro-Konten sind keine Fahrlehrer: weder zuständig setzen noch freigeben (Audit 2026-10-02)
+    const lehrerWahl = a.lehrer.filter(t => (a.buero || []).indexOf(t.id) < 0).map(t => ({ id: t.id, label: t.display_name || t.email.split("@")[0], email: t.email }));
     const monatVerschieben = delta => setZeitraum(z => {
         const d = new Date(z.jahr, z.monat - 1 + delta, 1);
         return { modus: "monat", jahr: d.getFullYear(), monat: d.getMonth() + 1 };

@@ -1143,3 +1143,13 @@ test("Preisliste: Simulator mit eigenem Preis, sonst Fahrstundenpreis", () => {
     assert.equal(k.preisAusPreisliste(school, "B", "ÜST", "2026-10-02"), 65);
     assert.equal(k.preisAusPreisliste({ preisliste: { klassen: { B: { fahrstunde: 65 } } } }, "B", "SIM", "2026-10-02"), 65);
 });
+
+test("Audit Ausbildung: erledigte Notiz, Archiv-Vorschlag nach Anlegedatum", () => {
+    const k = require("./lade-app")(["lastNoteErledigt", "archivVorschlaege"]);
+    const stu = { lastNote: "Kreisverkehr üben", lastNoteAt: "2026-09-20T10:00:00Z", drivenLessons: [{ date: "2026-09-25" }] };
+    assert.equal(k.lastNoteErledigt(stu), true);
+    assert.equal(k.lastNoteErledigt({ ...stu, drivenLessons: [{ date: "2026-09-19" }] }), false);
+    const alt = { id: "x", _isMine: true, vorname: "Alt", _createdAt: "2025-01-10T10:00:00Z", drivenLessons: [], lessons: [] };
+    const v = k.archivVorschlaege([alt], [], {}, new Date("2026-10-02T12:00:00Z"));
+    assert.equal(v.length, 1, "vor über einem Jahr angelegt, nie aktiv -> Vorschlag");
+});
