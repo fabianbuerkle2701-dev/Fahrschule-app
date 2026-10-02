@@ -1,0 +1,12 @@
+-- SEPA-Lastschrift (v2.99.0), angewandt 2026-10-02 (Migration "sepa_lastschrift_mandat", Volltext: list_migrations).
+-- students.data.sepaAnfrage = {am, referenz, glaeubiger, ci}            Fahrlehrer-App: "Per Handy anfordern"
+-- students.data.sepaMandat  = {referenz, datum, inhaber, iban, bic?, via: app|vorort|papier, sig?, aktiv,
+--                              widerrufenAm?, letzterEinzug?, anfrageAm?, stand}
+-- _iban_gueltig(text): Format + Länge (DE 22) + Prüfziffer mod 97.
+-- public_student_sepa_mandat(code, p_name, p_pin, p_inhaber, p_iban, p_bic, p_sig) -> ok | login | keine_anfrage | inhaber | iban | bic | unterschrift
+--   nur mit offener sepaAnfrage; schreibt sepaMandat (via 'app', stand = jetzt UTC).
+-- students_teacher_update: sepaMandat vom Server bleibt, wenn sein "stand" neuer ist als der des Geräts.
+-- public_student_overview: 'sepaAnfrage' (referenz, glaeubiger, ci - nie Bankdaten), solange kein neueres aktives Mandat existiert.
+-- Gläubiger-ID, BIC, Kontoinhaber der Fahrschule: schools.invoice_settings (glaeubigerId, bic, kontoinhaber), keine Migration nötig.
+-- Geprüft per Rollback-Test: ohne Anfrage abgelehnt, falsche IBAN abgelehnt, ok mit Leerzeichen/Kleinbuchstaben-BIC,
+--   Anfrage verschwindet danach aus der Übersicht, veralteter Gerätestand überschreibt das Handy-Mandat nicht, neuerer (Widerruf) schon.

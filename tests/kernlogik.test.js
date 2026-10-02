@@ -1051,3 +1051,48 @@ test("Rundnachricht: Empfänger-Gruppen und Nachrichtentext in der Schüler-App"
         assert.doesNotMatch(k.tt(l, "mt_nachricht_fs"), /^mt_/, l);
     }
 });
+
+test("SEPA-Lastschrift: IBAN, Gläubiger-ID, Bankarbeitstage, Bankdatei, Einzugsliste", () => {
+    const k = require("./lade-app")(["ibanPruefen", "glaeubigerIdPruefen", "sepaFruehesterEinzug", "sepaIstBankarbeitstag", "sepaText",
+        "sepaMandatsreferenz", "sepaLastschriftXml", "sepaEinzugKandidaten", "sepaMandatAktiv", "sepaAnfrageOffen", "sepaPostenAus"]);
+    assert.equal(k.ibanPruefen("DE89 3704 0044 0532 0130 00").iban, "DE89370400440532013000");
+    assert.equal(k.ibanPruefen("DE89370400440532013001").fehler, "pruefziffer");
+    assert.equal(k.ibanPruefen("DE8937040044053201300").fehler, "laenge");
+    assert.equal(k.glaeubigerIdPruefen("de98 zzz0 9999 9999 99").ok, true);
+    assert.equal(k.glaeubigerIdPruefen("DE97ZZZ09999999999").fehler, "pruefziffer");
+    // Fr 2.10. -> Di 6.10.; über Weihnachten (24.12. ist TARGET-Arbeitstag); über Ostern 2027
+    assert.equal(k.sepaFruehesterEinzug("2026-10-02", 2), "2026-10-06");
+    assert.equal(k.sepaFruehesterEinzug("2026-12-23", 2), "2026-12-28");
+    assert.equal(k.sepaFruehesterEinzug("2027-03-25", 2), "2027-03-31");
+    assert.equal(k.sepaIstBankarbeitstag("2026-05-01"), false);
+    assert.equal(k.sepaText("Jürgen Müßig & Söhne", 70), "Juergen Muessig Soehne");
+    assert.match(k.sepaMandatsreferenz("1b2c3d4e-aaaa-bbbb", "2026-10-02"), /^AD-[A-Z0-9]{1,12}-20261002$/);
+    const xml = k.sepaLastschriftXml({ glaeubiger: { name: "Fahrschule Sonnenweg", iban: "DE89370400440532013000", bic: "", ci: "DE98ZZZ09999999999" },
+        posten: [{ betrag: 45.5, name: "Ida <L>", iban: "DE02120300000000202051", mandat: "AD-X", mandatDatum: "2026-10-02", zweck: "R-1", e2e: "R-1", seq: "FRST" },
+                 { betrag: 100, name: "Mia", iban: "DE02500105170137075030", bic: "INGDDEFFXXX", mandat: "AD-Y", mandatDatum: "2026-09-01", zweck: "R-2", e2e: "R-2", seq: "RCUR" },
+                 { betrag: 0, name: "Null", iban: "DE02500105170137075030", mandat: "AD-Z", mandatDatum: "2026-09-01", zweck: "R-3", e2e: "R-3", seq: "RCUR" }],
+        faelligAm: "2026-10-06", msgId: "AD-1", erstelltAm: "2026-10-02T10:00:00" });
+    assert.match(xml, /pain\.008\.001\.08/);
+    assert.match(xml, /<GrpHdr>.*<NbOfTxs>2<\/NbOfTxs><CtrlSum>145\.50<\/CtrlSum>/);
+    assert.equal((xml.match(/<PmtInf>/g) || []).length, 2, "je Sequenztyp ein Sammelauftrag");
+    assert.match(xml, /<SeqTp>FRST<\/SeqTp>.*<SeqTp>RCUR<\/SeqTp>/);
+    assert.match(xml, /<Nm>Ida L<\/Nm>/, "Sonderzeichen entfernt, nichts unmaskiert");
+    assert.match(xml, /<BICFI>INGDDEFFXXX<\/BICFI>/);
+    assert.match(xml, /<Othr><Id>NOTPROVIDED<\/Id><\/Othr>/);
+    // Einzugsliste: nur aktive Mandate, offene, nicht stornierte Rechnungen
+    const mandat = { aktiv: true, referenz: "AD-A", datum: "2026-10-01", iban: "DE89370400440532013000", inhaber: "Anna A", stand: "2026-10-01T10:00:00.000Z" };
+    const schueler = [
+        { id: "a", vorname: "Anna", sepaMandat: mandat, invoices: [{ id: "i1", number: "R-1", total: 100 }, { id: "i2", number: "R-2", total: 50, cancelledBy: "S-1" }, { id: "i3", number: "R-3", total: 30 }],
+          payments: [{ amount: 30, invoiceId: "i3" }] },
+        { id: "b", vorname: "Ben", sepaMandat: { ...mandat, aktiv: false, widerrufenAm: "2026-10-02" }, invoices: [{ id: "i4", number: "R-4", total: 80 }] },
+        { id: "c", vorname: "Cem", invoices: [{ id: "i5", number: "R-5", total: 80 }] },
+    ];
+    const kand = k.sepaEinzugKandidaten(schueler);
+    assert.deepEqual(rein(kand.map(x => x.inv.number + ":" + x.offen)), ["R-1:100"]);
+    const posten = k.sepaPostenAus(kand, "Sonnenweg");
+    assert.equal(posten[0].seq, "FRST"); assert.equal(posten[0].mandat, "AD-A"); assert.equal(posten[0].name, "Anna A");
+    // Anfrage: offen, bis ein neueres aktives Mandat existiert
+    assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" } }), true);
+    assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" }, sepaMandat: { ...mandat, stand: "2026-10-02T10:00:00.000Z" } }), false);
+    assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" }, sepaMandat: mandat }), true, "älteres Mandat erledigt keine neue Anfrage");
+});

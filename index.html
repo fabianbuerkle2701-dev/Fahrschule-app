@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.98.0";
+const APP_VERSION = "2.99.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.99.0", date: "Oktober 2026", changes: [
+            "Neu: SEPA-Lastschrift. Trag unter Einstellungen › Rechnungsdaten deine Gläubiger-ID ein, lass Schüler das Mandat per Handy unterschreiben (oder erfasse es vor Ort) und zieh offene Rechnungen gesammelt ein – die App erstellt die Datei für dein Online-Banking und verbucht die Zahlungen",
+        ] },
     { v: "2.98.0", date: "Oktober 2026", changes: [
             "Neu: Nachricht an Schüler. In der Schülerliste (Megafon-Knopf) schreibst du allen oder einer Gruppe – z. B. prüfungsreif, eine Klasse oder ein Standort. Die Nachricht erscheint in der Schüler-App, auf Wunsch zusätzlich per WhatsApp",
         ] },
@@ -11300,6 +11303,174 @@ function osterSonntag(jahr) {
     const os = og + oe;
     return os <= 31 ? new Date(jahr, 2, os) : new Date(jahr, 3, os - 31);
 }
+// ── SEPA-Lastschrift (v2.99.0) ─────────────────────────────────────────────────────────────
+// Reine Funktionen: IBAN-/Gläubiger-ID-Prüfung, Bankarbeitstage, Mandatsreferenz und die
+// Bankdatei (pain.008.001.08, SEPA-Basislastschrift CORE), die im Online-Banking hochgeladen wird.
+function sepaMod97(ziffern) {
+    let rest = 0;
+    for (let i = 0; i < ziffern.length; i += 7) rest = Number(String(rest) + ziffern.slice(i, i + 7)) % 97;
+    return rest;
+}
+function sepaBuchstabenZuZiffern(t) {
+    return t.replace(/[A-Z]/g, c => String(c.charCodeAt(0) - 55));
+}
+const SEPA_IBAN_LAENGE = { DE: 22, AT: 20, CH: 21, NL: 18, BE: 16, LU: 20, FR: 27, IT: 27, ES: 24, PL: 28, DK: 18, CZ: 24, LI: 21 };
+function ibanPruefen(eingabe) {
+    const iban = String(eingabe || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!iban) return { ok: false, fehler: "leer" };
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(iban)) return { ok: false, iban, fehler: "format" };
+    const soll = SEPA_IBAN_LAENGE[iban.slice(0, 2)];
+    if (soll && iban.length !== soll) return { ok: false, iban, fehler: "laenge" };
+    if (sepaMod97(sepaBuchstabenZuZiffern(iban.slice(4) + iban.slice(0, 4))) !== 1) return { ok: false, iban, fehler: "pruefziffer" };
+    return { ok: true, iban };
+}
+function ibanLesbar(iban) {
+    return String(iban || "").replace(/(.{4})/g, "$1 ").trim();
+}
+function ibanVerdeckt(iban) {
+    const i = String(iban || "");
+    return i.length > 8 ? i.slice(0, 4) + " •••• " + i.slice(-4) : i;
+}
+// Gläubiger-Identifikationsnummer (z. B. DE98ZZZ09999999999). Prüfziffer wie bei der IBAN, aber
+// über die nationale Kennung ab Stelle 8 plus Land + "00"; die Geschäftsbereichskennung (Stelle 5-7)
+// zählt nicht mit.
+function glaeubigerIdPruefen(eingabe) {
+    const ci = String(eingabe || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!ci) return { ok: false, fehler: "leer" };
+    if (!/^[A-Z]{2}\d{2}[A-Z0-9]{3}[A-Z0-9]{1,28}$/.test(ci)) return { ok: false, ci, fehler: "format" };
+    if (ci.slice(0, 2) === "DE" && ci.length !== 18) return { ok: false, ci, fehler: "laenge" };
+    const pz = 98 - sepaMod97(sepaBuchstabenZuZiffern(ci.slice(7) + ci.slice(0, 2) + "00"));
+    if (pz !== Number(ci.slice(2, 4))) return { ok: false, ci, fehler: "pruefziffer" };
+    return { ok: true, ci };
+}
+// SEPA erlaubt nur den lateinischen Grundzeichensatz. Umlaute werden umschrieben, alles andere
+// Unerlaubte durch Leerzeichen ersetzt.
+function sepaText(t, max) {
+    const ersetzt = String(t || "").replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue").replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue").replace(/ß/g, "ss")
+        .normalize("NFD").replace(/[̀-ͯ]/g, "")
+        .replace(/[^A-Za-z0-9 \/\-?:().,'+]/g, " ").replace(/\s+/g, " ").trim();
+    return max ? ersetzt.slice(0, max).trim() : ersetzt;
+}
+// Mandatsreferenz: eindeutig je Schüler, höchstens 35 Zeichen, nur A-Z/0-9/-.
+function sepaMandatsreferenz(studentId, datumYmd) {
+    const kern = String(studentId || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 12);
+    return "AD-" + kern + "-" + String(datumYmd || "").replace(/-/g, "");
+}
+function sepaIstBankarbeitstag(ymdText) {
+    const [j, m, t] = String(ymdText).split("-").map(Number);
+    const d = new Date(Date.UTC(j, m - 1, t));
+    const wt = d.getUTCDay();
+    if (wt === 0 || wt === 6) return false;
+    const md = ymdText.slice(5);
+    if (md === "01-01" || md === "05-01" || md === "12-25" || md === "12-26") return false;
+    const os = osterSonntag(j);
+    const osUtc = Date.UTC(os.getFullYear(), os.getMonth(), os.getDate());
+    const diff = Math.round((d.getTime() - osUtc) / 86400000);
+    return diff !== -2 && diff !== 1; // Karfreitag, Ostermontag (TARGET2-Kalender)
+}
+// Frühester sinnvoller Fälligkeitstag: N Bankarbeitstage nach heute (die Bank braucht die Datei
+// mindestens einen Bankarbeitstag vorher; zwei Tage lassen Luft für die Annahmeschlusszeit).
+function sepaFruehesterEinzug(heuteYmd, vorlauf) {
+    const [j, m, t] = String(heuteYmd).split("-").map(Number);
+    const d = new Date(Date.UTC(j, m - 1, t));
+    let n = vorlauf == null ? 2 : vorlauf;
+    let txt = heuteYmd;
+    while (n > 0) {
+        d.setUTCDate(d.getUTCDate() + 1);
+        txt = d.toISOString().slice(0, 10);
+        if (sepaIstBankarbeitstag(txt)) n--;
+    }
+    return txt;
+}
+function sepaXmlEsc(t) {
+    return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+// Bankdatei pain.008.001.08 (Basislastschrift CORE). posten: [{betrag, name, iban, bic, mandat,
+// mandatDatum, zweck, e2e, seq: "FRST"|"RCUR"}]. Je Sequenztyp ein Sammelauftrag.
+function sepaLastschriftXml({ glaeubiger, posten, faelligAm, msgId, erstelltAm }) {
+    const e = sepaXmlEsc;
+    const cent = x => Math.round(Number(x) * 100);
+    const betrag = c => (c / 100).toFixed(2);
+    const gueltig = (posten || []).filter(p => p && cent(p.betrag) > 0);
+    const summe = gueltig.reduce((s, p) => s + cent(p.betrag), 0);
+    const agent = bic => bic ? "<FinInstnId><BICFI>" + e(bic) + "</BICFI></FinInstnId>" : "<FinInstnId><Othr><Id>NOTPROVIDED</Id></Othr></FinInstnId>";
+    const gName = e(sepaText(glaeubiger.name, 70));
+    const gruppen = ["FRST", "RCUR"].map(seq => ({ seq, liste: gueltig.filter(p => (p.seq || "RCUR") === seq) })).filter(g => g.liste.length);
+    const pmtInf = gruppen.map((g, gi) => {
+        const s = g.liste.reduce((t, p) => t + cent(p.betrag), 0);
+        return "<PmtInf>"
+            + "<PmtInfId>" + e(sepaText(msgId + "-" + (gi + 1), 35)) + "</PmtInfId><PmtMtd>DD</PmtMtd><BtchBookg>true</BtchBookg>"
+            + "<NbOfTxs>" + g.liste.length + "</NbOfTxs><CtrlSum>" + betrag(s) + "</CtrlSum>"
+            + "<PmtTpInf><SvcLvl><Cd>SEPA</Cd></SvcLvl><LclInstrm><Cd>CORE</Cd></LclInstrm><SeqTp>" + g.seq + "</SeqTp></PmtTpInf>"
+            + "<ReqdColltnDt>" + e(faelligAm) + "</ReqdColltnDt>"
+            + "<Cdtr><Nm>" + gName + "</Nm></Cdtr>"
+            + "<CdtrAcct><Id><IBAN>" + e(glaeubiger.iban) + "</IBAN></Id></CdtrAcct>"
+            + "<CdtrAgt>" + agent(glaeubiger.bic) + "</CdtrAgt><ChrgBr>SLEV</ChrgBr>"
+            + "<CdtrSchmeId><Id><PrvtId><Othr><Id>" + e(glaeubiger.ci) + "</Id><SchmeNm><Prtry>SEPA</Prtry></SchmeNm></Othr></PrvtId></Id></CdtrSchmeId>"
+            + g.liste.map(p => "<DrctDbtTxInf>"
+                + "<PmtId><EndToEndId>" + e(sepaText(p.e2e || "NOTPROVIDED", 35)) + "</EndToEndId></PmtId>"
+                + "<InstdAmt Ccy=\"EUR\">" + betrag(cent(p.betrag)) + "</InstdAmt>"
+                + "<DrctDbtTx><MndtRltdInf><MndtId>" + e(p.mandat) + "</MndtId><DtOfSgntr>" + e(p.mandatDatum) + "</DtOfSgntr></MndtRltdInf></DrctDbtTx>"
+                + "<DbtrAgt>" + agent(p.bic) + "</DbtrAgt>"
+                + "<Dbtr><Nm>" + e(sepaText(p.name, 70)) + "</Nm></Dbtr>"
+                + "<DbtrAcct><Id><IBAN>" + e(p.iban) + "</IBAN></Id></DbtrAcct>"
+                + "<RmtInf><Ustrd>" + e(sepaText(p.zweck, 140)) + "</Ustrd></RmtInf>"
+                + "</DrctDbtTxInf>").join("")
+            + "</PmtInf>";
+    }).join("");
+    return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+        + "<Document xmlns=\"urn:iso:std:iso:20022:tech:xsd:pain.008.001.08\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\">"
+        + "<CstmrDrctDbtInitn><GrpHdr>"
+        + "<MsgId>" + e(sepaText(msgId, 35)) + "</MsgId><CreDtTm>" + e(erstelltAm) + "</CreDtTm>"
+        + "<NbOfTxs>" + gueltig.length + "</NbOfTxs><CtrlSum>" + betrag(summe) + "</CtrlSum>"
+        + "<InitgPty><Nm>" + gName + "</Nm></InitgPty></GrpHdr>"
+        + pmtInf
+        + "</CstmrDrctDbtInitn></Document>\n";
+}
+// Pflichttext des Mandats (SEPA-Basislastschrift), mit den Daten der Fahrschule.
+function sepaMandatText(glaeubigerName, ci, referenz) {
+    return "Ich ermächtige " + glaeubigerName + ", Zahlungen von meinem Konto mittels Lastschrift einzuziehen. "
+        + "Zugleich weise ich mein Kreditinstitut an, die von " + glaeubigerName + " auf mein Konto gezogenen Lastschriften einzulösen.\n"
+        + "Hinweis: Ich kann innerhalb von acht Wochen, beginnend mit dem Belastungsdatum, die Erstattung des belasteten Betrages verlangen. "
+        + "Es gelten dabei die mit meinem Kreditinstitut vereinbarten Bedingungen.\n"
+        + "Gläubiger-Identifikationsnummer: " + ci + (referenz ? " · Mandatsreferenz: " + referenz : "");
+}
+// Mandat-Stand je Schüler. Aktiv = erteilt, nicht widerrufen, mit gültiger IBAN und Referenz.
+function sepaMandatAktiv(stu) {
+    const m = stu && stu.sepaMandat;
+    return !!(m && m.aktiv && !m.widerrufenAm && m.referenz && m.datum && ibanPruefen(m.iban).ok);
+}
+// Anfrage per Handy offen = angefragt und seitdem kein (neueres) aktives Mandat
+function sepaAnfrageOffen(stu) {
+    const a = stu && stu.sepaAnfrage;
+    if (!a || !a.am) return false;
+    return !(sepaMandatAktiv(stu) && String(stu.sepaMandat.stand || "") >= String(a.am));
+}
+function sepaSchuelerName(s) {
+    return [String((s && s.vorname) || "").trim(), String((s && s.name) || "").trim()].filter(Boolean).join(" ") || "Schüler";
+}
+// Offene, nicht stornierte Rechnungen von Schülern mit aktivem Mandat
+function sepaEinzugKandidaten(liste) {
+    const out = [];
+    (liste || []).forEach(s => {
+        if (!s || !sepaMandatAktiv(s)) return;
+        (s.invoices || []).forEach(inv => {
+            if (!inv || inv.cancelledBy || inv.stornoOf) return;
+            const offen = invoiceOpen(s, inv);
+            if (offen > 0.005) out.push({ stu: s, inv, offen });
+        });
+    });
+    return out.sort((a, b) => sepaSchuelerName(a.stu).localeCompare(sepaSchuelerName(b.stu), "de") || String(a.inv.date || "").localeCompare(String(b.inv.date || "")));
+}
+// Posten für die Bankdatei aus den gewählten Kandidaten
+function sepaPostenAus(auswahl, schulName) {
+    return (auswahl || []).map(k => {
+        const m = k.stu.sepaMandat || {};
+        return { betrag: k.offen, name: m.inhaber || sepaSchuelerName(k.stu), iban: ibanPruefen(m.iban).iban, bic: m.bic || "",
+            mandat: m.referenz, mandatDatum: m.datum, e2e: k.inv.number || k.inv.id,
+            zweck: "Rechnung " + (k.inv.number || "") + (schulName ? " " + schulName : ""), seq: m.letzterEinzug ? "RCUR" : "FRST" };
+    });
+}
 // Nach Jahr+Bundesland gecacht, statt bei jeder einzelnen Tageskarte im Kalender neu die
 // Osterformel und alle Feiertage des Jahres zu berechnen.
 const _feiertageCache = {};
@@ -12702,7 +12873,7 @@ const STUDENT_I18N = {
         wl_von: "Von", wl_bis: "Bis",
         wl_speichern: "Speichern", wl_speichert: "Speichert…", wl_gespeichert: "✓ Gespeichert",
         th_komme: "Ich komme", th_angemeldet: "Angemeldet", th_abmelden: "Abmelden", th_anzahl: "{n} angemeldet", th_anm_fehler: "Hat nicht geklappt. Bitte später noch einmal versuchen.", th_titel: "Theorieunterricht", th_stand: "{n} von {m} Pflichtthemen", th_naechste: "Nächste Theoriestunden", th_fehlt: "Fehlt dir noch", th_keine: "Zurzeit sind keine Theoriestunden eingetragen.", th_ohne_thema: "Thema folgt",
-        naechste_fahrstunde: "Nächste Fahrstunde", sa_abholung: "Abholung", sa_ziel: "Ziel der Stunde", vt_titel: "Ausbildungsvertrag", vt_text: "Deine Fahrschule hat dir den Ausbildungsvertrag zum Unterschreiben geschickt.", vt_lesen: "Lesen und unterschreiben", vt_gelesen: "Ich habe den Vertrag gelesen und bin einverstanden.", vt_unterschrift: "Deine Unterschrift", vt_absenden: "Vertrag unterschreiben", vt_spaeter: "Später", vt_fehler: "Das hat nicht geklappt. Prüfe die Verbindung und versuche es noch einmal.", vt_danke: "Danke, der Vertrag ist unterschrieben.", vt_sprache: "Lies den Vertrag in Ruhe durch. Mit deiner Unterschrift wird er verbindlich.", banner_storno_angefragt: " · Storno angefragt",
+        naechste_fahrstunde: "Nächste Fahrstunde", sa_abholung: "Abholung", sa_ziel: "Ziel der Stunde", vt_titel: "Ausbildungsvertrag", vt_text: "Deine Fahrschule hat dir den Ausbildungsvertrag zum Unterschreiben geschickt.", vt_lesen: "Lesen und unterschreiben", vt_gelesen: "Ich habe den Vertrag gelesen und bin einverstanden.", vt_unterschrift: "Deine Unterschrift", vt_absenden: "Vertrag unterschreiben", vt_spaeter: "Später", sepa_titel: "Lastschrift-Mandat", sepa_text: "Deine Fahrschule möchte Rechnungen per Lastschrift einziehen. Trag dafür deine IBAN ein und unterschreibe.", sepa_oeffnen: "IBAN eintragen", sepa_sprache: "Der Mandatstext ist auf Deutsch, weil er so rechtlich gilt.", sepa_inhaber: "Kontoinhaber", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "Diese IBAN stimmt nicht. Bitte prüfe sie noch einmal.", sepa_unterschrift: "Unterschrift des Kontoinhabers", sepa_absenden: "Mandat erteilen", sepa_danke: "Danke! Das Mandat ist erteilt.", sepa_fehler: "Das hat nicht geklappt. Bitte prüfe deine Angaben und versuch es noch einmal.", vt_fehler: "Das hat nicht geklappt. Prüfe die Verbindung und versuche es noch einmal.", vt_danke: "Danke, der Vertrag ist unterschrieben.", vt_sprache: "Lies den Vertrag in Ruhe durch. Mit deiner Unterschrift wird er verbindlich.", banner_storno_angefragt: " · Storno angefragt",
         keine_fahrstunde_banner: "Aktuell ist keine Fahrstunde für dich eingetragen. Unter „Termine“ kannst du deinem Fahrlehrer einen Wunschtermin vorschlagen.",
         sa_angefragt: " · Angefragt", sa_schnellzugriff: "Schnellzugriff",
         sa_kein_pin_titel: "Noch nicht angemeldet",
@@ -13100,7 +13271,7 @@ const STUDENT_I18N = {
         wl_von: "From", wl_bis: "To",
         wl_speichern: "Save", wl_speichert: "Saving…", wl_gespeichert: "✓ Saved",
         th_komme: "I'll come", th_angemeldet: "Signed up", th_abmelden: "Cancel", th_anzahl: "{n} signed up", th_anm_fehler: "That didn't work. Please try again later.", th_titel: "Theory classes", th_stand: "{n} of {m} required topics", th_naechste: "Upcoming theory classes", th_fehlt: "You still need this", th_keine: "No theory classes are scheduled right now.", th_ohne_thema: "Topic to be announced",
-        naechste_fahrstunde: "Next driving lesson", sa_abholung: "Pick-up", sa_ziel: "Lesson goal", vt_titel: "Training contract", vt_text: "Your driving school has sent you the training contract to sign.", vt_lesen: "Read and sign", vt_gelesen: "I have read the contract and agree to it.", vt_unterschrift: "Your signature", vt_absenden: "Sign contract", vt_spaeter: "Later", vt_fehler: "That didn't work. Check your connection and try again.", vt_danke: "Thank you, the contract is signed.", vt_sprache: "The contract is in German; the German version is binding. Your signature makes it binding.", banner_storno_angefragt: " · Cancellation requested",
+        naechste_fahrstunde: "Next driving lesson", sa_abholung: "Pick-up", sa_ziel: "Lesson goal", vt_titel: "Training contract", vt_text: "Your driving school has sent you the training contract to sign.", vt_lesen: "Read and sign", vt_gelesen: "I have read the contract and agree to it.", vt_unterschrift: "Your signature", vt_absenden: "Sign contract", vt_spaeter: "Later", sepa_titel: "Direct debit mandate", sepa_text: "Your driving school would like to collect invoices by direct debit. Enter your IBAN and sign.", sepa_oeffnen: "Enter IBAN", sepa_sprache: "The mandate text is in German because that version is legally binding.", sepa_inhaber: "Account holder", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "This IBAN is not valid. Please check it again.", sepa_unterschrift: "Signature of the account holder", sepa_absenden: "Grant mandate", sepa_danke: "Thank you! The mandate has been granted.", sepa_fehler: "That didn't work. Please check your details and try again.", vt_fehler: "That didn't work. Check your connection and try again.", vt_danke: "Thank you, the contract is signed.", vt_sprache: "The contract is in German; the German version is binding. Your signature makes it binding.", banner_storno_angefragt: " · Cancellation requested",
         keine_fahrstunde_banner: "No driving lesson is currently scheduled for you. Under \"Appointments\" you can suggest a preferred time to your driving instructor.",
         sa_angefragt: " · Requested", sa_schnellzugriff: "Quick access",
         sa_kein_pin_titel: "Not signed in yet",
@@ -13496,7 +13667,7 @@ const STUDENT_I18N = {
         wl_von: "Başlangıç", wl_bis: "Bitiş",
         wl_speichern: "Kaydet", wl_speichert: "Kaydediliyor…", wl_gespeichert: "✓ Kaydedildi",
         th_komme: "Geliyorum", th_angemeldet: "Kayıtlısın", th_abmelden: "Kaydı sil", th_anzahl: "{n} kişi kayıtlı", th_anm_fehler: "Olmadı. Lütfen daha sonra tekrar dene.", th_titel: "Teori dersleri", th_stand: "{m} zorunlu konudan {n}", th_naechste: "Sıradaki teori dersleri", th_fehlt: "Bu konu sende eksik", th_keine: "Şu anda planlanmış teori dersi yok.", th_ohne_thema: "Konu daha sonra belli olacak",
-        naechste_fahrstunde: "Sıradaki direksiyon dersi", sa_abholung: "Alınma yeri", sa_ziel: "Dersin hedefi", vt_titel: "Eğitim sözleşmesi", vt_text: "Sürücü kursun imzalaman için eğitim sözleşmesini gönderdi.", vt_lesen: "Oku ve imzala", vt_gelesen: "Sözleşmeyi okudum ve kabul ediyorum.", vt_unterschrift: "İmzan", vt_absenden: "Sözleşmeyi imzala", vt_spaeter: "Daha sonra", vt_fehler: "Olmadı. Bağlantını kontrol edip tekrar dene.", vt_danke: "Teşekkürler, sözleşme imzalandı.", vt_sprache: "Sözleşme Almancadır; bağlayıcı olan Almanca metindir. İmzanla bağlayıcı hale gelir.", banner_storno_angefragt: " · İptal talep edildi",
+        naechste_fahrstunde: "Sıradaki direksiyon dersi", sa_abholung: "Alınma yeri", sa_ziel: "Dersin hedefi", vt_titel: "Eğitim sözleşmesi", vt_text: "Sürücü kursun imzalaman için eğitim sözleşmesini gönderdi.", vt_lesen: "Oku ve imzala", vt_gelesen: "Sözleşmeyi okudum ve kabul ediyorum.", vt_unterschrift: "İmzan", vt_absenden: "Sözleşmeyi imzala", vt_spaeter: "Daha sonra", sepa_titel: "Otomatik ödeme talimatı (SEPA)", sepa_text: "Sürücü kursun faturaları otomatik ödeme ile tahsil etmek istiyor. Bunun için IBAN'ını gir ve imzala.", sepa_oeffnen: "IBAN gir", sepa_sprache: "Talimat metni Almancadır, çünkü hukuken geçerli olan metin budur.", sepa_inhaber: "Hesap sahibi", sepa_iban: "IBAN", sepa_bic: "BIC (isteğe bağlı)", sepa_iban_falsch: "Bu IBAN geçerli değil. Lütfen tekrar kontrol et.", sepa_unterschrift: "Hesap sahibinin imzası", sepa_absenden: "Talimat ver", sepa_danke: "Teşekkürler! Talimat verildi.", sepa_fehler: "Bu işe yaramadı. Lütfen bilgilerini kontrol edip tekrar dene.", vt_fehler: "Olmadı. Bağlantını kontrol edip tekrar dene.", vt_danke: "Teşekkürler, sözleşme imzalandı.", vt_sprache: "Sözleşme Almancadır; bağlayıcı olan Almanca metindir. İmzanla bağlayıcı hale gelir.", banner_storno_angefragt: " · İptal talep edildi",
         keine_fahrstunde_banner: "Şu anda senin için planlanmış bir direksiyon dersi yok. \"Randevular\" bölümünden eğitmenine bir randevu önerebilirsin.",
         sa_angefragt: " · Talep edildi", sa_schnellzugriff: "Hızlı erişim",
         sa_kein_pin_titel: "Henüz giriş yapılmadı",
@@ -13892,7 +14063,7 @@ const STUDENT_I18N = {
         wl_von: "С", wl_bis: "До",
         wl_speichern: "Сохранить", wl_speichert: "Сохранение…", wl_gespeichert: "✓ Сохранено",
         th_komme: "Я приду", th_angemeldet: "Записан(а)", th_abmelden: "Отменить", th_anzahl: "Записались: {n}", th_anm_fehler: "Не получилось. Попробуй позже ещё раз.", th_titel: "Теоретические занятия", th_stand: "{n} из {m} обязательных тем", th_naechste: "Ближайшие теоретические занятия", th_fehlt: "Тебе ещё нужно", th_keine: "Сейчас теоретические занятия не запланированы.", th_ohne_thema: "Тема будет объявлена позже",
-        naechste_fahrstunde: "Следующее занятие по вождению", sa_abholung: "Место встречи", sa_ziel: "Цель занятия", vt_titel: "Договор на обучение", vt_text: "Автошкола отправила тебе договор на обучение для подписи.", vt_lesen: "Прочитать и подписать", vt_gelesen: "Я прочитал(а) договор и согласен(на).", vt_unterschrift: "Твоя подпись", vt_absenden: "Подписать договор", vt_spaeter: "Позже", vt_fehler: "Не получилось. Проверь подключение и попробуй ещё раз.", vt_danke: "Спасибо, договор подписан.", vt_sprache: "Договор составлен на немецком языке; обязательной является немецкая версия. Подписью ты его заключаешь.", banner_storno_angefragt: " · Запрошена отмена",
+        naechste_fahrstunde: "Следующее занятие по вождению", sa_abholung: "Место встречи", sa_ziel: "Цель занятия", vt_titel: "Договор на обучение", vt_text: "Автошкола отправила тебе договор на обучение для подписи.", vt_lesen: "Прочитать и подписать", vt_gelesen: "Я прочитал(а) договор и согласен(на).", vt_unterschrift: "Твоя подпись", vt_absenden: "Подписать договор", vt_spaeter: "Позже", sepa_titel: "Мандат на прямое дебетование (SEPA)", sepa_text: "Автошкола хочет списывать оплату по счетам через прямое дебетование. Для этого укажи свой IBAN и подпиши.", sepa_oeffnen: "Указать IBAN", sepa_sprache: "Текст мандата на немецком языке, так как юридически действует именно он.", sepa_inhaber: "Владелец счёта", sepa_iban: "IBAN", sepa_bic: "BIC (необязательно)", sepa_iban_falsch: "Этот IBAN неверный. Пожалуйста, проверь его ещё раз.", sepa_unterschrift: "Подпись владельца счёта", sepa_absenden: "Подписать мандат", sepa_danke: "Спасибо! Мандат оформлен.", sepa_fehler: "Не получилось. Проверь данные и попробуй ещё раз.", vt_fehler: "Не получилось. Проверь подключение и попробуй ещё раз.", vt_danke: "Спасибо, договор подписан.", vt_sprache: "Договор составлен на немецком языке; обязательной является немецкая версия. Подписью ты его заключаешь.", banner_storno_angefragt: " · Запрошена отмена",
         keine_fahrstunde_banner: "Сейчас для тебя не запланировано ни одного занятия по вождению. В разделе «Записи» ты можешь предложить инструктору удобное время.",
         sa_angefragt: " · Запрошено", sa_schnellzugriff: "Быстрый доступ",
         sa_kein_pin_titel: "Вход ещё не выполнен",
@@ -16342,6 +16513,8 @@ function App() {
     const [fristenOpen, setFristenOpen] = useState(false); // Fristen-Radar (TÜV/HU + Löschfristen) auf der Startseite
     const [paketKnappOpen, setPaketKnappOpen] = useState(false); // Liste "Paket-Guthaben knapp" auf der Startseite
     const [mahnCockpit, setMahnCockpit] = useState(false);
+    const [sepaForm, setSepaForm] = useState(null);             // Schüler-ID: Lastschrift-Mandat erfassen (v2.99.0)
+    const [sepaEinzugOffen, setSepaEinzugOffen] = useState(false); // Lastschrift einziehen
     // Sammelmahnung (v2.96.0, Produktplan #26): geführter Durchlauf durch alle überfälligen Rechnungen
     // mit Telefonnummer - null | { i, ids:[inv.id], geoeffnet }
     const [mahnReihe, setMahnReihe] = useState(null); // Liste "Überfällige Rechnungen" (Mahnungen-Cockpit) auf der Startseite
@@ -19989,6 +20162,8 @@ function App() {
         }));
         return rows.sort((a, b) => b.tage - a.tage);
     }, [students, zahlungszielTage]);
+    // Offene Rechnungen eigener Schüler mit aktivem Lastschrift-Mandat (v2.99.0)
+    const sepaKandidaten = React.useMemo(() => sepaEinzugKandidaten((students || []).filter(s => s._isMine && !s.pending)), [students]);
     // WhatsApp-Erinnerung für eine Zeile aus ueberfaelligeRechnungen - exakt dieselbe Text-/
     // Freigabe-Logik wie erinnern()/erinnerungText() in renderAbrechnungBody(): solange
     // ZAHLUNGSERINNERUNG_STUFEN_RELEASED false ist, immer der einfache, freundliche Einzelton-
@@ -24186,6 +24361,10 @@ function App() {
             weekItems.push({ key: "rechn", icon: icWallet, red: true, onClick: () => setMahnCockpit(true),
                 text: ueberfaelligeRechnungen.length === 1 ? "1 überfällige Rechnung" : ueberfaelligeRechnungen.length + " überfällige Rechnungen",
                 amountText: eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)) });
+        if (sepaKandidaten.length > 0)
+            weekItems.push({ key: "lastschrift", prio: "bald", icon: icWallet, onClick: () => setSepaEinzugOffen(true),
+                text: sepaKandidaten.length === 1 ? "1 Rechnung per Lastschrift einziehbar" : sepaKandidaten.length + " Rechnungen per Lastschrift einziehbar",
+                amountText: eurFmt(sepaKandidaten.reduce((t, k) => t + k.offen, 0)) });
         if (overdueInteressenten.length > 0)
             weekItems.push({ key: "foelge", icon: icClock, red: true, onClick: () => setFolgeCockpit(true),
                 text: overdueInteressenten.length === 1 ? "1 überfällige Wiedervorlage" : overdueInteressenten.length + " überfällige Wiedervorlagen" });
@@ -24614,9 +24793,10 @@ function App() {
                 // lag #7a241c bei ~1,5:1 und war praktisch unsichtbar.
                 React.createElement("div", { style: { fontWeight: 800, color: "var(--red-ink)", marginBottom: 4 } }, loadErr === OFFLINE_LADEHINWEIS ? "Offline" : "Fehler beim Laden"),
                 React.createElement("div", { style: { fontSize: 12.5, color: "var(--red-ink)", wordBreak: "break-word" } }, loadErr)),
-            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", margin: "4px 2px 12px" } },
-                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22 } }, "Meine Sch\u00FCler"),
-                React.createElement("div", { style: { display: "flex", gap: 8 } },
+            // flexWrap: mit vier Knöpfen passt die Zeile auf schmalen Handys nicht mehr, dann rutschen die Knöpfe unter den Titel
+            React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, margin: "4px 2px 12px" } },
+                React.createElement("h2", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 22, whiteSpace: "nowrap" } }, "Meine Sch\u00FCler"),
+                React.createElement("div", { style: { display: "flex", gap: 8, marginLeft: "auto" } },
                     students.some(s => !s.archived && !s.pending) && React.createElement("button", { className: "btn btn-ghost", style: { padding: "9px 12px", color: "var(--orange-deep)" }, onClick: () => setRundOffen(true), "aria-label": "Nachricht an Schüler senden", title: "Nachricht an Schüler" },
                         React.createElement("svg", { width: "18", height: "18", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true" },
                             React.createElement("path", { d: "m3 11 18-5v12L3 14v-3z" }),
@@ -24632,7 +24812,7 @@ function App() {
                             React.createElement("path", { d: "M14 2v6h6" }),
                             React.createElement("path", { d: "M12 18v-6" }),
                             React.createElement("path", { d: "m9 15 3 3 3-3" }))),
-                    React.createElement("button", { className: "btn btn-primary", onClick: addStudent }, "+ Sch\u00FCler"))),
+                    React.createElement("button", { className: "btn btn-primary", style: { whiteSpace: "nowrap" }, onClick: addStudent }, "+ Sch\u00FCler"))),
             pendingList.length > 0 && React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, border: "1.5px solid var(--orange)" } },
                 React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14, marginBottom: 10, color: "var(--orange-deep)" } },
                     pendingList.length === 1 ? "1 neue Anmeldung" : pendingList.length + " neue Anmeldungen"),
@@ -26631,6 +26811,54 @@ function App() {
         showToast(num ? "Der Vertrag liegt jetzt in der App von " + dispName(stu) + " zum Unterschreiben bereit."
             : "Der Vertrag liegt in der App bereit. Für " + dispName(stu) + " ist keine Telefonnummer hinterlegt, sag ihm oder ihr bitte Bescheid.");
     }
+    // ── SEPA-Lastschrift (v2.99.0) ──
+    function sepaGlaeubiger() {
+        const iv = (school && school.invoice_settings) || {};
+        const ci = glaeubigerIdPruefen(iv.glaeubigerId);
+        const ib = ibanPruefen(iv.iban);
+        return { ok: ci.ok && ib.ok, ciFehler: !ci.ok, ibanFehler: !ib.ok, ci: ci.ci || "", iban: ib.iban || "",
+            bic: String(iv.bic || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
+            name: String(iv.kontoinhaber || iv.firma || (school && school.name) || "Fahrschule").trim() };
+    }
+    function sepaMandatAnfordern(stu) {
+        if (IS_DEMO()) { demoBlock("Demo-Ansicht: Es wird nichts verschickt."); return; }
+        const g = sepaGlaeubiger();
+        if (!g.ok) { showToast("Bitte zuerst Gläubiger-ID und IBAN unter Einstellungen › Rechnungsdaten eintragen."); return; }
+        const anfrage = { am: new Date().toISOString(), referenz: sepaMandatsreferenz(stu.id, ymd(new Date())), glaeubiger: g.name, ci: g.ci };
+        const num = stu.tel ? waNumber(stu.tel) : "";
+        const link = bookingCode ? bookingURL() : "";
+        const vorname = (stu.vorname || "").trim();
+        const text = "Hallo" + (vorname ? " " + vorname : "") + ", damit du deine Rechnungen bequem per Lastschrift bezahlen kannst, liegt in deiner Fahrschul-App ein SEPA-Mandat bereit. Bitte trag dort deine IBAN ein und unterschreibe. "
+            + (link ? "Melde dich hier mit deinem Namen und deiner PIN an: " + link : "Melde dich dort mit deinem Namen und deiner PIN an.");
+        if (num)
+            window.open("https://wa.me/" + num + "?text=" + encodeURIComponent(text), "_blank", "noopener");
+        schuelerAendernUndSpeichern(stu.id, s => ({ ...s, sepaAnfrage: anfrage }));
+        showToast(num ? "Das Mandat liegt jetzt in der App von " + dispName(stu) + " zum Unterschreiben bereit."
+            : "Das Mandat liegt in der App bereit. Für " + dispName(stu) + " ist keine Telefonnummer hinterlegt, sag bitte Bescheid.");
+    }
+    function sepaMandatSpeichern(sid, m) {
+        if (IS_DEMO()) { demoBlock("Demo-Ansicht: Das Mandat wird nicht gespeichert."); return; }
+        schuelerAendernUndSpeichern(sid, s => ({ ...s, sepaMandat: { ...m, stand: new Date().toISOString() } }));
+        showToast("✓ Lastschrift-Mandat gespeichert");
+    }
+    async function sepaMandatWiderrufen(stu) {
+        if (IS_DEMO()) { demoBlock(); return; }
+        if (!await askConfirm({ title: "Mandat widerrufen?", confirmLabel: "Widerrufen", danger: true,
+                message: "Für " + dispName(stu) + " wird danach nichts mehr per Lastschrift eingezogen. Bereits eingereichte Lastschriften bleiben davon unberührt." }))
+            return;
+        schuelerAendernUndSpeichern(stu.id, s => ({ ...s, sepaMandat: { ...(s.sepaMandat || {}), aktiv: false, widerrufenAm: ymd(new Date()), stand: new Date().toISOString() } }));
+    }
+    // Nach dem Erstellen der Bankdatei: je Rechnung eine Zahlung "Lastschrift" zum Fälligkeitstag,
+    // am Mandat den letzten Einzug merken (ab dann Folge-Lastschrift statt Erst-Lastschrift).
+    function sepaEinzugGebucht(posten, faellig, msgId) {
+        const jeSchueler = {};
+        (posten || []).forEach(x => { (jeSchueler[x.sid] = jeSchueler[x.sid] || []).push(x); });
+        Object.keys(jeSchueler).forEach(sid => {
+            schuelerAendernUndSpeichern(sid, s => ({ ...s,
+                payments: [...(s.payments || []), ...jeSchueler[sid].map(x => ({ id: uniqueId("pay"), date: faellig, amount: x.betrag, method: "Lastschrift", invoiceId: x.invId, lastschrift: msgId }))],
+                sepaMandat: { ...(s.sepaMandat || {}), letzterEinzug: faellig, stand: new Date().toISOString() } }));
+        });
+    }
     function viewContract(c) {
         setContractPreview(c);
         doPrint("contract");
@@ -27140,6 +27368,15 @@ function App() {
                     p.name,
                     " \u00B7 ",
                     eurFmt(p.amount))))),
+            // Lastschrift-Mandat (v2.99.0) - sichtbar, sobald die Fahrschule Lastschrift eingerichtet hat oder schon ein Mandat existiert
+            (() => {
+                const g = sepaGlaeubiger();
+                if (!g.ok && !active.sepaMandat && !active.sepaAnfrage) return null;
+                return React.createElement(SepaMandatZeile, { stu: active, aktiv: sepaMandatAktiv(active), anfrageOffen: sepaAnfrageOffen(active), einrichtbar: g.ok,
+                    einziehbar: sepaKandidaten.some(k => k.stu.id === active.id),
+                    onAnfordern: () => sepaMandatAnfordern(active), onErfassen: () => setSepaForm(active.id), onWiderrufen: () => sepaMandatWiderrufen(active),
+                    onEinziehen: () => setSepaEinzugOffen(true), onEinstellungen: () => { setView("einstellungen"); setSettingsScreen("rechnungsdaten"); } });
+            })(),
             React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 700, fontSize: 13, color: "var(--muted)", margin: "0 2px 8px", textTransform: "uppercase", letterSpacing: ".04em" } }, "Zahlungen"),
             pays.length === 0
                 ? React.createElement(LeerZustand, { text: "Noch keine Zahlungen erfasst.", abstand: 14 })
@@ -34907,6 +35144,28 @@ function App() {
                                     React.createElement("label", null, "IBAN (optional, für Überweisung)",
                                     React.createElement("input", { type: "text", defaultValue: iv("iban"), placeholder: "DE00 0000 0000 0000 0000 00", onBlur: e => { if (e.target.value !== iv("iban"))
                                             saveInvoiceSettings({ iban: e.target.value }); } }))),
+                                // SEPA-Lastschrift (v2.99.0)
+                                React.createElement("div", { style: { borderTop: "1px solid var(--line)", margin: "14px 0 10px", paddingTop: 12 } },
+                                    React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 2 } }, "Lastschrift (SEPA)"),
+                                    React.createElement("p", { style: { fontSize: 12, color: "var(--muted)", margin: 0, lineHeight: 1.5 } },
+                                        "Optional. Damit ziehst du offene Rechnungen per Lastschrift ein: Die App erstellt eine Datei, die du im Online-Banking hochlädst. Die Gläubiger-ID bekommst du kostenlos bei der Deutschen Bundesbank, Lastschriften schaltet deine Bank für dein Konto frei.")),
+                                React.createElement("div", { className: "field" },
+                                    React.createElement("label", null, "Gläubiger-Identifikationsnummer",
+                                    React.createElement("input", { type: "text", defaultValue: iv("glaeubigerId"), placeholder: "DE98ZZZ09999999999", autoCapitalize: "characters", onBlur: e => {
+                                            const v = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+                                            if (v !== iv("glaeubigerId")) saveInvoiceSettings({ glaeubigerId: v }); } }))),
+                                iv("glaeubigerId") && React.createElement("div", { style: { fontSize: 12, margin: "-6px 2px 10px", color: glaeubigerIdPruefen(iv("glaeubigerId")).ok ? "var(--green-ink)" : "var(--red-ink)" } },
+                                    !glaeubigerIdPruefen(iv("glaeubigerId")).ok ? "Diese Gläubiger-ID stimmt nicht – bitte prüfen."
+                                        : !ibanPruefen(iv("iban")).ok ? "Gläubiger-ID gültig. Für Lastschrift fehlt noch eine gültige IBAN (oben)." : "✓ Lastschrift ist eingerichtet."),
+                                React.createElement("div", { style: { display: "flex", gap: 10 } },
+                                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                                        React.createElement("label", null, "BIC (optional)",
+                                        React.createElement("input", { type: "text", defaultValue: iv("bic"), autoCapitalize: "characters", onBlur: e => { if (e.target.value !== iv("bic"))
+                                                saveInvoiceSettings({ bic: e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "") }); } }))),
+                                    React.createElement("div", { className: "field", style: { flex: 1 } },
+                                        React.createElement("label", null, "Kontoinhaber (optional)",
+                                        React.createElement("input", { type: "text", defaultValue: iv("kontoinhaber"), placeholder: iv("firma") || (school && school.name) || "", onBlur: e => { if (e.target.value !== iv("kontoinhaber"))
+                                                saveInvoiceSettings({ kontoinhaber: e.target.value }); } })))),
                                 React.createElement("div", { className: "field" },
                                     React.createElement("label", null, "Zusatztext auf der Rechnung (optional)",
                                     React.createElement("textarea", { rows: 2, defaultValue: iv("hinweis"), placeholder: "z.B. Zahlbar innerhalb 14 Tagen ohne Abzug.", onBlur: e => { if (e.target.value !== iv("hinweis"))
@@ -38997,6 +39256,13 @@ function App() {
                             React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0 } }, x.remaining <= 0 ? "aufgebraucht" : "noch " + ueFmt(x.remaining) + " UE"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setPaketKnappOpen(false) }, "Schlie\u00DFen"))),
+        sepaForm && (() => {
+            const stu = (students || []).find(x => x.id === sepaForm);
+            return stu ? React.createElement(SepaMandatErfassen, { stu, glaeubiger: sepaGlaeubiger(), onSpeichern: m => { sepaMandatSpeichern(stu.id, m); setSepaForm(null); }, onClose: () => setSepaForm(null) }) : null;
+        })(),
+        sepaEinzugOffen && React.createElement(LastschriftEinzugSheet, { kandidaten: sepaKandidaten, glaeubiger: sepaGlaeubiger(), schulName: (school && school.name) || "",
+            onGebucht: sepaEinzugGebucht, onClose: () => setSepaEinzugOffen(false),
+            onEinstellungen: () => { setSepaEinzugOffen(false); setView("einstellungen"); setSettingsScreen("rechnungsdaten"); } }),
         mahnCockpit && React.createElement("div", { onClick: () => { setMahnCockpit(false); setMahnReihe(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560,
                     borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
@@ -39005,6 +39271,10 @@ function App() {
                     React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19 } }, "\u00DCberf\u00E4llige Rechnungen"),
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)))),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + zahlungszielTage + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
+                // Lastschrift (v2.99.0): überfällige Rechnungen mit Mandat direkt einziehen
+                !mahnReihe && ueberfaelligeRechnungen.some(x => sepaMandatAktiv(x.stu)) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 },
+                        onClick: () => { setMahnCockpit(false); setSepaEinzugOffen(true); } },
+                    "Per Lastschrift einziehen (" + ueberfaelligeRechnungen.filter(x => sepaMandatAktiv(x.stu)).length + ")"),
                 // Sammelmahnung: einer nach dem anderen, ein Tipp öffnet die Erinnerung und springt weiter
                 (() => {
                     const mitTel = ueberfaelligeRechnungen.filter(x => waNumber(x.stu.tel));
@@ -43526,6 +43796,9 @@ function StudentArea({ code, info, appMode, onSprache }) {
         // Anmeldung (dorthin führt der WhatsApp-Link); in der nativen App steht die Karte auf "Start".
         !appMode && data.student && Array.isArray(data.student.vertraege) && data.student.vertraege.length > 0
             && React.createElement(VertragsKarte, { code, vertraege: data.student.vertraege, tS: t, onFertig: () => login(name, pin) }),
+        // Lastschrift-Mandat (v2.99.0), nur wenn die Fahrschule es angefordert hat
+        !appMode && data.student && data.student.sepaAnfrage
+            && React.createElement(SepaMandatSchuelerKarte, { code, anfrage: data.student.sepaAnfrage, kontoName: [data.student.vorname, data.student.name].filter(Boolean).join(" "), tS: t, onFertig: () => login(name, pin) }),
         // Theorieunterricht (v2.65.0) - solange die Theorieprüfung nicht bestanden ist
         !appMode && data.student && !data.student.theorie && React.createElement(TheorieKarte, { code, klasse: data.student.klasse, tS: t }),
         // Läuft der Zugang noch auf dem Start-PIN des Fahrlehrers, weist ein Banner darauf hin -
@@ -44178,6 +44451,214 @@ function TheorieKarte({ code, klasse, tS }) {
                             t.anzahl > 0 && React.createElement("span", { style: { fontSize: 12, color: "var(--muted)" } }, tS("th_anzahl", { n: t.anzahl }))))))),
         fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", marginTop: 8 } }, fehler));
 }
+// ── SEPA-Lastschrift: Oberfläche (v2.99.0) ──
+function SepaMandatZeile({ stu, aktiv, anfrageOffen, einrichtbar, einziehbar, onAnfordern, onErfassen, onWiderrufen, onEinziehen, onEinstellungen }) {
+    const m = stu.sepaMandat || {};
+    const knopf = (label, onClick, primaer) => React.createElement("button", { className: primaer ? "btn btn-primary" : "btn btn-ghost", style: { minHeight: 40, padding: "7px 13px", fontSize: 13 }, onClick }, label);
+    let titel, unter, knoepfe;
+    if (aktiv) {
+        titel = "Mandat aktiv · " + ibanVerdeckt(m.iban);
+        unter = "Referenz " + m.referenz + " · seit " + dashDatumKurz(m.datum)
+            + (m.via === "app" ? " · per Handy" : m.via === "vorort" ? " · vor Ort unterschrieben" : " · Papier-Mandat")
+            + (m.letzterEinzug ? " · zuletzt eingezogen " + dashDatumKurz(m.letzterEinzug) : "");
+        knoepfe = [einziehbar && knopf("Offene Rechnungen einziehen", onEinziehen, true), knopf("Widerrufen", onWiderrufen)];
+    } else if (anfrageOffen) {
+        titel = "Wartet auf Unterschrift in der Schüler-App";
+        unter = "Angefragt am " + dashDatumKurz(stu.sepaAnfrage.am) + ". Sobald " + sepaSchuelerName(stu) + " IBAN und Unterschrift eingetragen hat, ist das Mandat hier aktiv.";
+        knoepfe = [knopf("Erneut senden", onAnfordern), knopf("Hier erfassen", onErfassen)];
+    } else {
+        titel = m.widerrufenAm ? "Mandat widerrufen am " + dashDatumKurz(m.widerrufenAm) : "Kein Lastschrift-Mandat";
+        unter = einrichtbar ? "Lass das Mandat per Handy unterschreiben oder erfasse es hier (vor Ort oder Papier)." : "Für Lastschrift fehlt noch die Gläubiger-ID der Fahrschule.";
+        knoepfe = einrichtbar ? [knopf("Per Handy anfordern", onAnfordern, true), knopf("Hier erfassen", onErfassen)] : [knopf("Einstellungen öffnen", onEinstellungen)];
+    }
+    return React.createElement("div", { className: "card", style: { padding: "13px 14px", marginBottom: 14, borderLeft: "4px solid " + (aktiv ? "var(--green)" : anfrageOffen ? "var(--amber)" : "var(--line)") } },
+        React.createElement("div", { className: "home-eyebrow", style: { marginBottom: 4 } }, "Lastschrift"),
+        React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700 } }, titel),
+        React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", margin: "2px 0 10px", lineHeight: 1.45 } }, unter),
+        React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } }, knoepfe.filter(Boolean)));
+}
+function SepaMandatErfassen({ stu, glaeubiger, onSpeichern, onClose }) {
+    const [inhaber, setInhaber] = React.useState(sepaSchuelerName(stu));
+    const [iban, setIban] = React.useState("");
+    const [bic, setBic] = React.useState("");
+    const [datum, setDatum] = React.useState(ymd(new Date()));
+    const [sig, setSig] = React.useState(null);
+    const [papier, setPapier] = React.useState(false);
+    const [versucht, setVersucht] = React.useState(false);
+    const ib = ibanPruefen(iban);
+    const bicSauber = bic.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const bicOk = !bicSauber || /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bicSauber);
+    const ok = inhaber.trim().length >= 2 && ib.ok && bicOk && !!datum && (sig || papier);
+    const referenz = sepaMandatsreferenz(stu.id, datum);
+    function speichern() {
+        setVersucht(true);
+        if (!ok) return;
+        onSpeichern({ referenz, datum, inhaber: inhaber.trim().slice(0, 70), iban: ib.iban, bic: bicSauber || undefined,
+            via: sig ? "vorort" : "papier", sig: sig || undefined, aktiv: true });
+    }
+    const feld = (label, el) => React.createElement("div", { className: "field" }, React.createElement("label", null, label, el));
+    return React.createElement("div", { onClick: onClose, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Lastschrift-Mandat erfassen",
+            style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "92dvh", overflowY: "auto" } },
+            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 2 } }, "Lastschrift-Mandat"),
+            React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 12 } }, sepaSchuelerName(stu) + " · Referenz " + referenz),
+            feld("Kontoinhaber", React.createElement("input", { type: "text", value: inhaber, maxLength: 70, onChange: e => setInhaber(e.target.value) })),
+            feld("IBAN", React.createElement("input", { type: "text", value: iban, inputMode: "text", autoCapitalize: "characters", autoComplete: "off", placeholder: "DE00 0000 0000 0000 0000 00",
+                onChange: e => setIban(e.target.value) })),
+            iban.trim() && !ib.ok && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } },
+                ib.fehler === "laenge" ? "Die IBAN hat nicht die richtige Länge." : "Diese IBAN stimmt nicht – bitte noch einmal prüfen."),
+            React.createElement("div", { style: { display: "flex", gap: 10 } },
+                React.createElement("div", { style: { flex: 1 } }, feld("BIC (optional)", React.createElement("input", { type: "text", value: bic, autoCapitalize: "characters", onChange: e => setBic(e.target.value) }))),
+                React.createElement("div", { style: { flex: 1 } }, feld("Datum der Unterschrift", React.createElement("input", { type: "date", value: datum, max: ymd(new Date()), onChange: e => setDatum(e.target.value) })))),
+            !bicOk && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, "Die BIC hat 8 oder 11 Zeichen."),
+            React.createElement("div", { lang: "de", style: { border: "1px solid var(--line)", borderRadius: 12, padding: "11px 12px", fontSize: 12.5, lineHeight: 1.5, margin: "4px 0 12px", whiteSpace: "pre-wrap" } },
+                sepaMandatText(glaeubiger.name, glaeubiger.ci, referenz)),
+            !papier && React.createElement(SignaturePad, { autoSave: true, label: "Unterschrift des Kontoinhabers", existing: sig, onSave: url => setSig(url), onClear: () => setSig(null) }),
+            React.createElement("label", { className: "check", style: { margin: "4px 2px 12px" } },
+                React.createElement("input", { type: "checkbox", checked: papier, onChange: e => { setPapier(e.target.checked); if (e.target.checked) setSig(null); } }),
+                "Mandat wurde auf Papier unterschrieben (bitte aufbewahren)"),
+            versucht && !ok && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", marginBottom: 8 } },
+                "Bitte Kontoinhaber, gültige IBAN und Unterschrift (oder Papier-Mandat) angeben."),
+            React.createElement("button", { className: "btn btn-primary btn-block", onClick: speichern }, "Mandat speichern"),
+            React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: onClose }, "Abbrechen")));
+}
+function LastschriftEinzugSheet({ kandidaten, glaeubiger, schulName, onGebucht, onClose, onEinstellungen }) {
+    const heute = ymd(new Date());
+    const frueh = sepaFruehesterEinzug(heute, 2);
+    const [faellig, setFaellig] = React.useState(frueh);
+    const [ab, setAb] = React.useState({});
+    const [fertig, setFertig] = React.useState(null); // {n, summe, datei}
+    const schluessel = k => k.stu.id + "|" + k.inv.id;
+    const auswahl = kandidaten.filter(k => !ab[schluessel(k)]);
+    const summe = Math.round(auswahl.reduce((s, k) => s + k.offen, 0) * 100) / 100;
+    const datumOk = faellig && faellig >= frueh;
+    React.useEffect(() => {
+        const onEsc = e => { if (e.key === "Escape") onClose(); };
+        document.addEventListener("keydown", onEsc);
+        return () => document.removeEventListener("keydown", onEsc);
+    }, [onClose]);
+    async function erstellen() {
+        if (!auswahl.length || !datumOk) return;
+        if (IS_DEMO()) { demoBlock("Demo-Ansicht: Es wird keine Bankdatei erstellt."); return; }
+        if (!await askConfirm({ title: "Bankdatei erstellen?", confirmLabel: "Erstellen",
+                message: (auswahl.length === 1 ? "1 Lastschrift" : auswahl.length + " Lastschriften") + " über " + eurFmt(summe) + ", fällig am " + dashDatumKurz(faellig)
+                    + ". Die Rechnungen werden dabei als bezahlt (Lastschrift) verbucht. Platzt eine Lastschrift, löschst du die Zahlung beim Schüler wieder." }))
+            return;
+        const jetzt = new Date();
+        const msgId = "AD" + jetzt.toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+        const xml = sepaLastschriftXml({ glaeubiger, posten: sepaPostenAus(auswahl, schulName), faelligAm: faellig, msgId, erstelltAm: jetzt.toISOString().slice(0, 19) });
+        const datei = "Lastschrift_" + faellig + ".xml";
+        const url = URL.createObjectURL(new Blob([xml], { type: "application/xml;charset=utf-8" }));
+        const a = document.createElement("a");
+        a.href = url; a.download = datei;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 60000);
+        onGebucht(auswahl.map(k => ({ sid: k.stu.id, invId: k.inv.id, betrag: k.offen })), faellig, msgId);
+        setFertig({ n: auswahl.length, summe, datei });
+    }
+    let inhalt;
+    if (!glaeubiger.ok) {
+        inhalt = React.createElement(React.Fragment, null,
+            React.createElement("p", { style: { fontSize: 13.5, lineHeight: 1.5, margin: "0 0 14px" } },
+                glaeubiger.ciFehler ? "Für Lastschriften brauchst du eine Gläubiger-ID (kostenlos bei der Deutschen Bundesbank). Trag sie unter Einstellungen › Rechnungsdaten ein." : "Trag unter Einstellungen › Rechnungsdaten die IBAN deines Geschäftskontos ein."),
+            React.createElement("button", { className: "btn btn-primary btn-block", onClick: onEinstellungen }, "Zu den Rechnungsdaten"));
+    } else if (fertig) {
+        inhalt = React.createElement(React.Fragment, null,
+            React.createElement("div", { className: "card", role: "status", style: { padding: 16, marginBottom: 14 } },
+                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 6 } }, "Bankdatei erstellt"),
+                React.createElement("div", { style: { fontSize: 13.5, lineHeight: 1.55 } },
+                    (fertig.n === 1 ? "1 Lastschrift" : fertig.n + " Lastschriften") + " über " + eurFmt(fertig.summe) + " in „" + fertig.datei + "“."),
+                React.createElement("ol", { style: { fontSize: 13, lineHeight: 1.55, color: "var(--ink-2)", margin: "10px 0 0", paddingLeft: 18 } },
+                    React.createElement("li", null, "Im Online-Banking „SEPA-Lastschrift“ bzw. „Datei hochladen“ (Sammelauftrag) öffnen."),
+                    React.createElement("li", null, "Die Datei aus deinen Downloads auswählen und freigeben."),
+                    React.createElement("li", null, "Platzt eine Lastschrift, beim Schüler unter Kasse die Zahlung „Lastschrift“ löschen – die Rechnung ist dann wieder offen."))),
+            React.createElement("button", { className: "btn btn-primary btn-block", onClick: onClose }, "Fertig"));
+    } else if (!kandidaten.length) {
+        inhalt = React.createElement(React.Fragment, null,
+            React.createElement(LeerZustand, { text: "Keine offenen Rechnungen von Schülern mit Lastschrift-Mandat.", abstand: 14 }),
+            React.createElement("button", { className: "btn btn-ghost btn-block", onClick: onClose }, "Schließen"));
+    } else {
+        inhalt = React.createElement(React.Fragment, null,
+            React.createElement("div", { className: "field" },
+                React.createElement("label", null, "Fällig am (Einzugstag)",
+                    React.createElement("input", { type: "date", value: faellig, min: frueh, onChange: e => setFaellig(e.target.value) }))),
+            React.createElement("div", { style: { fontSize: 12, color: datumOk ? "var(--muted)" : "var(--red-ink)", margin: "-6px 2px 12px", lineHeight: 1.45 } },
+                !datumOk ? "Frühestens " + dashDatumKurz(frueh) + " – die Bank braucht die Datei rechtzeitig vorher."
+                    : !sepaIstBankarbeitstag(faellig) ? "Das ist kein Bankarbeitstag, die Bank bucht am nächsten Bankarbeitstag ab."
+                    : "Lade die Datei spätestens am Bankarbeitstag davor hoch."),
+            React.createElement("div", { className: "card", style: { padding: "4px 12px", marginBottom: 12 } },
+                kandidaten.map(k => React.createElement("label", { key: schluessel(k), style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid var(--line)", cursor: "pointer" } },
+                    React.createElement("input", { type: "checkbox", checked: !ab[schluessel(k)], onChange: e => setAb(x => ({ ...x, [schluessel(k)]: !e.target.checked })) }),
+                    React.createElement("span", { style: { flex: 1, minWidth: 0 } },
+                        React.createElement("span", { style: { display: "block", fontSize: 14, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, sepaSchuelerName(k.stu)),
+                        React.createElement("span", { style: { display: "block", fontSize: 12, color: "var(--muted)" } },
+                            (k.inv.number || "Rechnung") + " · " + dashDatumKurz(k.inv.date) + ((k.stu.sepaMandat || {}).letzterEinzug ? "" : " · Erst-Lastschrift"))),
+                    React.createElement("span", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 14.5, fontVariantNumeric: "tabular-nums" } }, eurFmt(k.offen))))),
+            React.createElement("button", { className: "btn btn-primary btn-block", disabled: !auswahl.length || !datumOk, onClick: erstellen },
+                "Bankdatei erstellen (" + auswahl.length + " · " + eurFmt(summe) + ")"),
+            React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "8px 2px 0", lineHeight: 1.5 } },
+                "SEPA-Basislastschrift im Format pain.008 für dein Online-Banking. Die App zieht selbst nichts ein, das macht deine Bank."));
+    }
+    return React.createElement("div", { onClick: onClose, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Lastschrift einziehen",
+            style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+        React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+                padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },
+            React.createElement("h3", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 19, marginBottom: 12 } }, "Lastschrift einziehen"),
+            inhalt));
+}
+// Schüler-App: Mandat per Handy erteilen (nur nach Anfrage der Fahrschule)
+function SepaMandatSchuelerKarte({ code, anfrage, kontoName, tS, onFertig }) {
+    const [offen, setOffen] = React.useState(false);
+    const [inhaber, setInhaber] = React.useState(kontoName || "");
+    const [iban, setIban] = React.useState("");
+    const [bic, setBic] = React.useState("");
+    const [sig, setSig] = React.useState(null);
+    const [status, setStatus] = React.useState("");
+    const ib = ibanPruefen(iban);
+    const bereit = inhaber.trim().length >= 2 && ib.ok && !!sig;
+    async function absenden() {
+        if (!bereit || status === "busy") return;
+        let n = "", pin = "";
+        try { n = localStorage.getItem("v3_sa_name_" + code) || ""; pin = localStorage.getItem("v3_sa_pin_" + code) || ""; } catch (e) { }
+        setStatus("busy");
+        try {
+            const { data, error } = await sbPublic.rpc("public_student_sepa_mandat", { code, p_name: n, p_pin: pin, p_inhaber: inhaber.trim(), p_iban: ib.iban, p_bic: bic, p_sig: sig });
+            if (!error && data === "ok") {
+                setStatus("ok");
+                setTimeout(() => { setOffen(false); setStatus(""); onFertig(); }, 1400);
+            } else setStatus(data === "iban" ? "iban" : "fehler");
+        } catch (e) { setStatus("fehler"); }
+    }
+    if (!anfrage) return null;
+    const feld = (label, el) => React.createElement("div", { className: "field" }, React.createElement("label", null, label, el));
+    return React.createElement(React.Fragment, null,
+        React.createElement("div", { className: "card", style: { padding: "14px 16px", marginBottom: 12, borderLeft: "4px solid var(--orange)" } },
+            React.createElement("div", { className: "home-eyebrow" }, tS("sepa_titel")),
+            React.createElement("div", { style: { fontSize: 15, fontWeight: 700, lineHeight: 1.4, margin: "5px 0 10px" } }, tS("sepa_text")),
+            React.createElement("button", { className: "btn btn-primary", style: { minHeight: 44, padding: "8px 16px", fontSize: 14 }, onClick: () => setOffen(true) }, tS("sepa_oeffnen"))),
+        offen && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": tS("sepa_titel"), onClick: () => status !== "busy" && setOffen(false),
+                style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1300, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+            React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 620, background: "var(--card)", borderRadius: "18px 18px 0 0",
+                    padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)", maxHeight: "92dvh", overflowY: "auto" } },
+                React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 14px" } }),
+                React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "0 0 12px", lineHeight: 1.5 } }, tS("sepa_sprache")),
+                React.createElement("div", { lang: "de", style: { border: "1px solid var(--line)", borderRadius: 12, padding: "12px 13px", fontSize: 13, lineHeight: 1.55, marginBottom: 14, whiteSpace: "pre-wrap" } },
+                    React.createElement("div", { style: { fontWeight: 800, marginBottom: 6 } }, "SEPA-Lastschriftmandat"),
+                    sepaMandatText(anfrage.glaeubiger || "", anfrage.ci || "", anfrage.referenz || "")),
+                status === "ok"
+                    ? React.createElement("div", { role: "status", style: { margin: "18px 0 6px", fontSize: 16, fontWeight: 800, color: "var(--green-ink)", textAlign: "center" } }, tS("sepa_danke"))
+                    : React.createElement(React.Fragment, null,
+                        feld(tS("sepa_inhaber"), React.createElement("input", { type: "text", value: inhaber, maxLength: 70, autoComplete: "name", onChange: e => setInhaber(e.target.value) })),
+                        feld(tS("sepa_iban"), React.createElement("input", { type: "text", value: iban, autoCapitalize: "characters", autoComplete: "off", placeholder: "DE00 0000 0000 0000 0000 00", onChange: e => setIban(e.target.value) })),
+                        (status === "iban" || (iban.replace(/\s/g, "").length >= 15 && !ib.ok)) && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, tS("sepa_iban_falsch")),
+                        feld(tS("sepa_bic"), React.createElement("input", { type: "text", value: bic, autoCapitalize: "characters", onChange: e => setBic(e.target.value) })),
+                        React.createElement(SignaturePad, { autoSave: true, label: tS("sepa_unterschrift"), existing: sig, onSave: url => setSig(url), onClear: () => setSig(null) }),
+                        status === "fehler" && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", margin: "6px 0 8px" } }, tS("sepa_fehler")),
+                        React.createElement("button", { className: "btn btn-primary btn-block", disabled: !bereit || status === "busy", style: { marginTop: 8, opacity: bereit ? 1 : .55 }, onClick: absenden },
+                            status === "busy" ? "…" : tS("sepa_absenden")),
+                        React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: () => setOffen(false) }, tS("vt_spaeter"))))));
+}
 function VertragsKarte({ code, vertraege, tS, onFertig }) {
     const [offen, setOffen] = React.useState(false);
     const [gelesen, setGelesen] = React.useState(false);
@@ -44396,6 +44877,8 @@ function SchuelerStart({ code, info, onGoTab, lang }) {
         // Ausbildungsvertrag zum Unterschreiben (v2.55.0) steht vor allem anderen
         data && !fehler && Array.isArray(stu.vertraege) && stu.vertraege.length > 0
             && React.createElement(VertragsKarte, { code, vertraege: stu.vertraege, tS, onFertig: () => setVersuch(x => x + 1) }),
+        data && !fehler && stu && stu.sepaAnfrage
+            && React.createElement(SepaMandatSchuelerKarte, { code, anfrage: stu.sepaAnfrage, kontoName: [stu.vorname, stu.name].filter(Boolean).join(" "), tS, onFertig: () => setVersuch(x => x + 1) }),
         data && !fehler && stu && !stu.theorie && React.createElement(TheorieKarte, { code, klasse: stu.klasse, tS }),
         // Ein nächster Schritt (Produktplan #16): höchstens EINE Karte, feste Reihenfolge -
         // Prüfung steht an > Unterlagen fehlen > kein nächster Termin. Sonst keine Karte.
