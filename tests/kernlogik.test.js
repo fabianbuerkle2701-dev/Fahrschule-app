@@ -1029,3 +1029,25 @@ test("Schüler-Mitteilungen: Texte je Typ in der Sprache des Schülers", () => {
     for (const typ of ["neu", "bestaetigt", "verschoben", "abgesagt", "storno_ok", "storno_abgelehnt"])
         assert.doesNotMatch(k.mitteilungText({ typ, start_at: "2026-10-05T12:00:00Z" }, de, "de"), /^mt_/, typ + " ohne Text");
 });
+
+test("Rundnachricht: Empfänger-Gruppen und Nachrichtentext in der Schüler-App", () => {
+    const k = require("./lade-app")(["rundnachrichtGruppen", "mitteilungText", "tt"]);
+    const liste = [
+        { id: "a", klasse: "B", standort: "s1", reif: true, ohneTermin: false },
+        { id: "b", klasse: "A", standort: "s2", reif: false, ohneTermin: true },
+        { id: "c", klasse: "B", standort: "", reif: false, ohneTermin: true },
+    ];
+    const g = k.rundnachrichtGruppen(liste, [{ id: "s1", name: "Innenstadt" }, { id: "s2", name: "Nord" }]);
+    const m = {}; g.forEach(x => { m[x.id] = x.ids.join(","); });
+    assert.deepEqual(rein(m), { alle: "a,b,c", reif: "a", ohneTermin: "b,c", "k:A": "b", "k:B": "a,c", "s:s1": "a", "s:s2": "b" });
+    // eine Klasse, ein Standort, niemand reif: nur "Alle" und "Ohne nächsten Termin"
+    const g2 = k.rundnachrichtGruppen([{ id: "x", klasse: "B", ohneTermin: true }], [{ id: "s1" }]);
+    assert.deepEqual(rein(g2.map(x => x.id)), ["alle", "ohneTermin"]);
+    const de = (key, v) => k.tt("de", key, v);
+    assert.equal(k.mitteilungText({ typ: "nachricht", text: "Wir haben zu." }, de, "de"), "Wir haben zu.");
+    for (const l of ["de", "en", "tr", "ru"]) {
+        assert.doesNotMatch(k.tt(l, "mt_nachricht_von", { name: "Anna" }), /^mt_/, l);
+        assert.match(k.tt(l, "mt_nachricht_von", { name: "Anna" }), /Anna/, l);
+        assert.doesNotMatch(k.tt(l, "mt_nachricht_fs"), /^mt_/, l);
+    }
+});

@@ -1,0 +1,9 @@
+-- Rundnachricht an Schüler (v2.98.0), angewandt 2026-10-02 (Migration "rundnachricht", Volltext: list_migrations).
+-- schueler_mitteilungen + Spalten text, absender, gesendet_von, rund_id; typ 'nachricht'.
+-- rundnachricht_senden(p_student_ids text[], p_text text) -> {gesendet, rund_id} | {fehler: leer|lang|keine|zuviele|tageslimit}
+--   nur authenticated; nur Schüler, die der Aufrufer besitzt oder geteilt bekommen hat; ≤ 1000 Zeichen, ≤ 500 Empfänger,
+--   ≤ 10 Rundnachrichten je Fahrlehrer und 24 h. owner der Zeile = Schüler-Besitzer (damit der Schüler-Login sie findet).
+-- rundnachrichten_liste() -> letzte 20 eigene aus 60 Tagen mit Empfänger-/Gelesen-Zahl.
+-- public_student_mitteilungen liefert zusätzlich text + absender.
+-- Aufräumen wie bisher: pg_cron löscht Mitteilungen > 90 Tage, Trigger beim Schüler-Löschen.
+-- Geprüft per Rollback-Test: eigener Schüler erhält sie, fremder nicht, leerer Text abgelehnt, Liste zählt richtig.
