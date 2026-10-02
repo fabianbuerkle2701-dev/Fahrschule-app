@@ -1,0 +1,14 @@
+-- Audit Sicherheit + Geld 2026-10-02 (Migrationen pin_bruteforce_checkin_reflection, audit_sicherheit_fixes,
+-- audit_geld_fixes; Volltext: list_migrations).
+-- HOCH: public_theory_checkin / public_lesson_reflection_submit – falsche PIN jetzt per response.status 400 ohne raise,
+--   damit der Fehlversuch in student_login_throttle bleibt (vorher Rollback -> PIN unbegrenzt durchprobierbar).
+--   Live per anon-curl geprüft: 3 falsche PINs -> HTTP 400 "error", fail_count 3 (Testschüler danach gelöscht).
+-- Plattform-Admin in 10 Funktionen über uid 96530a9f-… statt profiles.email.
+-- _guard_profile_privilege_flags: verguetung nur per trusted write; school_verguetung_set setzt app.trusted_profile_write.
+-- public_student_send_message: execute für public/anon/authenticated entzogen (Client nutzt sie nicht mehr).
+-- public_theory_exam_submit: höchstens 200 Probeprüfungen je Schüler.
+-- Bucket student-files: 20 MB Grenze. Indizes für alle einspaltigen Fremdschlüssel ohne Index (…_fk_idx).
+-- _open_invoiced_amount: Überzahlung einer gültigen Rechnung deckt andere (wie rechnungsZahlungen in der App).
+-- create_invoice / cancel_invoice: invoices+abrechnung immer per _schul_aenderung markieren.
+-- school_teacher_month: price fällt auf invoicedPrice zurück.
+-- school_offene_posten: zusätzlich abrechnungs_modell + invoices (DROP/CREATE wegen neuer Spalten).

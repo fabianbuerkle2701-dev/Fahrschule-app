@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.100.1";
+const APP_VERSION = "2.100.2";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.100.2", date: "Oktober 2026", changes: [
+            "Simulatorstunden werden mit dem Simulator-Preis aus der Preisliste berechnet, wenn einer eingetragen ist",
+            "Fehler behoben",
+        ] },
     { v: "2.100.1", date: "Oktober 2026", changes: [
             "Private Termine, sonstige Tätigkeiten und „Versetzt“ lassen sich auch bei ausgeschöpftem Tageslimit eintragen",
             "Fehler behoben",
@@ -9841,9 +9845,11 @@ function preisAusPreisliste(school, klasse, art, heuteKey) {
     if (gruppe !== "Fahrstunden" && gruppe !== "Sonderfahrten")
         return null;
     const posten = pl.klassen[klasse || DEFAULT_KLASSE];
-    const v = posten ? posten.fahrstunde : null;
-    const n = typeof v === "number" ? v : parseFloat(String(v == null ? "" : v).replace(",", "."));
-    return Number.isFinite(n) && n > 0 ? n : null;
+    const zahl = v => { const n = typeof v === "number" ? v : parseFloat(String(v == null ? "" : v).replace(",", ".")); return Number.isFinite(n) && n > 0 ? n : null; };
+    // Simulator (Posten 6): eigener Preis, wenn eingetragen - sonst wie bisher der Fahrstundenpreis
+    if (art === "SIM" && posten && zahl(posten.simulator) != null)
+        return zahl(posten.simulator);
+    return posten ? zahl(posten.fahrstunde) : null;
 }
 // Pauschalen der § 32-Preisliste, die als Kostenposten gebucht werden (Fahrstunden laufen über
 // preisAusPreisliste). Nur Posten mit eingetragenem Betrag; vor "Gültig ab" gar keine.
@@ -19688,8 +19694,11 @@ function App() {
     // Eine vergangene Fahrstunde bestätigen: Dauer übernehmen und als gefahrene Stunde speichern
     function confirmPastLesson(appt, minutes, extra) {
         const sid = appt._matchedStudentId || appt.student_id;
-        const stu = students.find(x => x.id === sid);
-        if (stu) {
+        // aktueller Stand (studentsRef): auf einem anderen Gerät kann der Termin inzwischen abgeschlossen
+        // sein - dann keine zweite Fahrstunde mit derselben apptId anlegen (Audit 2026-10-02)
+        const stu = (studentsRef.current || students || []).find(x => x.id === sid);
+        const schonErfasst = !!(stu && appt.id && (stu.drivenLessons || []).some(l => l && l.apptId === appt.id));
+        if (stu && !schonErfasst) {
             const id = "L" + Date.now() + Math.random().toString(36).slice(2, 6);
             // ymd() statt slice(0,10): start_at ist UTC-notiert - bei Terminen zwischen 0 und 2 Uhr
             // nachts stünde sonst das Vortagsdatum in der Fahrstunde (dieselbe Fehlerklasse wie der
@@ -19700,7 +19709,8 @@ function App() {
                 time = new Date(appt.start_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" });
             }
             catch (e) { }
-            const ausListe = preisAusPreisliste(school, stu.klasse, appt.art || "ÜST", ymd(new Date()));
+            // Preisliste nach dem Tag der Fahrstunde, nicht nach dem Tag der Bestätigung
+            const ausListe = preisAusPreisliste(school, stu.klasse, appt.art || "ÜST", date || ymd(new Date()));
             const price = ausListe != null ? ausListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour));
             const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "" }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
@@ -19872,8 +19882,9 @@ function App() {
         // WICHTIG: price speichert den Preis PRO UE (wie bei allen anderen Fahrtenbuch-Einträgen),
         // nicht den Gesamtpreis. lessonCost() multipliziert beim Anzeigen automatisch mit der UE-Zahl.
         // Im Formular gibt der Fahrlehrer den GESAMTPREIS ein/sieht ihn, daher hier umrechnen.
+        const preisListe = preisAusPreisliste(school, stu.klasse, f.art || "ÜST", f.date);
         const price = (f.priceMode === "auto")
-            ? ((pricePerHour === "" || pricePerHour == null) ? null : Number(pricePerHour))
+            ? (preisListe != null ? preisListe : ((pricePerHour === "" || pricePerHour == null) ? null : Number(pricePerHour)))
             : ((f.price === "" || f.price == null || ue <= 0) ? null : Math.round((betragAusEingabe(f.price) / ue) * 100) / 100);
         // Ein ungültiger Preis (z.B. eingefügtes "45,00 €" statt "45,00") wird zu NaN und würde die
         // komplette Kostenberechnung des Schülers unbemerkt auf NaN kippen (lessonsCharge()/sumCharges()
@@ -21728,8 +21739,9 @@ function App() {
             }
             const id = "L" + Date.now() + Math.random().toString(36).slice(2, 6);
             const minutes = parseInt(p.minutes, 10) || 0;
+            const preisListe = preisAusPreisliste(school, stu.klasse, "ÜST", p.date || today0());
             const driven = [...(stu.drivenLessons || []), { id, date: p.date || today0(), time: p.time || "", minutes,
-                    price: (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)) }];
+                    price: preisListe != null ? preisListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour)) }];
             writeStudent({ ...stu, drivenLessons: driven });
             setActiveId(stu.id);
             setAssistant(null);
@@ -33118,7 +33130,7 @@ function App() {
                 // packages muss mit, sonst rechnet lessonBillables() ohne Paket-Guthaben und der
                 // offene Betrag faellt bei Paket-Schuelern zu hoch aus.
                 const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [],
-                    payments: r.payments || [], packages: r.packages || [] };
+                    payments: r.payments || [], packages: r.packages || [], abrechnungsModell: r.abrechnungs_modell || undefined, invoices: r.invoices || [] };
                 const charges = sumCharges(stu, price);
                 const paid = sumPayments(stu);
                 return {
@@ -33158,7 +33170,7 @@ function App() {
                 name: (r.student_name || "").trim() || "Unbekannt",
                 teacher: r.teacher_email || "",
                 stu: { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [],
-                    payments: r.payments || [], packages: r.packages || [] },
+                    payments: r.payments || [], packages: r.packages || [], abrechnungsModell: r.abrechnungs_modell || undefined, invoices: r.invoices || [] },
             }));
             setLuecken(l => ({ ...l, busy: false, error: "", raw: raw }));
         }).catch(e => setLuecken(l => ({ ...l, busy: false, error: e.message || "Fehler beim Laden", raw: [] })));
@@ -46884,7 +46896,7 @@ function InhaberCockpit({ schoolId, stdPreis, lokal, onDetails, onTeamKalender }
         setRoh(r => ({ ...r, busy: true, error: "" }));
         Promise.all([fetchSchoolCockpit(schoolId), fetchSchoolOffenePosten(schoolId), fetchSchoolExamStats(schoolId)])
             .then(([daten, offene, pruefungen]) => setRoh({ busy: false, daten,
-                geld: (offene || []).map(r => ({ stu: { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [], packages: r.packages || [] } })),
+                geld: (offene || []).map(r => ({ stu: { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [], packages: r.packages || [], abrechnungsModell: r.abrechnungs_modell || undefined, invoices: r.invoices || [] } })),
                 pruefungen: pruefungen || [] }))
             .catch(e => setRoh({ busy: false, error: fehlerText(e) }));
     }, [schoolId, !!lokal]);
@@ -47692,7 +47704,7 @@ function SchulDashboard({ schoolId, stdPreis, rolle, zahlungszielTage, onRechnun
 
         // Offene Posten mit derselben Rechnung wie in der Schüleransicht (sumCharges/sumPayments).
         const offeneListe = (daten.offene || []).map(r => {
-            const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [], packages: r.packages || [] };
+            const stu = { drivenLessons: r.driven_lessons || [], costItems: r.cost_items || [], payments: r.payments || [], packages: r.packages || [], abrechnungsModell: r.abrechnungs_modell || undefined, invoices: r.invoices || [] };
             const offen = sumCharges(stu, stdPreis) - sumPayments(stu);
             return { studentId: r.student_id, name: (r.student_name || "").trim() || "Unbekannt", teacher: r.teacher_email || "", offen };
         }).filter(x => x.offen > 0.005).sort((x, y) => y.offen - x.offen);

@@ -1135,3 +1135,11 @@ test("Ausgaben & Gewinn: USt-Aufteilung, Fahrzeugkosten, Monatsübersicht, CSV",
     assert.equal(csv.zeilen[0][4], "950,00", "nach Datum sortiert");
     assert.equal(k.ausgabenCsvZeilen(u.alle, true).kopf.length, 8, "Kleinunternehmer ohne USt-Spalten");
 });
+
+test("Preisliste: Simulator mit eigenem Preis, sonst Fahrstundenpreis", () => {
+    const k = require("./lade-app")(["preisAusPreisliste"]);
+    const school = { preisliste: { klassen: { B: { fahrstunde: 65, simulator: "40,00" } } } };
+    assert.equal(k.preisAusPreisliste(school, "B", "SIM", "2026-10-02"), 40);
+    assert.equal(k.preisAusPreisliste(school, "B", "ÜST", "2026-10-02"), 65);
+    assert.equal(k.preisAusPreisliste({ preisliste: { klassen: { B: { fahrstunde: 65 } } } }, "B", "SIM", "2026-10-02"), 65);
+});
