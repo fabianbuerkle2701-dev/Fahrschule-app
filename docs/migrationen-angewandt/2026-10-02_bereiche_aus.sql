@@ -1,0 +1,4 @@
+-- Bereiche je Fahrschule ausschalten (v2.95.0, Produktplan #32), angewandt 2026-10-02 als Migration "bereiche_aus".
+-- schools.bereiche_aus jsonb (Liste von IDs: interessenten, fuhrpark, videos, begleitung, anmeldung), Speichern über saveSchool (RLS wie alle Schulfelder).
+-- public_buchungsseite(code) liefert zusätzlich 'bereicheAus' - Buchungsseite/Schüler-App blenden Reiter aus.
+-- Geprüft: Demo-Schule kurz auf fuhrpark/interessenten/anmeldung gesetzt (Menüs, Einstellungen, Buchungsseite korrekt), danach zurück auf [].
