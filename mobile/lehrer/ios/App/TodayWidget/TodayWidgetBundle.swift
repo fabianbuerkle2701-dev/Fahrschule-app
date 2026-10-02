@@ -31,6 +31,7 @@ struct Termin: Codable, Identifiable, Hashable {
     let typ: String?
     let titel: String?
     let ort: String?
+    let storno: Bool?
 
     var start: Date { Datum.parse(start_at) ?? .distantPast }
     var ende: Date { end_at.flatMap(Datum.parse) ?? start.addingTimeInterval(45 * 60) }
@@ -100,6 +101,8 @@ struct KalenderEntry: TimelineEntry {
     var urlaubHeute: Bool { heute.contains { $0.istUrlaub } }
 }
 
+enum Abruf: Error { case tokenUngueltig }
+
 struct Provider: TimelineProvider {
     func placeholder(in context: Context) -> KalenderEntry { Beispiel.entry() }
 
@@ -125,19 +128,34 @@ struct Provider: TimelineProvider {
     // auch ohne Netzabruf pünktlich weiter.
     private func laden(jetzt: Date) async -> [KalenderEntry] {
         let defaults = UserDefaults(suiteName: appGroupId)
-        guard let token = defaults?.string(forKey: "widgetToken") else {
+        // Leerer Token = abgemeldet (die App schickt beim Abmelden "" über nativeWidgetToken)
+        guard let token = defaults?.string(forKey: "widgetToken"), !token.isEmpty else {
+            defaults?.removeObject(forKey: cacheKey)
             return [KalenderEntry(date: jetzt, termine: [], anfragen: 0, angemeldet: false)]
         }
         var antwort: KalenderAntwort?
-        if let frisch = try? await abrufen(token: token) {
-            antwort = frisch
-            if let daten = try? JSONEncoder().encode(frisch) { defaults?.set(daten, forKey: cacheKey) }
-        } else if let daten = defaults?.data(forKey: cacheKey) {
-            antwort = try? JSONDecoder().decode(KalenderAntwort.self, from: daten)
+        do {
+            if let frisch = try await abrufen(token: token) {
+                antwort = frisch
+                if let daten = try? JSONEncoder().encode(frisch) {
+                    defaults?.set(daten, forKey: cacheKey)
+                    defaults?.set(token, forKey: cacheKey + "Token")
+                }
+            }
+        } catch Abruf.tokenUngueltig {
+            // Server kennt den Token nicht (mehr): nicht "frei" anzeigen, sondern zur Anmeldung auffordern
+            defaults?.removeObject(forKey: cacheKey)
+            return [KalenderEntry(date: jetzt, termine: [], anfragen: 0, angemeldet: false)]
+        } catch {
+            // Netzfehler: letzter Stand, aber nur, wenn er zu diesem Token gehört (kein fremder Kalender)
+            if defaults?.string(forKey: cacheKey + "Token") == token, let daten = defaults?.data(forKey: cacheKey) {
+                antwort = try? JSONDecoder().decode(KalenderAntwort.self, from: daten)
+            }
         }
         let termine = (antwort?.termine ?? []).sorted { $0.start < $1.start }
         let anfragen = antwort?.anfragen ?? 0
-        let wechsel = termine.map(\.ende).filter { $0 > jetzt && Datum.kalender.isDate($0, inSameDayAs: jetzt) }
+        // Zu Beginn UND Ende jedes heutigen Termins neu zeichnen ("Jetzt", "noch N Termine")
+        let wechsel = (termine.map(\.start) + termine.map(\.ende)).filter { $0 > jetzt && Datum.kalender.isDate($0, inSameDayAs: jetzt) }
         let zeiten = [jetzt] + Array(Set(wechsel)).sorted().prefix(24)
         return zeiten.map { KalenderEntry(date: $0, termine: termine, anfragen: anfragen, angemeldet: true) }
     }
@@ -153,9 +171,9 @@ struct Provider: TimelineProvider {
         request.httpBody = try JSONEncoder().encode(["p_token": token])
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-        // null = Token ungültig (z. B. abgemeldet) -> leer statt alter Zwischenspeicher
+        // null = Token ungültig (z. B. abgemeldet oder Konto gewechselt)
         if String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) == "null" {
-            return KalenderAntwort(anfragen: 0, termine: [])
+            throw Abruf.tokenUngueltig
         }
         return try JSONDecoder().decode(KalenderAntwort.self, from: data)
     }
@@ -169,7 +187,7 @@ enum Beispiel {
         func t(_ id: String, _ tag: Int, _ h: Int, _ m: Int, _ dauer: Int, _ art: String, _ titel: String, ort: String? = nil, typ: String = "termin") -> Termin {
             let s = k.date(byAdding: DateComponents(day: tag, hour: h, minute: m), to: heute) ?? heute
             let iso = ISO8601DateFormatter()
-            return Termin(id: id, start_at: iso.string(from: s), end_at: iso.string(from: s.addingTimeInterval(Double(dauer) * 60)), art: art, typ: typ, titel: titel, ort: ort)
+            return Termin(id: id, start_at: iso.string(from: s), end_at: iso.string(from: s.addingTimeInterval(Double(dauer) * 60)), art: art, typ: typ, titel: titel, ort: ort, storno: nil)
         }
         let jetzt = k.date(byAdding: DateComponents(hour: 13, minute: 20), to: heute) ?? Date()
         return KalenderEntry(date: jetzt, termine: [
@@ -215,7 +233,7 @@ private struct TerminZeile: View {
         .fixedSize(horizontal: false, vertical: true)
     }
     private var zusatz: String? {
-        let teile = [t.artKurz, t.istUrlaub ? nil : "bis " + Datum.uhr(t.ende), t.ort].compactMap { $0 }
+        let teile = [t.artKurz, t.istUrlaub ? nil : "bis " + Datum.uhr(t.ende), t.storno == true ? "Storno angefragt" : nil, t.ort].compactMap { $0 }
         return teile.isEmpty ? nil : teile.joined(separator: " · ")
     }
 }

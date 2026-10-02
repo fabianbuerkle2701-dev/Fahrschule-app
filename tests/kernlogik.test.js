@@ -1096,3 +1096,21 @@ test("SEPA-Lastschrift: IBAN, Gläubiger-ID, Bankarbeitstage, Bankdatei, Einzugs
     assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" }, sepaMandat: { ...mandat, stand: "2026-10-02T10:00:00.000Z" } }), false);
     assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" }, sepaMandat: mandat }), true, "älteres Mandat erledigt keine neue Anfrage");
 });
+
+test("SEPA nach Review: freie Zahlungen decken Rechnungen, Widerruf erledigt die Anfrage, BIC-Pflicht", () => {
+    const k = require("./lade-app")(["sepaEinzugKandidaten", "sepaAnfrageOffen", "sepaBicPflicht"]);
+    const mandat = { aktiv: true, referenz: "AD-A", datum: "2026-10-01", iban: "DE89370400440532013000", stand: "2026-10-01T10:00:00.000Z" };
+    // 500 € bar ohne Rechnungszuordnung: die Rechnung über 500 € darf nicht eingezogen werden,
+    // von einer zweiten (jüngeren) über 200 € bleibt alles offen
+    const s = { id: "a", sepaMandat: mandat, invoices: [{ id: "i1", number: "R-1", date: "2026-09-01", total: 500 }, { id: "i2", number: "R-2", date: "2026-09-20", total: 200 }],
+        payments: [{ amount: 500, method: "Bar" }] };
+    assert.deepEqual(rein(k.sepaEinzugKandidaten([s]).map(x => x.inv.number + ":" + x.offen)), ["R-2:200"]);
+    // Teilweise gedeckt
+    const t = { ...s, payments: [{ amount: 120 }] };
+    assert.deepEqual(rein(k.sepaEinzugKandidaten([t]).map(x => x.inv.number + ":" + x.offen)), ["R-1:380", "R-2:200"]);
+    // Widerruf nach der Anfrage: Anfrage ist erledigt
+    assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: { am: "2026-10-02T09:00:00.000Z" }, sepaMandat: { aktiv: false, widerrufenAm: "2026-10-02", stand: "2026-10-02T11:00:00.000Z" } }), false);
+    assert.equal(k.sepaAnfrageOffen({ sepaAnfrage: null, sepaMandat: mandat }), false);
+    assert.equal(k.sepaBicPflicht("CH9300762011623852957"), true);
+    assert.equal(k.sepaBicPflicht("DE89370400440532013000"), false);
+});

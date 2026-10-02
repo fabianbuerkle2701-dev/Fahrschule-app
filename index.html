@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.99.0";
+const APP_VERSION = "2.99.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.99.1", date: "Oktober 2026", changes: [
+            "Fehler behoben",
+        ] },
     { v: "2.99.0", date: "Oktober 2026", changes: [
             "Neu: SEPA-Lastschrift. Trag unter Einstellungen › Rechnungsdaten deine Gläubiger-ID ein, lass Schüler das Mandat per Handy unterschreiben (oder erfasse es vor Ort) und zieh offene Rechnungen gesammelt ein – die App erstellt die Datei für dein Online-Banking und verbucht die Zahlungen",
         ] },
@@ -7504,6 +7507,8 @@ async function ensureWidgetToken() {
 // bliebe er unbegrenzt gueltig und das Homescreen-Widget wuerde nach einer Geraeteweitergabe
 // weiterhin die Termine des vorherigen Nutzers anzeigen.
 async function revokeWidgetToken(uid) {
+    // Auch die Kopie in der App-Group leeren, sonst zeigt das Homescreen-Widget weiter die alten Termine
+    try { const b = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.nativeWidgetToken; if (b) b.postMessage(""); } catch (e) { }
     const { error } = await sb.from("widget_tokens").delete().eq("owner", uid);
     if (error)
         console.error(error);
@@ -11444,21 +11449,36 @@ function sepaMandatAktiv(stu) {
 function sepaAnfrageOffen(stu) {
     const a = stu && stu.sepaAnfrage;
     if (!a || !a.am) return false;
-    return !(sepaMandatAktiv(stu) && String(stu.sepaMandat.stand || "") >= String(a.am));
+    // Jeder neuere Mandats-Stand (erteilt ODER widerrufen) erledigt die Anfrage - sonst tauchte sie
+    // nach einem Widerruf wieder auf und der Schüler konnte das Mandat selbst reaktivieren.
+    const m = stu.sepaMandat;
+    return !(m && String(m.stand || "") >= String(a.am));
+}
+// Außerhalb des EWR verlangt SEPA die BIC des Zahlungspflichtigen
+function sepaBicPflicht(iban) {
+    return ["CH", "GB", "MC", "SM", "VA", "AD", "GI", "JE", "GG", "IM", "AL", "MD", "ME", "MK", "RS"].indexOf(String(iban || "").slice(0, 2).toUpperCase()) >= 0;
 }
 function sepaSchuelerName(s) {
     return [String((s && s.vorname) || "").trim(), String((s && s.name) || "").trim()].filter(Boolean).join(" ") || "Schüler";
 }
-// Offene, nicht stornierte Rechnungen von Schülern mit aktivem Mandat
+// Offene, nicht stornierte Rechnungen von Schülern mit aktivem Mandat. Zahlungen OHNE
+// Rechnungszuordnung ("+ Zahlung erfassen", vorgemerkte Storno-Umbuchungen) zählt invoiceOpen nicht -
+// sie decken hier die ältesten offenen Rechnungen, sonst würde eine bar bezahlte Rechnung noch
+// einmal per Lastschrift eingezogen (Pre-Push-Review v2.99).
 function sepaEinzugKandidaten(liste) {
     const out = [];
     (liste || []).forEach(s => {
         if (!s || !sepaMandatAktiv(s)) return;
-        (s.invoices || []).forEach(inv => {
-            if (!inv || inv.cancelledBy || inv.stornoOf) return;
-            const offen = invoiceOpen(s, inv);
-            if (offen > 0.005) out.push({ stu: s, inv, offen });
-        });
+        let frei = (s.payments || []).filter(p => p && !p.invoiceId).reduce((t, p) => t + (Number(p.amount) || 0), 0);
+        (s.invoices || []).filter(inv => inv && !inv.cancelledBy && !inv.stornoOf)
+            .map(inv => ({ inv, offen: invoiceOpen(s, inv) })).filter(x => x.offen > 0.005)
+            .sort((a, b) => String(a.inv.date || "").localeCompare(String(b.inv.date || "")))
+            .forEach(x => {
+                const deckung = Math.min(Math.max(frei, 0), x.offen);
+                frei -= deckung;
+                const rest = Math.round((x.offen - deckung) * 100) / 100;
+                if (rest > 0.005) out.push({ stu: s, inv: x.inv, offen: rest });
+            });
     });
     return out.sort((a, b) => sepaSchuelerName(a.stu).localeCompare(sepaSchuelerName(b.stu), "de") || String(a.inv.date || "").localeCompare(String(b.inv.date || "")));
 }
@@ -12873,7 +12893,7 @@ const STUDENT_I18N = {
         wl_von: "Von", wl_bis: "Bis",
         wl_speichern: "Speichern", wl_speichert: "Speichert…", wl_gespeichert: "✓ Gespeichert",
         th_komme: "Ich komme", th_angemeldet: "Angemeldet", th_abmelden: "Abmelden", th_anzahl: "{n} angemeldet", th_anm_fehler: "Hat nicht geklappt. Bitte später noch einmal versuchen.", th_titel: "Theorieunterricht", th_stand: "{n} von {m} Pflichtthemen", th_naechste: "Nächste Theoriestunden", th_fehlt: "Fehlt dir noch", th_keine: "Zurzeit sind keine Theoriestunden eingetragen.", th_ohne_thema: "Thema folgt",
-        naechste_fahrstunde: "Nächste Fahrstunde", sa_abholung: "Abholung", sa_ziel: "Ziel der Stunde", vt_titel: "Ausbildungsvertrag", vt_text: "Deine Fahrschule hat dir den Ausbildungsvertrag zum Unterschreiben geschickt.", vt_lesen: "Lesen und unterschreiben", vt_gelesen: "Ich habe den Vertrag gelesen und bin einverstanden.", vt_unterschrift: "Deine Unterschrift", vt_absenden: "Vertrag unterschreiben", vt_spaeter: "Später", sepa_titel: "Lastschrift-Mandat", sepa_text: "Deine Fahrschule möchte Rechnungen per Lastschrift einziehen. Trag dafür deine IBAN ein und unterschreibe.", sepa_oeffnen: "IBAN eintragen", sepa_sprache: "Der Mandatstext ist auf Deutsch, weil er so rechtlich gilt.", sepa_inhaber: "Kontoinhaber", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "Diese IBAN stimmt nicht. Bitte prüfe sie noch einmal.", sepa_unterschrift: "Unterschrift des Kontoinhabers", sepa_absenden: "Mandat erteilen", sepa_danke: "Danke! Das Mandat ist erteilt.", sepa_fehler: "Das hat nicht geklappt. Bitte prüfe deine Angaben und versuch es noch einmal.", vt_fehler: "Das hat nicht geklappt. Prüfe die Verbindung und versuche es noch einmal.", vt_danke: "Danke, der Vertrag ist unterschrieben.", vt_sprache: "Lies den Vertrag in Ruhe durch. Mit deiner Unterschrift wird er verbindlich.", banner_storno_angefragt: " · Storno angefragt",
+        naechste_fahrstunde: "Nächste Fahrstunde", sa_abholung: "Abholung", sa_ziel: "Ziel der Stunde", vt_titel: "Ausbildungsvertrag", vt_text: "Deine Fahrschule hat dir den Ausbildungsvertrag zum Unterschreiben geschickt.", vt_lesen: "Lesen und unterschreiben", vt_gelesen: "Ich habe den Vertrag gelesen und bin einverstanden.", vt_unterschrift: "Deine Unterschrift", vt_absenden: "Vertrag unterschreiben", vt_spaeter: "Später", sepa_titel: "Lastschrift-Mandat", sepa_text: "Deine Fahrschule möchte Rechnungen per Lastschrift einziehen. Trag dafür deine IBAN ein und unterschreibe.", sepa_oeffnen: "IBAN eintragen", sepa_sprache: "Der Mandatstext ist auf Deutsch, weil er so rechtlich gilt.", sepa_inhaber: "Kontoinhaber", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "Diese IBAN stimmt nicht. Bitte prüfe sie noch einmal.", sepa_bic_pflicht: "Für Konten außerhalb der EU wird die BIC benötigt.", sepa_unterschrift: "Unterschrift des Kontoinhabers", sepa_absenden: "Mandat erteilen", sepa_danke: "Danke! Das Mandat ist erteilt.", sepa_fehler: "Das hat nicht geklappt. Bitte prüfe deine Angaben und versuch es noch einmal.", vt_fehler: "Das hat nicht geklappt. Prüfe die Verbindung und versuche es noch einmal.", vt_danke: "Danke, der Vertrag ist unterschrieben.", vt_sprache: "Lies den Vertrag in Ruhe durch. Mit deiner Unterschrift wird er verbindlich.", banner_storno_angefragt: " · Storno angefragt",
         keine_fahrstunde_banner: "Aktuell ist keine Fahrstunde für dich eingetragen. Unter „Termine“ kannst du deinem Fahrlehrer einen Wunschtermin vorschlagen.",
         sa_angefragt: " · Angefragt", sa_schnellzugriff: "Schnellzugriff",
         sa_kein_pin_titel: "Noch nicht angemeldet",
@@ -13271,7 +13291,7 @@ const STUDENT_I18N = {
         wl_von: "From", wl_bis: "To",
         wl_speichern: "Save", wl_speichert: "Saving…", wl_gespeichert: "✓ Saved",
         th_komme: "I'll come", th_angemeldet: "Signed up", th_abmelden: "Cancel", th_anzahl: "{n} signed up", th_anm_fehler: "That didn't work. Please try again later.", th_titel: "Theory classes", th_stand: "{n} of {m} required topics", th_naechste: "Upcoming theory classes", th_fehlt: "You still need this", th_keine: "No theory classes are scheduled right now.", th_ohne_thema: "Topic to be announced",
-        naechste_fahrstunde: "Next driving lesson", sa_abholung: "Pick-up", sa_ziel: "Lesson goal", vt_titel: "Training contract", vt_text: "Your driving school has sent you the training contract to sign.", vt_lesen: "Read and sign", vt_gelesen: "I have read the contract and agree to it.", vt_unterschrift: "Your signature", vt_absenden: "Sign contract", vt_spaeter: "Later", sepa_titel: "Direct debit mandate", sepa_text: "Your driving school would like to collect invoices by direct debit. Enter your IBAN and sign.", sepa_oeffnen: "Enter IBAN", sepa_sprache: "The mandate text is in German because that version is legally binding.", sepa_inhaber: "Account holder", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "This IBAN is not valid. Please check it again.", sepa_unterschrift: "Signature of the account holder", sepa_absenden: "Grant mandate", sepa_danke: "Thank you! The mandate has been granted.", sepa_fehler: "That didn't work. Please check your details and try again.", vt_fehler: "That didn't work. Check your connection and try again.", vt_danke: "Thank you, the contract is signed.", vt_sprache: "The contract is in German; the German version is binding. Your signature makes it binding.", banner_storno_angefragt: " · Cancellation requested",
+        naechste_fahrstunde: "Next driving lesson", sa_abholung: "Pick-up", sa_ziel: "Lesson goal", vt_titel: "Training contract", vt_text: "Your driving school has sent you the training contract to sign.", vt_lesen: "Read and sign", vt_gelesen: "I have read the contract and agree to it.", vt_unterschrift: "Your signature", vt_absenden: "Sign contract", vt_spaeter: "Later", sepa_titel: "Direct debit mandate", sepa_text: "Your driving school would like to collect invoices by direct debit. Enter your IBAN and sign.", sepa_oeffnen: "Enter IBAN", sepa_sprache: "The mandate text is in German because that version is legally binding.", sepa_inhaber: "Account holder", sepa_iban: "IBAN", sepa_bic: "BIC (optional)", sepa_iban_falsch: "This IBAN is not valid. Please check it again.", sepa_bic_pflicht: "For accounts outside the EU, the BIC is required.", sepa_unterschrift: "Signature of the account holder", sepa_absenden: "Grant mandate", sepa_danke: "Thank you! The mandate has been granted.", sepa_fehler: "That didn't work. Please check your details and try again.", vt_fehler: "That didn't work. Check your connection and try again.", vt_danke: "Thank you, the contract is signed.", vt_sprache: "The contract is in German; the German version is binding. Your signature makes it binding.", banner_storno_angefragt: " · Cancellation requested",
         keine_fahrstunde_banner: "No driving lesson is currently scheduled for you. Under \"Appointments\" you can suggest a preferred time to your driving instructor.",
         sa_angefragt: " · Requested", sa_schnellzugriff: "Quick access",
         sa_kein_pin_titel: "Not signed in yet",
@@ -13667,7 +13687,7 @@ const STUDENT_I18N = {
         wl_von: "Başlangıç", wl_bis: "Bitiş",
         wl_speichern: "Kaydet", wl_speichert: "Kaydediliyor…", wl_gespeichert: "✓ Kaydedildi",
         th_komme: "Geliyorum", th_angemeldet: "Kayıtlısın", th_abmelden: "Kaydı sil", th_anzahl: "{n} kişi kayıtlı", th_anm_fehler: "Olmadı. Lütfen daha sonra tekrar dene.", th_titel: "Teori dersleri", th_stand: "{m} zorunlu konudan {n}", th_naechste: "Sıradaki teori dersleri", th_fehlt: "Bu konu sende eksik", th_keine: "Şu anda planlanmış teori dersi yok.", th_ohne_thema: "Konu daha sonra belli olacak",
-        naechste_fahrstunde: "Sıradaki direksiyon dersi", sa_abholung: "Alınma yeri", sa_ziel: "Dersin hedefi", vt_titel: "Eğitim sözleşmesi", vt_text: "Sürücü kursun imzalaman için eğitim sözleşmesini gönderdi.", vt_lesen: "Oku ve imzala", vt_gelesen: "Sözleşmeyi okudum ve kabul ediyorum.", vt_unterschrift: "İmzan", vt_absenden: "Sözleşmeyi imzala", vt_spaeter: "Daha sonra", sepa_titel: "Otomatik ödeme talimatı (SEPA)", sepa_text: "Sürücü kursun faturaları otomatik ödeme ile tahsil etmek istiyor. Bunun için IBAN'ını gir ve imzala.", sepa_oeffnen: "IBAN gir", sepa_sprache: "Talimat metni Almancadır, çünkü hukuken geçerli olan metin budur.", sepa_inhaber: "Hesap sahibi", sepa_iban: "IBAN", sepa_bic: "BIC (isteğe bağlı)", sepa_iban_falsch: "Bu IBAN geçerli değil. Lütfen tekrar kontrol et.", sepa_unterschrift: "Hesap sahibinin imzası", sepa_absenden: "Talimat ver", sepa_danke: "Teşekkürler! Talimat verildi.", sepa_fehler: "Bu işe yaramadı. Lütfen bilgilerini kontrol edip tekrar dene.", vt_fehler: "Olmadı. Bağlantını kontrol edip tekrar dene.", vt_danke: "Teşekkürler, sözleşme imzalandı.", vt_sprache: "Sözleşme Almancadır; bağlayıcı olan Almanca metindir. İmzanla bağlayıcı hale gelir.", banner_storno_angefragt: " · İptal talep edildi",
+        naechste_fahrstunde: "Sıradaki direksiyon dersi", sa_abholung: "Alınma yeri", sa_ziel: "Dersin hedefi", vt_titel: "Eğitim sözleşmesi", vt_text: "Sürücü kursun imzalaman için eğitim sözleşmesini gönderdi.", vt_lesen: "Oku ve imzala", vt_gelesen: "Sözleşmeyi okudum ve kabul ediyorum.", vt_unterschrift: "İmzan", vt_absenden: "Sözleşmeyi imzala", vt_spaeter: "Daha sonra", sepa_titel: "Otomatik ödeme talimatı (SEPA)", sepa_text: "Sürücü kursun faturaları otomatik ödeme ile tahsil etmek istiyor. Bunun için IBAN'ını gir ve imzala.", sepa_oeffnen: "IBAN gir", sepa_sprache: "Talimat metni Almancadır, çünkü hukuken geçerli olan metin budur.", sepa_inhaber: "Hesap sahibi", sepa_iban: "IBAN", sepa_bic: "BIC (isteğe bağlı)", sepa_bic_pflicht: "AB dışındaki hesaplar için BIC gereklidir.", sepa_iban_falsch: "Bu IBAN geçerli değil. Lütfen tekrar kontrol et.", sepa_unterschrift: "Hesap sahibinin imzası", sepa_absenden: "Talimat ver", sepa_danke: "Teşekkürler! Talimat verildi.", sepa_fehler: "Bu işe yaramadı. Lütfen bilgilerini kontrol edip tekrar dene.", vt_fehler: "Olmadı. Bağlantını kontrol edip tekrar dene.", vt_danke: "Teşekkürler, sözleşme imzalandı.", vt_sprache: "Sözleşme Almancadır; bağlayıcı olan Almanca metindir. İmzanla bağlayıcı hale gelir.", banner_storno_angefragt: " · İptal talep edildi",
         keine_fahrstunde_banner: "Şu anda senin için planlanmış bir direksiyon dersi yok. \"Randevular\" bölümünden eğitmenine bir randevu önerebilirsin.",
         sa_angefragt: " · Talep edildi", sa_schnellzugriff: "Hızlı erişim",
         sa_kein_pin_titel: "Henüz giriş yapılmadı",
@@ -14063,7 +14083,7 @@ const STUDENT_I18N = {
         wl_von: "С", wl_bis: "До",
         wl_speichern: "Сохранить", wl_speichert: "Сохранение…", wl_gespeichert: "✓ Сохранено",
         th_komme: "Я приду", th_angemeldet: "Записан(а)", th_abmelden: "Отменить", th_anzahl: "Записались: {n}", th_anm_fehler: "Не получилось. Попробуй позже ещё раз.", th_titel: "Теоретические занятия", th_stand: "{n} из {m} обязательных тем", th_naechste: "Ближайшие теоретические занятия", th_fehlt: "Тебе ещё нужно", th_keine: "Сейчас теоретические занятия не запланированы.", th_ohne_thema: "Тема будет объявлена позже",
-        naechste_fahrstunde: "Следующее занятие по вождению", sa_abholung: "Место встречи", sa_ziel: "Цель занятия", vt_titel: "Договор на обучение", vt_text: "Автошкола отправила тебе договор на обучение для подписи.", vt_lesen: "Прочитать и подписать", vt_gelesen: "Я прочитал(а) договор и согласен(на).", vt_unterschrift: "Твоя подпись", vt_absenden: "Подписать договор", vt_spaeter: "Позже", sepa_titel: "Мандат на прямое дебетование (SEPA)", sepa_text: "Автошкола хочет списывать оплату по счетам через прямое дебетование. Для этого укажи свой IBAN и подпиши.", sepa_oeffnen: "Указать IBAN", sepa_sprache: "Текст мандата на немецком языке, так как юридически действует именно он.", sepa_inhaber: "Владелец счёта", sepa_iban: "IBAN", sepa_bic: "BIC (необязательно)", sepa_iban_falsch: "Этот IBAN неверный. Пожалуйста, проверь его ещё раз.", sepa_unterschrift: "Подпись владельца счёта", sepa_absenden: "Подписать мандат", sepa_danke: "Спасибо! Мандат оформлен.", sepa_fehler: "Не получилось. Проверь данные и попробуй ещё раз.", vt_fehler: "Не получилось. Проверь подключение и попробуй ещё раз.", vt_danke: "Спасибо, договор подписан.", vt_sprache: "Договор составлен на немецком языке; обязательной является немецкая версия. Подписью ты его заключаешь.", banner_storno_angefragt: " · Запрошена отмена",
+        naechste_fahrstunde: "Следующее занятие по вождению", sa_abholung: "Место встречи", sa_ziel: "Цель занятия", vt_titel: "Договор на обучение", vt_text: "Автошкола отправила тебе договор на обучение для подписи.", vt_lesen: "Прочитать и подписать", vt_gelesen: "Я прочитал(а) договор и согласен(на).", vt_unterschrift: "Твоя подпись", vt_absenden: "Подписать договор", vt_spaeter: "Позже", sepa_titel: "Мандат на прямое дебетование (SEPA)", sepa_text: "Автошкола хочет списывать оплату по счетам через прямое дебетование. Для этого укажи свой IBAN и подпиши.", sepa_oeffnen: "Указать IBAN", sepa_sprache: "Текст мандата на немецком языке, так как юридически действует именно он.", sepa_inhaber: "Владелец счёта", sepa_iban: "IBAN", sepa_bic: "BIC (необязательно)", sepa_bic_pflicht: "Для счетов за пределами ЕС нужен BIC.", sepa_iban_falsch: "Этот IBAN неверный. Пожалуйста, проверь его ещё раз.", sepa_unterschrift: "Подпись владельца счёта", sepa_absenden: "Подписать мандат", sepa_danke: "Спасибо! Мандат оформлен.", sepa_fehler: "Не получилось. Проверь данные и попробуй ещё раз.", vt_fehler: "Не получилось. Проверь подключение и попробуй ещё раз.", vt_danke: "Спасибо, договор подписан.", vt_sprache: "Договор составлен на немецком языке; обязательной является немецкая версия. Подписью ты его заключаешь.", banner_storno_angefragt: " · Запрошена отмена",
         keine_fahrstunde_banner: "Сейчас для тебя не запланировано ни одного занятия по вождению. В разделе «Записи» ты можешь предложить инструктору удобное время.",
         sa_angefragt: " · Запрошено", sa_schnellzugriff: "Быстрый доступ",
         sa_kein_pin_titel: "Вход ещё не выполнен",
@@ -16960,6 +16980,7 @@ function App() {
     const [leistungForm, setLeistungForm] = useState(null);
     const [importState, setImportState] = useState(null); // null | {busy, error, data} Screenshot-Import
     const [rundOffen, setRundOffen] = useState(false);     // Rundnachricht-Fenster (v2.98.0)
+    const rundZustandRef = useRef({ busy: false, text: "" }); // für Escape/Zurück-Geste: nicht mitten im Senden, Text erst nach Rückfrage verwerfen
     // CSV-Datenuebernahme (siehe csvDateiGewaehlt). MUSS hier oben bei den uebrigen Hooks
     // stehen, nicht unten bei der zugehoerigen Logik: dort liegt der Code hinter den fruehen
     // returns fuer session===undefined/null, und ein useState dahinter aendert die Hook-Anzahl
@@ -17774,6 +17795,15 @@ function App() {
         // Dieselben Sperren wie beim Tipp daneben: Nach dem Absagen (cancelled) bzw. Übernehmen
         // (fertig) steht die Liste "wen noch benachrichtigen" NUR im State - Escape/Zurück-Geste
         // warf sie sonst weg, obwohl es laut G-M7 nur über "Fertig" zugeht.
+        else if (rundOffen) {
+            const z = rundZustandRef.current || {};
+            if (!z.busy) {
+                if (String(z.text || "").trim()) askConfirm({ title: "Nachricht verwerfen?", confirmLabel: "Verwerfen", danger: true, message: "Der geschriebene Text geht verloren." }).then(ok => { if (ok) setRundOffen(false); });
+                else setRundOffen(false);
+            }
+        }
+        else if (sepaForm) setSepaForm(null);
+        else if (sepaEinzugOffen) setSepaEinzugOffen(false);
         else if (sickModal) { if (!sickModal.busy && !sickModal.cancelled) setSickModal(null); }
         else if (kiPlan) { if (!kiPlan.uebernehmen && !kiPlan.fertig) setKiPlan(null); }
         else if (wegPlan) { if (!wegPlan.uebernehmen) setWegPlan(null); }
@@ -17871,7 +17901,7 @@ function App() {
         }
         document.addEventListener("keydown", onEsc);
         return () => document.removeEventListener("keydown", onEsc);
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, buchungsseiteEdit, kalDruckWahl, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
+    }, [rundOffen, sepaForm, sepaEinzugOffen, recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, buchungsseiteEdit, kalDruckWahl, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view]);
     // Audit I-M10: Beim Wechsel der Ansicht blieb die Scroll-Position der vorigen stehen - man
     // landete mitten in der neuen Seite. Außerdem (I-M11) blieb eine offene Einstellungs-Unterseite
     // hängen, wenn man die Einstellungen über die Tab-Leiste verließ: Beim nächsten Besuch stand
@@ -18111,7 +18141,7 @@ function App() {
             // (tracking=false) und settle() liefe nie. Deshalb hier zurückschnellen lassen.
             if (drag.verschoben) { drag.verschoben = false; drag.tracking = false; settle(0); }
         };
-    }, [recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, buchungsseiteEdit, kalDruckWahl, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
+    }, [rundOffen, sepaForm, sepaEinzugOffen, recRestore, kiPlan, wegPlan, leerlaufPlan, wochePlan, wochePlanen, papierkorb, cmdOpen, apptChoice, counterForm, theoryForm, invoiceDraft, apptForm, qrModal, loeschDialog, voucherForm, voucherRedeem, csvImport, theoryCheckinModal, examSlotAssign, examSlotForm, calImport, adkImport, assistant, lessonForm, itemForm, paymentForm, leistungForm, importState, interessentImport, proposeForm, birthdayPopup, cityTplModal, showChangelog, adminTeacherStudents, waPrompt, urlaubForm, proposalForm, printChoice, offenePosten, luecken.offen, zahlungsImport, quotenpilot, erinnerungen, stillOpen, ohneTerminOpen, unterlagenOpen, arbeitszeitOpen, wechselCode, auskunft, faktenblatt, aufladen, buchungsseiteEdit, kalDruckWahl, wechselImport, folgeschritte, fristenOpen, abbruchOpen, schoolLeistungen, adminEdit, adminTeachers, tabMenu, handoverModal, interessentForm, sickModal, theoryGenModal, calShare, paketKnappOpen, mahnCockpit, folgeCockpit, practiceLog, waitlistOffer, welcomeOffer, showNachweisModal, contractSignId, settingsScreen, view, students, activeId, studentTab]);
     useEffect(() => { if (cmdOpen) {
             setCmdQuery("");
             setCmdIndex(0);
@@ -24781,13 +24811,6 @@ function App() {
             return dispName(a).localeCompare(dispName(b), "de");
         });
         return React.createElement("div", { className: "pad" },
-            rundOffen && (() => {
-                const aktiv = students.filter(s => !s.archived && !s.pending);
-                const schueler = aktiv.map(s => ({ id: s.id, name: dispName(s), vorname: String(s.vorname || "").trim(), wa: s.tel ? waNumber(s.tel) : "", hatApp: !!(s.pin || s.pinCustom) }));
-                const gruppen = rundnachrichtGruppen(aktiv.map(s => ({ id: s.id, klasse: s.klasse, standort: String(s.location_id || "").trim(),
-                    reif: ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen", ohneTermin: !nextApptByStudent[s.id] })), locations);
-                return React.createElement(RundnachrichtSheet, { schueler, gruppen, schulName: (school && school.name) || "", onClose: () => setRundOffen(false) });
-            })(),
             loadErr && React.createElement("div", { className: "card", style: { padding: "12px 14px", marginBottom: 12, border: "2px solid var(--red)", background: "var(--red-soft)" } },
                 // --red-ink statt festem Dunkelrot: auf dem dunklen --red-soft des Dunkelmodus
                 // lag #7a241c bei ~1,5:1 und war praktisch unsichtbar.
@@ -26817,7 +26840,7 @@ function App() {
         const ci = glaeubigerIdPruefen(iv.glaeubigerId);
         const ib = ibanPruefen(iv.iban);
         return { ok: ci.ok && ib.ok, ciFehler: !ci.ok, ibanFehler: !ib.ok, ci: ci.ci || "", iban: ib.iban || "",
-            bic: String(iv.bic || "").toUpperCase().replace(/[^A-Z0-9]/g, ""),
+            bic: /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(String(iv.bic || "").toUpperCase().replace(/[^A-Z0-9]/g, "")) ? String(iv.bic).toUpperCase().replace(/[^A-Z0-9]/g, "") : "",
             name: String(iv.kontoinhaber || iv.firma || (school && school.name) || "Fahrschule").trim() };
     }
     function sepaMandatAnfordern(stu) {
@@ -26846,7 +26869,7 @@ function App() {
         if (!await askConfirm({ title: "Mandat widerrufen?", confirmLabel: "Widerrufen", danger: true,
                 message: "Für " + dispName(stu) + " wird danach nichts mehr per Lastschrift eingezogen. Bereits eingereichte Lastschriften bleiben davon unberührt." }))
             return;
-        schuelerAendernUndSpeichern(stu.id, s => ({ ...s, sepaMandat: { ...(s.sepaMandat || {}), aktiv: false, widerrufenAm: ymd(new Date()), stand: new Date().toISOString() } }));
+        schuelerAendernUndSpeichern(stu.id, s => ({ ...s, sepaAnfrage: null, sepaMandat: { ...(s.sepaMandat || {}), aktiv: false, widerrufenAm: ymd(new Date()), stand: new Date().toISOString() } }));
     }
     // Nach dem Erstellen der Bankdatei: je Rechnung eine Zahlung "Lastschrift" zum Fälligkeitstag,
     // am Mandat den letzten Einzug merken (ab dann Folge-Lastschrift statt Erst-Lastschrift).
@@ -35156,7 +35179,9 @@ function App() {
                                             if (v !== iv("glaeubigerId")) saveInvoiceSettings({ glaeubigerId: v }); } }))),
                                 iv("glaeubigerId") && React.createElement("div", { style: { fontSize: 12, margin: "-6px 2px 10px", color: glaeubigerIdPruefen(iv("glaeubigerId")).ok ? "var(--green-ink)" : "var(--red-ink)" } },
                                     !glaeubigerIdPruefen(iv("glaeubigerId")).ok ? "Diese Gläubiger-ID stimmt nicht – bitte prüfen."
-                                        : !ibanPruefen(iv("iban")).ok ? "Gläubiger-ID gültig. Für Lastschrift fehlt noch eine gültige IBAN (oben)." : "✓ Lastschrift ist eingerichtet."),
+                                        : !ibanPruefen(iv("iban")).ok ? "Gläubiger-ID gültig. Für Lastschrift fehlt noch eine gültige IBAN (oben)."
+                                        : iv("bic") && !/^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(iv("bic")) ? "Die BIC hat 8 oder 11 Zeichen – so wird sie in der Bankdatei weggelassen (bei deutschen Konten kein Problem)."
+                                        : "✓ Lastschrift ist eingerichtet."),
                                 React.createElement("div", { style: { display: "flex", gap: 10 } },
                                     React.createElement("div", { className: "field", style: { flex: 1 } },
                                         React.createElement("label", null, "BIC (optional)",
@@ -39256,11 +39281,20 @@ function App() {
                             React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: tone, flexShrink: 0 } }, x.remaining <= 0 ? "aufgebraucht" : "noch " + ueFmt(x.remaining) + " UE"));
                     }),
                 React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 6 }, onClick: () => setPaketKnappOpen(false) }, "Schlie\u00DFen"))),
+        // Rundnachricht (v2.98.0) - hier außerhalb der Seitenfläche, damit es beim Zurück-Wischen nicht mitwandert
+        rundOffen && (() => {
+            const aktiv = (students || []).filter(s => !s.archived && !s.pending);
+            const schueler = aktiv.map(s => ({ id: s.id, name: dispName(s), vorname: String(s.vorname || "").trim(), wa: s.tel ? waNumber(s.tel) : "", hatApp: !!(s.pin || s.pinCustom) }));
+            const gruppen = rundnachrichtGruppen(aktiv.map(s => ({ id: s.id, klasse: s.klasse, standort: String(s.location_id || "").trim(),
+                reif: ampel(s, tplFor(s.klasse).adk, tplFor(s.klasse).strecken, sonderfahrtenSoll).stufe === "gruen", ohneTermin: !nextApptByStudent[s.id] })), locations);
+            return React.createElement(RundnachrichtSheet, { schueler, gruppen, schulName: (school && school.name) || "", zustandRef: rundZustandRef, onClose: () => setRundOffen(false) });
+        })(),
         sepaForm && (() => {
             const stu = (students || []).find(x => x.id === sepaForm);
             return stu ? React.createElement(SepaMandatErfassen, { stu, glaeubiger: sepaGlaeubiger(), onSpeichern: m => { sepaMandatSpeichern(stu.id, m); setSepaForm(null); }, onClose: () => setSepaForm(null) }) : null;
         })(),
         sepaEinzugOffen && React.createElement(LastschriftEinzugSheet, { kandidaten: sepaKandidaten, glaeubiger: sepaGlaeubiger(), schulName: (school && school.name) || "",
+            frisch: () => sepaEinzugKandidaten((studentsRef.current || []).filter(s => s._isMine && !s.pending)),
             onGebucht: sepaEinzugGebucht, onClose: () => setSepaEinzugOffen(false),
             onEinstellungen: () => { setSepaEinzugOffen(false); setView("einstellungen"); setSettingsScreen("rechnungsdaten"); } }),
         mahnCockpit && React.createElement("div", { onClick: () => { setMahnCockpit(false); setMahnReihe(null); }, className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
@@ -39272,9 +39306,12 @@ function App() {
                     React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 15 } }, eurFmt(ueberfaelligeRechnungen.reduce((s, x) => s + x.offen, 0)))),
                 React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } }, "Zahlungsziel " + zahlungszielTage + " Tage \u00FCberschritten \u2013 \u201EErinnern\u201C \u00F6ffnet WhatsApp mit einem fertigen Text, du siehst ihn vor dem Senden."),
                 // Lastschrift (v2.99.0): überfällige Rechnungen mit Mandat direkt einziehen
-                !mahnReihe && ueberfaelligeRechnungen.some(x => sepaMandatAktiv(x.stu)) && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 },
-                        onClick: () => { setMahnCockpit(false); setSepaEinzugOffen(true); } },
-                    "Per Lastschrift einziehen (" + ueberfaelligeRechnungen.filter(x => sepaMandatAktiv(x.stu)).length + ")"),
+                (() => {
+                    const n = ueberfaelligeRechnungen.filter(x => sepaKandidaten.some(k => k.stu.id === x.stu.id && k.inv.id === x.inv.id)).length;
+                    return !mahnReihe && n > 0 && React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 10 },
+                            onClick: () => { setMahnCockpit(false); setSepaEinzugOffen(true); } },
+                        "Per Lastschrift einziehen (" + n + ")");
+                })(),
                 // Sammelmahnung: einer nach dem anderen, ein Tipp öffnet die Erinnerung und springt weiter
                 (() => {
                     const mitTel = ueberfaelligeRechnungen.filter(x => waNumber(x.stu.tel));
@@ -44488,7 +44525,8 @@ function SepaMandatErfassen({ stu, glaeubiger, onSpeichern, onClose }) {
     const ib = ibanPruefen(iban);
     const bicSauber = bic.toUpperCase().replace(/[^A-Z0-9]/g, "");
     const bicOk = !bicSauber || /^[A-Z]{6}[A-Z0-9]{2}([A-Z0-9]{3})?$/.test(bicSauber);
-    const ok = inhaber.trim().length >= 2 && ib.ok && bicOk && !!datum && (sig || papier);
+    const bicFehlt = ib.ok && sepaBicPflicht(ib.iban) && !bicSauber;
+    const ok = inhaber.trim().length >= 2 && ib.ok && bicOk && !bicFehlt && !!datum && (sig || papier);
     const referenz = sepaMandatsreferenz(stu.id, datum);
     function speichern() {
         setVersucht(true);
@@ -44512,6 +44550,7 @@ function SepaMandatErfassen({ stu, glaeubiger, onSpeichern, onClose }) {
                 React.createElement("div", { style: { flex: 1 } }, feld("BIC (optional)", React.createElement("input", { type: "text", value: bic, autoCapitalize: "characters", onChange: e => setBic(e.target.value) }))),
                 React.createElement("div", { style: { flex: 1 } }, feld("Datum der Unterschrift", React.createElement("input", { type: "date", value: datum, max: ymd(new Date()), onChange: e => setDatum(e.target.value) })))),
             !bicOk && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, "Die BIC hat 8 oder 11 Zeichen."),
+            bicFehlt && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, "Für Konten außerhalb der EU wird die BIC benötigt."),
             React.createElement("div", { lang: "de", style: { border: "1px solid var(--line)", borderRadius: 12, padding: "11px 12px", fontSize: 12.5, lineHeight: 1.5, margin: "4px 0 12px", whiteSpace: "pre-wrap" } },
                 sepaMandatText(glaeubiger.name, glaeubiger.ci, referenz)),
             !papier && React.createElement(SignaturePad, { autoSave: true, label: "Unterschrift des Kontoinhabers", existing: sig, onSave: url => setSig(url), onClear: () => setSig(null) }),
@@ -44523,7 +44562,7 @@ function SepaMandatErfassen({ stu, glaeubiger, onSpeichern, onClose }) {
             React.createElement("button", { className: "btn btn-primary btn-block", onClick: speichern }, "Mandat speichern"),
             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 8 }, onClick: onClose }, "Abbrechen")));
 }
-function LastschriftEinzugSheet({ kandidaten, glaeubiger, schulName, onGebucht, onClose, onEinstellungen }) {
+function LastschriftEinzugSheet({ kandidaten, frisch, glaeubiger, schulName, onGebucht, onClose, onEinstellungen }) {
     const heute = ymd(new Date());
     const frueh = sepaFruehesterEinzug(heute, 2);
     const [faellig, setFaellig] = React.useState(frueh);
@@ -44533,11 +44572,6 @@ function LastschriftEinzugSheet({ kandidaten, glaeubiger, schulName, onGebucht, 
     const auswahl = kandidaten.filter(k => !ab[schluessel(k)]);
     const summe = Math.round(auswahl.reduce((s, k) => s + k.offen, 0) * 100) / 100;
     const datumOk = faellig && faellig >= frueh;
-    React.useEffect(() => {
-        const onEsc = e => { if (e.key === "Escape") onClose(); };
-        document.addEventListener("keydown", onEsc);
-        return () => document.removeEventListener("keydown", onEsc);
-    }, [onClose]);
     async function erstellen() {
         if (!auswahl.length || !datumOk) return;
         if (IS_DEMO()) { demoBlock("Demo-Ansicht: Es wird keine Bankdatei erstellt."); return; }
@@ -44545,16 +44579,23 @@ function LastschriftEinzugSheet({ kandidaten, glaeubiger, schulName, onGebucht, 
                 message: (auswahl.length === 1 ? "1 Lastschrift" : auswahl.length + " Lastschriften") + " über " + eurFmt(summe) + ", fällig am " + dashDatumKurz(faellig)
                     + ". Die Rechnungen werden dabei als bezahlt (Lastschrift) verbucht. Platzt eine Lastschrift, löschst du die Zahlung beim Schüler wieder." }))
             return;
+        // Während der Rückfrage kann ein Neuladen Zahlungen gebracht haben: mit dem aktuellen Stand rechnen
+        const neu = frisch ? frisch() : kandidaten;
+        const aktuell = auswahl.map(k => neu.find(x => schluessel(x) === schluessel(k))).filter(Boolean);
+        if (aktuell.length !== auswahl.length || aktuell.some((x, i) => Math.abs(x.offen - auswahl[i].offen) > 0.005)) {
+            showToast("Die offenen Beträge haben sich gerade geändert. Bitte die Liste prüfen und noch einmal erstellen.");
+            return;
+        }
         const jetzt = new Date();
         const msgId = "AD" + jetzt.toISOString().replace(/[^0-9]/g, "").slice(0, 14);
-        const xml = sepaLastschriftXml({ glaeubiger, posten: sepaPostenAus(auswahl, schulName), faelligAm: faellig, msgId, erstelltAm: jetzt.toISOString().slice(0, 19) });
+        const xml = sepaLastschriftXml({ glaeubiger, posten: sepaPostenAus(aktuell, schulName), faelligAm: faellig, msgId, erstelltAm: jetzt.toISOString().slice(0, 19) });
         const datei = "Lastschrift_" + faellig + ".xml";
         const url = URL.createObjectURL(new Blob([xml], { type: "application/xml;charset=utf-8" }));
         const a = document.createElement("a");
         a.href = url; a.download = datei;
         document.body.appendChild(a); a.click(); document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 60000);
-        onGebucht(auswahl.map(k => ({ sid: k.stu.id, invId: k.inv.id, betrag: k.offen })), faellig, msgId);
+        onGebucht(aktuell.map(k => ({ sid: k.stu.id, invId: k.inv.id, betrag: k.offen })), faellig, msgId);
         setFertig({ n: auswahl.length, summe, datei });
     }
     let inhalt;
@@ -44616,7 +44657,8 @@ function SepaMandatSchuelerKarte({ code, anfrage, kontoName, tS, onFertig }) {
     const [sig, setSig] = React.useState(null);
     const [status, setStatus] = React.useState("");
     const ib = ibanPruefen(iban);
-    const bereit = inhaber.trim().length >= 2 && ib.ok && !!sig;
+    const bicFehlt = ib.ok && sepaBicPflicht(ib.iban) && !bic.replace(/[^A-Za-z0-9]/g, "");
+    const bereit = inhaber.trim().length >= 2 && ib.ok && !bicFehlt && !!sig;
     async function absenden() {
         if (!bereit || status === "busy") return;
         let n = "", pin = "";
@@ -44627,7 +44669,7 @@ function SepaMandatSchuelerKarte({ code, anfrage, kontoName, tS, onFertig }) {
             if (!error && data === "ok") {
                 setStatus("ok");
                 setTimeout(() => { setOffen(false); setStatus(""); onFertig(); }, 1400);
-            } else setStatus(data === "iban" ? "iban" : "fehler");
+            } else setStatus(data === "iban" ? "iban" : data === "bic" ? "bic" : "fehler");
         } catch (e) { setStatus("fehler"); }
     }
     if (!anfrage) return null;
@@ -44653,6 +44695,7 @@ function SepaMandatSchuelerKarte({ code, anfrage, kontoName, tS, onFertig }) {
                         feld(tS("sepa_iban"), React.createElement("input", { type: "text", value: iban, autoCapitalize: "characters", autoComplete: "off", placeholder: "DE00 0000 0000 0000 0000 00", onChange: e => setIban(e.target.value) })),
                         (status === "iban" || (iban.replace(/\s/g, "").length >= 15 && !ib.ok)) && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, tS("sepa_iban_falsch")),
                         feld(tS("sepa_bic"), React.createElement("input", { type: "text", value: bic, autoCapitalize: "characters", onChange: e => setBic(e.target.value) })),
+                        (bicFehlt || status === "bic") && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", margin: "-6px 2px 10px" } }, tS("sepa_bic_pflicht")),
                         React.createElement(SignaturePad, { autoSave: true, label: tS("sepa_unterschrift"), existing: sig, onSave: url => setSig(url), onClear: () => setSig(null) }),
                         status === "fehler" && React.createElement("div", { role: "alert", style: { fontSize: 13, color: "var(--red-ink)", margin: "6px 0 8px" } }, tS("sepa_fehler")),
                         React.createElement("button", { className: "btn btn-primary btn-block", disabled: !bereit || status === "busy", style: { marginTop: 8, opacity: bereit ? 1 : .55 }, onClick: absenden },
@@ -46941,7 +46984,7 @@ async function rundnachrichtenListe() {
     if (error) throw new Error(error.message || "Liste konnte nicht geladen werden");
     return Array.isArray(data) ? data : [];
 }
-function RundnachrichtSheet({ schueler, gruppen, schulName, onClose }) {
+function RundnachrichtSheet({ schueler, gruppen, schulName, zustandRef, onClose }) {
     const [gruppe, setGruppe] = React.useState("alle");
     const [ab, setAb] = React.useState({});          // abgewählte Schüler-IDs
     const [zeigeListe, setZeigeListe] = React.useState(false);
@@ -46956,11 +46999,14 @@ function RundnachrichtSheet({ schueler, gruppen, schulName, onClose }) {
         rundnachrichtenListe().then(l => { if (!weg) setVerlauf(l); }).catch(() => { if (!weg) setVerlauf([]); });
         return () => { weg = true; };
     }, [fertig]);
-    React.useEffect(() => {
-        const onEsc = e => { if (e.key === "Escape") onClose(); };
-        document.addEventListener("keydown", onEsc);
-        return () => document.removeEventListener("keydown", onEsc);
-    }, [onClose]);
+    // Escape und Zurück-Geste laufen über closeTopOverlay in App - dafür den Zustand melden
+    if (zustandRef) zustandRef.current = { busy, text: fertig ? "" : text };
+    async function wegtippen() {
+        if (busy) return;
+        if (!fertig && text.trim() && !await askConfirm({ title: "Nachricht verwerfen?", confirmLabel: "Verwerfen", danger: true, message: "Der geschriebene Text geht verloren." }))
+            return;
+        onClose();
+    }
     const g = gruppen.find(x => x.id === gruppe) || gruppen[0];
     const inGruppe = (g ? g.ids : []).map(id => schueler.find(x => x.id === id)).filter(Boolean);
     const empfaenger = inGruppe.filter(x => !ab[x.id]);
@@ -47050,7 +47096,7 @@ function RundnachrichtSheet({ schueler, gruppen, schulName, onClose }) {
                     React.createElement("div", { style: { fontSize: 12, color: "var(--muted)", marginTop: 2 } },
                         new Date(v.am).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", day: "numeric", month: "short" }) + " · gelesen von " + v.gelesen + " / " + v.empfaenger)))));
     }
-    return React.createElement("div", { onClick: onClose, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Nachricht an Schüler",
+    return React.createElement("div", { onClick: wegtippen, className: "modal-overlay", role: "dialog", "aria-modal": "true", "aria-label": "Nachricht an Schüler",
             style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 150, display: "flex", alignItems: "flex-end", justifyContent: "center" } },
         React.createElement("div", { onClick: e => e.stopPropagation(), style: { background: "var(--card)", width: "100%", maxWidth: 560, borderTopLeftRadius: 24, borderTopRightRadius: 24,
                 padding: "20px 18px calc(20px + env(safe-area-inset-bottom))", maxHeight: "90dvh", overflowY: "auto" } },

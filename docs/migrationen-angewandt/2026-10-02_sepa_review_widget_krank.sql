@@ -1,0 +1,6 @@
+-- Pre-Push-Review 2026-10-02 (Migration "sepa_review_fixes_widget_krank", Volltext: list_migrations):
+-- public_student_sepa_mandat: nur solange KEIN neuerer Mandats-Stand existiert (kein Reaktivieren nach Widerruf,
+--   kein Überschreiben eines aktiven Mandats); BIC Pflicht für IBANs außerhalb des EWR (CH, GB, MC, SM, VA, AD, GI, JE, GG, IM, AL, MD, ME, MK, RS).
+-- public_student_overview: sepaAnfrage nur, wenn sepaMandat.stand < sepaAnfrage.am.
+-- widget_kalender: Titel "Krank" für §URLAUB§Krank; Termine mit status cancel_requested bleiben drin (Feld storno: true).
+-- Geprüft per Rollback-Test: erst=ok, überschreiben=keine_anfrage, Anfrage nach Widerruf null, reaktivieren=keine_anfrage, CH ohne BIC=bic.
