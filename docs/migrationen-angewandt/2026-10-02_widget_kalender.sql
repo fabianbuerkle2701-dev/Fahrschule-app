@@ -1,0 +1,5 @@
+-- Kalender-Widget fürs iPhone (Lehrer-App), angewandt 2026-10-02 (Migration "widget_kalender", Volltext: list_migrations).
+-- widget_kalender(p_token text) -> {stand, anfragen, termine:[{id,start_at,end_at,art,typ(termin|sonstige|privat|urlaub),titel,ort}]}
+-- Zugang wie widget_today_appointments über widget_tokens (die App legt den Token per nativeWidgetToken in die App-Group).
+-- Zeitraum: heute 00:00 Berlin bis +8 Tage, nur bestätigte Termine, höchstens 80. Private Termine nur als "Privat" ohne Ort.
+-- Ungültiger/zu kurzer Token -> null. widget_today_appointments bleibt für ältere App-Builds bestehen.
