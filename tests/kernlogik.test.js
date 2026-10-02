@@ -1114,3 +1114,24 @@ test("SEPA nach Review: freie Zahlungen decken Rechnungen, Widerruf erledigt die
     assert.equal(k.sepaBicPflicht("CH9300762011623852957"), true);
     assert.equal(k.sepaBicPflicht("DE89370400440532013000"), false);
 });
+
+test("Ausgaben & Gewinn: USt-Aufteilung, Fahrzeugkosten, Monatsübersicht, CSV", () => {
+    const k = require("./lade-app")(["ustAufteilen", "fahrzeugKostenAlsAusgaben", "gewinnUebersicht", "ausgabenCsvZeilen"]);
+    assert.deepEqual(rein(k.ustAufteilen(119, 19)), { brutto: 119, netto: 100, ust: 19 });
+    assert.deepEqual(rein(k.ustAufteilen("10.70", 7)), { brutto: 10.7, netto: 10, ust: 0.7 });
+    assert.deepEqual(rein(k.ustAufteilen(50, null)), { brutto: 50, netto: 50, ust: 0 });
+    const fahrzeuge = [{ id: "v1", name: "Golf", costs: [{ id: "c1", date: "2026-03-04", category: "Kraftstoff", amount: 80.5 }, { id: "c2", date: "2025-12-30", category: "TÜV/HU", amount: 120 }, { id: "c3", date: "2026-03-10", amount: 0 }] }];
+    assert.equal(k.fahrzeugKostenAlsAusgaben(fahrzeuge).length, 2, "Betrag 0 fällt weg");
+    const u = k.gewinnUebersicht({ jahr: 2026, fahrzeuge,
+        ausgaben: [{ id: "a", datum: "2026-03-01", betrag: 950, kategorie: "Miete & Nebenkosten" }, { id: "b", datum: "2025-03-01", betrag: 1, kategorie: "Sonstiges" }],
+        einnahmen: { "2026-03": 2000.1, "2026-04": 300 } });
+    const maerz = u.monate[2];
+    assert.deepEqual(rein({ e: maerz.einnahmen, a: maerz.ausgaben, g: maerz.gewinn }), { e: 2000.1, a: 1030.5, g: 969.6 });
+    assert.deepEqual(rein(u.summe), { einnahmen: 2300.1, ausgaben: 1030.5, gewinn: 1269.6 });
+    assert.deepEqual(rein(u.kategorien.map(x => x.name + ":" + x.betrag)), ["Miete & Nebenkosten:950", "Fahrzeuge:80.5"]);
+    const csv = k.ausgabenCsvZeilen(u.alle, false);
+    assert.equal(csv.kopf.length, 11);
+    assert.equal(csv.zeilen.length, 2);
+    assert.equal(csv.zeilen[0][4], "950,00", "nach Datum sortiert");
+    assert.equal(k.ausgabenCsvZeilen(u.alle, true).kopf.length, 8, "Kleinunternehmer ohne USt-Spalten");
+});

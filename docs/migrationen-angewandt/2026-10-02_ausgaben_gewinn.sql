@@ -1,0 +1,8 @@
+-- Ausgaben & Gewinn (v2.100.0), angewandt 2026-10-02 (Migration "ausgaben_gewinn", Volltext: list_migrations).
+-- Tabelle ausgaben (school_id, erfasst_von, datum, betrag>0, kategorie, beschreibung≤200, ust_satz 0/7/19|null, zahlart, beleg_pfad),
+--   RLS: select/insert/update/delete nur _ist_schul_admin(school_id); anon ohne Rechte.
+-- Storage-Bucket "belege" (privat, 10 MB, jpeg/png/heic/webp/pdf), Ordner = school_id, Policies nur für Schul-Admins.
+-- RPC school_einnahmen_monate(p_school_id, p_jahr) -> {"2026-03": summe, ...} aus students.data.payments aller Schüler
+--   aller Fahrlehrer der Schule; nur Admin (Büro bewusst nicht, Umsatz bleibt Admin-Sache wie in Teil Q).
+-- Fahrzeugkosten bleiben in schools.vehicles[].costs (Fuhrpark) und werden in der App nur mitgezählt.
+-- Geprüft per Rollback-Test: Admin sieht/schreibt, Fahrlehrer derselben Schule sieht 0, Insert abgelehnt, Einnahmen-RPC abgelehnt.
