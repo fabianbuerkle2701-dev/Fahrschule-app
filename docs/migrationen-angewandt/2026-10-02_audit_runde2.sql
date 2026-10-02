@@ -13,3 +13,5 @@
 -- school_offene_posten: Büro bekommt Fahrstunden ohne note/notiz/signature.
 -- Regressionsprüfung: students_teacher_update übernimmt bei Server-Rechnungen ein dort fehlendes "faellig" vom Gerät
 -- (Migration teacher_update_faellig_behalten; Rollback-Test: faellig 2026-10-16 bleibt, Fahrstunden 2, Rechnung 1).
+-- voucher_redeem: Zahlung mit id + erfasstVon 'server' + payments-Markierung; students_teacher_update übernimmt
+-- Server-Zahlungen wie Büro-Zahlungen (Migration voucher_zahlung_geschuetzt; Rollback-Test: altes Gerät -> 1 Zahlung, kein Doppel).
