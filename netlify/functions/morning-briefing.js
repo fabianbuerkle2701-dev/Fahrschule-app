@@ -5,8 +5,8 @@
 // daraus gebaut werden und welchen Rahmen der Prompt bekommt. Erzeugt selbst KEINE neuen
 // Daten und trifft keine Aussagen über Dinge, die nicht im "facts"-Objekt stehen.
 //
-// Erreichbar ohne Login (wie booking-chat.js), weil der Client seine Session nicht als Bearer-
-// Token mitschickt - stattdessen wie dort über den Buchungscode + Tageslimit geschützt
+// Seit Audit 2026-10-02 nur mit Sitzung (Bearer-Token) des Fahrlehrers, dem der Buchungscode gehört.
+// Zusätzlich wie booking-chat.js über den Buchungscode + Tageslimit geschützt
 // (public_chat_rate_limit), damit die Function nicht zur offenen Kostenfalle wird. Der Code
 // selbst ist kein Geheimnis (steht auf jedem Buchungslink), und die "facts" enthalten nur
 // Zahlen/Vornamen, die der anfragende Fahrlehrer in seinem eigenen Dashboard ohnehin schon sieht.
@@ -58,6 +58,23 @@ exports.handler = async function (event, context) {
   const kind = ["morning", "evening", "statistik", "interessent", "pruefung", "abrechnung", "reform"].includes(body.kind) ? body.kind : "morning";
   if (!code) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Buchungscode übergeben" }) };
   if (!facts) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Daten übergeben" }) };
+
+  // Audit 2026-10-02: Das Briefing ist eine Fahrlehrer-Funktion. Nur mit gültiger Sitzung, und der
+  // Buchungscode muss zum angemeldeten Fahrlehrer gehören - sonst konnten Fremde mit dem öffentlichen
+  // Code das KI-Tageskontingent eines Fahrlehrers aufbrauchen.
+  const sitzung = ((event.headers && (event.headers.authorization || event.headers.Authorization)) || "").replace(/^Bearer\s+/i, "");
+  if (!sitzung) return { statusCode: 401, headers, body: JSON.stringify({ error: "Bitte neu anmelden." }) };
+  try {
+    const who = await fetch(SUPABASE_URL + "/auth/v1/user", { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + sitzung } });
+    if (!who.ok) return { statusCode: 401, headers, body: JSON.stringify({ error: "Sitzung abgelaufen – bitte neu anmelden." }) };
+    const user = await who.json();
+    const prof = await fetch(SUPABASE_URL + "/rest/v1/profiles?select=booking_code&id=eq." + encodeURIComponent(user && user.id), { headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + sitzung } });
+    const zeilen = prof.ok ? await prof.json() : [];
+    const eigenerCode = (zeilen && zeilen[0] && zeilen[0].booking_code || "").toString().trim().toLowerCase();
+    if (!eigenerCode || eigenerCode !== code.toLowerCase()) return { statusCode: 403, headers, body: JSON.stringify({ error: "Kein Zugriff." }) };
+  } catch (e) {
+    return { statusCode: 401, headers, body: JSON.stringify({ error: "Anmeldung konnte nicht geprüft werden." }) };
+  }
 
   // Mit dem Service-Role-Key, sobald er als Netlify-Umgebungsvariable da ist: public_chat_rate_limit
   // soll nach diesem Deploy für anon gesperrt werden (sonst kann jeder per curl das Tageslimit
