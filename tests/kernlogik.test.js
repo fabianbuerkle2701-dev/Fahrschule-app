@@ -1018,3 +1018,14 @@ test("Kalender drucken als Zeitstrahl: Überlappungen nebeneinander, Stundenbere
     const t = k.kalenderDruckTage([{ start_at: "2026-09-29T07:00:00Z", end_at: "2026-09-29T07:45:00Z", title: "Ida Lorenz", art: "AB", status: "confirmed" }], "2026-09-28", "2026-10-04", {});
     assert.equal(t[1].eintraege[0].startMin, 540); assert.equal(t[1].eintraege[0].endMin, 585);
 });
+
+test("Schüler-Mitteilungen: Texte je Typ in der Sprache des Schülers", () => {
+    const k = require("./lade-app")(["mitteilungText", "tt"]);
+    const de = (key, v) => k.tt("de", key, v), en = (key, v) => k.tt("en", key, v);
+    const m = { typ: "verschoben", start_at: "2026-10-05T12:00:00Z", alt_start_at: "2026-10-05T11:00:00Z", art: "AB" };
+    const t = k.mitteilungText(m, de, "de");
+    assert.match(t, /^Termin verschoben auf .*05\.10\.2026.*14:00.*\(Autobahnfahrt\) \(vorher .*13:00/);
+    assert.match(k.mitteilungText({ typ: "abgesagt", start_at: "2026-10-05T12:00:00Z", art: "ÜST" }, en, "en"), /^Lesson cancelled: /);
+    for (const typ of ["neu", "bestaetigt", "verschoben", "abgesagt", "storno_ok", "storno_abgelehnt"])
+        assert.doesNotMatch(k.mitteilungText({ typ, start_at: "2026-10-05T12:00:00Z" }, de, "de"), /^mt_/, typ + " ohne Text");
+});

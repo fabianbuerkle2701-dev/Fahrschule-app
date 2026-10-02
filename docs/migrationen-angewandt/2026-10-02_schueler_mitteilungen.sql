@@ -1,0 +1,11 @@
+-- Automatische Schüler-Mitteilungen (v2.94.0, Produktplan #11 als In-App-Kanal), angewandt 2026-10-02.
+-- Migrationen: schueler_mitteilungen, schueler_mitteilungen_zeit, schueler_nebendaten_aufraeumen (Volltext: list_migrations).
+-- Tabelle schueler_mitteilungen(owner, student_id, typ, start_at, alt_start_at, art, created_at=clock_timestamp(), gelesen_at), RLS ohne Policies.
+-- Trigger termin_mitteilung (AFTER INSERT/UPDATE/DELETE on appointments, SECURITY DEFINER, Fehler werden geschluckt -> blockiert nie):
+--   INSERT confirmed in Zukunft = neu; pending->confirmed = bestaetigt; cancel_requested->confirmed = storno_abgelehnt;
+--   confirmed + andere Zeit = verschoben; DELETE confirmed (Zukunft) = abgesagt; DELETE cancel_requested = storno_ok.
+--   Ausgenommen: ohne Schüler, PRIVAT/ST/STI, §SONST§/§URLAUB§-Termine.
+-- RPCs public_student_mitteilungen (letzte 30 aus 60 Tagen + Zahl ungelesen), public_student_mitteilungen_gelesen.
+-- Aufräumen: Trigger schueler_nebendaten_loeschen (students DELETE -> Mitteilungen, Eltern-Links, Upload-Tickets),
+--   pg_cron schueler-nebendaten-aufraeumen 03:25 (Mitteilungen > 90 Tage, Tickets > 2 Tage).
+-- Geprüft: Rollback-Test (6 Typen korrekt, §SONST§ ausgenommen, falsche PIN null, Fahrlehrer liest Tabelle nicht) und Browser mit Test-Schüler (entfernt).
