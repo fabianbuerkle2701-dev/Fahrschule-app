@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.96.0";
+const APP_VERSION = "2.97.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.97.0", date: "Oktober 2026", changes: [
+            "Team-Kalender: Bei mehreren Standorten kannst du nach Standort filtern. Termine anderer Standorte bleiben blass sichtbar, damit belegte Zeiten nicht frei aussehen",
+        ] },
     { v: "2.96.0", date: "Oktober 2026", changes: [
             "Neu: Sammelmahnung. Bei den überfälligen Rechnungen gehst du mit „Alle nacheinander erinnern“ der Reihe nach durch – ein Tipp öffnet die WhatsApp-Erinnerung und springt zur nächsten",
         ] },
@@ -21979,7 +21982,8 @@ function App() {
                 const stu = a.student_id ? (students || []).find(x => x.id === a.student_id) : null;
                 const typ = typVon(a);
                 return { id: a.id, lehrer_id: uid, start_at: a.start_at, end_at: a.end_at, status: a.status, art: a.art, typ,
-                    name: typ === "privat" || typ === "urlaub" ? null : (stu ? dispName(stu) : a.title), klasse: stu ? stu.klasse : null };
+                    name: typ === "privat" || typ === "urlaub" ? null : (stu ? dispName(stu) : a.title), klasse: stu ? stu.klasse : null,
+                    standort: typ === "privat" || !stu ? null : (String(stu.location_id || "").trim() || null) };
             }),
         };
     }
@@ -36823,7 +36827,7 @@ function App() {
                 view === "fuhrpark" && renderFuhrpark(),
                 view === "schulboard" && (isSchoolAdmin || isSchoolOffice) && React.createElement(SchulDashboard, { schoolId: school && school.id, stdPreis: Number(pricePerHour) || 0, zahlungszielTage,
                     onRechnungDrucken: (stu, inv) => { setDruckSchueler(stu); setInvoicePreview(inv); doPrint("invoice"); }, rolle: isSchoolAdmin ? "admin" : "buero" }),
-                view === "teamkalender" && (isSchoolAdmin || isSchoolOffice) && React.createElement(TeamKalender, { schoolId: school && school.id, lokal: IS_DEMO() ? teamKalenderLokal() : null }),
+                view === "teamkalender" && (isSchoolAdmin || isSchoolOffice) && React.createElement(TeamKalender, { schoolId: school && school.id, standorte: locations, lokal: IS_DEMO() ? teamKalenderLokal() : null }),
                 view === "admin" && canModerateApp && renderAdmin(),
                 view === "datenschutz" && renderDatenschutz(),
                 view === "impressum" && renderImpressum(),
@@ -46414,8 +46418,12 @@ async function schoolTerminUmhaengen(apptId, lehrerId) {
     if (error) throw new Error(/OVERLAP/.test(error.message || "") ? "OVERLAP" : fehlerText(error));
 }
 const TK_PXH = 60; // Pixel je Stunde
-function TeamKalender({ schoolId, lokal }) {
+function TeamKalender({ schoolId, standorte, lokal }) {
     const [tag, setTag] = React.useState(() => { const d = new Date(); d.setHours(12, 0, 0, 0); return d; });
+    // Standort-Filter (v2.97.0, Produktplan #39): erst ab zwei Standorten. Termine anderer Standorte
+    // werden nur abgeblendet, nicht ausgeblendet - sonst sähe ein belegter Fahrlehrer frei aus.
+    const [standortFilter, setStandortFilter] = React.useState("");
+    const standortListe = (standorte || []).filter(l => l && l.id);
     const [st, setSt] = React.useState({ busy: true });
     const [auswahl, setAuswahl] = React.useState(null);   // Termin, für den "Umhängen zu" offen ist
     const [ziel, setZiel] = React.useState(null);         // Spalte, über der gerade gezogen wird
@@ -46486,7 +46494,11 @@ function TeamKalender({ schoolId, lokal }) {
             React.createElement("button", { className: "btn btn-ghost", "aria-label": "Tag vor", style: { minWidth: 44, minHeight: 44, padding: 10 }, onClick: () => verschieben(1) }, "›"),
             tagKey !== ymd(new Date()) && React.createElement("button", { className: "btn btn-ghost", style: { minHeight: 44 }, onClick: () => { const d = new Date(); d.setHours(12, 0, 0, 0); setTag(d); } }, "Heute")),
         React.createElement("p", { style: { fontSize: 12.5, color: "var(--muted)", margin: "10px 0 0", lineHeight: 1.5 } },
-            "Fahrstunde auf eine andere Spalte ziehen – oder antippen und „Umhängen zu“ wählen. Private Termine und Urlaub erscheinen nur als belegte Zeit."));
+            "Fahrstunde auf eine andere Spalte ziehen – oder antippen und „Umhängen zu“ wählen. Private Termine und Urlaub erscheinen nur als belegte Zeit."),
+        standortListe.length >= 2 && React.createElement("div", { className: "tf-row", role: "radiogroup", "aria-label": "Standort", style: { marginTop: 12 } },
+            [["", "Alle Standorte"]].concat(standortListe.map(l => [l.id, l.name || "Standort"])).concat([["__ohne", "Ohne Standort"]])
+                .map(([k, lbl]) => React.createElement("button", { key: k || "alle", type: "button", role: "radio", "aria-checked": standortFilter === k,
+                    className: "tf-pill" + (standortFilter === k ? " on" : ""), style: { minHeight: 36, fontSize: 13 }, onClick: () => setStandortFilter(k) }, lbl))));
     if (st.busy)
         return React.createElement("div", { className: "pad" }, kopf, React.createElement("div", { className: "card", style: { padding: 20, textAlign: "center", color: "var(--muted)" } }, "Kalender wird geladen…"));
     if (st.error)
@@ -46509,9 +46521,15 @@ function TeamKalender({ schoolId, lokal }) {
         privat: { bg: "var(--field-bg)", rand: "var(--line)", ink: "var(--muted)" },
         urlaub: { bg: "var(--amber-bg)", rand: "var(--amber)", ink: "var(--amber-ink)" },
     };
+    const standortPasst = t => {
+        if (!standortFilter || t.typ === "privat" || t.typ === "urlaub") return true;
+        const st = String(t.standort || "").trim();
+        return standortFilter === "__ohne" ? !st : st === standortFilter;
+    };
     const block = t => {
         const s = STIL[t.typ] || STIL.fahrstunde;
         const ganzTag = t.typ === "urlaub";
+        const passt = standortPasst(t);
         const beg = ganzTag ? startH * 60 : Math.max(startH * 60, minuten(t.start_at));
         const end = ganzTag ? endH * 60 : Math.min(endH * 60, t.end_at ? minuten(t.end_at) : minuten(t.start_at) + 45);
         const umhaengbar = t.typ === "fahrstunde" || t.typ === "sonstige";
@@ -46526,7 +46544,7 @@ function TeamKalender({ schoolId, lokal }) {
                 style: { position: "absolute", left: 4, right: 4, top: (beg - startH * 60) / 60 * TK_PXH + 1, height: Math.max(22, (end - beg) / 60 * TK_PXH - 2),
                     background: s.bg, borderLeft: "4px solid " + s.rand, border: anfrage ? "1.5px dashed " + s.rand : undefined, borderRadius: 8,
                     padding: "3px 7px", overflow: "hidden", cursor: umhaengbar ? "grab" : "default", color: s.ink, fontSize: 12, lineHeight: 1.3,
-                    opacity: ganzTag ? .55 : 1, boxSizing: "border-box" } },
+                    opacity: ganzTag ? .55 : passt ? 1 : .3, boxSizing: "border-box" } },
             React.createElement("div", { style: { fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, text),
             !ganzTag && React.createElement("div", { style: { fontVariantNumeric: "tabular-nums", color: "var(--muted)", whiteSpace: "nowrap" } },
                 zeitText(t) + (anfrage ? " · Anfrage" : t.status === "cancel_requested" ? " · Storno angefragt" : "") + (t.klasse ? " · " + t.klasse : "")));
@@ -46541,7 +46559,7 @@ function TeamKalender({ schoolId, lokal }) {
                     // Kopfzeile
                     React.createElement("div", { style: { borderBottom: "1px solid var(--line)" } }),
                     lehrer.map(l => {
-                        const eigene = termine.filter(t => t.lehrer_id === l.id && t.typ !== "urlaub" && t.typ !== "privat" && t.status !== "pending");
+                        const eigene = termine.filter(t => t.lehrer_id === l.id && t.typ !== "urlaub" && t.typ !== "privat" && t.status !== "pending" && standortPasst(t));
                         const min = eigene.reduce((s, t) => s + ((t.end_at ? minuten(t.end_at) : minuten(t.start_at) + 45) - minuten(t.start_at)), 0);
                         return React.createElement("div", { key: l.id, style: { padding: "10px 10px 8px", borderBottom: "1px solid var(--line)", borderLeft: "1px solid var(--line)" } },
                             React.createElement("div", { style: { fontWeight: 800, fontSize: 14, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, l.name),
