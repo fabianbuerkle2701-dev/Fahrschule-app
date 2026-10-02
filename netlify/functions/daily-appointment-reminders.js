@@ -155,7 +155,7 @@ async function sendDailyReminders(sbFetch, now, owners) {
   const results = [];
   for (const owner of owners) {
     const apptResp = await sbFetch(
-      "appointments?owner=eq." + owner + "&status=eq.confirmed" +
+      "appointments?owner=eq." + owner + "&status=in.(confirmed,cancel_requested)" +
         "&start_at=gte." + encodeURIComponent(fromStr) +
         "&start_at=lte." + encodeURIComponent(toStr) +
         "&select=start_at,note,art,student_id&order=start_at.asc"

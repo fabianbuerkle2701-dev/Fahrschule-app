@@ -105,7 +105,7 @@ exports.handler = async function (event) {
     const to = new Date(now.getTime() + 270 * 24 * 3600 * 1000).toISOString();
 
     const [apptResp, stuResp, profResp] = await Promise.all([
-      sbFetch("appointments?owner=eq." + owner + "&status=eq.confirmed&start_at=gte." + from + "&start_at=lte." + to + "&select=id,student_id,title,start_at,end_at,art,note&order=start_at.asc"),
+      sbFetch("appointments?owner=eq." + owner + "&status=in.(confirmed,cancel_requested)&start_at=gte." + from + "&start_at=lte." + to + "&select=id,student_id,title,start_at,end_at,art,note,status&order=start_at.asc"),
       sbFetch("students?owner=eq." + owner + "&select=id,data"),
       sbFetch("profiles?id=eq." + owner + "&select=display_name,school_id"),
     ]);
@@ -158,6 +158,8 @@ exports.handler = async function (event) {
       if (isUrlaub) summary = "Urlaub";
       else if (isSonstige) summary = a.title || desc || "Sonstige Tätigkeit";
       else summary = stuName ? (artLabel + " – " + stuName) : (a.title || artLabel);
+      // Absage angefragt: der Termin gilt, bis der Fahrlehrer entscheidet (Audit 2026-10-02)
+      if (a.status === "cancel_requested") summary += " (Absage angefragt)";
       lines.push("BEGIN:VEVENT");
       lines.push(foldLine("UID:allindrive-" + a.id + "@allindrive.netlify.app"));
       lines.push("DTSTAMP:" + toICSDate(new Date().toISOString()));

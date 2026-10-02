@@ -1,0 +1,7 @@
+-- Audit Kalender 2026-10-02 (Migration "audit_kalender_schueler_fixes", Volltext: list_migrations):
+-- public_my_slots / public_book_or_propose_appointment: _verify_student_login nur mit PIN (vorher zählte jeder
+--   Aufruf ohne PIN als Fehlversuch -> Fremde konnten Schüler per Name 15 Min aussperren).
+-- public_student_overview + public_student_cancel_appt: Termine des Schülers auch bei Kollegen derselben Schule
+--   (nach Umhängen im Team-Kalender); cancel_appt vergleicht den Namen leerraumbereinigt wie alle anderen.
+-- public_student_mitteilungen(+_gelesen): nur noch über student_id (Mitteilungen umgehängter Termine haben owner = neuer Fahrlehrer).
+-- Geprüft per Rollback-Test: 10x public_my_slots ohne PIN -> 0 neue Throttle-Zeilen; Absage mit "Anna " im Namen -> requested.

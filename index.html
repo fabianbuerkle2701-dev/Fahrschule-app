@@ -3764,7 +3764,7 @@ function deepCopy(x) { return JSON.parse(JSON.stringify(x)); }
 function isPinHash(v) { return /^\$2[aby]\$/.test(v || ""); }
 /* ════════ Storage ════════ */
 /* ════════ Supabase ════════ */
-const APP_VERSION = "2.100.0";
+const APP_VERSION = "2.100.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3916,6 +3916,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.100.1", date: "Oktober 2026", changes: [
+            "Private Termine, sonstige Tätigkeiten und „Versetzt“ lassen sich auch bei ausgeschöpftem Tageslimit eintragen",
+            "Fehler behoben",
+        ] },
     { v: "2.100.0", date: "Oktober 2026", changes: [
             "Neu: Ausgaben & Gewinn (für Inhaber). Miete, Versicherungen, Lehrmaterial & Co. mit Belegfoto erfassen – zusammen mit den Fahrzeugkosten aus dem Fuhrpark siehst du je Monat Einnahmen, Ausgaben und was übrig bleibt. Export für den Steuerberater als CSV",
         ] },
@@ -23408,7 +23412,8 @@ function App() {
                     // Privater Termin) würde stillschweigend zu einem Standard-Termin.
                     const created = await dbInsertAppt(uid, {
                         start_at: backup.start_at, end_at: backup.end_at, student_id: backup.student_id,
-                        title: backup.title, note: backup.note, status: backup.status, art: backup.art
+                        title: backup.title, note: backup.note, status: backup.status, art: backup.art,
+                        ziel: backup.ziel, abholort: backup.abholort, fahrzeug: backup.fahrzeug, offer_klasse: backup.offer_klasse, offered_at: backup.offered_at
                     });
                     apptDeletedRef.current.delete(id);
                     setAppts(prev => [...prev, created].sort((a, b) => a.start_at.localeCompare(b.start_at)));
@@ -23444,7 +23449,9 @@ function App() {
             // Limit-Prüfung beim Bestätigen (nur bestätigte zählen, dieser kommt dazu)
             const dKey = ymd(appt.start_at);
             const mins = apptMin(appt);
-            const lp = limitProblem(dKey, mins, id, appt.student_id, liste);
+            // Anfragen vom Buchungslink haben noch keine student_id - sonst würde das Schüler-Limit übersprungen
+            const limitSid = appt.student_id || (appt.title ? ((matchStudentByName(appt.title) || {}).id || null) : null);
+            const lp = limitProblem(dKey, mins, id, limitSid, liste);
             if (lp) {
                 if (o.sammel && o.gruende)
                     o.gruende.push((apptStudentName(appt) || appt.title || "Termin") + " (" + fmtD(appt.start_at) + ", " + hm(appt.start_at) + "): " + lp.split("\n")[0]);
@@ -23646,9 +23653,10 @@ function App() {
         const name = (stu && stu.vorname) ? stu.vorname.trim() : "";
         const greet = name ? ("Hallo " + name + ", ") : "Hallo, ";
         const url = code ? bookingURL(code) : "";
-        const bestaetigen = (mehrere) => url
-            ? "Öffne diesen Link, gib deinen Namen ein und bestätige " + (mehrere ? "die Termine" : "den Termin") + ":\n" + url
-            : "Gib mir bitte kurz Bescheid, ob " + (mehrere ? "die Termine passen" : "der Termin passt") + ".";
+        // Die Buchungsseite hat keinen Knopf zum Bestätigen eines Vorschlags (Audit 2026-10-02) -
+        // deshalb um Rückmeldung bitten und den Link nur zum Ansehen mitgeben.
+        const bestaetigen = (mehrere) => "Gib mir bitte kurz Bescheid, ob " + (mehrere ? "die Termine passen" : "der Termin passt") + "."
+            + (url ? "\nDeine Termine siehst du hier: " + url : "");
         if (list.length === 1) {
             const s = list[0];
             const d = new Date(s.start_at);
@@ -31916,9 +31924,14 @@ function App() {
         }
         const startISO = combineDT(f.date, f.start);
         const endISO = f.end ? combineDT(f.date, f.end) : null;
-        // Limit-Prüfung nur für praktische Ausbildung (nicht bei sonstiger Tätigkeit und nicht
-        // beim Urlaub - der zählt nirgends als Unterrichtszeit)
-        if (!f.sonstige && !f.urlaub) {
+        // Am Tag der Zeitumstellung gibt es 02:00-03:00 nicht - dann kann das Ende vor dem Beginn landen
+        if (endISO && new Date(endISO).getTime() <= new Date(startISO).getTime()) {
+            showToast("Diese Uhrzeit gibt es an diesem Tag wegen der Zeitumstellung nicht. Bitte Start oder Ende ändern.");
+            return;
+        }
+        // Limit-Prüfung nur für praktische Ausbildung (nicht bei sonstiger Tätigkeit, Urlaub und
+        // Arten, die nicht als Fahrstunde zählen wie Privat, ST/STI, VS - Audit 2026-10-02)
+        if (!f.sonstige && !f.urlaub && artCounts(f.art || "ÜST")) {
             const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
             const lp = limitProblem(f.date, mins, f.id, f.student_id);
             if (lp) {
@@ -32037,7 +32050,7 @@ function App() {
             for (const date of dates) {
                 const startISO = combineDT(date, f.start);
                 const endISO = f.end ? combineDT(date, f.end) : null;
-                if (!f.sonstige) {
+                if (!f.sonstige && artCounts(f.art || "ÜST")) {
                     const mins = Math.max(0, endISO ? Math.round((new Date(endISO).getTime() - new Date(startISO).getTime()) / 60000) : 45);
                     const lp = limitProblem(date, mins, null, f.student_id);
                     if (lp) {
@@ -47434,7 +47447,9 @@ function TeamKalender({ schoolId, standorte, lokal }) {
         const lok = lokalRef.current;
         if (lok) { setSt({ busy: false, lehrer: lok.lehrer, termine: lok.termine.filter(t => ymd(t.start_at) === tagKey) }); return; }
         setSt(s => ({ ...s, busy: true, error: "" }));
-        const von = new Date(tagKey + "T00:00:00"), bis = new Date(von.getTime() + 86400000);
+        // Tagesgrenzen in deutscher Zeit - ein fester 24-h-Tag verschob sich an den Tagen der Zeitumstellung
+        const morgenKey = ymd(new Date(new Date(tagKey + "T12:00:00").getTime() + 86400000));
+        const von = new Date(combineDT(tagKey, "00:00")), bis = new Date(combineDT(morgenKey, "00:00"));
         Promise.all([adminFetchTeachers(schoolId), fetchSchoolBueroIds(schoolId), fetchSchoolTermine(schoolId, von.toISOString(), bis.toISOString())])
             .then(([lehrer, buero, termine]) => {
                 const bueroSet = new Set(buero || []);
@@ -48844,6 +48859,16 @@ function VehicleCalendar({ code, teacherNames, defaultTeacher }) {
         }
         catch (e) { } };
     }, [info, code]);
+    // Ohne Anmeldung liefert Realtime für bookings nichts (RLS) - deshalb jede Minute und beim
+    // Zurückkehren auf die Seite neu laden (Audit 2026-10-02).
+    React.useEffect(() => {
+        if (!info || info === "fehler")
+            return;
+        const t = setInterval(() => { if (document.visibilityState === "visible") reloadRef.current(); }, 60000);
+        const sichtbar = () => { if (document.visibilityState === "visible") reloadRef.current(); };
+        document.addEventListener("visibilitychange", sichtbar);
+        return () => { clearInterval(t); document.removeEventListener("visibilitychange", sichtbar); };
+    }, [info]);
     if (info === undefined)
         return React.createElement("div", { style: { padding: 40, textAlign: "center", color: "var(--muted)" } }, "Kalender l\u00E4dt\u2026");
     if (info === "fehler")
