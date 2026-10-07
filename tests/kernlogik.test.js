@@ -1176,3 +1176,13 @@ test("Datenverlust 2026-10-07: nur Geändertes auf den Serverstand, Haken je Pun
     const m4 = k.geaendertesUeberlegen({}, { adkDates: { a1: ["2026-10-07"] } }, ["adkDates" + T + "a1"]);
     assert.deepEqual(JSON.parse(JSON.stringify(m4.adkDates)), { a1: ["2026-10-07"] });
 });
+
+test("Funktionen ein/aus: Liste eindeutig, alte Bereichs-Ids erhalten, Schüler-App nur schulweit", () => {
+    const k = require("./lade-app")(["FUNKTIONEN", "FUNKTION_GRUPPEN"]);
+    const ids = k.FUNKTIONEN.map(f => f.id);
+    assert.equal(new Set(ids).size, ids.length, "keine doppelten Ids");
+    ["interessenten", "fuhrpark", "videos", "begleitung", "anmeldung"].forEach(id => assert.ok(ids.includes(id), "bisherige Bereichs-Id " + id + " (schools.bereiche_aus) bleibt"));
+    k.FUNKTIONEN.forEach(f => assert.ok(k.FUNKTION_GRUPPEN.includes(f.gruppe), f.id + " hat eine bekannte Gruppe"));
+    k.FUNKTIONEN.filter(f => f.gruppe === "Schüler-App").forEach(f => assert.ok(!f.persoenlich, f.id + ": Schüler-App-Funktionen nur schulweit"));
+    assert.ok(k.FUNKTIONEN.find(f => f.id === "empfehlung").persoenlich, "Empfehlungsprogramm darf jeder Fahrlehrer ausblenden");
+});
