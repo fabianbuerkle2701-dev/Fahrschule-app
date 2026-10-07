@@ -3817,7 +3817,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.106.0";
+const APP_VERSION = "2.107.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3969,6 +3969,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.107.0", date: "Oktober 2026", changes: [
+            "Fehler behoben: Abgehakte Punkte (z. B. ADK) konnten später wieder verschwinden, obwohl „Gespeichert“ angezeigt wurde – vor allem, wenn die App auf mehreren Geräten offen war oder gerade beim Speichern neu geladen hat",
+        ] },
     { v: "2.106.0", date: "Oktober 2026", changes: [
             "Einstellungen → Arbeit & Ausbildung: Du kannst festlegen, ob Schüler über dein Tageslimit (z. B. 495 Min.) hinaus Termine vorschlagen dürfen. Ohne Haken zählen offene Vorschläge mit, und ein voller Tag nimmt keine Vorschläge mehr an",
         ] },
@@ -6715,6 +6718,31 @@ async function dbInsert(uid, s) {
         return null;
     }
 }
+// Felder, die eine Zuordnung Punkt -> Wert sind (ADK-Haken, Streckenpunkte, Notizen, Zähler,
+// Datumslisten): markDirtyKeys merkt sich hier die einzelnen Punkte als "feld" + TEIL_TRENNER +
+// "punkt", damit zwei Geräte verschiedene Punkte desselben Feldes abhaken können.
+const TEIL_FELDER = new Set(["items", "strecken", "streckenNotes", "customCounts", "adkDates"]);
+const TEIL_TRENNER = "\u001F";
+const istZuordnung = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+// Legt die lokal geänderten Felder (bzw. einzelnen Punkte) auf den frischen Serverstand.
+// Ein ganz geändertes Feld gewinnt vor seinen Einzelpunkten.
+function geaendertesUeberlegen(frisch, lokal, keys) {
+    const merged = { ...frisch };
+    const ganz = new Set(keys.filter(k => k.indexOf(TEIL_TRENNER) < 0));
+    ganz.forEach(k => { if (lokal[k] === undefined) delete merged[k]; else merged[k] = lokal[k]; });
+    keys.forEach(k => {
+        const i = k.indexOf(TEIL_TRENNER);
+        if (i < 0) return;
+        const feld = k.slice(0, i), punkt = k.slice(i + 1);
+        if (ganz.has(feld)) return;
+        const ziel = { ...(istZuordnung(merged[feld]) ? merged[feld] : {}) };
+        const quelle = istZuordnung(lokal[feld]) ? lokal[feld] : {};
+        if (Object.prototype.hasOwnProperty.call(quelle, punkt) && quelle[punkt] !== undefined) ziel[punkt] = quelle[punkt];
+        else delete ziel[punkt];
+        merged[feld] = ziel;
+    });
+    return merged;
+}
 // Schreibt über die RPC students_teacher_update statt direkt per .update({data:...}) - die RPC
 // bewahrt serverseitig die schülereigenen Felder (PIN, Theorie-Fortschritt, begleitete Fahrten
 // usw.), die der Fahrlehrer-Client nie im lokalen Stand hat, weil die Schülerliste nur einmal
@@ -6734,15 +6762,18 @@ async function dbInsert(uid, s) {
 // Speichern tatsächlich lokal geänderten Felder (changedKeys, siehe markDirtyKeys) darüberlegen -
 // alle anderen Felder kommen vom frischen Serverstand und damit ggf. vom Kollegen. Schlägt das
 // Nachladen fehl, wird wie bisher der komplette lokale Stand geschickt (kein Blockieren des Saves).
+// 2026-10-07 (Datenverlust "abgehakt, eine Stunde später weg"): gilt jetzt für ALLE Schüler,
+// nicht nur geteilte. Ein zweites Gerät (Handy + Rechner/Tablet) oder eine lange offene Sitzung
+// hat ebenfalls einen veralteten Stand und schrieb mit jeder Änderung die frischen ADK-Haken des
+// anderen Geräts weg. Haken-Felder (TEIL_FELDER) werden dabei sogar je Punkt gemergt.
 async function dbUpdate(s, changedKeys) {
     if (IS_DEMO()) { demoBlock("Demo-Ansicht: Änderungen werden nicht gespeichert."); return; }
     await withNetworkRetry(async () => {
         let payload = cleanData(s);
-        if (changedKeys && changedKeys.length && s._shared && s._shared.length) {
+        if (changedKeys && changedKeys.length) {
             const { data: freshRow, error: fetchErr } = await sb.from("students").select("data").eq("id", s.id).single();
             if (!fetchErr && freshRow && freshRow.data && typeof freshRow.data === "object") {
-                const merged = { ...freshRow.data };
-                changedKeys.forEach(k => { merged[k] = payload[k]; });
+                const merged = geaendertesUeberlegen(freshRow.data, payload, changedKeys);
                 // Schul-Markierungen (schulAenderungen, v2.41.0) IMMER vom eigenen Stand: mit den frischen
                 // Server-Markierungen hielte der Server einen veralteten lokalen Wert (z.B. payments ohne
                 // die Büro-Zahlung) für "gesehen" und überschriebe die Büro-Änderung (Pre-Push-Review).
@@ -17404,6 +17435,9 @@ function App() {
     // Schüler steht nach dem Setzen der Hash vom Server - so landet der Klartext-PIN nicht mehr
     // im localStorage-Cache (Audit G-N11), lässt sich aber direkt danach noch teilen.
     const pinKlartextRef = useRef({});
+    // Wann das letzte Speichern je Schüler fertig wurde: ein Neuladen, das VORHER gestartet ist,
+    // liefert für diesen Schüler womöglich den Stand vor dem Speichern (Datenverlust 2026-10-07).
+    const studentSaveDoneRef = useRef(new Map());
     function studentWriteDelta(id, d) {
         const m = studentWritesRef.current;
         const n = (m.get(id) || 0) + d;
@@ -17423,7 +17457,8 @@ function App() {
     function schuelerListeEinspielen(list, startedAt) {
         const writes = studentWritesRef.current, touched = studentTouchedRef.current;
         const ws = warteschlangeRef.current;
-        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt || !!ws[id];
+        const done = studentSaveDoneRef.current;
+        const busy = id => (writes.get(id) || 0) > 0 || (touched.get(id) || 0) >= startedAt || (done.get(id) || 0) >= startedAt || !!ws[id];
         const byId = new Map((list || []).map(s => [s.id, s]));
         // Warteschlangen-Einträge für Schüler, die der Server nicht mehr liefert (umgehängt, Freigabe
         // entzogen, gelöscht), sind nicht mehr zustellbar: Eintrag weg, Schüler weg. Sonst blieb er als
@@ -17520,8 +17555,14 @@ function App() {
         keys.forEach(k => {
             if (k === "id" || k.startsWith("_"))
                 return;
-            if ((prevObj || {})[k] !== (nextObj || {})[k])
-                set.add(k);
+            const a = (prevObj || {})[k], b = (nextObj || {})[k];
+            if (a === b)
+                return;
+            if (TEIL_FELDER.has(k) && istZuordnung(a) && istZuordnung(b)) {
+                new Set([...Object.keys(a), ...Object.keys(b)]).forEach(p => { if (a[p] !== b[p]) set.add(k + TEIL_TRENNER + p); });
+                return;
+            }
+            set.add(k);
         });
     }
     // true, solange nach dem Link aus "Passwort vergessen?" noch kein neues Passwort gesetzt ist.
@@ -19687,6 +19728,7 @@ function App() {
                 return false;
             }
             finally {
+                studentSaveDoneRef.current.set(stu.id, Date.now());
                 studentWriteDelta(stu.id, -1);
             }
         }, 500);

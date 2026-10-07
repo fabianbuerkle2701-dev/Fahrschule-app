@@ -1153,3 +1153,26 @@ test("Audit Ausbildung: erledigte Notiz, Archiv-Vorschlag nach Anlegedatum", () 
     const v = k.archivVorschlaege([alt], [], {}, new Date("2026-10-02T12:00:00Z"));
     assert.equal(v.length, 1, "vor über einem Jahr angelegt, nie aktiv -> Vorschlag");
 });
+
+test("Datenverlust 2026-10-07: nur Geändertes auf den Serverstand, Haken je Punkt", () => {
+    const k = require("./lade-app")(["geaendertesUeberlegen", "TEIL_TRENNER"]);
+    const T = k.TEIL_TRENNER;
+    // Handy hat a1 abgehakt (Server), Rechner mit altem Stand hakt b2 ab und ändert die Notiz
+    const server = { items: { a1: 1, x: 2 }, strecken: { s1: "gut" }, lastNote: "alt", payments: [{ id: "p1" }] };
+    const rechner = { items: { x: 2, b2: 1 }, strecken: {}, lastNote: "neu", payments: [] };
+    const m = k.geaendertesUeberlegen(server, rechner, ["items" + T + "b2", "lastNote"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(m.items)), { a1: 1, x: 2, b2: 1 }, "Haken des Handys bleibt, neuer kommt dazu");
+    assert.deepEqual(JSON.parse(JSON.stringify(m.strecken)), { s1: "gut" }, "nicht geänderte Felder vom Server");
+    assert.equal(m.lastNote, "neu");
+    assert.equal(m.payments.length, 1, "Zahlung vom anderen Gerät bleibt");
+    // Haken entfernen löscht nur diesen Punkt
+    const m2 = k.geaendertesUeberlegen(server, { items: { x: 2 } }, ["items" + T + "a1"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(m2.items)), { x: 2 });
+    // Ganzes Feld geändert gewinnt vor Einzelpunkten; gelöschtes Feld wird entfernt
+    const m3 = k.geaendertesUeberlegen(server, { items: { z: 1 } }, ["items", "items" + T + "a1", "lastNote"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(m3.items)), { z: 1 });
+    assert.equal("lastNote" in m3, false);
+    // Feld fehlt auf dem Server noch
+    const m4 = k.geaendertesUeberlegen({}, { adkDates: { a1: ["2026-10-07"] } }, ["adkDates" + T + "a1"]);
+    assert.deepEqual(JSON.parse(JSON.stringify(m4.adkDates)), { a1: ["2026-10-07"] });
+});
