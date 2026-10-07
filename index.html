@@ -3817,7 +3817,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.105.0";
+const APP_VERSION = "2.106.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3969,6 +3969,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.106.0", date: "Oktober 2026", changes: [
+            "Einstellungen → Arbeit & Ausbildung: Du kannst festlegen, ob Schüler über dein Tageslimit (z. B. 495 Min.) hinaus Termine vorschlagen dürfen. Ohne Haken zählen offene Vorschläge mit, und ein voller Tag nimmt keine Vorschläge mehr an",
+        ] },
     { v: "2.105.0", date: "Oktober 2026", changes: [
             "Schüler-App: Termine buchen im neuen Stil – Tage mit großem Datum, Kalenderwoche oben, runde Knöpfe",
             "Schüler-App: Übungsfahrten und Hinweise als runde, farbig getönte Karten",
@@ -6619,7 +6622,7 @@ function clearAccountCaches(uid) {
             "v3_packages_" + uid, "v3_price_hour_" + uid,
             // Buchungslimits sind (noch) geräteweit gespeichert - sonst startete das nächste Konto
             // auf diesem Gerät mit den Limits des vorherigen, bis der Server-Stand da ist.
-            "v3_day_limit", "v3_week_limit", "v3_student_day_limit", "v3_student_week_limit"].forEach(k => localStorage.removeItem(k));
+            "v3_day_limit", "v3_week_limit", "v3_student_day_limit", "v3_student_week_limit", "v3_vorschlaege_ueber_limit"].forEach(k => localStorage.removeItem(k));
     }
     catch (e) { }
 }
@@ -7463,7 +7466,7 @@ async function touchLastSeen(uid) {
     catch (e) { }
 }
 // Persönliches Limit am Profil speichern, damit die Buchungsseite es lesen kann
-async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentWeekLim) {
+async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentWeekLim, ueberLimit) {
     if (!uid)
         return;
     try {
@@ -7474,7 +7477,7 @@ async function saveLimitsToProfile(uid, dayLim, weekLim, studentDayLim, studentW
         // kommt als { error } zurück und wurde hier bisher komplett ignoriert (fehlgeschlagenes
         // Speichern blieb unbemerkt, siehe alle Schwesterfunktionen wie saveBookingMessage()).
         const { error } = await sb.from("profiles").upsert({ id: uid, email, day_limit: dayLim, week_limit: weekLim,
-            student_day_limit: studentDayLim, student_week_limit: studentWeekLim }, { onConflict: "id" });
+            student_day_limit: studentDayLim, student_week_limit: studentWeekLim, vorschlaege_ueber_limit: ueberLimit !== false }, { onConflict: "id" });
         if (error)
             throw new Error(error.message || "Limits konnten nicht gespeichert werden");
         return true;
@@ -17213,6 +17216,14 @@ function App() {
     catch (e) {
         return 495;
     } });
+    // v2.106.0: Dürfen Schüler über das Tageslimit hinaus Termine vorschlagen? true = wie bisher
+    // (offene Vorschläge zählen nicht), false = jeder Termin des Tages zählt zum Limit.
+    const [vorschlaegeUeberLimit, setVorschlaegeUeberLimit] = useState(() => { try {
+        return localStorage.getItem("v3_vorschlaege_ueber_limit") !== "0";
+    }
+    catch (e) {
+        return true;
+    } });
     const [weekLimit, setWeekLimit] = useState(() => { try {
         const v = localStorage.getItem("v3_week_limit");
         return v === null ? 0 : (parseInt(v, 10) || 0);
@@ -17292,6 +17303,10 @@ function App() {
         localStorage.setItem("v3_week_limit", String(weekLimit));
     }
     catch (e) { } }, [weekLimit]);
+    useEffect(() => { try {
+        localStorage.setItem("v3_vorschlaege_ueber_limit", vorschlaegeUeberLimit ? "1" : "0");
+    }
+    catch (e) { } }, [vorschlaegeUeberLimit]);
     useEffect(() => { try {
         localStorage.setItem("v3_student_day_limit", String(studentDayLimit));
     }
@@ -18521,20 +18536,22 @@ function App() {
         }
         if (!limitSyncReady.current) {
             limitSyncReady.current = true;
-            sb.from("profiles").select("day_limit,week_limit,student_day_limit,student_week_limit").eq("id", uid).maybeSingle()
+            sb.from("profiles").select("day_limit,week_limit,student_day_limit,student_week_limit,vorschlaege_ueber_limit").eq("id", uid).maybeSingle()
                 .then(({ data }) => {
                     if (!data)
                         return;
                     // Genau die Werte, die gleich lokal gelten - null bei day/week_limit heißt
                     // "nicht gesetzt", der lokale Wert bleibt dann und wird wie bisher gespeichert.
                     limitServerStandRef.current = JSON.stringify([data.day_limit != null ? data.day_limit : null, data.week_limit != null ? data.week_limit : null,
-                        data.student_day_limit != null ? data.student_day_limit : 0, data.student_week_limit != null ? data.student_week_limit : 0]);
+                        data.student_day_limit != null ? data.student_day_limit : 0, data.student_week_limit != null ? data.student_week_limit : 0,
+                        data.vorschlaege_ueber_limit !== false]);
                     if (data.day_limit != null)
                         setDayLimit(data.day_limit);
                     if (data.week_limit != null)
                         setWeekLimit(data.week_limit);
                     setStudentDayLimit(data.student_day_limit != null ? data.student_day_limit : 0);
                     setStudentWeekLimit(data.student_week_limit != null ? data.student_week_limit : 0);
+                    setVorschlaegeUeberLimit(data.vorschlaege_ueber_limit !== false);
                 })
                 .catch(() => { });
             return;
@@ -18542,7 +18559,7 @@ function App() {
         // Audit I-M7: vorher ein upsert pro Tastendruck, alle parallel - kam die Antwort für "49"
         // nach der für "495" an, blieb 49 gespeichert. Jetzt aufgeschoben (planSave: nur der letzte
         // Stand läuft, auch beim Verlassen der Seite) und hintereinander statt gleichzeitig.
-        const lim = [dayLimit, weekLimit, studentDayLimit, studentWeekLimit];
+        const lim = [dayLimit, weekLimit, studentDayLimit, studentWeekLimit, vorschlaegeUeberLimit];
         const limStand = JSON.stringify(lim);
         if (limStand === limitServerStandRef.current) {
             // Unverändert gegenüber dem Server (direkt nach dem Laden oder zurückgetippt): nichts
@@ -18560,11 +18577,11 @@ function App() {
             // zurück, wurde das als "unverändert" übersprungen und danach stand der neue Wert im
             // Profil, der alte im Feld. Scheitert das Speichern, erzwingt null den nächsten Versuch.
             limitServerStandRef.current = limStand;
-            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3]))
+            limitSaveChainRef.current = limitSaveChainRef.current.then(() => saveLimitsToProfile(uid, lim[0], lim[1], lim[2], lim[3], lim[4]))
                 .then(ok => { if (!ok && limitServerStandRef.current === limStand) limitServerStandRef.current = null; return ok; });
             return limitSaveChainRef.current;
         }, 600);
-    }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit]);
+    }, [uid, dayLimit, weekLimit, studentDayLimit, studentWeekLimit, vorschlaegeUeberLimit]);
     const nameSaveChainRef = useRef(Promise.resolve());
     const nameSyncReady = useRef(false);
     // Zuletzt vom Server geladener bzw. erfolgreich gespeicherter Name. Ohne diesen Abgleich
@@ -34417,6 +34434,16 @@ function App() {
                                     "Entspricht ", (dayLimit / 45).toLocaleString("de-DE", { maximumFractionDigits: 2 }), " UE pro Tag."),
                                 (dayLimit === 0 || dayLimit > PRAXIS_GRENZE_MIN) && React.createElement("div", { role: "note", style: { fontSize: 12, color: "var(--amber-ink)", fontWeight: 700, marginTop: 6, lineHeight: 1.45 } },
                                     "§ 12 FahrlG erlaubt höchstens " + PRAXIS_GRENZE_MIN + " Minuten praktischen Fahrunterricht am Tag (einschließlich Prüfungsfahrten). " + (dayLimit === 0 ? "Ohne Limit warnt die Planung nicht davor." : "Dein Limit liegt darüber."))),
+                            // v2.106.0: Vorschläge über das Tageslimit (Wunsch Fabian 2026-10-07). Wirkt auf die
+                            // Buchungsseite und serverseitig in public_book_or_propose_appointment.
+                            dayLimit > 0 && React.createElement("div", { style: { margin: "0 0 14px", padding: "12px 13px", borderRadius: 16, background: "var(--field-bg)" } },
+                                React.createElement("label", { style: { display: "flex", alignItems: "flex-start", gap: 11, cursor: "pointer" } },
+                                    React.createElement("input", { type: "checkbox", checked: vorschlaegeUeberLimit, onChange: e => setVorschlaegeUeberLimit(e.target.checked), style: { width: 20, height: 20, flexShrink: 0, marginTop: 1 } }),
+                                    React.createElement("span", { style: { fontWeight: 700, fontSize: 14, lineHeight: 1.35 } }, "Vorschläge über " + dayLimit + " Min. am Tag zulassen")),
+                                React.createElement("p", { style: { fontSize: 11.5, color: "var(--muted)", margin: "6px 0 0 31px", lineHeight: 1.5 } },
+                                    vorschlaegeUeberLimit
+                                        ? "An: Schüler können weiter Termine vorschlagen, auch wenn der Tag mit Vorschlägen schon voll ist. Erst wenn die bestätigten Termine " + dayLimit + " Min. erreichen, ist der Tag ausgebucht. Du entscheidest beim Bestätigen."
+                                        : "Aus: Offene Vorschläge zählen mit. Sobald bestätigte Termine und Vorschläge zusammen " + dayLimit + " Min. erreichen, kann an diesem Tag niemand mehr etwas vorschlagen.")),
                             React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginBottom: 12 }, onClick: () => setArbeitszeitOpen(true) }, "Arbeitszeitnachweis ansehen (§ 12 FahrlG)"),
                             React.createElement("div", { className: "field" },
                                 React.createElement("label", null, "Wochenlimit in Minuten (0 = aus)",
@@ -45603,6 +45630,14 @@ function BookingPage({ code, appMode, onLogout }) {
         const e = b.end_at ? new Date(b.end_at).getTime() : s + 45 * 60000;
         return sum + Math.max(0, Math.round((e - s) / 60000));
     }, 0);
+    // v2.106.0: Hat der Fahrlehrer "Vorschläge über das Tageslimit zulassen" ausgeschaltet, zählt
+    // jeder Termin des Tages (auch offene Vorschläge) - wie die Server-Prüfung (TEACHER_FULL).
+    const limitStrikt = !!info && info.vorschlaege_ueber_limit === false;
+    const tagesMin = (rows) => limitStrikt ? rows.reduce((sum, b) => {
+        const s = new Date(b.start_at).getTime();
+        const e = b.end_at ? new Date(b.end_at).getTime() : s + 45 * 60000;
+        return sum + Math.max(0, Math.round((e - s) / 60000));
+    }, 0) : belegtMin(rows);
     const wocheVonKey = ymd(startOfWeek(week)), wocheBisKey = ymd(weekEnd);
     const wochenBelegt = belegtMin(busy.filter(b => { const k = ymd(b.start_at); return k >= wocheVonKey && k <= wocheBisKey; }));
     // "tag" = Tageslimit des Fahrlehrers erreicht, "woche" = Wochenlimit, "" = frei oder unbekannt.
@@ -45610,7 +45645,8 @@ function BookingPage({ code, appMode, onLogout }) {
         if (!info || dateStr < wocheVonKey || dateStr > wocheBisKey)
             return "";
         const dayLim = info.day_limit || 0, weekLim = info.week_limit || 0;
-        if (dayLim > 0 && belegtMin(byDay[dateStr] || []) >= dayLim)
+        // Streng: unter 45 freien Minuten passt keine Fahrstunde mehr - der Tag ist dann voll.
+        if (dayLim > 0 && (limitStrikt ? tagesMin(byDay[dateStr] || []) > dayLim - 45 : belegtMin(byDay[dateStr] || []) >= dayLim))
             return "tag";
         if (weekLim > 0 && wochenBelegt >= weekLim)
             return "woche";
@@ -45836,6 +45872,7 @@ function BookingPage({ code, appMode, onLogout }) {
         if (/OUTSIDE_HOURS/i.test(m)) return { reason: "liegt außerhalb der Arbeitszeit deines Fahrlehrers", zeit: true };
         if (/INVALID_TIME/i.test(m)) return { reason: "das Ende muss nach dem Start liegen", zeit: true };
         if (/TOOLONG/i.test(m)) return { reason: "höchstens 4 Stunden am Stück möglich", zeit: true };
+        if (/TEACHER_FULL/i.test(m)) return { reason: "dein Fahrlehrer ist an diesem Tag schon voll ausgelastet", zeit: true };
         if (/DAYLIMIT/i.test(m)) return { reason: "dein Tageslimit ist an diesem Tag erreicht", zeit: true };
         if (/WEEKLIMIT/i.test(m)) return { reason: "dein Wochenlimit ist in dieser Woche erreicht", zeit: true };
         if (/UNPAID/i.test(m)) return { reason: "wegen einer offenen Rechnung gesperrt", unpaid: true };
@@ -46304,7 +46341,7 @@ function BookingPage({ code, appMode, onLogout }) {
                     const hoursLabel = dayBlocked ? null : (hasTimeLimit ? dayHours.von + " – " + dayHours.bis + " Uhr" : "ganztägig geöffnet");
                     // Belegte Minuten an diesem Tag (bestätigte Termine), für die Limit-Anzeige
                     const dayLim = (info && info.day_limit) || 0;
-                    const usedMin = belegtMin(byDay[k] || []);
+                    const usedMin = tagesMin(byDay[k] || []);
                     // "Ausgebucht" auch, wenn das Wochenlimit des Fahrlehrers erreicht ist - dieselbe
                     // Prüfung (tagVoll) sperrt den Tag im Formular und beim Absenden.
                     const dayFull = !!tagVoll(k);
@@ -46347,7 +46384,7 @@ function BookingPage({ code, appMode, onLogout }) {
                                             display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 5 } }, "+ Termin")),
                         dayLim > 0 && !dayBlocked && React.createElement("div", { style: { padding: "9px 14px", borderBottom: "1px solid var(--line)" } },
                             React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 5 } },
-                                React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, "Belegt an diesem Tag"),
+                                React.createElement("span", { style: { fontSize: 11.5, color: "var(--muted)" } }, limitStrikt ? "Belegt inkl. Vorschlägen" : "Belegt an diesem Tag"),
                                 // Text dunkler als der Balken: Orange auf Weiß lag bei 2,2:1 (Audit 2026-10-02)
                                 React.createElement("span", { style: { fontSize: 12, fontWeight: 700, fontFamily: "var(--font-d)", color: barCol === "var(--orange)" ? "color-mix(in srgb, var(--orange) 72%, var(--ink))" : barCol, fontVariantNumeric: "tabular-nums" } },
                                     usedMin,
