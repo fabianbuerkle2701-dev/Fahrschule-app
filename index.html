@@ -3836,7 +3836,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.108.0";
+const APP_VERSION = "2.109.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3988,6 +3988,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.109.0", date: "Oktober 2026", changes: [
+            "Schülersuche: Der getippte Text steht sofort im Feld, die Liste filtert erst nach einer kurzen Tipppause. Sie springt dadurch nicht mehr bei jedem Buchstaben, und das Tippen bleibt auch bei vielen Schülern flüssig. Mit Enter filtert sie sofort, ein geleertes Feld zeigt sofort wieder alle",
+        ] },
     { v: "2.108.0", date: "Oktober 2026", changes: [
             "Zurückwischen vom linken Rand führt jetzt immer zum Bereich, in dem du vorher warst – auch an dieselbe Stelle in der Liste",
             "Die Wischgeste läuft flüssiger: kein Hängenbleiben mehr, die Seite scrollt beim Wischen nicht mit, ein kurzer schneller Wisch reicht, und links zeigt ein Pfeil, wohin es zurückgeht",
@@ -12296,6 +12299,67 @@ function Ring({ pct, size = 50, color }) {
         React.createElement("text", { x: "50%", y: "50%", dominantBaseline: "central", textAnchor: "middle", style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: fontSize, fill: "var(--ink)" } },
             pct,
             "%"));
+}
+// Suchfeld, das den getippten Text selbst hält und erst nach einer Tipppause nach oben meldet.
+// Vorher lag der Suchtext der Schülerliste direkt im Zustand der Fahrlehrer-Seite: jeder
+// Tastendruck baute die ganze Seite samt aller Schülerkarten neu auf, und die Liste filterte bei
+// jedem Buchstaben erneut - bei über hundert Schülern merkt man das beim Tippen. Jetzt zeichnet
+// ein Tastendruck nur noch dieses Feld, die Liste filtert einmal, sobald 300 ms nichts mehr
+// getippt wurde. Ein geleertes Feld wirkt sofort: auf die vollständige Liste wartet man nicht.
+// Bedingung an die Aufrufstelle: "wert" muss der Zustand sein, den "onWert" setzt (hier search /
+// setSearch). Nur so unterscheidet das Feld ein Zurücksetzen von außen von seiner eigenen Meldung.
+function SuchFeldMitPause({ wert, onWert, platzhalter, ariaLabel }) {
+    const [text, setText] = useState(wert || "");
+    const timerRef = useRef(null);
+    // Was zuletzt nach oben gemeldet wurde. Nur wenn der Wert von außen davon abweicht - etwa
+    // über "Suche und Filter zurücksetzen" oder den Sprung von der Startseite in die Liste -,
+    // übernimmt das Feld ihn; die eigene Meldung darf den gerade getippten Text nicht überschreiben.
+    const gemeldetRef = useRef(wert || "");
+    useEffect(() => {
+        const aussen = wert || "";
+        if (aussen === gemeldetRef.current)
+            return;
+        gemeldetRef.current = aussen;
+        if (timerRef.current) {
+            clearTimeout(timerRef.current);
+            timerRef.current = null;
+        }
+        setText(aussen);
+    }, [wert]);
+    // Beim Verlassen der Ansicht den offenen Timer abräumen, sonst filtert er in eine Liste
+    // hinein, die es nicht mehr gibt.
+    useEffect(() => () => { if (timerRef.current)
+        clearTimeout(timerRef.current); }, []);
+    function stopp() { if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+    } }
+    function melden(v) { gemeldetRef.current = v; onWert(v); }
+    function aendern(v) {
+        setText(v);
+        stopp();
+        if (!v.trim()) {
+            melden("");
+            return;
+        }
+        timerRef.current = setTimeout(() => { timerRef.current = null; melden(v); }, 300);
+    }
+    function leeren() { stopp(); setText(""); melden(""); }
+    return React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
+        React.createElement("input", { value: text, onChange: e => aendern(e.target.value), placeholder: platzhalter,
+                "aria-label": ariaLabel || platzhalter,
+                // Enter filtert ohne die Pause abzuwarten. Ein Filtern beim Verlassen des Feldes
+                // bewusst nicht: der Finger ist dann schon auf einer Schülerkarte unterwegs, und
+                // eine Liste, die sich unter ihm neu sortiert, öffnet den falschen Schüler.
+                onKeyDown: e => { if (e.key === "Enter") {
+                    e.preventDefault();
+                    stopp();
+                    melden(text);
+                } },
+                style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 999, padding: "12px 42px 12px 18px",
+                        fontSize: 16, background: "var(--card)" } }),
+        text && React.createElement("button", { onClick: leeren, "aria-label": "Suche löschen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
+                fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "×"));
 }
 // WMO-Wettercodes (Open-Meteo) grob zusammengefasst: [Emoji, Label]
 const WEATHER_CODE_MAP = {
@@ -25217,11 +25281,12 @@ function App() {
             // Suche und Filter erst ab 4 Schülern - aber sichtbar lassen, solange eins davon aktiv
             // ist. Sonst blieb nach dem Löschen/Archivieren auf 3 Schüler ein Filter unsichtbar
             // eingeschaltet und die Liste leer, ohne Weg, ihn zurückzusetzen.
-            (students.length > 3 || search || listFilter !== "alle") && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
-                React.createElement("input", { value: search, onChange: e => setSearch(e.target.value), placeholder: "Sch\u00FCler suchen\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 999, padding: "12px 42px 12px 18px",
-                        fontSize: 16, background: "var(--card)" } }),
-                search && React.createElement("button", { onClick: () => setSearch(""), "aria-label": "Suche l\u00F6schen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
-                        fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "\u00D7")),
+            // "search" ist der verzögerte Wert: das Feld hält den getippten Text selbst und meldet
+            // ihn erst nach einer Tipppause hierher (SuchFeldMitPause). Alles, was unten von
+            // "search" abhängt - Filter, Gruppen, der Satz "Kein Schüler gefunden für ..." -
+            // bezieht sich damit immer auf die Liste, die gerade zu sehen ist.
+            (students.length > 3 || search || listFilter !== "alle") && React.createElement(SuchFeldMitPause, { wert: search, onWert: setSearch,
+                platzhalter: "Sch\u00FCler suchen\u2026", ariaLabel: "Sch\u00FCler suchen" }),
             // Filter-Pillen (spec 7). Die Status-Gruppen weiter unten bleiben erhalten - die Pillen
             // schr\u00E4nken nur ein, welche Sch\u00FCler \u00FCberhaupt in den Gruppen landen.
             (students.length > 3 || search || listFilter !== "alle") && React.createElement("div", { className: "stud-seg", style: { marginBottom: 12 } },
