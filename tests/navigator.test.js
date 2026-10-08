@@ -137,3 +137,68 @@ test("Texte ohne KI und Praxistipps", () => {
     assert.match(k.navigatorTippFuer("rechts vor links").tipp, /Kreuzung laut ankündigen/);
     assert.match(k.navigatorTippFuer("Einfahren in BAB").tipp, /Lückenerkennung/);
 });
+
+test("7./12. ADK von Hand geändert: Signatur ändert sich, abgehakter Punkt fällt raus", () => {
+    const stu = { lessons: [{ id: "l1", date: "2026-10-01" }] };
+    const e = { stu, adk: ADK, dauer: 90, heute: HEUTE, gesamtPct: 20, sonder: [] };
+    const p = k.navigatorPlan(e);
+    const erster = p.items.find(i => i.adkId);
+    assert.equal(k.navigatorSignatur(e, p), k.navigatorSignatur(e, k.navigatorPlan(e)), "ohne Änderung gleiche Signatur - ein angepasster Plan bleibt stehen");
+    const stu2 = { ...stu, items: { [erster.adkId]: Math.max(1, parseInt(index[erster.adkId].count, 10) || 1) } };
+    const e2 = { ...e, stu: stu2 };
+    const p2 = k.navigatorPlan(e2);
+    assert.notEqual(k.navigatorSignatur(e2, p2), k.navigatorSignatur(e, p));
+    assert.ok(!p2.items.some(i => i.adkId === erster.adkId));
+});
+
+test("13. Mehrere Stunden hintereinander: Ergebnis der ersten Stunde bestimmt die zweite", () => {
+    const stu0 = { lessons: [{ id: "l0", date: "2026-10-01" }] };
+    const p1 = plan(stu0, { gesamtPct: 30 });
+    const [a, b] = p1.items.filter(i => i.adkId);
+    const nach = k.navigatorErgebnisAnwenden(stu0, { heute: HEUTE, jetztIso: HEUTE + "T10:00:00Z", adkIndex: index, apptId: "t1", neueLessonId: "n1",
+        ergebnisse: [{ adkId: a.adkId, titel: a.titel, status: "sitzt" }, { adkId: b.adkId, titel: b.titel, status: "weiter" }], gut: "", naechstes: "", ratings: {} });
+    const p2 = plan(nach, { gesamtPct: 32 });
+    assert.ok(!p2.items.some(i => i.adkId === a.adkId), "Gesessenes kommt nicht direkt wieder");
+    assert.equal(p2.items[0].adkId, b.adkId, "„Weiter üben“ steht in der Folgestunde vorne");
+    assert.equal(p2.items[0].art, "wiederholen");
+});
+
+test("Sonderfahrten: Uhrzeit geprüft, schon eingetragene nicht als offen gemeldet", () => {
+    const stu = { lessons: [{ id: "l1", date: "2026-10-05" }] };
+    const sonder = [{ code: "AB", label: "Autobahn", ue: 1, sollUe: 4, erfuellt: false }, { code: "NF", label: "Dämmerungsfahrt", ue: 0, sollUe: 3, erfuellt: false }];
+    const zuFrueh = plan(stu, { gesamtPct: 70, sonder, terminArt: "NF", dunkel: { beginn: "16:00", dunkelAb: "19:10", startZuFrueh: true, endetImDunkeln: false } });
+    assert.ok(zuFrueh.hinweise.some(h => /beginnt um 16:00 Uhr.*19:10/.test(h)));
+    const imDunkeln = plan(stu, { gesamtPct: 70, sonder, dunkel: { beginn: "18:30", dunkelAb: "19:10", startZuFrueh: true, endetImDunkeln: true } });
+    assert.ok(imDunkeln.hinweise.some(h => /reicht in die Dunkelheit/.test(h)));
+    assert.ok(imDunkeln.hinweise.some(h => /Autobahn \(1 von 4 UE\)/.test(h)));
+    const geplant = plan(stu, { gesamtPct: 70, sonder, geplanteSonder: { AB: "14.10.", NF: "20.10." }, dunkel: { beginn: "18:30", dunkelAb: "19:10", startZuFrueh: true, endetImDunkeln: true } });
+    assert.ok(geplant.hinweise.some(h => /Bereits eingetragen: Autobahn am 14\.10\., Dämmerungsfahrt am 20\.10\./.test(h)));
+    assert.ok(!geplant.hinweise.some(h => /Noch offen/.test(h) || /reicht in die Dunkelheit/.test(h)));
+});
+
+test("Nichts behandelt: kein leerer Fahrstunden-Eintrag, aber nachholen beim nächsten Mal", () => {
+    const stu = { lessons: [{ id: "l1", date: "2026-10-01" }] };
+    const nach = k.navigatorErgebnisAnwenden(stu, { heute: HEUTE, jetztIso: HEUTE + "T10:00:00Z", adkIndex: index, apptId: "t9", neueLessonId: "n9",
+        ergebnisse: [{ adkId: "bvf_ls_engpass", titel: "Engpass", status: "nicht" }], gut: "", naechstes: "", ratings: {} });
+    assert.equal(nach.lessons.length, 1, "kein leerer Eintrag");
+    assert.equal(nach.navigator.verlauf.length, 1);
+    assert.ok(plan(nach, { gesamtPct: 30 }).items.some(i => i.adkId === "bvf_ls_engpass" && i.art === "nachholen"));
+});
+
+test("Prüfungsnähe: auch eine 45-Minuten-Stunde enthält prüfungsnahes Fahren", () => {
+    const p = plan({ lessons: [{ id: "l1", date: "2026-10-05" }] }, { dauer: 45, gesamtPct: 90 });
+    assert.equal(p.phase, "pruefung");
+    assert.ok(p.items.some(i => i.art === "anwenden"));
+    assert.equal(summe(p) + p.reserve, 45);
+    assert.match(p.warum, /prüfungsnah/);
+    assert.ok(!/^Danach/.test(p.warum), "„Warum“ beginnt nicht mit „Danach“");
+});
+
+test("Übergabe zählt auch abgehakte Punkte ohne Datum (Import, „Alles abhaken“)", () => {
+    const grund = ADK.find(s => s.id === "bvf_grund").items;
+    const items = {}; grund.forEach(it => { items[it.id] = parseInt(it.count, 10) || 1; });
+    const u = k.navigatorUebergabe({ items }, ADK);
+    assert.equal(u.sicherAnzahl, grund.length);
+    assert.equal(u.sicher.length, 0, "ohne Datum keine „zuletzt“-Liste");
+    assert.ok(u.gesamt > u.sicherAnzahl);
+});

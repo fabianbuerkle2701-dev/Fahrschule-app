@@ -269,6 +269,10 @@ Regeln, unbedingt einhalten:
         if (s.stand) teile.push(s.stand);
         if (typeof s.offenerBetrag === "number" && s.offenerBetrag > 0) teile.push("offener Betrag " + s.offenerBetrag.toFixed(2).replace(".", ",") + " €");
         if (s.notiz) teile.push("Notiz von der letzten Stunde: \"" + s.notiz + "\"");
+        if (Array.isArray(s.schwerpunkte) && s.schwerpunkte.length) {
+          const sp = s.schwerpunkte.filter((x) => typeof x === "string" && x.trim()).slice(0, 3).map((x) => x.trim().slice(0, 80));
+          if (sp.length) teile.push("vorbereitete Schwerpunkte (Ausbildungsnavigator): " + sp.join("; "));
+        }
         zeilen.push("- " + s.zeit + " " + s.name + ": " + teile.join(", "));
       });
     }
