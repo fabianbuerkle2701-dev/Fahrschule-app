@@ -3845,7 +3845,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.112.2";
+const APP_VERSION = "2.112.3";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -3999,6 +3999,10 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.112.3", date: "Oktober 2026", changes: [
+            "Fehler behoben: Auf einem anderen Gerät gelöschte Termine verschwinden jetzt sofort aus Kalender und UE-Zähler",
+            "Fehler behoben: Auch bei sehr vielen Terminen werden alle geladen – vorher hätten ab dem 1.000. Termin die neuesten gefehlt",
+        ] },
     { v: "2.112.2", date: "Oktober 2026", changes: [
             "Fehler behoben: UE-Zähler, Tagesring, Tages- und Wochenlimit und die Buchungsseite zählen jetzt überall gleich – die tatsächliche Dauer der Fahrstunden, sich überschneidende Termine nur einmal, Termine mit angefragter Absage zählen mit. Urlaub, Krank, Privates, sonstige Tätigkeiten und Theorieunterricht zählen nicht (welche Terminarten zählen, legst du unter Einstellungen › Terminarten fest)",
         ] },
@@ -8685,15 +8689,21 @@ function liveTerminMeldung(alt, neu) {
     return null;
 }
 async function fetchAppointments(uid) {
-    const { data, error } = await sb.from("appointments").select("*").eq("owner", uid).order("start_at", { ascending: true });
-    if (error) {
-        // Werfen statt [] zurückgeben: eine leere Liste sah beim Aufrufer genauso aus wie "nichts
-        // vorhanden" - bei schwachem Netz leerte ein Neuladen z.B. still den Kalender und die
-        // Doppelbuchungsprüfung lief gegen nichts (Audit A2-H1). Aufrufer behalten den alten Stand.
-        console.error(error);
-        throw new Error(error.message || "Termine konnten nicht geladen werden");
+    // 2026-10-08: seitenweise laden. PostgREST liefert je Abfrage höchstens 1000 Zeilen - aufsteigend
+    // sortiert fehlten ab dem 1001. Termin die NEUESTEN (Kalender leer, UE-Zähler zu niedrig).
+    const SEITE = 1000;
+    let alle = [];
+    for (let von = 0; ; von += SEITE) {
+        const { data, error } = await sb.from("appointments").select("*").eq("owner", uid)
+            .order("start_at", { ascending: true }).order("id", { ascending: true }).range(von, von + SEITE - 1);
+        if (error) {
+            console.error(error);
+            throw new Error(error.message || "Termine konnten nicht geladen werden");
+        }
+        alle = alle.concat(data || []);
+        if (!data || data.length < SEITE) break;
     }
-    return data || [];
+    return alle;
 }
 // Bei instabiler Verbindung (z.B. während der Fahrstunde im Auto) meldet fetch() nur ein
 // generisches "TypeError: Load failed" (Safari/WKWebView) bzw. "Failed to fetch" (Chrome)
@@ -19336,8 +19346,8 @@ function App() {
     // Live-Kalender (v2.79.0): neue Anfragen, Absage-Wünsche und übernommene freie Termine
     // erscheinen sofort, ohne dass die App erst in den Hintergrund und zurück muss. Supabase
     // Realtime liefert nur Zeilen, die dieser Fahrlehrer per RLS sehen darf (owner = uid).
-    // Gelöschte Termine kommen weiter über das Neuladen beim Zurückkehren (DELETE-Ereignisse
-    // lassen sich nicht nach owner filtern). Mehrere Ereignisse kurz hintereinander = ein Neuladen.
+    // Gelöschte Termine: eigenes DELETE-Abo ohne owner-Filter (siehe unten), nur eigene IDs zählen.
+    // Mehrere Ereignisse kurz hintereinander = ein Neuladen.
     useEffect(() => {
         if (!uid || IS_DEMO())
             return;
@@ -19374,6 +19384,15 @@ function App() {
         const ch = sb.channel("termine_" + uid)
             .on("postgres_changes", { event: "INSERT", schema: "public", table: "appointments", filter }, eingang)
             .on("postgres_changes", { event: "UPDATE", schema: "public", table: "appointments", filter }, eingang)
+            // 2026-10-08: Gelöschte Termine (anderes Gerät, Buchungsseite) blieben bis zum nächsten
+            // Fokuswechsel im Kalender und im UE-Zähler. DELETE lässt sich nicht nach owner filtern und
+            // liefert nur die ID - neu geladen wird nur, wenn es einer der eigenen Termine war.
+            .on("postgres_changes", { event: "DELETE", schema: "public", table: "appointments" }, p => {
+                const id = p && p.old && p.old.id;
+                if (!id || aus || !(apptsRef.current || []).some(a => a.id === id)) return;
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(nachladen, 700);
+            })
             .subscribe();
         return () => {
             aus = true;

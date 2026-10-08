@@ -1197,3 +1197,23 @@ test("Fahrzeit einheitlich (2026-10-08): echte Dauer, Überschneidungen einmal, 
     assert.equal(k.fahrMinutenAus([t("10:00", "09:00")]), 0, "Ende vor Beginn zählt nicht");
     assert.equal(k.fahrMinutenAus([]), 0);
 });
+
+test("Fahrzeit Grenzfälle: Zeitumstellung, Mitternacht, Berliner Kalendertag", () => {
+    const k = require("./lade-app")(["fahrMinutenAus", "ymd"]);
+    // 25.10.2026: Uhr springt 03:00 MESZ -> 02:00 MEZ. 01:30 MESZ bis 03:30 MEZ sind real 3 Stunden.
+    assert.equal(k.fahrMinutenAus([{ start_at: "2026-10-24T23:30:00Z", end_at: "2026-10-25T02:30:00Z" }]), 180, "echte Dauer über die Zeitumstellung");
+    assert.equal(k.ymd("2026-10-24T23:30:00Z"), "2026-10-25", "01:30 MESZ gehört zum 25.10.");
+    // Termin über Mitternacht zählt am Starttag ganz
+    assert.equal(k.fahrMinutenAus([{ start_at: "2026-10-12T21:30:00Z", end_at: "2026-10-12T22:30:00Z" }]), 60);
+    assert.equal(k.ymd("2026-10-12T22:30:00Z"), "2026-10-13", "00:30 MESZ ist schon der nächste Tag");
+    // Zwei Termine, die in UTC am selben Tag liegen, in Berlin aber an zwei Tagen: keine Vereinigung über Tage hinweg
+    const spaet = { start_at: "2026-10-12T21:45:00Z", end_at: "2026-10-12T22:15:00Z" };   // 23:45–00:15 Berlin, Tag 12.
+    const frueh = { start_at: "2026-10-12T22:00:00Z", end_at: "2026-10-12T22:45:00Z" };   // 00:00–00:45 Berlin, Tag 13.
+    assert.equal(k.fahrMinutenAus([spaet, frueh]), 75, "je Berliner Tag einzeln vereinigt (30 + 45)");
+    // Montag 00:15 Berlin liegt in der neuen Woche (Sonntag 22:15 UTC)
+    assert.equal(k.ymd("2026-10-11T22:15:00Z"), "2026-10-12");
+    // Drei überlappende Termine in einer Kette = durchgehende Spanne
+    const z = (a, b) => ({ start_at: "2026-10-14T" + a + ":00Z", end_at: "2026-10-14T" + b + ":00Z" });
+    assert.equal(k.fahrMinutenAus([z("08:00", "09:00"), z("08:30", "10:00"), z("09:45", "10:30")]), 150);
+    assert.equal(k.fahrMinutenAus([z("08:00", "10:00"), z("08:30", "09:00")]), 120, "eingeschlossener Termin zählt nicht extra");
+});
