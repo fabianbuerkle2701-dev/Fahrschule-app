@@ -1186,3 +1186,14 @@ test("Funktionen ein/aus: Liste eindeutig, alte Bereichs-Ids erhalten, Schüler-
     k.FUNKTIONEN.filter(f => f.gruppe === "Schüler-App").forEach(f => assert.ok(!f.persoenlich, f.id + ": Schüler-App-Funktionen nur schulweit"));
     assert.ok(k.FUNKTIONEN.find(f => f.id === "empfehlung").persoenlich, "Empfehlungsprogramm darf jeder Fahrlehrer ausblenden");
 });
+
+test("Fahrzeit einheitlich (2026-10-08): echte Dauer, Überschneidungen einmal, je Tag", () => {
+    const k = require("./lade-app")(["fahrMinutenAus"]);
+    const t = (von, bis) => ({ start_at: "2026-10-05T" + von + ":00+02:00", end_at: bis ? "2026-10-05T" + bis + ":00+02:00" : null });
+    assert.equal(k.fahrMinutenAus([t("06:45", "07:15"), t("07:15", "07:45")]), 60, "zwei 30-Min.-Stunden = 60 Min., nicht 90");
+    assert.equal(k.fahrMinutenAus([t("10:10", "11:50"), t("11:40", "12:35")]), 145, "10 Min. Überschneidung zählen einmal");
+    assert.equal(k.fahrMinutenAus([t("09:00", null)]), 45, "ohne Ende = 45 Min.");
+    assert.equal(k.fahrMinutenAus([t("09:00", "10:00"), { start_at: "2026-10-06T09:00:00+02:00", end_at: "2026-10-06T09:45:00+02:00" }]), 105, "Tage einzeln, dann summiert");
+    assert.equal(k.fahrMinutenAus([t("10:00", "09:00")]), 0, "Ende vor Beginn zählt nicht");
+    assert.equal(k.fahrMinutenAus([]), 0);
+});
