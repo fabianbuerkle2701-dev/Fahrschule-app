@@ -202,3 +202,13 @@ test("Übergabe zählt auch abgehakte Punkte ohne Datum (Import, „Alles abhake
     assert.equal(u.sicher.length, 0, "ohne Datum keine „zuletzt“-Liste");
     assert.ok(u.gesamt > u.sicherAnzahl);
 });
+
+test("Erste Stunde: mehrere kurze Einstiegspunkte statt eines langen, Zeit passt", () => {
+    const p45 = plan({}, { dauer: 45 });
+    assert.equal(p45.items.length, 3);
+    assert.ok(p45.items.every(i => i.art === "neu" && i.minuten <= 20));
+    assert.equal(summe(p45) + p45.reserve, 45);
+    const p90 = plan({}, { dauer: 90 });
+    assert.equal(p90.items.length, 4);
+    assert.equal(summe(p90) + p90.reserve, 90);
+});
