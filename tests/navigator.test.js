@@ -212,3 +212,36 @@ test("Erste Stunde: mehrere kurze Einstiegspunkte statt eines langen, Zeit passt
     assert.equal(p90.items.length, 4);
     assert.equal(summe(p90) + p90.reserve, 90);
 });
+
+test("Bestehender Schüler mit vielen Stunden, kaum ADK-Haken: beginnt nicht am Anfang", () => {
+    const p = plan({ lessons: [{ id: "l1", date: "2026-10-01" }] }, { ueGesamt: 22, ueSonder: 0, gesamtPct: 40 });
+    const grund = new Set(ADK.find(s => s.id === "bvf_grund").items.map(i => i.id));
+    const aufbau = new Set(ADK.find(s => s.id === "bvf_aufbau").items.map(i => i.id));
+    assert.ok(!p.items.some(i => grund.has(i.adkId) || aufbau.has(i.adkId)), "keine Grund-/Aufbaustufe mehr");
+    assert.equal(p.stufeLautStunden, true);
+    assert.equal(JSON.stringify(p.stufen.filter(s => s.status === "fertig").map(s => s.key)), JSON.stringify(["grund", "aufbau", "gfa", "leistung"]));
+    assert.equal(p.ersteStunde, false);
+});
+
+test("8 Stunden ohne ADK-Haken: Aufbaustufe statt Grundstufe", () => {
+    const p = plan({}, { ueGesamt: 8 });
+    const aufbau = new Set(ADK.find(s => s.id === "bvf_aufbau").items.map(i => i.id));
+    assert.equal(p.ersteStunde, false, "8 Stunden sind keine erste Stunde");
+    assert.ok(p.items.filter(i => i.art === "neu").every(i => aufbau.has(i.adkId)));
+    assert.equal(p.stufen.find(s => s.status === "jetzt").key, "aufbau");
+});
+
+test("Gepflegte ADK hat Vorrang vor der Stundenzahl (langsamer Schüler)", () => {
+    const items = {}; ADK.find(s => s.id === "bvf_grund").items.forEach(it => { items[it.id] = parseInt(it.count, 10) || 1; });
+    const ersterAufbau = ADK.find(s => s.id === "bvf_aufbau").items[0];
+    items[ersterAufbau.id] = parseInt(ersterAufbau.count, 10) || 1;
+    const p = plan({ items, lessons: [{ id: "l1", date: "2026-10-01" }] }, { ueGesamt: 12 });
+    assert.equal(p.stufen.find(s => s.status === "jetzt").key, "aufbau", "offene Aufbaustufe zuerst, obwohl 12 Stunden");
+    assert.ok(p.items.some(i => i.art === "neu" && /Aufbaustufe/.test(i.sektion)));
+    assert.equal(p.stufeLautStunden, false);
+});
+
+test("Sonderfahrten im Kalender verfälschen die Übungsstufe nicht", () => {
+    const p = plan({}, { ueGesamt: 14, ueSonder: 12 });
+    assert.equal(p.stufen.find(s => s.status === "jetzt").key, "grund", "nur 2 Übungs-UE");
+});
