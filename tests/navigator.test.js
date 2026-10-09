@@ -245,3 +245,11 @@ test("Sonderfahrten im Kalender verfälschen die Übungsstufe nicht", () => {
     const p = plan({}, { ueGesamt: 14, ueSonder: 12 });
     assert.equal(p.stufen.find(s => s.status === "jetzt").key, "grund", "nur 2 Übungs-UE");
 });
+
+test("Keine doppelten Punkte, auch bei gleichnamigen ADK-Punkten", () => {
+    const k2 = require("./lade-app")(["navigatorPlan", "DEFAULT_ADK"]);
+    const p = k2.navigatorPlan({ stu: { lessons: [{ id: "l1", date: "2026-10-01" }] }, adk: k2.DEFAULT_ADK, dauer: 90, heute: HEUTE, gesamtPct: 0, sonder: [], ueGesamt: 30 });
+    const titel = p.items.map(i => i.titel.toLowerCase());
+    assert.equal(new Set(titel).size, titel.length, "jeder Titel nur einmal: " + titel.join(", "));
+    assert.ok(p.items.length >= 2, "kurz vor der Prüfung mehr als ein Punkt");
+});
