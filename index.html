@@ -700,6 +700,12 @@
   .nav-stufe.jetzt .nav-stufe-punkt{background:var(--orange);border-color:var(--orange);box-shadow:0 0 0 4px color-mix(in srgb,var(--orange) 22%,transparent)}
   .nav-stufe-name{font-size:11px;font-weight:700;color:var(--muted);line-height:1.2;hyphens:manual;-webkit-hyphens:manual;max-width:100%}
   .nav-stufe.jetzt .nav-stufe-name{color:var(--ink);font-weight:800}
+  .nav-stufe.teil .nav-stufe-punkt{background:linear-gradient(90deg,color-mix(in srgb,var(--orange) 50%,var(--card)) 50%,var(--card) 50%);border-color:color-mix(in srgb,var(--orange) 50%,var(--line))}
+  .nav-stufe.teil::before{background:color-mix(in srgb,var(--orange) 55%,var(--line))}
+  .nav-sonder{display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 0}
+  .nav-sonder-teil{display:inline-flex;align-items:center;padding:5px 10px;border-radius:var(--r-pill);font-size:12px;font-weight:700;
+    background:var(--canvas);border:1px solid var(--line);color:var(--ink-2);font-variant-numeric:tabular-nums}
+  .nav-sonder-teil.fertig{background:color-mix(in srgb,var(--orange) 12%,var(--card));border-color:color-mix(in srgb,var(--orange) 35%,var(--line));color:var(--ink)}
   .nav-verlauf-satz{margin:12px 2px 0;font-size:14px;color:var(--ink);font-weight:800;line-height:1.4}
   .nav-verlauf-fakten{margin:4px 2px 0;font-size:12.5px;color:var(--muted);line-height:1.45}
   .nav-details-knopf{display:flex;align-items:center;width:100%;min-height:44px;padding:0 4px;border:none;background:none;font:inherit;font-size:13.5px;font-weight:700;color:var(--ink-2);cursor:pointer;text-align:left}
@@ -15113,7 +15119,8 @@ function navigatorPlan(e) {
     while (aktuelleStufe < NAV_STUFEN.length && (!stufeInfo[aktuelleStufe].n || stufeInfo[aktuelleStufe].fertig >= stufeInfo[aktuelleStufe].n)) aktuelleStufe++;
     const kernFertig = aktuelleStufe >= NAV_STUFEN.length;
     const stufeLautStunden = !adkGepflegt && idxStunden > Math.max(idxAdk, 0);
-    const sonderOffen = (e.sonder || []).filter(x => !x.erfuellt);
+    // Offen wie überall in der App: UE-Soll nicht erreicht ODER noch keine Doppelstunde (90 Min. am Stück) dabei
+    const sonderOffen = (e.sonder || []).filter(x => !x.erfuellt || x.langeFahrtDabei === false);
     const gesamtPct = e.gesamtPct || 0;
     const pruefInTagen = e.pruefDatum ? navTage(heute, e.pruefDatum) : null;
     const phase = (pruefInTagen != null && pruefInTagen >= 0 && pruefInTagen <= 21) || gesamtPct >= 85 || (kernFertig && !sonderOffen.length && ueGesamt > 0) ? "pruefung"
@@ -15213,16 +15220,16 @@ function navigatorPlan(e) {
     const geplant = e.geplanteSonder || {};
     const ueText = v => String(Math.round((Number(v) || 0) * 10) / 10).replace(".", ",");
     if (!sonderTermin && (phase === "fortgeschritten" || phase === "pruefung")) {
-        const offen = (e.sonder || []).filter(x => !x.erfuellt && !geplant[x.code]).map(x => x.label + (x.sollUe ? " (" + ueText(x.ue) + " von " + x.sollUe + " UE)" : ""));
+        const offen = sonderOffen.filter(x => !geplant[x.code]).map(x => x.label + (x.sollUe ? " (" + ueText(x.ue) + " von " + x.sollUe + " UE" + (x.erfuellt && x.langeFahrtDabei === false ? ", Doppelstunde fehlt" : "") + ")" : ""));
         if (offen.length) hinweise.push("Noch offen: " + offen.join(", ") + ". Die nächste passende längere Fahrstunde dafür nutzen.");
-        const schon = (e.sonder || []).filter(x => !x.erfuellt && geplant[x.code]).map(x => x.label + " am " + geplant[x.code]);
+        const schon = sonderOffen.filter(x => geplant[x.code]).map(x => x.label + " am " + geplant[x.code]);
         if (schon.length) hinweise.push("Bereits eingetragen: " + schon.join(", ") + ".");
     }
     // Uhrzeit: Dämmerungsfahrt zu früh bzw. normale Stunde, die ohnehin in die Dunkelheit reicht
     const dk = e.dunkel;
     if (dk && sonderTermin === "NF" && dk.startZuFrueh)
         hinweise.push("Die Dämmerungsfahrt beginnt um " + dk.beginn + " Uhr – ausreichend dunkel ist es erst ab etwa " + dk.dunkelAb + " Uhr.");
-    if (dk && !sonderTermin && dk.endetImDunkeln && (phase === "fortgeschritten" || phase === "pruefung") && !geplant.NF && (e.sonder || []).some(x => x.code === "NF" && !x.erfuellt))
+    if (dk && !sonderTermin && dk.endetImDunkeln && (phase === "fortgeschritten" || phase === "pruefung") && !geplant.NF && sonderOffen.some(x => x.code === "NF"))
         hinweise.push("Diese Stunde reicht in die Dunkelheit (ab etwa " + dk.dunkelAb + " Uhr) – passend für die noch offene Dämmerungsfahrt.");
     if (letzterPlan && !(letzterPlan.items || []).length) hinweise.push("Keine Ergebnisse aus der letzten geführten Stunde vorhanden.");
     const wieder = items.filter(i => i.art === "wiederholen" || i.art === "nachholen").length;
@@ -15239,9 +15246,13 @@ function navigatorPlan(e) {
     const warum = teile.join(" ");
     // Ausbildungsverlauf für die Anzeige: Kernstufen (nur vorhandene), Sonderfahrten, Prüfungsreife
     const stufen = stufeInfo.map((x, i) => x.n ? { key: x.key, titel: x.titel, status: i < aktuelleStufe ? "fertig" : i === aktuelleStufe ? "jetzt" : "offen" } : null).filter(Boolean);
-    if ((e.sonder || []).length) stufen.push({ key: "sonder", titel: "Sonderfahrten", status: !sonderOffen.length ? "fertig" : kernFertig ? "jetzt" : "offen" });
+    // Sonderfahrten (Klasse B: 5 Überland, 4 Autobahn, 3 Dämmerung): "läuft", sobald welche gefahren sind
+    if ((e.sonder || []).length) stufen.push({ key: "sonder", titel: "Sonderfahrten",
+        status: !sonderOffen.length ? "fertig" : kernFertig ? "jetzt" : (e.sonder || []).some(x => (Number(x.ue) || 0) > 0) ? "teil" : "offen" });
     stufen.push({ key: "reife", titel: "Prüfungsreife", status: kernFertig && !sonderOffen.length ? "jetzt" : "offen" });
-    return { dauer, reserve, items, phase, warum, hinweise, ersteStunde, pruefInTagen, pauseTage, stufen, aktuelleStufe, kernFertig, stufeLautStunden, ueGesamt };
+    const sonderStand = (e.sonder || []).map(x => ({ code: x.code, label: x.label, ue: Number(x.ue) || 0, sollUe: Number(x.sollUe) || 0,
+        fertig: !!x.erfuellt && x.langeFahrtDabei !== false, doppelstundeFehlt: !!x.erfuellt && x.langeFahrtDabei === false }));
+    return { dauer, reserve, items, phase, warum, hinweise, ersteStunde, pruefInTagen, pauseTage, stufen, aktuelleStufe, kernFertig, stufeLautStunden, ueGesamt, sonderStand };
 }
 // Kurzer Fingerabdruck der Plan-Grundlagen: ändert er sich, ist ein gespeicherter Vorschlag veraltet.
 function navigatorSignatur(e, plan) {
@@ -24203,20 +24214,26 @@ function App() {
         const jetzt = p.stufen.find(x => x.status === "jetzt");
         const sonder = stand.e.sonder || [];
         const sonderUe = sonder.reduce((x, y) => x + (Number(y.ue) || 0), 0), sonderSoll = sonder.reduce((x, y) => x + (Number(y.sollUe) || 0), 0);
+        const sonderStufe = p.stufen.find(x => x.key === "sonder");
+        const ueTxt = v => String(Math.round(v * 10) / 10).replace(".", ",");
+        const sonderEinzeln = sonderStufe && sonderStufe.status !== "offen" && sonderStufe.status !== "fertig" ? (p.sonderStand || []) : [];
         const fakten = [Math.round(p.ueGesamt || 0) + " Std. gefahren",
-            sonderSoll ? "Sonderfahrten " + String(Math.round(sonderUe * 10) / 10).replace(".", ",") + " von " + sonderSoll + " UE" : null,
+            sonderSoll ? (sonderStufe && sonderStufe.status === "fertig" ? "Sonderfahrten erledigt" : "Sonderfahrten " + ueTxt(sonderUe) + " von " + sonderSoll + " UE") : null,
             stu.theorie ? "Theorie bestanden" : "Theorie offen",
             stand.e.pruefDatum ? "Prüfung am " + fmtD(stand.e.pruefDatum) : null].filter(Boolean).join(" · ");
         return React.createElement("div", { className: "card nav-verlauf" },
             React.createElement("div", { className: "home-eyebrow" }, "Ausbildungsverlauf"),
             React.createElement("ol", { className: "nav-stufen", style: { gridTemplateColumns: "repeat(" + p.stufen.length + ", minmax(0, 1fr))" } },
                 p.stufen.map(x => React.createElement("li", { key: x.key, className: "nav-stufe " + x.status, "aria-current": x.status === "jetzt" ? "step" : undefined,
-                        "aria-label": x.titel + (x.status === "fertig" ? ": erledigt" : x.status === "jetzt" ? ": jetzt dran" : ": noch offen") },
+                        "aria-label": x.titel + (x.status === "fertig" ? ": erledigt" : x.status === "jetzt" ? ": jetzt dran" : x.status === "teil" ? ": läuft" : ": noch offen") },
                     React.createElement("span", { className: "nav-stufe-punkt", "aria-hidden": "true" }, x.status === "fertig" ? "✓" : ""),
                     React.createElement("span", { className: "nav-stufe-name", "aria-hidden": "true" }, NAV_STUFE_KURZ[x.key] || x.titel)))),
             jetzt && React.createElement("p", { className: "nav-verlauf-satz" }, "Jetzt dran: " + jetzt.titel,
                 p.stufeLautStunden && React.createElement("span", { style: { display: "block", fontWeight: 600, fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
                     "Geschätzt aus " + Math.round(p.ueGesamt) + " gefahrenen Stunden – frühere Stufen gelten als erledigt.")),
+            sonderEinzeln.length > 0 && React.createElement("div", { className: "nav-sonder" },
+                sonderEinzeln.map(x => React.createElement("span", { key: x.code, className: "nav-sonder-teil" + (x.fertig ? " fertig" : "") },
+                    (x.fertig ? "✓ " : "") + x.label + " " + ueTxt(x.ue) + "/" + x.sollUe + (x.doppelstundeFehlt ? " · Doppelstunde fehlt" : "")))),
             React.createElement("p", { className: "nav-verlauf-fakten" }, fakten));
     }
     function navPunkt(stu, i, n, edit, items, stand) {

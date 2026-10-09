@@ -253,3 +253,24 @@ test("Keine doppelten Punkte, auch bei gleichnamigen ADK-Punkten", () => {
     assert.equal(new Set(titel).size, titel.length, "jeder Titel nur einmal: " + titel.join(", "));
     assert.ok(p.items.length >= 2, "kurz vor der Prüfung mehr als ein Punkt");
 });
+
+test("Prüfungsreife erst nach den 12 Sonderfahrten - inklusive Doppelstunde", () => {
+    const sf = (ulFertig, ulDoppel) => [
+        { code: "ÜL", label: "Überland", ue: ulFertig ? 5 : 2, sollUe: 5, erfuellt: ulFertig, langeFahrtDabei: ulDoppel },
+        { code: "AB", label: "Autobahn", ue: 4, sollUe: 4, erfuellt: true, langeFahrtDabei: true },
+        { code: "NF", label: "Dämmerungsfahrt", ue: 3, sollUe: 3, erfuellt: true, langeFahrtDabei: true }];
+    const stu = { lessons: [{ id: "l1", date: "2026-10-05" }] };
+    const status = p => JSON.stringify(Object.fromEntries(p.stufen.map(x => [x.key, x.status])));
+    const ohneDoppel = plan(stu, { ueGesamt: 40, ueSonder: 12, sonder: sf(true, false) });
+    assert.match(status(ohneDoppel), /"sonder":"jetzt"/);
+    assert.match(status(ohneDoppel), /"reife":"offen"/);
+    assert.notEqual(ohneDoppel.phase, "pruefung", "ohne Doppelstunde noch nicht prüfungsnah");
+    assert.ok(ohneDoppel.hinweise.some(h => /Überland \(5 von 5 UE, Doppelstunde fehlt\)/.test(h)));
+    assert.ok(ohneDoppel.sonderStand.find(x => x.code === "ÜL").doppelstundeFehlt);
+    const fertig = plan(stu, { ueGesamt: 40, ueSonder: 12, sonder: sf(true, true) });
+    assert.match(status(fertig), /"sonder":"fertig"/);
+    assert.match(status(fertig), /"reife":"jetzt"/);
+    assert.equal(fertig.phase, "pruefung");
+    const laeuft = plan(stu, { ueGesamt: 10, ueSonder: 2, sonder: sf(false, true) });
+    assert.match(status(laeuft), /"sonder":"teil"/, "Sonderfahrten laufen schon, Kernstufen noch nicht durch");
+});
