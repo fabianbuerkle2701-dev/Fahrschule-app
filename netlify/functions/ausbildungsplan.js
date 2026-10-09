@@ -58,7 +58,7 @@ exports.handler = async function (event, context) {
     const reserve = cn(d.reserve, 0, 30) || 10;
     const verfuegbar = dauer - reserve;
     const kandidaten = (Array.isArray(d.kandidaten) ? d.kandidaten : []).slice(0, 12).map(k => ({
-      key: cs(k.key, 80), titel: cs(k.titel, 100), bereich: cs(k.sektion, 60), art: cs(k.art, 20), grund: cs(k.grund, 200), minuten: cn(k.minuten, 5, 120) }))
+      key: cs(k.key, 80), titel: cs(k.titel, 100), bereich: cs(k.sektion, 60), art: cs(k.art, 20), lernstand: cs(k.lernstand, 12), grund: cs(k.grund, 200), minuten: cn(k.minuten, 5, 120) }))
       .filter(k => k.key && k.titel);
     if (!kandidaten.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Planpunkte übergeben" }) };
     werkzeug = {
@@ -76,27 +76,27 @@ exports.handler = async function (event, context) {
     };
     prompt = "Du hilfst einem Fahrlehrer, die nächste Fahrstunde mit " + vorname + " vorzubereiten.\n"
       + "Die Kandidaten hat die App aus der ADK und den bisherigen Fahrstunden berechnet. Wähle NUR aus diesen Kandidaten (key exakt übernehmen), "
-      + "bringe sie in eine didaktisch sinnvolle Reihenfolge (Wiederholung vor Neuem, Anwendung zum Schluss), verteile die Minuten (zusammen höchstens " + verfuegbar + " Minuten) "
+      + "Das Ziel der Stunde steht fest (zielDerStunde). Bringe die Kandidaten in eine didaktisch sinnvolle Reihenfolge (Unsicheres vor Geübtem vor Neuem, prüfungsnahes Fahren zum Schluss), verteile die Minuten (zusammen höchstens " + verfuegbar + " Minuten) "
       + "und gib je Punkt einen kurzen Grund und einen konkreten, praktischen Tipp. Du darfst Punkte weglassen, aber keine neuen erfinden. "
       + "Erfinde keine Fakten, Termine, ADK-Inhalte oder rechtlichen Anforderungen; die Prüfungsreife legst du nicht fest. Kurz und ohne Floskeln.\n\n"
-      + "FAKTEN:\n" + JSON.stringify({ klasse: cs(d.klasse, 6), ausbildungsstand: cn(d.pct, 0, 100), phase: cs(d.phase, 20), dauer, reserve,
+      + "FAKTEN:\n" + JSON.stringify({ klasse: cs(d.klasse, 6), ausbildungsstand: cn(d.pct, 0, 100), phase: cs(d.phase, 20), dauer, reserve, zielDerStunde: cs(d.ziel, 160),
         pruefungInTagen: d.pruefInTagen == null ? null : cn(d.pruefInTagen, -400, 400), notizNaechsteStunde: cs(d.lastNote, 300),
         wiederkehrendeSchwaechen: schwaechen, letzteStunden: letzte, hinweise: (Array.isArray(d.hinweise) ? d.hinweise : []).slice(0, 4).map(x => cs(x, 160)), kandidaten });
     maxTokens = 1400;
     body.__kandidaten = kandidaten; body.__verfuegbar = verfuegbar;
   } else {
-    const erg = (Array.isArray(d.ergebnisse) ? d.ergebnisse : []).slice(0, 10).map(r => ({ titel: cs(r.titel, 100), status: ["sitzt", "weiter", "nicht"].indexOf(r.status) >= 0 ? r.status : "nicht" }));
+    const erg = (Array.isArray(d.ergebnisse) ? d.ergebnisse : []).slice(0, 10).map(r => ({ titel: cs(r.titel, 100), status: ["sitzt", "weiter", "unsicher", "nicht"].indexOf(r.status) >= 0 ? r.status : "nicht" }));
     if (!erg.length) return { statusCode: 400, headers, body: JSON.stringify({ error: "Keine Ergebnisse übergeben" }) };
     werkzeug = {
       name: "fahrstunden_abschluss",
       description: "Kurze Texte für das Fahrstunden-Tagebuch.",
       input_schema: { type: "object", properties: {
         gut: { type: "string", description: "Das lief gut – 1 Satz, nur aus Punkten mit Status sitzt" },
-        naechstes: { type: "string", description: "Nächstes Mal – 1 Satz aus weiter/nicht" },
+        naechstes: { type: "string", description: "Nächstes Mal – 1 Satz aus unsicher/weiter/nicht" },
       }, required: ["gut", "naechstes"] },
     };
     prompt = "Formuliere für das Fahrstunden-Tagebuch von " + vorname + " je einen kurzen Satz für „Das lief gut“ und „Nächstes Mal“. "
-      + "Nutze ausschließlich diese Ergebnisse (sitzt = gut, weiter = weiter üben, nicht = nicht behandelt) und die genannten Schwächen. Nichts erfinden, kein Lob ohne Grundlage.\n\n"
+      + "Nutze ausschließlich diese Ergebnisse (sitzt = gut, weiter = weiter üben, unsicher = noch unsicher, wiederholen, nicht = nicht behandelt) und die genannten Schwächen. Nichts erfinden, kein Lob ohne Grundlage.\n\n"
       + JSON.stringify({ ergebnisse: erg, wiederkehrendeSchwaechen: schwaechen });
     maxTokens = 400;
   }

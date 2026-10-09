@@ -73,3 +73,15 @@ test("Demo-Konto gesperrt, KI-Sperre der Fahrschule greift, KI-Ausfall wird saub
     r = await lade({}).fn.handler({ httpMethod: "POST", headers: {}, body: "{}" }, {});
     assert.equal(r.statusCode, 401, "ohne Anmeldung nichts");
 });
+
+test("v2.116: Ziel der Stunde und Lernstand gehen an die KI, „unsicher“ bleibt erhalten", async () => {
+    let { fn, protokoll } = lade({ zusammenfassung: "Kreuzungen festigen.", plan: [{ key: "bvf_ls_rvl#0", minuten: 20, grund: "zuerst" }] });
+    let r = await fn.handler(anfrage({ dauer: 90, ziel: "Kreuzungen sicher", kandidaten: [{ ...KANDIDATEN[0], lernstand: "unsicher" }] }), {});
+    assert.equal(r.statusCode, 200);
+    assert.match(protokoll.anfrage.messages[0].content, /"zielDerStunde":"Kreuzungen sicher"/);
+    assert.match(protokoll.anfrage.messages[0].content, /"lernstand":"unsicher"/);
+    ({ fn, protokoll } = lade({ gut: "", naechstes: "Engpass wiederholen." }));
+    r = await fn.handler(anfrage({ ergebnisse: [{ titel: "Engpass", status: "unsicher" }] }, "abschluss"), {});
+    assert.equal(r.statusCode, 200);
+    assert.match(protokoll.anfrage.messages[0].content, /"status":"unsicher"/);
+});
