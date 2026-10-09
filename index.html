@@ -15066,49 +15066,154 @@ function navSonderCode(secId) {
     if (/daemmerung$/.test(secId)) return "NF";
     return null;
 }
+// ── Lernstand je ADK-Punkt in vier Stufen (Fahrlehrer-Didaktik: ein Haken sagt nur "behandelt", nicht
+// "kann es"). Kommt ohne eigene Datenhaltung aus dem vorhandenen Übungs-Verlauf (adkLog) und den Haken:
+//   eingeführt = angesprochen · geübt = geübt · unsicher = geübt/gekonnt mit "schlecht" · sitzt = gekonnt bzw. voll abgehakt
+const NAV_LERNSTAND = {
+    neu: { label: "Neu", rang: 0 },
+    eingefuehrt: { label: "Eingeführt", rang: 1 },
+    unsicher: { label: "Unsicher", rang: 1 },
+    geuebt: { label: "Geübt", rang: 2 },
+    sicher: { label: "Sitzt", rang: 3 },
+};
+// So schreibt der Abschluss den Lernstand in den Übungs-Verlauf (dieselben Einträge wie im ADK-Verlauf)
+const NAV_LERNSTAND_EINTRAG = {
+    eingefuehrt: { status: "angesprochen" },
+    geuebt: { status: "geuebt", rating: "okay" },
+    unsicher: { status: "geuebt", rating: "bad" },
+    sicher: { status: "gekonnt", rating: "good" },
+};
+function navLernstandAusEintrag(e) {
+    if (!e) return null;
+    if (e.status === "gekonnt") return e.rating === "bad" ? "unsicher" : "sicher";
+    if (e.status === "geuebt") return e.rating === "bad" ? "unsicher" : "geuebt";
+    if (e.status === "angesprochen") return "eingefuehrt";
+    return null;
+}
 // Stand eines ADK-Punkts aus normaler ADK + Übungs-Verlauf.
 function navPunktStand(stu, it) {
     const soll = Math.max(1, parseInt(it.count, 10) || 1);
     const done = adkDone(stu, it);
-    const log = ((stu.adkLog || {})[it.id] || []).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-    // "Weiter üben" in Folge am Ende des Verlaufs; ein späteres "Gekonnt" beendet die Kette.
-    let weiterInFolge = 0;
-    for (let i = log.length - 1; i >= 0; i--) {
-        if (log[i].status === "gekonnt") break;
-        if (log[i].status === "geuebt") weiterInFolge++;
-    }
+    const log = ((stu.adkLog || {})[it.id] || []).filter(Boolean).slice().sort((a, b) => (a.date || "").localeCompare(b.date || ""));
     const zuletzt = log.length ? log[log.length - 1] : null;
     const dates = (stu.adkDates || {})[it.id] || [];
-    return { soll, done: Math.min(done, soll), fertig: done >= soll, begonnen: done > 0 || log.length > 0, weiterInFolge, zuletzt, letztesDatum: (zuletzt && zuletzt.date) || dates[dates.length - 1] || null };
+    const letzterHaken = dates.length ? dates[dates.length - 1] : null;
+    const ausVerlauf = navLernstandAusEintrag(zuletzt);
+    let lernstand;
+    if (done >= soll) lernstand = ausVerlauf === "unsicher" && !(letzterHaken && zuletzt && letzterHaken > (zuletzt.date || "")) ? "unsicher" : "sicher";
+    else if (ausVerlauf) lernstand = ausVerlauf;
+    else lernstand = done > 0 ? "geuebt" : "neu";
+    // Wie oft hintereinander zuletzt geübt bzw. unsicher (ein "gekonnt" beendet die Kette)
+    let weiterInFolge = 0;
+    for (let i = log.length - 1; i >= 0; i--) {
+        if (log[i].status === "gekonnt" && log[i].rating !== "bad") break;
+        if (log[i].status === "geuebt" || log[i].status === "gekonnt") weiterInFolge++;
+    }
+    return { soll, done: Math.min(done, soll), fertig: lernstand === "sicher", begonnen: lernstand !== "neu", lernstand, weiterInFolge, zuletzt,
+        letztesDatum: [(zuletzt && zuletzt.date) || null, letzterHaken].filter(Boolean).sort().pop() || null };
 }
 // Tage zwischen zwei YYYY-MM-DD
 function navTage(von, bis) {
     if (!von || !bis) return null;
     return Math.round((new Date(bis + "T12:00:00Z") - new Date(von + "T12:00:00Z")) / 86400000);
 }
+// ── Prüfungsthemen nach der praktischen Prüfung: acht Fahraufgaben, dazu Grundfahraufgaben und die
+// Sicherheitskontrolle. Gewicht nach der Prüfungsstatistik (TÜV|DEKRA arge tp 21, 1,29 Mio. Klasse-B-
+// Prüfungen 2021/22: 57,5 % der Abbruchfehler an Kreuzungen/Einmündungen, dann Geradeausfahren und
+// Fahrstreifen). Eigene Worte - der Wortlaut des amtlichen Fahraufgabenkatalogs ist lizenzpflichtig.
+const NAV_AUFGABEN = {
+    kreuzung: { titel: "Kreuzungen und Einmündungen", kurz: "Kreuzungen", gewicht: 10, pruefung: true, fehlerquelle: "Kreuzungen und Einmündungen sind in der Prüfung die häufigste Fehlerquelle.",
+        ziel: "Kreuzungen und Einmündungen sicher: früh beobachten, Vorfahrt klar erkennen, sauber abbiegen",
+        situation: "Wohngebiet mit Rechts-vor-links-Kreuzungen, Einmündungen und mindestens einer Ampelkreuzung" },
+    gerade: { titel: "Tempo, Abstand und Verkehrszeichen", kurz: "Tempo & Abstand", gewicht: 7, pruefung: true, fehlerquelle: "Tempo, Abstand und Schilder sind in der Prüfung die zweithäufigste Fehlerquelle.",
+        ziel: "Tempo und Abstand jederzeit passend – auch bei wechselnden Schildern",
+        situation: "Strecke mit wechselnden Tempolimits: Ortsdurchfahrt, Landstraße, viele Verkehrszeichen" },
+    fahrstreifen: { titel: "Fahrstreifenwechsel und Einfädeln", kurz: "Fahrstreifen", gewicht: 5, pruefung: true, fehlerquelle: "Fahrstreifenwechsel sind in der Prüfung die dritthäufigste Fehlerquelle.",
+        ziel: "Fahrstreifen sicher wechseln und einfädeln: Spiegel, Schulterblick, Lücke",
+        situation: "Mehrspurige Straße oder Schnellstraße mit Auf- und Abfahrt" },
+    gfa: { titel: "Grundfahraufgaben", kurz: "Grundfahraufgaben", gewicht: 5, pruefung: true,
+        ziel: "Grundfahraufgaben fehlerfrei – so wie in der Prüfung",
+        situation: "Ruhige Wohnstraße oder Parkplatz für die Grundfahraufgaben" },
+    kreisverkehr: { titel: "Kreisverkehr", kurz: "Kreisverkehr", gewicht: 4, pruefung: true,
+        ziel: "Kreisverkehr sicher: einordnen, Vorfahrt beachten, beim Ausfahren blinken",
+        situation: "Mehrere Kreisverkehre, wenn möglich einer mit zwei Fahrstreifen" },
+    schutz: { titel: "Fußgänger, Radfahrer und Haltestellen", kurz: "Fußgänger & Rad", gewicht: 4, pruefung: true,
+        ziel: "Fußgänger, Radfahrer und Haltestellen früh erkennen und Vorrang beachten",
+        situation: "Innenstadt mit Haltestellen, Zebrastreifen und Radverkehr" },
+    vorbeifahren: { titel: "Vorbeifahren und Überholen", kurz: "Überholen", gewicht: 3, pruefung: true,
+        ziel: "Vorbeifahren und Überholen mit genug Abstand und klarer Entscheidung",
+        situation: "Straßen mit parkenden Autos, Engstellen und einer Gelegenheit zum Überholen" },
+    kurven: { titel: "Kurven", kurz: "Kurven", gewicht: 3, pruefung: true,
+        ziel: "Kurven mit passendem Tempo und sauberer Linie",
+        situation: "Kurvige Landstraße mit unterschiedlichen Kurven" },
+    schiene: { titel: "Bahnübergänge und Straßenbahn", kurz: "Bahnübergang", gewicht: 2, pruefung: true,
+        ziel: "Bahnübergänge und Straßenbahnen sicher passieren",
+        situation: "Strecke mit Bahnübergang oder Straßenbahn" },
+    vorbereitung: { titel: "Sicherheitskontrolle", kurz: "Sicherheitskontrolle", gewicht: 2, pruefung: true,
+        ziel: "Sicherheitskontrolle am Fahrzeug selbstständig erklären und zeigen",
+        situation: "Vor der Fahrt am stehenden Auto" },
+    bedienung: { titel: "Fahrzeug bedienen", kurz: "Bedienung", gewicht: 1, pruefung: false,
+        ziel: "Fahrzeug sicher bedienen",
+        situation: "Verkehrsarme Straße, Übungsplatz oder ruhiges Gewerbegebiet" },
+    pruefung: { titel: "Prüfungsnah fahren", kurz: "Prüfungsnah", gewicht: 6, pruefung: false,
+        ziel: "Selbstständig und prüfungsnah fahren",
+        situation: "Typische Prüfungsstrecke: Stadt, Landstraße und – wenn möglich – Autobahn" },
+};
+// Die fünf Kompetenzbereiche der Prüfung (= Bewertungen je Fahrstunde) und die Prüfungsthemen, in denen sie am meisten zählen
+const NAV_KOMPETENZ_AUFGABEN = { verkehr: ["kreuzung", "fahrstreifen", "schutz", "kreisverkehr"], position: ["fahrstreifen", "kurven", "kreuzung", "vorbeifahren"],
+    tempo: ["gerade", "kurven", "kreuzung"], komm: ["fahrstreifen", "kreisverkehr", "schutz"], bedien: ["bedienung", "gfa"] };
+const NAV_SONDER_ZIEL = {
+    "ÜL": { ziel: "Überlandfahrt: Tempo, Kurven und Überholen außerorts sicher", situation: "Landstraße mit Kurven, Steigungen und Ortsdurchfahrten" },
+    "AB": { ziel: "Autobahnfahrt: Einfahren, Fahrstreifen und Tempo sicher", situation: "Autobahn – wenn möglich 45 Minuten ohne Tempolimit oder mit mindestens 120 km/h" },
+    "NF": { ziel: "Dämmerungsfahrt: Licht, Sicht und Blendung sicher", situation: "Bei Dämmerung oder Dunkelheit, mindestens zur Hälfte auf Autobahn, Bundes- oder Landstraße" },
+};
+// Fahrzeugbedienung in der Aufbaustufe bzw. eigenen Abschnitten ("Gefälle/Steigung", "Bremsübungen") -
+// erst nach den Verkehrs-Mustern geprüft, damit "Überholen (Spiegel/Schulterblick)" ein Überholpunkt bleibt
+const NAV_BEDIENUNG_MUSTER = /sitz|spiegel|lenkrad|kopfstütze|pedal|gurt|schalt|wählhebel|zündschloss|motor|anfahr|anhalt|lenkübung|rollen|bremsübung|abbremsen|zielbrems|degressiv|gefahrsit|gefälle|steigung|tastgeschwind|schritt|rückwärts|sichern|bedien|kontrolleinricht|einsteig|einstellen|blickschulung|örtliche/i;
+const NAV_AUFGABE_MUSTER = [
+    ["schiene", /bahnübergang|straßenbahn|schiene/i],
+    ["kreisverkehr", /kreisverkehr|kreisel/i],
+    ["fahrstreifen", /fahrstreifen|einfahren in bab|ausfahren aus bab|verlassen der bab|einfädel|ausfädel|benutzung bab|anschlussstelle/i],
+    ["vorbeifahren", /überhol|vorbeifahr|engpass|engstelle|hindernis/i],
+    ["kurven", /kurve/i],
+    ["schutz", /fußgänger|überweg|kinder|ältere|behindert|radfahr|radweg|mofa|motorrad|schulbus|öffentl|haltestelle|verkehrsmittel|verkehrsberuhig|unbeleuchtete verkehrsteilnehmer/i],
+    ["kreuzung", /kreuzung|einmündung|vorfahrt|rechts vor links|abbieg|grünpfeil|ampel|lichtzeichen|polizeibeamte|einordnen|abknickend/i],
+];
+function navAufgabeVon(it, sek) {
+    const art = navStufeVon(sek || {});
+    if (art === "gfa") return "gfa";
+    if (art === "situativ") return "vorbereitung";
+    if (art === "reife") return "pruefung";
+    const t = String((it && it.label) || "");
+    if (art === "grund") return "bedienung";
+    const hit = NAV_AUFGABE_MUSTER.find(x => x[1].test(t));
+    if (hit) return hit[0];
+    return (art === "aufbau" || art === "sonst") && NAV_BEDIENUNG_MUSTER.test(t) ? "bedienung" : "gerade";
+}
+function navTagText(d) { return d ? d.split("-").reverse().slice(0, 2).join(".") + "." : ""; }
 
-// Grundplan ohne KI. e = { stu, adk, dauer, dauerQuelle, terminArt, pruefDatum, heute, gesamtPct, sonder, lessons }
-// Liefert { dauer, reserve, items:[{key, adkId, titel, sektion, art, grund, minuten}], phase, warum, hinweise, ersteStunde }
+// Plan für die nächste Fahrstunde ohne KI, nach der Fahrlehrer-Didaktik: EIN Ziel, 2–4 ADK-Punkte, ein Satz
+// für den Einstieg (Anknüpfen an die letzte Stunde) und die Situation, die die Strecke bieten sollte - die
+// Strecke selbst wählt der Fahrlehrer. Reihenfolge: Unsicheres vor Geübtem vor Neuem, gewichtet nach
+// Prüfungsrelevanz und wiederkehrenden Schwächen aus den Bewertungen.
+// e = { stu, adk, dauer, terminArt, pruefDatum, heute, gesamtPct, sonder, ueGesamt, ueSonder, letzteFahrt, dunkel, geplanteSonder, lessons? }
 function navigatorPlan(e) {
     const stu = e.stu || {};
     const heute = e.heute;
     const dauer = Math.max(30, Math.min(240, Math.round(e.dauer || 90)));
     const reserve = dauer >= 60 ? 10 : 5;
-    const verfuegbar = dauer - reserve;
-    const maxItems = dauer <= 45 ? 3 : dauer <= 60 ? 4 : 5;
     const lessons = (e.lessons || stu.lessons || []).slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
     const verlauf = ((stu.navigator && stu.navigator.verlauf) || []).slice().sort((a, b) => (b.datum || "").localeCompare(a.datum || ""));
     const sektionen = (e.adk || []).filter(s => s && s.id !== "fahrzeugkunde" && Array.isArray(s.items));
     const alle = [];
-    sektionen.forEach(s => s.items.forEach(it => alle.push({ it, sek: s, st: navPunktStand(stu, it) })));
-    const nachId = {}; alle.forEach(x => { nachId[x.it.id] = x; });
-    // ── Ausbildungsstufe aus allen Daten: ADK-Haken UND Stundenzahl (Termine, Abrechnung, Übernahme).
-    // Wer schon viele Stunden hat, fängt nicht wieder bei der Grundstufe an, auch wenn die ADK kaum
-    // abgehakt ist. Ist die ADK gepflegt (Haken etwa auf Höhe der Stunden), gilt die ADK.
+    sektionen.forEach(s => s.items.forEach(it => alle.push({ it, sek: s, st: navPunktStand(stu, it), stufe: navStufeVon(s), aufgabe: navAufgabeVon(it, s), pos: alle.length })));
+    // ── Ausbildungsstufe aus allen Daten: Lernstand UND Stundenzahl (Termine, Abrechnung, Übernahme).
+    // Ist die ADK gepflegt (Lernstand etwa auf Höhe der Stunden), gilt sie; sonst ist die Stundenzahl ein
+    // Richtwert, damit Schüler mit vielen Stunden nicht wieder bei der Grundstufe anfangen.
     const ueGesamt = Math.max(0, Number(e.ueGesamt) || 0);
     const ueNormal = Math.max(0, ueGesamt - Math.max(0, Number(e.ueSonder) || 0));
     const stufeInfo = NAV_STUFEN.map(st => {
-        const punkte = alle.filter(x => navStufeVon(x.sek) === st.key);
+        const punkte = alle.filter(x => x.stufe === st.key);
         return { key: st.key, titel: st.titel, n: punkte.length, fertig: punkte.filter(x => x.st.fertig).length, begonnen: punkte.some(x => x.st.begonnen) };
     });
     const idxStunden = NAV_STUFEN.filter(st => ueNormal >= st.bisUe).length;
@@ -15119,7 +15224,7 @@ function navigatorPlan(e) {
     while (aktuelleStufe < NAV_STUFEN.length && (!stufeInfo[aktuelleStufe].n || stufeInfo[aktuelleStufe].fertig >= stufeInfo[aktuelleStufe].n)) aktuelleStufe++;
     const kernFertig = aktuelleStufe >= NAV_STUFEN.length;
     const stufeLautStunden = !adkGepflegt && idxStunden > Math.max(idxAdk, 0);
-    // Offen wie überall in der App: UE-Soll nicht erreicht ODER noch keine Doppelstunde (90 Min. am Stück) dabei
+    // Sonderfahrten offen wie überall in der App: UE-Soll nicht erreicht ODER noch keine Doppelstunde (90 Min. am Stück)
     const sonderOffen = (e.sonder || []).filter(x => !x.erfuellt || x.langeFahrtDabei === false);
     const gesamtPct = e.gesamtPct || 0;
     const pruefInTagen = e.pruefDatum ? navTage(heute, e.pruefDatum) : null;
@@ -15128,30 +15233,10 @@ function navigatorPlan(e) {
     const letzteStunde = [lessons[0] ? lessons[0].date : null, e.letzteFahrt || null].filter(Boolean).sort().pop() || null;
     const pauseTage = letzteStunde ? navTage(letzteStunde, heute) : null;
     const ersteStunde = !lessons.length && !alle.some(x => x.st.begonnen) && ueGesamt < 0.5;
-    const kandidaten = [];
-    const genommen = new Set();
-    // Jeder Punkt nur einmal - auch gleichnamige Punkte aus verschiedenen Abschnitten (z. B. zweimal „Selbstständiges Fahren“)
-    const gleicherTitel = t => kandidaten.some(x => x.titel.toLowerCase() === String(t || "").toLowerCase());
-    const add = (k) => { if ((k.adkId && genommen.has(k.adkId)) || gleicherTitel(k.titel)) return; if (k.adkId) genommen.add(k.adkId); kandidaten.push(k); };
     const sonderTermin = e.terminArt && ["ÜL", "AB", "NF"].indexOf(e.terminArt) >= 0 ? e.terminArt : null;
-    // 1) Sonderfahrt-Termin: offene Punkte genau dieser Sonderfahrt zuerst
-    if (sonderTermin) {
-        sektionen.filter(s => navSonderCode(s.id) === sonderTermin).forEach(s => s.items.forEach(it => {
-            const x = nachId[it.id];
-            if (x && !x.st.fertig) add({ adkId: it.id, titel: it.label, sektion: s.title, art: "sonderfahrt", grund: "Der Termin ist eine " + (sonderTermin === "AB" ? "Autobahnfahrt" : sonderTermin === "ÜL" ? "Überlandfahrt" : "Dämmerungs-/Nachtfahrt") + " – dieser Punkt der Sonderfahrt ist noch offen." });
-        }));
-    }
-    // 2) "Weiter üben" (Übungs-Verlauf), älteste Kette zuerst
-    alle.filter(x => !x.st.fertig && x.st.weiterInFolge > 0)
-        .sort((a, b) => b.st.weiterInFolge - a.st.weiterInFolge || (a.st.letztesDatum || "").localeCompare(b.st.letztesDatum || ""))
-        .forEach(x => add({ adkId: x.it.id, titel: x.it.label, sektion: x.sek.title, art: "wiederholen",
-            grund: x.st.weiterInFolge >= 2 ? "In den letzten " + x.st.weiterInFolge + " Fahrstunden als „weiter üben“ markiert – kurz wiederholen und festigen."
-                : "Zuletzt als „weiter üben“ markiert" + (x.st.letztesDatum ? " (" + x.st.letztesDatum.split("-").reverse().join(".") + ")" : "") + "." }));
-    // 3) Zuletzt geplant, aber nicht geschafft
-    const letzterPlan = verlauf[0];
-    if (letzterPlan) (letzterPlan.items || []).filter(i => i.status === "nicht" && i.adkId && nachId[i.adkId] && !nachId[i.adkId].st.fertig)
-        .forEach(i => { const x = nachId[i.adkId]; add({ adkId: i.adkId, titel: x.it.label, sektion: x.sek.title, art: "nachholen", grund: "War für die letzte Stunde geplant, wurde aber nicht mehr geschafft." }); });
-    // 4) Wiederkehrende Schwäche aus den Bewertungen - verliert Gewicht, wenn die letzten zwei Bewertungen gut waren
+    // Wiederkehrende Schwächen aus den Bewertungen (die fünf Kompetenzbereiche) - verlieren Gewicht,
+    // sobald die letzten zwei Bewertungen gut waren (nicht ewig wiederholen)
+    const schwach = [];
     const bew = lessons.slice(0, 8);
     LESSON_FIELDS.forEach(f => {
         const vals = bew.map(l => l.ratings && l.ratings[f.id]).filter(v => v);
@@ -15159,147 +15244,210 @@ function navigatorPlan(e) {
         const schlecht = vals.filter(v => v === 1).length;
         const schnitt = vals.reduce((a, v) => a + v, 0) / vals.length;
         if (schlecht < 2 && schnitt > 1.6) return;
-        if (vals[0] === 3 && vals[1] === 3) return; // inzwischen zweimal gut: nicht ewig wiederholen
-        const fk = NAVIGATOR_FOKUS[f.id];
-        add({ adkId: null, fokus: f.id, titel: "Fokus: " + (fk ? fk.titel : f.label), sektion: "Wiederkehrende Auffälligkeit", art: "fokus",
-            grund: "In " + schlecht + " der letzten " + vals.length + " bewerteten Fahrstunden als schwach bewertet." });
+        if (vals[0] === 3 && vals[1] === 3) return;
+        schwach.push(f.id);
     });
-    // 5) Nächster sinnvoller offener ADK-Bereich (Reihenfolge der Vorlage, ohne Sonderfahrten)
-    // Erste Stunde: mehrere kurze Einstiegspunkte (Einsteigen, Sitz/Spiegel, Anfahren) statt einem langen
-    const neuZahl = ersteStunde ? (dauer <= 45 ? 3 : 4) : phase === "pruefung" ? (dauer >= 60 ? 2 : 1) : dauer <= 45 ? 1 : 2;
-    let neu = 0;
-    for (const s of sektionen) {
-        // Neu nur ab der aktuellen Stufe; Prüfungsreife und Situatives erst nach den Kernstufen
-        const art = navStufeVon(s);
-        if (art === "sonder") continue;
-        if ((art === "reife" || art === "situativ") && !kernFertig) continue;
-        if (NAV_STUFEN.some(x => x.key === art) && NAV_STUFEN.findIndex(x => x.key === art) < aktuelleStufe) continue;
-        if (neu >= neuZahl) break;
-        for (const it of s.items) {
-            if (neu >= neuZahl) break;
-            const x = nachId[it.id];
-            if (!x || x.st.fertig || genommen.has(it.id)) continue;
-            add({ adkId: it.id, titel: it.label, sektion: s.title, art: "neu",
-                grund: ersteStunde ? "Erste Fahrstunde: Einstieg laut ADK (" + s.title + ")." : x.st.begonnen ? "Begonnen, aber laut ADK noch nicht abgeschlossen." : "Nächster offener Punkt im Bereich „" + s.title + "“." });
-            neu++;
+    const boost = {};
+    schwach.forEach(f => (NAV_KOMPETENZ_AUFGABEN[f] || []).forEach(a => { boost[a] = (boost[a] || 0) + 25; }));
+    // Zuletzt geplant, aber nicht dran gewesen (auch Einträge aus v2.113: status "nicht")
+    const letzterPlan = verlauf[0];
+    const zuletztNicht = new Set();
+    if (letzterPlan) (letzterPlan.items || []).forEach(i => { if (i && i.adkId && (i.lernstand === null || i.status === "nicht")) zuletztNicht.add(i.adkId); });
+    // ── Kandidaten mit Punktwert
+    const ersterOffen = (alle.find(x => !x.st.begonnen && (x.stufe === (NAV_STUFEN[aktuelleStufe] || {}).key)) || {}).pos || 0;
+    const kandidaten = [];
+    alle.forEach(x => {
+        if (x.st.lernstand === "sicher" || /bestanden/i.test(x.it.label || "")) return;
+        if (sonderTermin) { if (x.stufe !== "sonder" || navSonderCode(x.sek.id) !== sonderTermin) return; }
+        else if (x.stufe === "sonder") return; // Sonderfahrt-Inhalte nur zu Sonderfahrten
+        const imGang = x.st.lernstand !== "neu" || zuletztNicht.has(x.it.id);
+        let punkte = ({ unsicher: 100, geuebt: 70, eingefuehrt: 60, neu: 40 })[x.st.lernstand] || 40;
+        if (!imGang && !sonderTermin) {
+            // Neues erst ab der aktuellen Stufe (höchstens eine weiter); Prüfungsreife/Situatives erst nach den Kernstufen
+            if ((x.stufe === "reife" || x.stufe === "situativ") && !kernFertig) return;
+            const si = NAV_STUFEN.findIndex(s => s.key === x.stufe);
+            if (si >= 0 && si < aktuelleStufe && x.stufe !== "gfa") return;
+            if (si > aktuelleStufe + 1) return;
+            if (si === aktuelleStufe + 1) punkte -= 15;
+            punkte += Math.max(0, 20 - Math.max(0, x.pos - ersterOffen)); // Reihenfolge der ADK
         }
+        punkte += ((NAV_AUFGABEN[x.aufgabe] || NAV_AUFGABEN.gerade).gewicht) * 2 + (boost[x.aufgabe] || 0) + (zuletztNicht.has(x.it.id) ? 30 : 0);
+        if (x.st.lernstand !== "neu" && x.st.letztesDatum) punkte += Math.min(20, Math.floor((navTage(x.st.letztesDatum, heute) || 0) / 7) * 4);
+        kandidaten.push({ ...x, punkte });
+    });
+    kandidaten.sort((a, b) => b.punkte - a.punkte || a.pos - b.pos);
+    // ── Ein Ziel: das Prüfungsthema des wichtigsten Kandidaten; dazu die besten Punkte (zuerst aus diesem Thema)
+    const n = ersteStunde ? (dauer <= 45 ? 3 : 4) : dauer <= 45 ? 2 : dauer <= 60 ? 3 : 4;
+    let zielAufgabe = sonderTermin ? null : kandidaten.length ? kandidaten[0].aufgabe : (kernFertig ? "pruefung" : null);
+    if (ersteStunde) zielAufgabe = "bedienung";
+    const gewaehlt = [];
+    const titelSchon = new Set();
+    const nimm = (x, bis) => { const t = x.it.label.toLowerCase(); if (gewaehlt.length >= (bis || n) || titelSchon.has(t) || gewaehlt.indexOf(x) >= 0) return; titelSchon.add(t); gewaehlt.push(x); };
+    // Selbstständig und prüfungsnah fahren: ADK-Punkt der Prüfungsreife, sonst allgemein (ohne ADK-Haken)
+    const selbstAdk = alle.find(x => x.stufe === "reife" && /selbstständig/i.test(x.it.label) && x.st.lernstand !== "sicher");
+    const selbstVorlage = () => ({ ...(selbstAdk || { it: { id: null, label: "Selbstständig fahren wie in der Prüfung" }, sek: { title: "Prüfungsreife" }, st: { lernstand: null }, aufgabe: "pruefung", stufe: "reife", pos: 9999 }), selbst: true });
+    // Prüfungsphase: zum Schluss immer ein Stück prüfungsnah fahren
+    const selbstPunkt = phase === "pruefung" && !sonderTermin && !ersteStunde ? selbstVorlage() : null;
+    const platz = n - (selbstPunkt ? 1 : 0);
+    if (ersteStunde) kandidaten.slice().sort((a, b) => a.pos - b.pos).forEach(x => nimm(x));
+    else {
+        // Festigen (unsicher, geübt, eingeführt, nachholen) und - ab drei Punkten - ein Platz für Neues,
+        // damit die Ausbildung weiterkommt. Zuerst immer aus dem Prüfungsthema des Ziels.
+        const imGang = x => x.st.lernstand !== "neu" || zuletztNicht.has(x.it.id);
+        const amZiel = x => sonderTermin || x.aufgabe === zielAufgabe;
+        const neuDa = kandidaten.some(x => !imGang(x));
+        const festBis = neuDa && platz >= 3 ? platz - 1 : platz;
+        kandidaten.filter(x => imGang(x) && amZiel(x)).forEach(x => nimm(x, festBis));
+        kandidaten.filter(x => imGang(x)).forEach(x => nimm(x, festBis));
+        kandidaten.filter(x => !imGang(x) && amZiel(x)).forEach(x => nimm(x, platz));
+        kandidaten.forEach(x => nimm(x, platz));
     }
-    // 6) Anwendung / Prüfungsnähe
-    if (!ersteStunde && (dauer >= 60 || phase === "pruefung" || phase === "fortgeschritten")) {
-        const selbst = alle.find(x => /selbstständig/i.test(x.it.label) && !genommen.has(x.it.id) && !gleicherTitel(x.it.label));
-        if (phase === "pruefung" || phase === "fortgeschritten")
-            add({ adkId: selbst ? selbst.it.id : null, titel: selbst ? selbst.it.label : "Selbstständiges Fahren", sektion: selbst ? selbst.sek.title : "Anwendung", art: "anwenden",
-                grund: phase === "pruefung" ? (pruefInTagen != null && pruefInTagen >= 0 ? "Prüfung in " + pruefInTagen + " Tagen – prüfungsnah und selbstständig fahren." : "Ausbildung weit fortgeschritten – prüfungsnah und selbstständig fahren.") : "Gelerntes im Zusammenhang anwenden." });
-        else
-            add({ adkId: null, titel: "Anwendung: Gelerntes im Verkehr", sektion: "Anwendung", art: "anwenden", grund: "Neues in einer längeren Fahrt verknüpfen, wenn Zeit bleibt." });
-    }
-    // Zeit verteilen
-    const basis = { sonderfahrt: 25, wiederholen: dauer <= 45 ? 10 : 15, nachholen: 15, fokus: 10, neu: ersteStunde ? (dauer <= 45 ? 12 : 18) : dauer <= 45 ? 20 : 25, anwenden: 20 };
-    const items = [];
-    let summe = 0;
-    for (const k of kandidaten) {
-        if (items.length >= maxItems) break;
-        const m = basis[k.art] || 15;
-        if (summe + m > verfuegbar) {
-            const rest = verfuegbar - summe;
-            if (rest >= 10 && k.art !== "anwenden") { items.push({ ...k, minuten: rest }); summe += rest; }
-            continue;
+    if (selbstPunkt && !titelSchon.has(selbstPunkt.it.label.toLowerCase())) gewaehlt.push(selbstPunkt);
+    // Kernstufen durch und nichts mehr offen: selbstständig fahren
+    if (!gewaehlt.length && kernFertig && !sonderTermin) { gewaehlt.push(selbstVorlage()); zielAufgabe = "pruefung"; }
+    const stufeTitel = x => (NAV_STUFEN.find(s => s.key === x.stufe) || {}).titel || x.sek.title;
+    const grundVon = x => {
+        if (x.selbst) return "Nur das Ziel ansagen und schweigen, wie in der Prüfung" + (pruefInTagen != null && pruefInTagen >= 0 ? " – Prüfung in " + pruefInTagen + " Tagen." : ".");
+        const teile = [];
+        if (sonderTermin) teile.push("Teil der " + (sonderTermin === "AB" ? "Autobahnfahrt" : sonderTermin === "ÜL" ? "Überlandfahrt" : "Dämmerungsfahrt") + ".");
+        if (zuletztNicht.has(x.it.id)) teile.push("War für die letzte Stunde geplant, kam aber nicht mehr dran.");
+        if (x.st.lernstand === "unsicher") teile.push("Zuletzt unsicher" + (x.st.letztesDatum ? " (" + navTagText(x.st.letztesDatum) + ")" : "") + " – wiederholen, bis es sitzt.");
+        else if (x.st.lernstand === "geuebt") teile.push(x.st.weiterInFolge >= 2 ? x.st.weiterInFolge + "-mal geübt, sitzt aber noch nicht." : "Schon geübt, sitzt noch nicht.");
+        else if (x.st.lernstand === "eingefuehrt") teile.push("Eingeführt – jetzt üben.");
+        else if (!sonderTermin && !zuletztNicht.has(x.it.id)) teile.push(ersteStunde ? "Einstieg laut ADK." : "Nächster Punkt der " + stufeTitel(x) + ".");
+        const bereich = schwach.find(f => (NAV_KOMPETENZ_AUFGABEN[f] || []).indexOf(x.aufgabe) >= 0);
+        if (bereich) { const lf = LESSON_FIELDS.find(f => f.id === bereich); teile.push("Passt zur wiederkehrenden Schwäche „" + (lf ? lf.label : bereich) + "“."); }
+        return teile.join(" ");
+    };
+    const minuten = gewaehlt.length ? Math.max(5, Math.floor((dauer - reserve) / gewaehlt.length / 5) * 5) : 0; // nur grob, für die KI
+    const items = gewaehlt.map((x, i) => ({ key: (x.it.id || "eigen") + "#" + i, adkId: x.it.id || null, titel: x.it.label, sektion: x.sek.title, aufgabe: x.aufgabe,
+        lernstand: x.it.id ? x.st.lernstand : null, art: x.selbst ? "anwenden" : sonderTermin ? "sonderfahrt" : zuletztNicht.has(x.it.id) ? "nachholen" : x.st.lernstand === "neu" ? "neu" : "festigen", grund: grundVon(x), minuten }));
+    // ── Ziel, Situation (für die Streckenwahl), Einstieg
+    let ziel, situation;
+    if (sonderTermin) { ziel = NAV_SONDER_ZIEL[sonderTermin].ziel; situation = NAV_SONDER_ZIEL[sonderTermin].situation; }
+    else if (ersteStunde) { ziel = "Erste Fahrstunde: Auto kennenlernen, sicher anfahren und anhalten"; situation = NAV_AUFGABEN.bedienung.situation; }
+    else if (zielAufgabe === "bedienung") { ziel = "Fahrzeug sicher bedienen: " + items.filter(i => i.aufgabe === "bedienung").slice(0, 3).map(i => i.titel).join(", "); situation = NAV_AUFGABEN.bedienung.situation; }
+    else if (zielAufgabe && NAV_AUFGABEN[zielAufgabe]) { ziel = NAV_AUFGABEN[zielAufgabe].ziel; situation = NAV_AUFGABEN[zielAufgabe].situation; }
+    else { ziel = items.length ? items[0].titel : "Gelerntes festigen"; situation = NAV_AUFGABEN.gerade.situation; }
+    // Kurzform für Karten und Startseite
+    const sonderName = { "ÜL": "Überlandfahrt", "AB": "Autobahnfahrt", "NF": "Dämmerungsfahrt" };
+    const zielAuf = zielAufgabe && NAV_AUFGABEN[zielAufgabe];
+    const zielTitel = sonderTermin ? sonderName[sonderTermin] : ersteStunde ? "Erste Fahrstunde" : zielAuf ? zielAuf.titel : (items[0] ? items[0].titel : "Gelerntes festigen");
+    const zielKurz = sonderTermin ? sonderName[sonderTermin] : ersteStunde ? "Erste Fahrstunde" : zielAuf ? zielAuf.kurz : zielTitel;
+    const einstieg = (() => {
+        if (ersteStunde) return "Kurz kennenlernen und den Ablauf erklären, dann Sitz, Spiegel und Lenkrad einstellen.";
+        const teile = [];
+        if (pauseTage != null && pauseTage >= 21) teile.push("Nach " + pauseTage + " Tagen Pause erst ein paar Minuten auffrischen.");
+        const lz = verlauf[0];
+        const lsVon = i => i.lernstand !== undefined ? i.lernstand : i.status === "sitzt" ? "sicher" : i.status === "weiter" ? "geuebt" : null;
+        if (lz && (lz.items || []).length) {
+            const sitzt = lz.items.filter(i => lsVon(i) === "sicher").map(i => i.titel);
+            const unsicher = lz.items.filter(i => lsVon(i) === "unsicher").map(i => i.titel);
+            const geuebt = lz.items.filter(i => lsVon(i) === "geuebt" || lsVon(i) === "eingefuehrt").map(i => i.titel);
+            const s = [sitzt.length ? sitzt.slice(0, 2).join(" und ") + " sitzt" : "", unsicher.length ? unsicher.slice(0, 2).join(" und ") + " noch unsicher" : "",
+                !unsicher.length && geuebt.length ? geuebt.slice(0, 2).join(" und ") + " geübt" : ""].filter(Boolean).join(", ");
+            if (s) teile.push("Letzte Stunde (" + navTagText(lz.datum) + "): " + s + ".");
         }
-        items.push({ ...k, minuten: m });
-        summe += m;
-    }
-    // Restzeit: auf "Anwendung" bzw. letzten Punkt, damit die Stunde gefüllt ist
-    if (items.length && summe < verfuegbar) {
-        const ziel = items.find(i => i.art === "anwenden") || items[items.length - 1];
-        ziel.minuten += verfuegbar - summe;
-    }
-    items.forEach((i, n) => { i.key = (i.adkId || ("f-" + (i.fokus || i.titel))) + "#" + n; });
-    // Hinweise (keine Planpunkte): fehlende Sonderfahrten, Pause
+        else if (lessons[0] && (lessons[0].thema || lessons[0].schlecht)) {
+            teile.push("Letzte Stunde (" + navTagText(lessons[0].date) + "): " + (lessons[0].thema || "") + (lessons[0].schlecht ? (lessons[0].thema ? " – " : "") + "offen: " + lessons[0].schlecht : "") + ".");
+        }
+        const notiz = String(stu.lastNote || "").trim();
+        if (notiz && !teile.some(t => t.indexOf(notiz) >= 0)) teile.push("Notiz: " + notiz);
+        return teile.join(" ") || "Kurz nachfragen, wie es seit der letzten Stunde lief, und das Ziel für heute erklären.";
+    })();
+    // ── Hinweise (keine Planpunkte): Pause, Sonderfahrten (5/4/3 + Doppelstunde), Uhrzeit, fehlende Ergebnisse
     const hinweise = [];
-    if (pauseTage != null && pauseTage >= 21) hinweise.push("Letzte Fahrstunde vor " + pauseTage + " Tagen – zu Beginn kurz Grundlagen auffrischen.");
     const geplant = e.geplanteSonder || {};
     const ueText = v => String(Math.round((Number(v) || 0) * 10) / 10).replace(".", ",");
-    if (!sonderTermin && (phase === "fortgeschritten" || phase === "pruefung")) {
+    // Sonderfahrten: Richtwert ab etwa 15–20 Übungsstunden bzw. sobald die Ausbildung weit ist (Hinweis, keine Sperre)
+    if (!sonderTermin && (phase === "fortgeschritten" || phase === "pruefung" || ueNormal >= 15)) {
         const offen = sonderOffen.filter(x => !geplant[x.code]).map(x => x.label + (x.sollUe ? " (" + ueText(x.ue) + " von " + x.sollUe + " UE" + (x.erfuellt && x.langeFahrtDabei === false ? ", Doppelstunde fehlt" : "") + ")" : ""));
-        if (offen.length) hinweise.push("Noch offen: " + offen.join(", ") + ". Die nächste passende längere Fahrstunde dafür nutzen.");
+        if (offen.length) hinweise.push("Sonderfahrten noch offen: " + offen.join(", ") + ". Die nächsten passenden Termine als Sonderfahrt eintragen.");
         const schon = sonderOffen.filter(x => geplant[x.code]).map(x => x.label + " am " + geplant[x.code]);
         if (schon.length) hinweise.push("Bereits eingetragen: " + schon.join(", ") + ".");
     }
-    // Uhrzeit: Dämmerungsfahrt zu früh bzw. normale Stunde, die ohnehin in die Dunkelheit reicht
     const dk = e.dunkel;
     if (dk && sonderTermin === "NF" && dk.startZuFrueh)
         hinweise.push("Die Dämmerungsfahrt beginnt um " + dk.beginn + " Uhr – ausreichend dunkel ist es erst ab etwa " + dk.dunkelAb + " Uhr.");
     if (dk && !sonderTermin && dk.endetImDunkeln && (phase === "fortgeschritten" || phase === "pruefung") && !geplant.NF && sonderOffen.some(x => x.code === "NF"))
         hinweise.push("Diese Stunde reicht in die Dunkelheit (ab etwa " + dk.dunkelAb + " Uhr) – passend für die noch offene Dämmerungsfahrt.");
-    if (letzterPlan && !(letzterPlan.items || []).length) hinweise.push("Keine Ergebnisse aus der letzten geführten Stunde vorhanden.");
-    const wieder = items.filter(i => i.art === "wiederholen" || i.art === "nachholen").length;
-    const ersterNeu = items.find(i => i.art === "neu");
-    const teile = [];
-    if (ersteStunde) teile.push("Für diesen Schüler gibt es noch keine bisherigen Fahrstunden – der Plan beginnt mit den ersten Punkten der ADK.");
-    else {
-        if (items.some(i => i.art === "sonderfahrt")) teile.push("Der Termin passt zu einer offenen Sonderfahrt.");
-        if (wieder) teile.push(wieder === 1 ? "Ein Punkt aus den letzten Stunden ist noch nicht stabil." : wieder + " Punkte aus den letzten Stunden sind noch nicht stabil.");
-        if (items.some(i => i.art === "fokus")) teile.push("Eine Auffälligkeit wiederholt sich in den Bewertungen.");
-        if (ersterNeu) teile.push((teile.length ? "Danach ist laut ADK " : "Als Nächstes ist laut ADK ") + "„" + ersterNeu.sektion + "“ dran.");
-        if (phase === "pruefung") teile.push(pruefInTagen != null && pruefInTagen >= 0 ? "Bis zur Prüfung sind es noch " + pruefInTagen + " Tage – viel selbstständig und prüfungsnah fahren." : "Die Ausbildung ist weit – viel selbstständig und prüfungsnah fahren.");
+    if (sonderTermin) {
+        const sf = (e.sonder || []).find(x => x.code === sonderTermin);
+        if (sf && sf.langeFahrtDabei === false && (sonderTermin === "ÜL" || sonderTermin === "AB") && dauer < 90)
+            hinweise.push("Für die " + sf.label + " fehlt noch eine Doppelstunde (90 Min. am Stück) – dieser Termin ist kürzer.");
     }
-    const warum = teile.join(" ");
-    // Ausbildungsverlauf für die Anzeige: Kernstufen (nur vorhandene), Sonderfahrten, Prüfungsreife
+    // ── Warum dieser Plan?
+    const warumTeile = [];
+    if (ersteStunde) warumTeile.push("Erste Stunde – Einstieg mit der Grundstufe.");
+    else if (sonderTermin) warumTeile.push("Der Termin ist eine Sonderfahrt – ihre offenen Punkte stehen vorne.");
+    else {
+        if (items.some(i => i.lernstand === "unsicher")) warumTeile.push("Unsicheres zuerst.");
+        if (items.some(i => i.lernstand === "geuebt" || i.lernstand === "eingefuehrt")) warumTeile.push("Geübtes, bis es sitzt.");
+        const ersterNeu = gewaehlt.find((x, i) => items[i].art === "neu");
+        if (ersterNeu) warumTeile.push((warumTeile.length ? "Dann Neues aus der " : "Als Nächstes Neues aus der ") + stufeTitel(ersterNeu) + ".");
+        if (items.some(i => i.art === "anwenden")) warumTeile.push("Zum Schluss prüfungsnah fahren.");
+        if (zielAufgabe && NAV_AUFGABEN[zielAufgabe] && NAV_AUFGABEN[zielAufgabe].fehlerquelle) warumTeile.push(NAV_AUFGABEN[zielAufgabe].fehlerquelle);
+        if (schwach.length) { const lf = LESSON_FIELDS.find(f => f.id === schwach[0]); warumTeile.push("Die Bewertungen zeigen öfter Schwächen bei „" + (lf ? lf.label : schwach[0]) + "“."); }
+        if (phase === "pruefung" && pruefInTagen != null && pruefInTagen >= 0) warumTeile.push("Bis zur Prüfung sind es noch " + pruefInTagen + " Tage.");
+    }
+    const warum = warumTeile.join(" ");
+    // ── Ausbildungsverlauf für die Anzeige: Kernstufen (nur vorhandene), Sonderfahrten, Prüfungsreife
     const stufen = stufeInfo.map((x, i) => x.n ? { key: x.key, titel: x.titel, status: i < aktuelleStufe ? "fertig" : i === aktuelleStufe ? "jetzt" : "offen" } : null).filter(Boolean);
-    // Sonderfahrten (Klasse B: 5 Überland, 4 Autobahn, 3 Dämmerung): "läuft", sobald welche gefahren sind
     if ((e.sonder || []).length) stufen.push({ key: "sonder", titel: "Sonderfahrten",
         status: !sonderOffen.length ? "fertig" : kernFertig ? "jetzt" : (e.sonder || []).some(x => (Number(x.ue) || 0) > 0) ? "teil" : "offen" });
     stufen.push({ key: "reife", titel: "Prüfungsreife", status: kernFertig && !sonderOffen.length ? "jetzt" : "offen" });
     const sonderStand = (e.sonder || []).map(x => ({ code: x.code, label: x.label, ue: Number(x.ue) || 0, sollUe: Number(x.sollUe) || 0,
         fertig: !!x.erfuellt && x.langeFahrtDabei !== false, doppelstundeFehlt: !!x.erfuellt && x.langeFahrtDabei === false }));
-    return { dauer, reserve, items, phase, warum, hinweise, ersteStunde, pruefInTagen, pauseTage, stufen, aktuelleStufe, kernFertig, stufeLautStunden, ueGesamt, sonderStand };
+    return { dauer, reserve, items, phase, warum, hinweise, ersteStunde, pruefInTagen, pauseTage, stufen, aktuelleStufe, kernFertig, stufeLautStunden, ueGesamt, ueNormal,
+        sonderStand, ziel, zielAufgabe, zielTitel, zielKurz, situation, einstieg, schwach };
 }
 // Kurzer Fingerabdruck der Plan-Grundlagen: ändert er sich, ist ein gespeicherter Vorschlag veraltet.
 function navigatorSignatur(e, plan) {
     const stu = e.stu || {};
     const teile = [e.dauer, e.terminArt || "", e.pruefDatum || "", e.apptId || "", (stu.lessons || []).length, Math.floor(Number(e.ueGesamt) || 0),
         ((stu.navigator && stu.navigator.verlauf) || []).length,
-        plan.items.map(i => i.adkId ? i.adkId + ":" + ((stu.items || {})[i.adkId] || 0) : i.titel).join(",")];
+        plan.items.map(i => (i.adkId || i.titel) + ":" + (i.lernstand || "")).join(",")];
     return teile.join("|");
 }
-// Ergebnisse einer geführten Stunde in den Schüler übernehmen (rein, testbar).
-// ergebnisse: [{adkId|null, titel, status: "sitzt"|"weiter"|"nicht"}]
-// Liefert den neuen Schüler-Stand: normale ADK (items/adkDates), Übungs-Verlauf (adkLog),
-// Fahrstunden-Eintrag (lessons, über apptId wiedergefunden), lastNote und Navigator-Verlauf.
+// Ergebnisse einer Fahrstunde in den Schüler übernehmen (rein, testbar).
+// ergebnisse: [{adkId|null, titel, lernstand: "eingefuehrt"|"geuebt"|"unsicher"|"sicher"|null}] - null = heute nicht dran.
+// Ältere Einträge mit status "sitzt"/"weiter"/"nicht" (v2.113) werden umgedeutet.
+// Schreibt in die normale ADK (Haken: "sitzt" voll, "geübt" eine Übung mehr, nie bis fertig), in den Übungs-
+// Verlauf (adkLog), ins Fahrtenbuch (Eintrag zum Termin ergänzen, sonst neu - nur wenn es etwas festzuhalten
+// gibt), in lastNote und in den Navigator-Verlauf. Die Abrechnung (drivenLessons) bleibt unberührt.
 function navigatorErgebnisAnwenden(stu, eing) {
     const heute = eing.heute;
     const s = { ...stu };
     const items = { ...(s.items || {}) };
     const adkDates = { ...(s.adkDates || {}) };
     const adkLog = { ...(s.adkLog || {}) };
-    const sollVon = id => { const it = (eing.adkIndex || {})[id]; return it ? Math.max(1, parseInt(it.count, 10) || 1) : 1; };
-    // Unbekannte ADK-IDs komplett verwerfen (weder ADK noch Fahrstunden-Eintrag); eigene Schwerpunkte ohne ID bleiben.
-    const ergebnisse = (eing.ergebnisse || []).filter(r => r && (!r.adkId || (eing.adkIndex || {})[r.adkId]));
+    const idx = eing.adkIndex || {};
+    const lsVon = r => r.lernstand !== undefined ? r.lernstand : r.status === "sitzt" ? "sicher" : r.status === "weiter" ? "geuebt" : null;
+    // Unbekannte ADK-IDs komplett verwerfen; eigene Schwerpunkte ohne ID bleiben
+    const ergebnisse = (eing.ergebnisse || []).filter(r => r && (!r.adkId || idx[r.adkId])).map(r => ({ adkId: r.adkId || null, titel: String(r.titel || ""), lernstand: NAV_LERNSTAND_EINTRAG[lsVon(r)] ? lsVon(r) : null }));
     ergebnisse.forEach(r => {
-        if (!r.adkId || r.status === "nicht" || !(eing.adkIndex || {})[r.adkId]) return;
-        const soll = sollVon(r.adkId);
+        if (!r.adkId || !r.lernstand) return;
+        const soll = Math.max(1, parseInt(idx[r.adkId].count, 10) || 1);
         const vorher = typeof items[r.adkId] === "number" ? items[r.adkId] : 0;
-        // Sitzt: vollständig. Weiter üben: eine Übung mehr, aber nie "fertig" (bleibt offen).
-        const nachher = r.status === "sitzt" ? Math.max(vorher, soll) : Math.max(vorher, Math.min(vorher + 1, soll - 1));
+        const nachher = r.lernstand === "sicher" ? Math.max(vorher, soll) : r.lernstand === "geuebt" ? Math.max(vorher, Math.min(vorher + 1, soll - 1)) : vorher;
         if (nachher !== vorher) {
             items[r.adkId] = nachher;
             const d = adkDates[r.adkId] || [];
             if (d.indexOf(heute) < 0) adkDates[r.adkId] = [...d, heute];
         }
-        adkLog[r.adkId] = [...(adkLog[r.adkId] || []), { date: heute, status: r.status === "sitzt" ? "gekonnt" : "geuebt", note: "Ausbildungsnavigator" }];
+        adkLog[r.adkId] = [...(adkLog[r.adkId] || []), { date: heute, ...NAV_LERNSTAND_EINTRAG[r.lernstand], note: "Ausbildungsnavigator" }];
     });
     s.items = items; s.adkDates = adkDates; s.adkLog = adkLog;
-    // Fahrstunden-Eintrag: vorhandenen zum Termin ergänzen (nur leere Felder), sonst neu anlegen
-    const thema = ergebnisse.filter(r => r.status !== "nicht").map(r => r.titel.replace(/^Fokus: /, "")).join(", ").slice(0, 200);
-    const nav = ergebnisse.map(r => ({ adkId: r.adkId || null, titel: r.titel, status: r.status }));
+    const dran = ergebnisse.filter(r => r.lernstand);
+    const thema = dran.map(r => r.titel).join(", ").slice(0, 200);
+    const nav = ergebnisse.map(r => ({ adkId: r.adkId, titel: r.titel, lernstand: r.lernstand }));
     const lessons = (s.lessons || []).slice();
-    const idx = eing.apptId ? lessons.findIndex(l => l.apptId === eing.apptId) : -1;
-    if (idx >= 0) {
-        const l = lessons[idx];
-        lessons[idx] = { ...l, thema: l.thema || thema, gut: l.gut || eing.gut || "", schlecht: l.schlecht || eing.naechstes || "",
+    const ix = eing.apptId ? lessons.findIndex(l => l.apptId === eing.apptId) : -1;
+    if (ix >= 0) {
+        const l = lessons[ix];
+        lessons[ix] = { ...l, thema: l.thema || thema, gut: l.gut || eing.gut || "", schlecht: l.schlecht || eing.naechstes || "",
             ratings: Object.keys(l.ratings || {}).length ? l.ratings : (eing.ratings || {}), navigator: nav };
     }
-    // Neuer Eintrag nur, wenn es etwas festzuhalten gibt - sonst stünde ein leerer Tagebuch-Eintrag da
     else if (thema || (eing.gut || "").trim() || (eing.naechstes || "").trim() || Object.keys(eing.ratings || {}).length) {
         lessons.push({ id: eing.neueLessonId, date: heute, thema, gut: eing.gut || "", schlecht: eing.naechstes || "", route: null,
             ratings: eing.ratings || {}, note: "", navigator: nav, ...(eing.apptId ? { apptId: eing.apptId } : {}) });
@@ -15307,36 +15455,54 @@ function navigatorErgebnisAnwenden(stu, eing) {
     s.lessons = lessons;
     if ((eing.naechstes || "").trim()) { s.lastNote = eing.naechstes.trim(); s.lastNoteAt = eing.jetztIso; }
     const alt = s.navigator || {};
-    s.navigator = { ...alt, plan: null, verlauf: [{ datum: heute, apptId: eing.apptId || null, items: nav }, ...(alt.verlauf || [])].slice(0, 30) };
+    s.navigator = { ...alt, plan: null, verlauf: [{ datum: heute, apptId: eing.apptId || null, ziel: eing.ziel || "", items: nav }, ...(alt.verlauf || [])].slice(0, 30) };
     return s;
 }
-// Vorschlag für "Das lief gut" / "Nächstes Mal" ohne KI - nur aus den markierten Punkten.
+// Vorschlag für "Das lief gut" / "Nächstes Mal" ohne KI - nur aus den Lernständen der Stunde.
 function navigatorTexteVorschlag(ergebnisse) {
-    const t = r => r.titel.replace(/^Fokus: /, "");
-    const gut = ergebnisse.filter(r => r.status === "sitzt").map(t);
-    const weiter = ergebnisse.filter(r => r.status === "weiter").map(t);
-    const nicht = ergebnisse.filter(r => r.status === "nicht").map(t);
+    const t = r => String(r.titel || "").replace(/^Fokus: /, "");
+    const ls = r => r.lernstand !== undefined ? r.lernstand : r.status === "sitzt" ? "sicher" : r.status === "weiter" ? "geuebt" : null;
+    const sitzt = ergebnisse.filter(r => ls(r) === "sicher").map(t);
+    const unsicher = ergebnisse.filter(r => ls(r) === "unsicher").map(t);
+    const geuebt = ergebnisse.filter(r => ls(r) === "geuebt" || ls(r) === "eingefuehrt").map(t);
+    const nicht = ergebnisse.filter(r => !ls(r)).map(t);
     return {
-        gut: gut.length ? gut.join(", ") + (gut.length === 1 ? " sitzt." : " sitzen.") : "",
-        naechstes: [weiter.length ? weiter.join(", ") + " weiter festigen." : "", nicht.length ? nicht.join(", ") + " beginnen bzw. nachholen." : ""].filter(Boolean).join(" "),
+        gut: sitzt.length ? sitzt.join(", ") + (sitzt.length === 1 ? " sitzt." : " sitzen.") : "",
+        naechstes: [unsicher.length ? unsicher.join(", ") + " noch unsicher – wiederholen." : "", geuebt.length ? geuebt.join(", ") + " weiter üben." : "",
+            nicht.length ? nicht.join(", ") + " nachholen." : ""].filter(Boolean).join(" "),
     };
 }
 // Übergabe-Überblick für einen anderen Fahrlehrer, rein aus den Daten.
 function navigatorUebergabe(stu, adk) {
     const sek = (adk || []).filter(s => s && s.id !== "fahrzeugkunde" && Array.isArray(s.items));
-    const sicher = [], weiter = [], offen = [];
-    let gesamt = 0, sicherAnzahlRoh = 0;
+    const sicher = [], unsicher = [], weiter = [], offen = [];
+    let gesamt = 0, sicherAnzahl = 0;
     sek.forEach(s => s.items.forEach(it => {
         const st = navPunktStand(stu, it);
         gesamt++;
-        if (st.fertig) { sicherAnzahlRoh++; if (st.letztesDatum) sicher.push({ titel: it.label, datum: st.letztesDatum }); }
-        else if (st.weiterInFolge > 0 || st.done > 0) weiter.push({ titel: it.label });
+        if (st.lernstand === "sicher") { sicherAnzahl++; if (st.letztesDatum) sicher.push({ titel: it.label, datum: st.letztesDatum }); }
+        else if (st.lernstand === "unsicher") unsicher.push({ titel: it.label });
+        else if (st.lernstand === "geuebt" || st.lernstand === "eingefuehrt") weiter.push({ titel: it.label });
     }));
-    const sicherAnzahl = sicherAnzahlRoh;
     const naechsteSek = sek.find(s => !NAV_SEK_SONDER.test(s.id) && s.items.some(it => !navPunktStand(stu, it).begonnen));
     if (naechsteSek) naechsteSek.items.filter(it => !navPunktStand(stu, it).begonnen).slice(0, 4).forEach(it => offen.push({ titel: it.label }));
     sicher.sort((a, b) => b.datum.localeCompare(a.datum));
-    return { sicher: sicher.slice(0, 5), sicherAnzahl, gesamt, weiter: weiter.slice(0, 6), offen, offenBereich: naechsteSek ? naechsteSek.title : null };
+    return { sicher: sicher.slice(0, 5), sicherAnzahl, gesamt, unsicher: unsicher.slice(0, 6), weiter: weiter.slice(0, 6), offen, offenBereich: naechsteSek ? naechsteSek.title : null };
+}
+// Lernstand nach Prüfungsthemen: je Fahraufgabe der Prüfung, wie viele zugehörige ADK-Punkte sitzen, geübt
+// bzw. unsicher oder noch neu sind - dieselben Einträge, nur nach Prüfung sortiert (keine zweite Karte).
+function navigatorPruefungsthemen(stu, adk) {
+    const z = {};
+    (adk || []).filter(s => s && s.id !== "fahrzeugkunde" && Array.isArray(s.items)).forEach(s => s.items.forEach(it => {
+        const a = navAufgabeVon(it, s);
+        if (!NAV_AUFGABEN[a] || !NAV_AUFGABEN[a].pruefung) return;
+        const st = navPunktStand(stu, it);
+        const r = z[a] || (z[a] = { key: a, titel: NAV_AUFGABEN[a].titel, gewicht: NAV_AUFGABEN[a].gewicht, n: 0, sicher: 0, geuebt: 0, unsicher: 0, neu: 0 });
+        r.n++;
+        r[st.lernstand === "eingefuehrt" ? "geuebt" : st.lernstand]++;
+    }));
+    return Object.values(z).map(r => ({ ...r, status: r.unsicher ? "unsicher" : r.sicher === r.n ? "sicher" : (r.sicher + r.geuebt) > 0 ? "laeuft" : "offen" }))
+        .sort((a, b) => b.gewicht - a.gewicht);
 }
 // Laufende geführte Stunde und offener Abschluss überstehen einen Neustart der App (höchstens 12 Stunden alt)
 const NAV_LAUFEND_KEY = "v3_navigator_laufend";
