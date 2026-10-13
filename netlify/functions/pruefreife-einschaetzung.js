@@ -86,10 +86,16 @@ exports.handler = async function (event, context) {
   })) : [];
   const psRaw = rawStudent.pruefungssimulation && typeof rawStudent.pruefungssimulation === "object" ? rawStudent.pruefungssimulation : null;
   const gesamtRaw = psRaw && psRaw.gesamt && typeof psRaw.gesamt === "object" ? psRaw.gesamt : null;
+  // letzteBewertung (ab App 2.118.0): Ergebnis der letzten Simulation nach den 5 Prüfkriterien.
+  const lbRaw = psRaw && psRaw.letzteBewertung && typeof psRaw.letzteBewertung === "object" ? psRaw.letzteBewertung : null;
   const pruefungssimulation = psRaw ? {
     anzahl: clampNum(psRaw.anzahl),
     letzteAm: clampStr(psRaw.letzteAm, 20),
-    gesamt: gesamtRaw ? { leicht: clampNum(gesamtRaw.leicht), erheblich: clampNum(gesamtRaw.erheblich), gefaehrdung: clampNum(gesamtRaw.gefaehrdung) } : null,
+    gesamt: gesamtRaw ? { leicht: clampNum(gesamtRaw.leicht), erheblich: clampNum(gesamtRaw.erheblich), gefaehrdung: clampNum(gesamtRaw.gefaehrdung), gut: clampNum(gesamtRaw.gut) } : null,
+    letzteBewertung: lbRaw ? {
+      waereBestanden: lbRaw.bestanden === true,
+      stufen: Array.isArray(lbRaw.stufen) ? lbRaw.stufen.slice(0, 5).map((x) => ({ kriterium: clampStr(x && x.kriterium, 60), stufe: clampStr(x && x.stufe, 20) })) : [],
+    } : null,
   } : null;
   const skRaw = rawStudent.schaltkompetenz && typeof rawStudent.schaltkompetenz === "object" ? rawStudent.schaltkompetenz : null;
   const schaltkompetenz = skRaw ? {
@@ -146,7 +152,7 @@ exports.handler = async function (event, context) {
 Regeln, unbedingt einhalten:
 1. Nutze AUSSCHLIESSLICH die unten stehenden Daten. Erfinde niemals Fortschritt, Fehler, Noten oder Ereignisse, die dort nicht stehen.
 2. Beginne mit einer KLAREN Einschätzung in einem Satz: z.B. "Bereit für die Prüfungsanmeldung", "Fast bereit, aber X noch klären", oder "Noch nicht bereit, hier ist warum". Sei konkret, nicht ausweichend - aber erfinde nichts über die Daten hinaus.
-3. Begründe das dann in 3-5 Sätzen: gehe auf die App-eigene Ampel/Prozentwerte ein (offenePunkteAnzahl, theorieOffen), aber gewichte STÄRKER, was aus wiederkehrendeSchwaechen, wiederkehrendeSchwerePruefungssimFehler, letzteFahrstundenNotizen und sonderfahrten hervorgeht - das sind die Signale, die eine reine Prozentzahl übersieht. Wenn diese weichen Signale der Ampel widersprechen (z.B. Ampel "fast bereit", aber wiederkehrende schwere Fehler in der Prüfungssimulation), sag das explizit und gewichte die weichen Signale höher.
+3. Begründe das dann in 3-5 Sätzen: gehe auf die App-eigene Ampel/Prozentwerte ein (offenePunkteAnzahl, theorieOffen), aber gewichte STÄRKER, was aus wiederkehrendeSchwaechen, wiederkehrendeSchwerePruefungssimFehler, letzteFahrstundenNotizen und sonderfahrten hervorgeht - das sind die Signale, die eine reine Prozentzahl übersieht. Wenn diese weichen Signale der Ampel widersprechen (z.B. Ampel "fast bereit", aber wiederkehrende schwere Fehler in der Prüfungssimulation), sag das explizit und gewichte die weichen Signale höher. pruefungssimulation.letzteBewertung ist das Ergebnis der letzten Prüfungssimulation nach den 5 Prüfkriterien wie im Prüfprotokoll (Stufen Sehr gut/Gut/Ausreichend/Ungenügend) - "waereBestanden": false dort ist ein starkes Signal.
 4. Schließe mit 1-2 KONKRETEN nächsten Schritten ab (z.B. "vor der Anmeldung noch 2-3 gezielte Fahrstunden zu Vorfahrt einplanen"), nur wenn sich das direkt aus den Daten ableiten lässt.
 5. Fehlen zu einem Punkt Daten (z.B. keine Prüfungssimulation absolviert, Theorie noch nicht geübt), erwähne das nur, wenn es für die Einschätzung relevant ist - nicht jeden fehlenden Datenpunkt einzeln auflisten.
 6. KOSTEN, ZAHLUNGEN ODER OFFENE BETRÄGE KOMMEN IN DEN DATEN NICHT VOR UND DÜRFEN WEDER ERWÄHNT NOCH VERMUTET WERDEN.

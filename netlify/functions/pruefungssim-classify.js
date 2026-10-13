@@ -62,14 +62,16 @@ exports.handler = async function (event, context) {
   // Länge/Größe begrenzen, bevor sie in den Prompt eingebettet werden (wie in suggest-adk-items.js) -
   // sonst könnte ein Aufruf mit riesigem Text oder Katalog die Anthropic-Tokenkosten eines
   // einzelnen Calls unbegrenzt hochtreiben.
-  const text = (body.text || "").toString().trim().slice(0, 800);
+  const mehrfach = body.modus === "mehrfach";
+  const text = (body.text || "").toString().trim().slice(0, mehrfach ? 2500 : 800);
   const fahraufgaben = Array.isArray(body.fahraufgaben) ? body.fahraufgaben.filter((f) => f && typeof f === "object").slice(0, 50) : [];
   const kompetenzbereiche = Array.isArray(body.kompetenzbereiche) ? body.kompetenzbereiche.filter((f) => f && typeof f === "object").slice(0, 50) : [];
   const schweregrade = Array.isArray(body.schweregrade) ? body.schweregrade.filter((f) => f && typeof f === "object").slice(0, 50) : [];
   if (!text) return { statusCode: 400, headers, body: JSON.stringify({ error: "Kein Text übergeben" }) };
-  if (!fahraufgaben.length || !kompetenzbereiche.length || !schweregrade.length) {
+  if (!fahraufgaben.length || !kompetenzbereiche.length || (!mehrfach && !schweregrade.length)) {
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Kataloge fehlen" }) };
   }
+  if (mehrfach) return mehrfachZerlegen({ text, fahraufgaben, kompetenzbereiche, apiKey, headers, context });
 
   const system = `Du unterstützt einen Fahrlehrer, der während einer Prüfungssimulation (Nachstellen der praktischen Fahrprüfung) kurz und in eigenen Worten notiert, was gerade passiert ist. Ordne diese Beobachtung strukturiert zu.
 
@@ -144,3 +146,57 @@ Regeln:
     return { statusCode: 500, headers, body: JSON.stringify({ error: "Serverfehler: " + (e.message || "unbekannt") }) };
   }
 };
+
+// Modus "mehrfach" (v2.118.0): Der Fahrlehrer schreibt oder diktiert die ganze Fahrt auf einmal -
+// Gutes und Schlechtes. Die KI zerlegt den Text in einzelne Beobachtungen und ordnet jede einem der
+// fünf Prüfkriterien (Kompetenzbereiche), optional einer Fahraufgabe und einer Art zu. Erzwungenes
+// Werkzeug statt Freitext; der Server lässt nur bekannte ids durch. Der Client zeigt alles zum
+// Bestätigen - gespeichert wird nie automatisch.
+const ARTEN = ["gut", "leicht", "erheblich", "gefaehrdung", "notiz"];
+async function mehrfachZerlegen({ text, fahraufgaben, kompetenzbereiche, apiKey, headers, context }) {
+  const kb = kompetenzbereiche.map((k) => ({ id: String(k.id || "").slice(0, 40), label: String(k.label || "").slice(0, 80) })).filter((k) => k.id);
+  const fa = fahraufgaben.map((f) => ({ id: String(f.id || "").slice(0, 40), label: String(f.label || "").slice(0, 120) })).filter((f) => f.id);
+  const kbIds = new Set(kb.map((k) => k.id)), faIds = new Set(fa.map((f) => f.id));
+  const werkzeug = {
+    name: "beobachtungen",
+    description: "Einzelne Beobachtungen aus der Notiz einer Prüfungssimulation.",
+    input_schema: { type: "object", properties: {
+      eintraege: { type: "array", items: { type: "object", properties: {
+        art: { type: "string", enum: ARTEN, description: "gut = gelungen/lobenswert; leicht = leichter Fehler; erheblich = schwerer Fehler; gefaehrdung = akute Gefährdung, Eingreifen des Fahrlehrers oder Unfall (Prüfung nicht bestanden); notiz = neutral, ohne Bewertung" },
+        kompetenzbereich: { type: "string", enum: [...kbIds, "keiner"] },
+        fahraufgabe: { type: "string", enum: [...faIds, "keine"] },
+        text: { type: "string", description: "Knapp und sachlich, 3–12 Wörter, wie im Prüfprotokoll" },
+      }, required: ["art", "kompetenzbereich", "fahraufgabe", "text"] } },
+    }, required: ["eintraege"] },
+  };
+  const prompt = "Ein Fahrlehrer hat während oder nach einer Prüfungssimulation (Nachstellen der praktischen Fahrprüfung) in eigenen Worten notiert, was passiert ist – Gutes und Schlechtes, oft mehrere Situationen in einem Text.\n"
+    + "Zerlege die Notiz in einzelne Beobachtungen (eine Situation = ein Eintrag, in der Reihenfolge des Textes). Lass keine Beobachtung weg und erfinde keine.\n"
+    + "Ordne jede Beobachtung einem der fünf Prüfkriterien zu. Ist mangelnde Verkehrsbeobachtung mit überwiegender Sicherheit die Ursache, gehört der Fehler zur Verkehrsbeobachtung (Zuordnungsregel der Prüfung). Nur bei neutralen Notizen ohne Bewertung: kompetenzbereich \"keiner\".\n"
+    + "Fahraufgabe nur, wenn sie aus dem Text erkennbar ist, sonst \"keine\".\n"
+    + "„gefaehrdung“ nur bei akuter Gefährdung, Eingreifen des Fahrlehrers oder Unfall – im Zweifel niedriger einstufen. Ein Zusatz wie „war aber ungefährlich“ gehört zur vorigen Beobachtung.\n\n"
+    + "Prüfkriterien: " + JSON.stringify(kb) + "\nFahraufgaben: " + JSON.stringify(fa) + "\n\nNotiz:\n" + text;
+  let resp;
+  try {
+    resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST", signal: kiSignal(context),
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model: "claude-sonnet-5", max_tokens: 1500, thinking: { type: "disabled" },
+        tools: [werkzeug], tool_choice: { type: "tool", name: werkzeug.name }, messages: [{ role: "user", content: prompt }] }),
+    });
+  } catch (e) {
+    if (istKiTimeout(e)) return kiTimeoutAntwort(headers);
+    return { statusCode: 502, headers, body: JSON.stringify({ error: "KI nicht erreichbar" }) };
+  }
+  const data = (await resp.json().catch(() => null)) || {};
+  if (!resp.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: (data.error && data.error.message) || "KI-Anfrage fehlgeschlagen" }) };
+  const block = Array.isArray(data.content) ? data.content.find((c) => c && c.type === "tool_use") : null;
+  const roh = block && block.input && Array.isArray(block.input.eintraege) ? block.input.eintraege : null;
+  if (!roh) return { statusCode: 502, headers, body: JSON.stringify({ error: "Antwort konnte nicht gelesen werden" }) };
+  const eintraege = roh.slice(0, 20).map((e) => {
+    const art = ARTEN.indexOf(e && e.art) >= 0 ? e.art : "notiz";
+    const t = String((e && e.text) || "").trim().slice(0, 140);
+    return { art, kompetenzbereich: kbIds.has(e && e.kompetenzbereich) ? e.kompetenzbereich : null, fahraufgabe: faIds.has(e && e.fahraufgabe) ? e.fahraufgabe : null, text: t };
+  }).filter((e) => e.text);
+  if (!eintraege.length) return { statusCode: 502, headers, body: JSON.stringify({ error: "Keine Beobachtung erkannt" }) };
+  return { statusCode: 200, headers, body: JSON.stringify({ eintraege }) };
+}
