@@ -1,7 +1,8 @@
 // Prüfungssimulation: Bewertung nach den 5 Prüfkriterien (wie im e-Prüfprotokoll) und Schnelleintrag ohne KI.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const k = require("./lade-app")(["pruefungssimBewertung", "pruefungssimTextZerlegen", "pruefungssimSchnellEintraege", "pruefungssimSummary", "pruefungssimZaehlText"]);
+const k = require("./lade-app")(["pruefungssimBewertung", "pruefungssimTextZerlegen", "pruefungssimSchnellEintraege", "pruefungssimSummary", "pruefungssimZaehlText",
+    "pruefsimEintragArt", "pruefsimArtPatch", "pruefsimDauer"]);
 const json = x => JSON.stringify(x);
 const fehler = (kb, sg) => ({ type: "fehler", kompetenzbereich: kb, schweregrad: sg, text: "x" });
 const gut = kb => ({ type: "gut", kompetenzbereich: kb, text: "x" });
@@ -101,4 +102,32 @@ test("Gefährdung ohne Prüfkriterium (ältere Simulation): trotzdem nicht besta
     assert.equal(b.nb, true);
     assert.equal(b.bestanden, false);
     assert.ok(b.bereiche.every(x => x.stufe === "sehr_gut"), "die Bereiche selbst bleiben unberührt");
+});
+
+test("Beobachtung ändern: Art umstellen, Text und Prüfkriterium bleiben", () => {
+    const e = { id: "x", type: "fehler", schweregrad: "leicht", kompetenzbereich: "beobachtung", fahraufgabe: "kreuzung", text: "Schulterblick vergessen" };
+    assert.equal(k.pruefsimEintragArt(e), "leicht");
+    const gut = { ...e, ...k.pruefsimArtPatch("gut") };
+    assert.equal(k.pruefsimEintragArt(gut), "gut");
+    assert.equal(JSON.parse(JSON.stringify(gut)).schweregrad, undefined, "kein Schweregrad mehr im gespeicherten Eintrag");
+    assert.equal(json([gut.text, gut.kompetenzbereich, gut.fahraufgabe]), json(["Schulterblick vergessen", "beobachtung", "kreuzung"]));
+    const notiz = { ...gut, ...k.pruefsimArtPatch("notiz") };
+    assert.equal(notiz.type, "freitext");
+    assert.equal(k.pruefsimEintragArt(notiz), "notiz");
+    const gef = { ...notiz, ...k.pruefsimArtPatch("gefaehrdung") };
+    assert.equal(json([gef.type, gef.schweregrad, gef.kompetenzbereich]), json(["fehler", "gefaehrdung", "beobachtung"]));
+    assert.equal(k.pruefungssimBewertung([gef]).bestanden, false);
+    assert.equal(k.pruefsimEintragArt({ type: "fehler", schweregrad: "quatsch" }), "notiz", "Unbekanntes gilt als Notiz");
+});
+
+test("Schnelleintrag: Zeilen eines Textes gehören zusammen und behalten ihre Reihenfolge", () => {
+    const e = k.pruefungssimSchnellEintraege([{ art: "gut", kompetenzbereich: "position", text: "Anfahren sauber" }, { art: "leicht", kompetenzbereich: "beobachtung", text: "Schulterblick vergessen" }], 5000);
+    assert.equal(json(e.map(x => x.gruppe)), json([5000, 5000]));
+    assert.ok(e[0].at < e[1].at);
+});
+
+test("Dauer in Minuten statt Uhrzeit-Schreibweise", () => {
+    assert.equal(k.pruefsimDauer(1980), "33 Min.");
+    assert.equal(k.pruefsimDauer(20), "unter 1 Min.");
+    assert.equal(k.pruefsimDauer(undefined), "unter 1 Min.");
 });
