@@ -2,7 +2,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const k = require("./lade-app")(["pruefungssimBewertung", "pruefungssimTextZerlegen", "pruefungssimSchnellEintraege", "pruefungssimSummary", "pruefungssimZaehlText",
-    "pruefsimEintragArt", "pruefsimArtPatch", "pruefsimDauer"]);
+    "pruefsimEintragArt", "pruefsimArtPatch", "pruefsimDauer", "pruefsimChronologisch", "PRUEFUNGS_KB_ERKLAERUNG"]);
 const json = x => JSON.stringify(x);
 const fehler = (kb, sg) => ({ type: "fehler", kompetenzbereich: kb, schweregrad: sg, text: "x" });
 const gut = kb => ({ type: "gut", kompetenzbereich: kb, text: "x" });
@@ -130,4 +130,15 @@ test("Dauer in Minuten statt Uhrzeit-Schreibweise", () => {
     assert.equal(k.pruefsimDauer(1980), "33 Min.");
     assert.equal(k.pruefsimDauer(20), "unter 1 Min.");
     assert.equal(k.pruefsimDauer(undefined), "unter 1 Min.");
+});
+
+test("Protokoll für die Akte: Reihenfolge wie gefahren, Schnelleintrag in Textreihenfolge", () => {
+    const e = [{ id: "spaet", at: 9000, text: "c" }, ...k.pruefungssimSchnellEintraege([{ art: "gut", kompetenzbereich: "position", text: "a" }, { art: "leicht", kompetenzbereich: "position", text: "b" }], 5000), { id: "frueh", at: 1000, text: "z" }];
+    assert.equal(json(k.pruefsimChronologisch(e).map(x => x.text)), json(["z", "a", "b", "c"]));
+    assert.equal(k.pruefsimChronologisch(undefined).length, 0);
+});
+
+test("Auswertung für den Schüler: jedes Prüfkriterium hat eine kurze Erklärung", () => {
+    for (const id of ["beobachtung", "position", "geschwindigkeit", "kommunikation", "bedienung"])
+        assert.ok((k.PRUEFUNGS_KB_ERKLAERUNG[id] || "").length > 10, id);
 });
