@@ -4095,7 +4095,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.118.0";
+const APP_VERSION = "2.119.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4249,6 +4249,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.119.0", date: "Oktober 2026", changes: [
+            "Kalender: Dauert eine Fahrstunde länger oder kürzer als geplant, passt sich das Ende des Termins beim Abschließen automatisch an",
+        ] },
     { v: "2.118.0", date: "Oktober 2026", changes: [
             "Prüfungssimulation: Schreib oder diktier die Fahrt einfach in eigenen Worten – Gutes und Schlechtes auf einmal. Daraus werden einzelne Beobachtungen; jede lässt sich antippen und ändern",
             "Neu: „Gut gemacht“ festhalten – nicht nur Fehler",
@@ -12434,6 +12437,20 @@ function ampel(stu, adk, strecken, sonderfahrtenSoll) {
 }
 /* ════════ Icons (Feather, MIT) ════════ */
 const I = ({ children }) => React.createElement("svg", { width: "21", height: "21", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" }, children);
+// Neues Terminende nach dem Abschließen einer Fahrstunde: Beginn + tatsächliche Dauer (v2.119.0).
+// null, wenn sich nichts ändert oder Beginn/Dauer unbrauchbar sind. Gleiches Format wie combineDT().
+function abschlussTerminEnde(appt, minuten) {
+    const m = Math.round(Number(minuten));
+    if (!appt || !appt.start_at || !(m > 0))
+        return null;
+    const start = new Date(appt.start_at).getTime();
+    if (isNaN(start))
+        return null;
+    const ende = start + m * 60000;
+    if (appt.end_at && new Date(appt.end_at).getTime() === ende)
+        return null;
+    return new Date(ende).toISOString();
+}
 // ── Fenster zum Bestätigen der Dauer einer vergangenen Fahrstunde ──
 function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, onConfirm, onSkip, lastRatings, folgeSlots, naechsterTermin, erinnern, navigatorFertig }) {
     // So wenig Aufwand wie möglich nach der Stunde: Im Normalfall genügt EIN Tipp auf
@@ -12466,6 +12483,8 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
     const ue = (Number(minutes) || 0) / 45;
     const ueText = ue.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + " UE";
     const wieGeplant = Number(minutes) === Number(plannedMinutes || 45);
+    // Weicht die Dauer ab, zieht der Kalender beim Abschließen das Terminende nach (confirmPastLesson).
+    const neuesEnde = wieGeplant ? null : abschlussTerminEnde(appt, minutes);
     const dateLabel = appt ? new Date(appt.start_at).toLocaleDateString("de-DE", { timeZone: "Europe/Berlin", weekday: "short", day: "2-digit", month: "2-digit" }) : "";
     const timeLabel = appt ? new Date(appt.start_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) : "";
     const endLabel = (appt && appt.end_at) ? new Date(appt.end_at).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) : "";
@@ -12496,7 +12515,9 @@ function LessonPromptModal({ appt, studentName, plannedMinutes, index, total, on
             React.createElement("div", { style: zeile },
                 React.createElement("div", { style: { fontSize: 14, color: "var(--ink)" } },
                     React.createElement("b", null, minutes + " Min"),
-                    React.createElement("span", { style: { color: "var(--muted)" } }, " · " + ueText + (wieGeplant ? " · wie geplant" : " · geändert"))),
+                    React.createElement("span", { style: { color: "var(--muted)" } }, " · " + ueText + (wieGeplant ? " · wie geplant" : " · geändert")),
+                    neuesEnde && React.createElement("div", { style: { fontSize: 12.5, color: "var(--muted)", marginTop: 2 } },
+                        "Im Kalender endet der Termin dann um " + new Date(neuesEnde).toLocaleTimeString("de-DE", { timeZone: "Europe/Berlin", hour: "2-digit", minute: "2-digit" }) + " Uhr")),
                 React.createElement("button", { type: "button", onClick: () => setDauerOffen(o => !o), "aria-expanded": dauerOffen, style: linkKnopf }, dauerOffen ? "Fertig" : "Ändern")),
             dauerOffen && React.createElement("div", { style: { paddingBottom: 10 } },
                 React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 } }, quick.map(q => React.createElement("button", { key: q, type: "button", onClick: () => setMinutes(q), style: { flex: "1 0 28%", padding: "10px 0", borderRadius: 10, fontSize: 14, fontWeight: 700, fontFamily: "var(--font-d)",
@@ -21326,6 +21347,14 @@ function App() {
             const price = ausListe != null ? ausListe : (pricePerHour === "" || pricePerHour == null ? null : Number(pricePerHour));
             const driven = [...(stu.drivenLessons || []), { id, date, time, minutes, price, apptId: appt.id, fromAppt: true, art: appt.art || "", klasse: stu.klasse || DEFAULT_KLASSE }];
             writeStudent({ ...stu, drivenLessons: driven, ...fahrtenbuchAusAbschluss(stu, appt, date, extra) });
+            // Ging die Stunde länger oder kürzer als geplant, das Terminende im Kalender anpassen
+            // (Fabian, 16.10.). Nur das Ende: eine geänderte Startzeit würde dem Schüler eine
+            // "verschoben"-Mitteilung schicken (Trigger _termin_mitteilung), das Ende nicht. Nur eigene
+            // Termine; schlägt das Speichern fehl, meldet updateAppt() das und nimmt es zurück - die
+            // Fahrstunde selbst ist dann trotzdem erfasst.
+            const neuesEnde = abschlussTerminEnde(appt, minutes);
+            if (neuesEnde && appt.id && (appts || []).some(a => a.id === appt.id))
+                updateAppt(appt.id, { end_at: neuesEnde });
             if (extra && extra.folge) {
                 const f = { id: null, date: extra.folge.date, start: extra.folge.start, end: extra.folge.end, student_id: stu.id, note: "", title: "", sonstige: false, art: appt.art || "ÜST", fahrzeug: (appt.fahrzeug && vehicles.some(v => v.id === appt.fahrzeug && !v.inactive)) ? appt.fahrzeug : fahrzeugVorschlag() };
                 setApptForm({ ...f, _stand: apptFormStand(f) });
