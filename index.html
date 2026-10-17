@@ -68,6 +68,12 @@
     if (!vv) return;
     var wurzel = document.documentElement;
     var letzte = -1;
+    var luecke = -1;
+    // Installierte App (Capacitor) oder Homescreen-App - dort gibt es keine Browserleisten.
+    function inApp() {
+      try { return !!(window.navigator.standalone || (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())); }
+      catch (e) { return false; }
+    }
     function messen() {
       // offsetTop zaehlt mit: hat iOS die Seite schon hochgeschoben, um das Feld freizulegen,
       // fehlt dieser Teil sonst in der Rechnung und die Tastatur waere scheinbar halb so hoch.
@@ -78,13 +84,44 @@
       // dort faelschlich eine Tastatur erkennen und die Tab-Leiste ausblenden. scale ist genau
       // dann groesser als 1, also hier abfangen.
       if (vv.scale && vv.scale > 1.05) kb = 0;
+      // iOS 26 (Fehler im System, WebKit-Bugs 297779 und 301857): nach dem Schließen der Tastatur
+      // bleibt die Layout-Höhe (innerHeight) manchmal zu klein. Alles mit position:fixed am unteren
+      // Rand hängt dann mitten im Bild - gemeldet 2026-10-17 mit Screenshot: Tab-Leiste und KI-Knopf
+      // um genau eine Tastaturhöhe zu hoch. In diesem Zustand reicht der sichtbare Ausschnitt tiefer
+      // als das Layout; um genau diese Lücke rücken die unteren Leisten nach (html.vv-luecke).
+      // Nur in der installierten App/Homescreen-App - im Safari-Tab gibt es eigene Leisten.
+      var unten = Math.round(vv.offsetTop + vv.height - window.innerHeight);
+      var gap = (kb === 0 && unten > 40 && !(vv.scale && vv.scale > 1.05) && inApp()) ? unten : 0;
+      if (gap !== luecke) {
+        luecke = gap;
+        wurzel.style.setProperty("--vv-luecke", gap + "px");
+        wurzel.classList.toggle("vv-luecke", gap > 0);
+      }
       if (kb === letzte) return;
+      var warOffen = letzte > 0;
       letzte = kb;
       wurzel.style.setProperty("--kb", kb + "px");
       wurzel.classList.toggle("kb-auf", kb > 0);
+      // Tastatur gerade zugegangen: WebKit anstoßen, damit es die Höhe neu berechnet (der bekannte
+      // Umgehungsweg für den iOS-26-Fehler). Ein Pixel hin und zurück sieht niemand.
+      if (warOffen && kb === 0) { setTimeout(anstossen, 120); setTimeout(anstossen, 450); }
+    }
+    function anstossen() {
+      var unten = Math.round(vv.offsetTop + vv.height - window.innerHeight);
+      if (Math.abs(unten) < 2 && vv.offsetTop < 1) return;
+      var x = window.scrollX || 0, y = window.scrollY || 0;
+      window.scrollTo(x, y > 0 ? y - 1 : y + 1);
+      window.scrollTo(x, y);
+      messen();
     }
     vv.addEventListener("resize", messen);
     vv.addEventListener("scroll", messen);
+    // Die zu kleine Layout-Höhe kann sich auch ohne Ereignis am sichtbaren Ausschnitt wieder
+    // einrenken (oder erst beim Scrollen zeigen) - deshalb auch hier neu messen.
+    window.addEventListener("resize", messen);
+    window.addEventListener("scroll", messen, { passive: true });
+    // Tastatur geht auch zu, wenn ein Feld den Fokus verliert, ohne dass vorher kb gemessen wurde
+    document.addEventListener("focusout", function () { setTimeout(anstossen, 150); setTimeout(anstossen, 500); }, true);
     window.addEventListener("orientationchange", function () { setTimeout(messen, 300); });
     messen();
   })();
@@ -1071,6 +1108,12 @@
      sie ihr display inline tragen). Hinweise (Toasts) rücken stattdessen über die Tastatur. */
   html.kb-auf .fab-assistant,html.kb-auf .rec-pill,html.kb-auf .kb-weg{display:none!important}
   html.kb-auf .kb-lift{bottom:calc((var(--kb) + 12px) / var(--zoom,1))!important}
+  /* iOS-26-Fehler (siehe Kopf-Skript): bleibt die Layout-Höhe nach dem Schließen der Tastatur zu
+     klein, rücken die unteren Leisten um die Lücke an den echten Bildschirmrand, und Fenster
+     reichen wieder bis ganz unten. "translate" statt "transform", damit vorhandene Verschiebungen
+     (Toast: -50 %) erhalten bleiben. --vv-luecke ist echte Bildschirmhöhe, deshalb / var(--zoom,1). */
+  html.vv-luecke .tabbar,html.vv-luecke .fab-assistant,html.vv-luecke .rec-pill,html.vv-luecke .app-toast,html.vv-luecke .kb-weg{translate:0 calc(var(--vv-luecke) / var(--zoom,1))}
+  html.vv-luecke .modal-overlay,html.vv-luecke .cmdk-overlay{bottom:calc(0px - var(--vv-luecke) / var(--zoom,1))!important}
   /* Grundregel für alle Dialoge: Ein Dialog ohne eigenes max-height (u.a. die zentrierten mit
      padding:18) wuchs auf kleinen Geräten über den Bildschirm hinaus, und wer eins hatte, aber
      kein overflowY, ließ sich nicht scrollen. :where() hält die Spezifität bei 0 - eigene Klassen
@@ -4095,7 +4138,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.119.0";
+const APP_VERSION = "2.119.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4249,6 +4292,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.119.1", date: "Oktober 2026", changes: [
+            "Fehler behoben: Auf manchen iPhones blieb die untere Leiste nach dem Tippen mitten im Bildschirm hängen",
+        ] },
     { v: "2.119.0", date: "Oktober 2026", changes: [
             "Kalender: Dauert eine Fahrstunde länger oder kürzer als geplant, passt sich das Ende des Termins beim Abschließen automatisch an",
         ] },
