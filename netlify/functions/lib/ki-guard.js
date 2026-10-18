@@ -31,7 +31,10 @@ const KI_DAILY_LIMIT = 150;
 // Prueft und erhoeht atomar das gemeinsame Tageskontingent des Kontos (ueber dessen eigenes
 // Token, RPC laeuft mit auth.uid() des Aufrufers). true = noch Budget frei (und schon
 // mitgezaehlt), false = Limit fuer heute erreicht. Fail-open bei jedem Infrastrukturproblem.
-async function dailyLimitOk(token) {
+// feature/limit nur fuer Functions mit eigenem Kontingent (Ally: eine Frage braucht mehrere
+// Runden und wuerde sonst das gemeinsame Kontingent aufbrauchen). Ohne beides bleibt der Aufruf
+// genau wie bisher (Zaehler "default").
+async function dailyLimitOk(token, feature, limit) {
   if (!token) return true;
   try {
     const resp = await fetch(SUPABASE_URL + "/rest/v1/rpc/ki_rate_limit", {
@@ -41,7 +44,7 @@ async function dailyLimitOk(token) {
         Authorization: "Bearer " + token,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ max_per_day: KI_DAILY_LIMIT }),
+      body: JSON.stringify(feature ? { max_per_day: limit || KI_DAILY_LIMIT, p_feature: feature } : { max_per_day: KI_DAILY_LIMIT }),
     });
     if (!resp.ok) return true; // fail-open
     const out = await resp.json().catch(() => null);
@@ -74,14 +77,16 @@ async function schuleErlaubtKi(token) {
 }
 
 // Gibt { ok: true } zurueck, wenn der Aufruf erlaubt ist, sonst { ok: false, statusCode, error }.
-async function subscriptionGate(uid, token) {
+// opts (optional): { feature, limit } - eigenes Tageskontingent statt des gemeinsamen.
+async function subscriptionGate(uid, token, opts) {
+  const o = opts || {};
   // Schul-Schalter vor dem Tageslimit, damit ein gesperrter Aufruf kein Kontingent verbraucht.
   if (!(await schuleErlaubtKi(token))) {
     return { ok: false, statusCode: 403, error: "KI-Funktionen sind für deine Fahrschule ausgeschaltet." };
   }
 
   // Ebene 2 zuerst (siehe Kommentar oben) - unabhaengig vom Abo-Status.
-  const unterTageslimit = await dailyLimitOk(token);
+  const unterTageslimit = await dailyLimitOk(token, o.feature, o.limit);
   if (!unterTageslimit) {
     return {
       ok: false,
