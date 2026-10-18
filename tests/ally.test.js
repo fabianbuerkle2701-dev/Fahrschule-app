@@ -3,7 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const k = require("./lade-app")(["ALLY_WERKZEUGE", "allyNeueKarte", "allyKuerzel", "allyNamenErsetzen", "allyKuerzelAufloesen", "allyGesundheit",
-    "allyFreitext", "allyFilterPasst", "allyFilterLeer", "allyKontextZeile", "allyNamePasst", "allyWunschzeiten", "allyAntwortText", "allyDatumOk", "allyZeitOk"]);
+    "allyFreitext", "allyFilterPasst", "allyFilterLeer", "allyKontextZeile", "allyNamePasst", "allyWunschzeiten", "allyAntwortText", "allyDatumOk", "allyZeitOk",
+    "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText"]);
 
 const PERSONEN = [
     { schluessel: "s:1", vorname: "Lena", nachname: "Weber", anzeige: "Lena Weber" },
@@ -100,4 +101,19 @@ test("App und Server kennen dieselben Werkzeuge", () => {
         assert.deepEqual(fn.WERKZEUGE.map(w => w.name).sort(), Array.from(k.ALLY_WERKZEUGE).sort());
     }
     finally { Module._load = alt; }
+});
+
+test("Plan: Rückfrage zählt nur Abgehaktes ohne Problem, Verschieben geht einzeln", () => {
+    const punkte = [{ art: "annehmen" }, { art: "annehmen" }, { art: "ablehnen" }, { art: "vorschlag", problem: "Überschneidet sich." }, { art: "vorschlag" }, { art: "anbieten" }, { art: "verschieben" }];
+    assert.deepEqual(Array.from(k.allyPlanZeilen(punkte, new Set([0, 1, 2, 3, 4, 5, 6]))), ["2 Anfragen werden bestätigt", "1 Anfrage wird abgelehnt und gelöscht",
+        "1 Terminvorschlag wird angelegt", "1 freie Zeit wird der Warteliste angeboten"]);
+    assert.deepEqual(Array.from(k.allyPlanZeilen(punkte, new Set([1]))), ["1 Anfrage wird bestätigt"]);
+    assert.deepEqual(Array.from(k.allyPlanZeilen(punkte, new Set())), []);
+});
+
+test("Plan: Arten passen zum Server, WhatsApp-Text zum Verschieben kommt aus der App", () => {
+    assert.deepEqual(Object.keys(k.ALLY_PLAN_ARTEN).sort(), ["ablehnen", "anbieten", "annehmen", "verschieben", "vorschlag"]);
+    assert.equal(k.allyVerschiebenText("Lena", "Donnerstag, 23.10.", "10:00", "09:15"),
+        "Hallo Lena, würde es dir passen, wenn deine Fahrstunde am Donnerstag, 23.10. um 09:15 Uhr statt um 10:00 Uhr beginnt? Gib mir bitte kurz Bescheid. Danke!");
+    assert.match(k.allyVerschiebenText("", "Mo", "8:00", "9:00"), /^Hallo, /);
 });

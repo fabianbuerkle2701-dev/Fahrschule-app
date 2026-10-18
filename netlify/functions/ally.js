@@ -1,4 +1,4 @@
-// Netlify Function: Ally - die KI im Kalender (Etappe 1 "Fragen und Filtern", v2.120.0).
+// Netlify Function: Ally - die KI im Kalender (v2.120.0 "Fragen und Filtern", v2.121.0 "Planen").
 //
 // Der Server ist bewusst nur ein duenner Durchreicher:
 //   - Regeln (System-Prompt) und Werkzeugliste stehen fest HIER und nicht in der App. So kann
@@ -8,7 +8,9 @@
 //     dort liegen die Pruefungen (Ueberschneidung, Limits, Arbeitszeit), und nur die App kennt
 //     die echten Namen: zur KI gehen Kuerzel (S1, A1 ...) statt Namen, Gesundheitsangaben
 //     filtert die App vorher heraus.
-//   - Etappe 1 liest nur und stellt die Kalender-Ansicht um. Kein Werkzeug aendert Daten.
+//   - Kein Werkzeug aendert selbst Daten. Seit v2.121.0 stellt Ally Plaene zusammen
+//     (plan_vorschlagen); die App zeigt sie mit Haekchen und setzt sie erst nach dem OK des
+//     Fahrlehrers um - mit denselben Pruefungen wie der fruehere Knopf "Planen".
 //
 // Zugang, fail-closed: angemeldet, nicht der Demo-Account, KI fuer die Fahrschule an
 // (ki-guard), Pilot "ally" fuer die Fahrschule freigeschaltet, Ally bzw. KI nicht persoenlich
@@ -42,9 +44,10 @@ const STATUS = ["bestaetigt", "anfrage", "absage_wunsch", "angeboten"];
 const SYSTEM = `Du bist Ally, die KI im Kalender der Fahrschul-App Allindrive. Du hilfst einem Fahrlehrer, seinen Kalender im Blick zu behalten: Fragen beantworten, offene Anfragen zeigen, freie Zeiten finden und die Kalender-Ansicht passend einstellen.
 
 WAS DU KANNST
-- Lesen: Termine, Terminanfragen, Absage-Wünsche, Angebote an die Warteliste, Planungsfakten zu Schülern, freie Zeiten, Regelprüfungen, noch nicht abgeschlossene Fahrstunden, Erinnerungen für morgen, Einstellungen.
+- Lesen: Termine, Terminanfragen, Absage-Wünsche, Angebote an die Warteliste, Planungsfakten zu Schülern, freie Zeiten, Wartezeit zwischen Terminen, passende Zeiten für die Warteliste, Regelprüfungen, noch nicht abgeschlossene Fahrstunden, Erinnerungen für morgen, Einstellungen.
 - Ansicht: Filter im Kalender setzen oder entfernen, zu einem Tag, einer Woche oder einem Monat springen.
-Du kannst in dieser Version noch NICHTS ändern: keine Termine anlegen, verschieben, absagen oder bestätigen, keine Anfragen annehmen oder ablehnen, keine Nachrichten senden, keine Einstellungen ändern. Wird so etwas gewünscht, sag in einem Satz, dass das noch nicht über dich geht und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen). Tu nie so, als hättest du etwas geändert.
+- Planen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen.
+Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was nicht in einen Plan passt (einen Termin direkt eintragen oder absagen, Einstellungen ändern, Nachrichten senden), geht noch nicht über dich: sag das in einem Satz und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen).
 
 DATEN UND KÜRZEL
 - Namen siehst du nie. Schüler heißen S1, S2 usw., Personen mit einer Terminanfrage, aber ohne Schülerakte, heißen P1, P2 usw. Die App setzt in deiner Antwort automatisch die echten Namen ein. Schreib Personen deshalb immer nur als Kürzel, ohne Klammern und ohne Zusätze wie "Schüler".
@@ -59,6 +62,17 @@ GENAUIGKEIT
 - Jede Nachricht des Fahrlehrers beginnt mit einer Zeile der App: aktuelles Datum, Uhrzeit und was der Kalender gerade zeigt. Leite "heute", "morgen", "nächsten Dienstag" usw. daraus ab. Werkzeuge bekommen Daten immer als JJJJ-MM-TT und Uhrzeiten als HH:MM.
 - Fehlt dir etwas Wichtiges, frag kurz nach, statt zu raten.
 - Brauchst du mehrere Werkzeuge unabhängig voneinander, ruf sie im selben Schritt auf. Lies lieber einmal einen längeren Zeitraum als viele einzelne Tage.
+
+PLANEN
+- Hol dir zuerst die Fakten, je nach Auftrag: anfragen_lesen, freie_zeiten, schueler_liste, leerlauf_finden, warteliste_luecken. Bei "Plane meine Woche" oder ähnlich alles davon für die nächsten sieben Tage, in einem Schritt.
+- Dann genau ein plan_vorschlagen mit höchstens 10 Punkten. Der Grund je Punkt ist ein kurzer Halbsatz (höchstens 12 Wörter). Gibt es nichts Sinnvolles zu planen, sag das, statt einen leeren Plan zu schicken.
+- Anfragen: annehmen, wenn regeln_pruefen mit termin = Nummer der Anfrage keinen Konflikt meldet. Ablehnen nur mit echtem Grund: Überschneidung, Limit, außerhalb der Arbeitszeit, Feiertag. Mehr als 60 Minuten Leerlauf davor oder danach sprechen gegen eine normale Anfrage, nicht gegen eine Sonderfahrt.
+- Terminvorschläge: nur in freie Zeiten aus freie_zeiten. Vorrang hat, wer keinen nächsten Termin hat, wessen letzte Fahrstunde lange her ist, wessen Prüfung näher rückt oder wem Sonderfahrten fehlen. Wunschzeiten beachten. Höchstens ein Vorschlag je Schüler und Tag. Lieber an bestehende Termine anschließen als neue Lücken reißen.
+- Sonderfahrten: Dämmerungsfahrten (NF) erst nach Sonnenuntergang, Überland (ÜL) und Autobahn (AB) am besten als Doppelstunde mit 90 Minuten.
+- Warteliste: nur Zeiten aus warteliste_luecken anbieten.
+- Verschieben: nur Termine, die leerlauf_finden als verschiebbar zeigt, am selben Tag, und nur wenn es Wartezeit spart. Der Fahrlehrer fragt den Schüler vorher.
+- Vorrang nie nach Leistung oder Lernstand, nur nach Terminlage, Pflichtfahrten, Prüfungstermin und Wunschzeiten.
+- Nach plan_vorschlagen in zwei, drei Sätzen sagen, was im Plan steht und was die App beanstandet hat. Der Plan erscheint mit Häkchen direkt unter deiner Antwort.
 
 ANSICHT
 - Will der Fahrlehrer etwas sehen oder "nur …" angezeigt bekommen, stell die Ansicht mit ansicht_filtern und ansicht_springen ein und sag in einem kurzen Satz, was jetzt zu sehen ist. Liegen die gefilterten Termine nicht im gezeigten Zeitraum, spring auch dorthin.
@@ -115,7 +129,7 @@ const WERKZEUGE = [
   },
   {
     name: "schueler_liste",
-    description: "Liste der eigenen Schüler als Kürzel mit Klasse, gefahrenen Stunden, offenen Sonderfahrten und nächstem Termin. Für Fragen über mehrere Schüler (\"Wer hat noch keine Autobahnfahrt?\", \"Wer hat diese Woche keinen Termin?\"). Mit suche findest du einen Schüler, dessen Name im Text des Fahrlehrers nicht als Kürzel ersetzt wurde, etwa bei einem Tippfehler oder Spitznamen.",
+    description: "Liste der eigenen Schüler als Kürzel mit Planungsfakten: Klasse, gefahrene Stunden, offene Sonderfahrten, nächster Termin (und in wie vielen Tagen), Tage seit der letzten Fahrstunde, Termine in den nächsten sieben Tagen, Prüfungstermin, Wunschzeiten, Warteliste. Für Planung und für Fragen über mehrere Schüler (\"Wer hat noch keine Autobahnfahrt?\"). Mit suche findest du einen Schüler, dessen Name im Text des Fahrlehrers nicht als Kürzel ersetzt wurde, etwa bei einem Tippfehler oder Spitznamen.",
     input_schema: {
       type: "object",
       properties: {
@@ -150,6 +164,48 @@ const WERKZEUGE = [
         termin: { type: "string", description: "Nummer eines bestehenden Termins (#…), der beim Prüfen nicht als Überschneidung zählt, z. B. die Anfrage selbst" },
       },
       required: ["datum", "von", "minuten"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "leerlauf_finden",
+    description: "Tage der nächsten zwei Wochen mit Wartezeit von mindestens 45 Minuten zwischen zwei Fahrstunden: Arbeitszeit, die Lücken und alle Termine des Tages mit Nummer, Person, Uhrzeit, Art, Wunschfenster und ob sie verschiebbar sind. Grundlage für Verschiebungen im Plan.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "warteliste_luecken",
+    description: "Freie Zeiten der nächsten sieben Tage, die zu den Wunschzeiten wartender Schüler passen (Warteliste in der Schüler-App), mit dem passenden Schüler. Grundlage für Angebote an die Warteliste im Plan.",
+    input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "plan_vorschlagen",
+    description: "Zeigt dem Fahrlehrer einen Plan mit Häkchen. Ändert selbst nichts: Erst wenn er Punkte abhakt und bestätigt, setzt die App sie um und prüft dabei jede Regel noch einmal. Ein neuer Plan ersetzt einen noch offenen. Arten: vorschlag = Terminvorschlag an einen Schüler (er bestätigt ihn selbst), annehmen / ablehnen = offene Anfrage, anbieten = freie Zeit an die Warteliste, verschieben = bestätigten Termin am selben Tag auf eine andere Uhrzeit. Die Antwort sagt, welche Punkte die App beanstandet.",
+    input_schema: {
+      type: "object",
+      properties: {
+        titel: { type: "string", description: "Kurzer Titel, z. B. \"Woche füllen\" oder \"Offene Anfragen\"" },
+        zusammenfassung: { type: "string", description: "Ein Satz zum ganzen Plan" },
+        punkte: {
+          type: "array",
+          description: "Höchstens 10 Punkte",
+          items: {
+            type: "object",
+            properties: {
+              art: { type: "string", enum: ["vorschlag", "annehmen", "ablehnen", "anbieten", "verschieben"] },
+              schueler: { type: "string", description: "Kürzel des Schülers (vorschlag; bei anbieten der passende Schüler aus warteliste_luecken)" },
+              termin: { type: "string", description: "Nummer des bestehenden Termins (annehmen, ablehnen, verschieben)" },
+              datum: { type: "string", description: "Tag, JJJJ-MM-TT (vorschlag, anbieten)" },
+              von: { type: "string", description: "HH:MM - Beginn (vorschlag, anbieten) bzw. neue Uhrzeit (verschieben)" },
+              minuten: { type: "integer", description: "Dauer in Minuten (vorschlag, anbieten)" },
+              terminart: { type: "string", description: "Code der Terminart (vorschlag), sonst ÜST" },
+              grund: { type: "string", description: "Kurzer Halbsatz, warum" },
+            },
+            required: ["art", "grund"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["titel", "punkte"],
       additionalProperties: false,
     },
   },

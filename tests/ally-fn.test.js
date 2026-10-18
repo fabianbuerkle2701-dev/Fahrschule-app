@@ -54,7 +54,11 @@ test("Anfrage an Anthropic: Sonnet 5.5, niedrige Denkstufe, Caching, feste Regel
     assert.equal(p.thinking, undefined, "thinking: disabled gäbe auf Sonnet 5.5 einen 400");
     assert.equal(typeof p.system, "string");
     assert.doesNotMatch(p.system, /20\d\d-\d\d-\d\d/, "kein Datum im System-Prompt, sonst greift das Caching nicht");
-    assert.equal(p.tools.length, 11);
+    assert.equal(p.tools.length, 14);
+    const plan = p.tools.find(w => w.name === "plan_vorschlagen");
+    assert.ok(plan, "Planen-Werkzeug vorhanden");
+    assert.deepEqual(plan.input_schema.properties.punkte.items.properties.art.enum, ["vorschlag", "annehmen", "ablehnen", "anbieten", "verschieben"]);
+    assert.match(p.system, /Selbst ändern kannst du nichts/);
     assert.ok(p.tools.every(w => w.input_schema && w.input_schema.type === "object"));
     assert.deepEqual(sdk.gate, { feature: "ally", limit: 300 }, "eigenes Tageskontingent");
     assert.equal(sdk.optionen.maxRetries, 1);
