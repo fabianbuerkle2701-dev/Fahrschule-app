@@ -2,11 +2,11 @@
 // zwischengespeichert - Änderungen hier wirken mit dem nächsten Deploy. Bei neuen Funktionen,
 // geänderten Menüs oder Bezeichnungen hier nachziehen, sonst erklärt der Support alte Wege
 // (siehe Obsidian „KI-Support“). Die Navigationsziele müssen zu befehlsZiele() in index.html passen.
-// Stand: v2.125.1, zusammengestellt aus dem Code am 19.10.2026. Keine personenbezogenen Daten.
+// Stand: v2.125.2, zusammengestellt aus dem Code am 19.10.2026. Keine personenbezogenen Daten.
 
 const WISSEN = `# Allindrive – Wissensbuch für den Support
 
-Stand: App-Version 2.125.1 (Oktober 2026). Alle Menüpfade, Reiter und Knöpfe sind so geschrieben, wie sie in der App stehen. „›“ trennt die Schritte eines Pfads.
+Stand: App-Version 2.125.2 (Oktober 2026). Alle Menüpfade, Reiter und Knöpfe sind so geschrieben, wie sie in der App stehen. „›“ trennt die Schritte eines Pfads.
 
 Grundregeln für Antworten:
 - Viele Bereiche lassen sich abschalten (Einstellungen › Funktionen ein/aus). Findet jemand etwas nicht, ist eine ausgeschaltete Funktion der häufigste Grund – persönlich oder für die ganze Fahrschule.
@@ -197,7 +197,7 @@ Löschung nach § 31 FahrlG: Fünf Jahre nach dem Jahresende der Archivierung er
 - Antippen eines Termins im Kalender öffnet die Auswahl: „Vor der Fahrt“ (Ziel, Notiz „Nächstes Mal“, Auffälligkeiten, Sonderfahrt-Stand, Prüfungswarnung, „Fahrstundenplan ansehen“), „Zum Abholort navigieren“, „Termin bearbeiten“, „Fahrstunde abschließen“ bzw. „Fahrstunde anlegen“, „Termin löschen“, „Abbrechen“.
 - Verschieben: „Termin bearbeiten“ › Datum/Von/Bis ändern › „Speichern“. Ziehen per Maus gibt es nur im Team-Kalender (Fahrlehrerwechsel).
 - In „Termin bearbeiten“ außerdem: „Bestätigung per WhatsApp senden“, „Als Kalender-Datei senden“, „Leistung erstellen“ (Leistungsnachweis mit Unterschrift), bei Theorieunterricht „Anwesenheit (QR-Check-in)“, bei vergangenen Terminen „Stunde im Tagebuch bewerten“.
-- Löschen: „Termin löschen“ › „Löschen“. Warten Schüler auf einen früheren Termin, fragt die App danach „Termin ist frei geworden“ und bietet die Zeit der Warteliste an („Auf der Warteliste anbieten“, WhatsApp je Schüler, oder „Nicht anbieten“).
+- Löschen: „Termin löschen“ › „Löschen“. Warten Schüler auf einen früheren Termin, fragt die App danach „Termin ist frei geworden“ und bietet die Zeit der Warteliste an („Auf der Warteliste anbieten“, WhatsApp je Schüler, oder „Nicht anbieten“). Hatte der Schüler den Termin absagen wollen (Storno-Anfrage) und beginnt er innerhalb deiner Stornofrist, fragt die App dabei auch nach der Ausfallgebühr („Gebühr buchen“ oder „Kulanz“).
 - Ein Schüler erscheint nicht: Schüler › Übersicht › Karte „Zuverlässigkeit“ › „+ melden“ (Notiz, optional Ausfallgebühr; Standardbetrag unter Einstellungen › Kosten).
 
 ### Terminart und Ausbildungsfahrt-Arten
@@ -643,7 +643,7 @@ Einstellungen › Daten & Sicherung:
 4. **KI-Knöpfe fehlen / „KI-Funktionen sind für deine Fahrschule ausgeschaltet.“** → KI-Schalter (Einstellungen › Kosten, Admin) oder Funktion „KI-Helfer“ persönlich aus.
 5. **Kalender zeigt nicht alle Termine** → Ally-Filter aktiv („Kalender gefiltert“ › „Alle zeigen“); im Team-Kalender Standort-Filter; Sonntag erst sichtbar, wenn unter Arbeitszeiten eingeblendet.
 6. **Schüler kann einen Tag nicht buchen („außerhalb der Arbeitszeit“)** → Sonntag immer gesperrt; sonst Wochentage & Zeiten (Kreuz = gesperrt), Urlaub oder Krank-Sperre.
-7. **Keine Frage nach der Ausfallgebühr nach kurzfristiger Absage** → Die Frage („Gebühr buchen“ oder „Kulanz“) kommt nur bei „Stornierung bestätigen“ und nur, wenn eine Stornofrist eingetragen ist (Einstellungen › Kosten) und der Termin dann noch innerhalb dieser Frist beginnt. „Termin löschen“ fragt nicht. Bis v2.125.0 fehlte sie außerdem bei ausgeschalteter Funktion „Warteliste & Lücken-Radar“ – in v2.125.1 behoben, App neu öffnen. Gebühr nachträglich: Kasse › „+ Posten hinzufügen“.
+7. **Keine Frage nach der Ausfallgebühr nach kurzfristiger Absage** → Die Frage („Gebühr buchen“ oder „Kulanz“) kommt, wenn du die Storno-Anfrage eines Schülers annimmst – über „Stornierung bestätigen“ oder „Termin löschen“ – und der Termin dann noch innerhalb deiner Stornofrist beginnt (Einstellungen › Kosten; ohne eingetragene Frist keine Frage). Termine ohne Storno-Anfrage lösen keine Frage aus. Ältere Versionen fragten nicht bei ausgeschalteter Funktion „Warteliste & Lücken-Radar“ (behoben in v2.125.1) und nicht bei „Termin löschen“ (seit v2.125.2) – App neu öffnen. Gebühr nachträglich: Kasse › „+ Posten hinzufügen“.
 8. **Tag „voll ausgelastet“, obwohl Zeit frei** → Tageslimit erreicht; ohne Haken bei „Vorschläge über … Min. am Tag zulassen“ zählen offene Vorschläge mit.
 9. **Termin lässt sich nicht bestätigen** → Tages-/Wochenlimit, Limit je Schüler oder Überschneidung.
 10. **Schüler kann wegen offener Rechnung nicht buchen** → Kasse › „Guthaben-Modus“ steht auf „Deckung nötig“.
