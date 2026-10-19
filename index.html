@@ -4315,7 +4315,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.125.1";
+const APP_VERSION = "2.125.2";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4469,6 +4469,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.125.2", date: "Oktober 2026", changes: [
+            "Löschst du einen Termin, den ein Schüler kurzfristig absagen möchte, fragt die App jetzt ebenfalls nach der Ausfallgebühr",
+        ] },
     { v: "2.125.1", date: "Oktober 2026", changes: [
             "Fehler behoben: Ist die Warteliste ausgeschaltet, fragt die App nach einer kurzfristigen Absage jetzt trotzdem, ob du eine Ausfallgebühr buchen möchtest",
         ] },
@@ -26860,15 +26863,21 @@ function App() {
         if (await askConfirm({ message: "Diesen Terminvorschlag ablehnen und entfernen?", confirmLabel: "Ablehnen" }))
             await removeAppt(id, { label: "Vorschlag abgelehnt" });
     }
+    // Gebührenfrage zu einer Storno-Anfrage, die der Fahrlehrer annimmt - über „Stornierung
+    // bestätigen“ oder (seit v2.125.2) „Termin löschen“. Liefert das extra für maybeOfferWaitlist()
+    // oder null. VOR dem Löschen aufrufen (danach ist start_at weg). Es gibt keinen eigenen
+    // Zeitstempel dafür, WANN der Schüler die Stornierung angefragt hat - als ehrliche Näherung
+    // gilt: beginnt der Termin JETZT, im Moment der Fahrlehrer-Entscheidung, noch innerhalb der
+    // Stornofrist, war die Anfrage in jedem Fall kurzfristig genug.
+    function stornoGebuehrFrage(appt) {
+        const kurzfristig = !!(appt && stornoFristStunden != null && (new Date(appt.start_at).getTime() - Date.now()) < stornoFristStunden * 3600000);
+        return kurzfristig ? { gebuehr: ausfallgebuehrVorschlag(appt) } : null;
+    }
     // Storno-Anfrage eines Fahrschülers: bestätigen (Termin löschen) oder ablehnen (Termin behalten).
     async function confirmCancel(id) {
         if (await askConfirm({ message: "Stornierung bestätigen? Der Termin wird damit endgültig gelöscht.", confirmLabel: "Stornierung bestätigen" })) {
             const freed = (appts || []).find(a => a.id === id);
-            // Kurzfristigkeits-Prüfung VOR dem Löschen (danach ist start_at weg). Es gibt keinen
-            // eigenen Zeitstempel dafür, WANN der Schüler die Stornierung angefragt hat - als
-            // ehrliche Näherung gilt: beginnt der Termin JETZT, im Moment der Fahrlehrer-Entscheidung,
-            // noch innerhalb der Stornofrist, war die Anfrage in jedem Fall kurzfristig genug.
-            const kurzfristig = !!(freed && stornoFristStunden != null && (new Date(freed.start_at).getTime() - Date.now()) < stornoFristStunden * 3600000);
+            const extra = stornoGebuehrFrage(freed);
             const ok = await removeAppt(id, { label: "Termin storniert" });
             // Nur bei tatsächlich erfolgreichem Löschen der Warteliste anbieten - sonst könnte ein
             // fehlgeschlagenes Löschen (Netzwerkfehler) denselben Termin doppelt vergeben: der
@@ -26878,7 +26887,7 @@ function App() {
             // Warteliste und Ersatz-Kandidaten zusammen - vorher liefen zwei Gebühren-Rückfragen
             // gleichzeitig mit dem Wartelisten-Sheet und schoben sich darüber.
             if (freed && ok)
-                maybeOfferWaitlist({ ...freed, status: "confirmed" }, undefined, kurzfristig ? { gebuehr: ausfallgebuehrVorschlag(freed) } : null);
+                maybeOfferWaitlist({ ...freed, status: "confirmed" }, undefined, extra);
         }
     }
     // Ausfallgebühr für eine kurzfristig stornierte Fahrstunde - eigenständig statt reportNoShow()
@@ -45508,6 +45517,9 @@ function App() {
                             // sonst hinter dem Auswahlfenster und ist nicht bedienbar.
                             setApptChoice(null);
                             if (await askConfirm({ message: "Diesen Termin löschen?", confirmLabel: "Löschen", danger: true })) {
+                                // Offene Storno-Anfrage: dieselbe Gebührenfrage wie bei „Stornierung
+                                // bestätigen“ (v2.125.2) - vor dem Löschen prüfen, siehe stornoGebuehrFrage().
+                                const extra = a.status === "cancel_requested" ? stornoGebuehrFrage(a) : null;
                                 const ok = await removeAppt(a.id);
                                 // Bei einer offenen Storno-Anfrage war der Termin bis eben "confirmed"
                                 // (cancel_requested ist nur ein Zwischenstatus) - maybeOfferWaitlist
@@ -45515,7 +45527,7 @@ function App() {
                                 // tatsächlich erfolgreichem Löschen anbieten, sonst könnte ein
                                 // fehlgeschlagenes Löschen denselben Termin doppelt vergeben.
                                 if (ok)
-                                    maybeOfferWaitlist(a.status === "cancel_requested" ? { ...a, status: "confirmed" } : a);
+                                    maybeOfferWaitlist(a.status === "cancel_requested" ? { ...a, status: "confirmed" } : a, undefined, extra);
                             } } },
                     React.createElement("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2.2", strokeLinecap: "round", strokeLinejoin: "round" },
                         React.createElement("path", { d: "M3 6h18" }),
@@ -45865,12 +45877,14 @@ function App() {
                         // dieser (sehr gängige) Löschweg den Slot nie an wartende Schüler an, anders
                         // als das Löschen direkt aus dem Termin-Auswahlfenster.
                         const freed = (appts || []).find(x => x.id === apptForm.id);
+                        // Offene Storno-Anfrage: Gebührenfrage wie bei „Stornierung bestätigen“ (v2.125.2).
+                        const extra = freed && freed.status === "cancel_requested" ? stornoGebuehrFrage(freed) : null;
                         const ok = await removeAppt(apptForm.id);
                         setApptForm(null);
                         // Nur bei tatsächlich erfolgreichem Löschen anbieten, sonst könnte ein
                         // fehlgeschlagenes Löschen denselben Termin doppelt vergeben.
                         if (freed && ok)
-                            maybeOfferWaitlist(freed.status === "cancel_requested" ? { ...freed, status: "confirmed" } : freed);
+                            maybeOfferWaitlist(freed.status === "cancel_requested" ? { ...freed, status: "confirmed" } : freed, undefined, extra);
                     } } }, "Termin l\u00F6schen"),
                 React.createElement("button", { className: "btn btn-ghost btn-block", disabled: !!apptForm.busy, onClick: () => { if (!apptForm.busy) setApptForm(null); } }, "Abbrechen"))),
         showNachweisModal && React.createElement("div", { className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 100, display: "flex",
