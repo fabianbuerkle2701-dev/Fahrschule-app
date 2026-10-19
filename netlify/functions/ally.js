@@ -18,6 +18,8 @@
 //     Formular "Fahrstunde erfassen" fuellt der Fahrlehrer selbst aus. Seit v2.124.0 liest Ally
 //     auch offene Betraege und den Ausbildungsnachweis (ADK/Strecken) - beides mit Kuerzeln, und
 //     beides in der App einzeln abschaltbar - und bereitet Zahlungen und Haken als Planpunkte vor.
+//     Seit v2.125.0 oeffnet Ally Seiten der App (seite_oeffnen) und uebergibt Fragen zur Bedienung,
+//     zu Fehlern, Konto oder Abo an den KI-Support (support_uebergeben, netlify/functions/support.js).
 //
 // Zugang, fail-closed: angemeldet, nicht der Demo-Account, KI fuer die Fahrschule an
 // (ki-guard), Pilot "ally" fuer die Fahrschule freigeschaltet, Ally bzw. KI nicht persoenlich
@@ -55,6 +57,7 @@ WAS DU KANNST
 - Ansicht: Filter im Kalender setzen oder entfernen, zu einem Tag, einer Woche oder einem Monat springen.
 - Planen und Eintragen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): feste Termine eintragen, Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen, erhaltene Zahlungen erfassen, ADK- und Streckenpunkte abhaken.
 - Abschließen: den Abschluss einer gefahrenen Fahrstunde bereitlegen (abschluss_oeffnen). Ausfüllen und speichern tut der Fahrlehrer selbst.
+- Weiterhelfen: eine Seite der App öffnen (seite_oeffnen) und Fragen zur Bedienung der App, zu Fehlern, Konto, Abo oder Datenschutz an den Allindrive-Support übergeben (support_uebergeben).
 Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was du nicht kannst (einen bestätigten Termin absagen oder ändern, Kontaktdaten oder Notizen eines Schülers ändern, Rechnungen schreiben, Einstellungen ändern, Nachrichten senden), sag in einem Satz, und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen, die Schülerakte öffnen).
 Steht in der Zeile der App "Aus: …", sind diese Bereiche für dich ausgeschaltet: nutz ihre Werkzeuge nicht, sondern sag, dass der Fahrlehrer sie unter Einstellungen › Funktionen einschalten kann.
 
@@ -94,6 +97,9 @@ AUSBILDUNGSNACHWEIS
 - Abhaken (Arten adk und strecke im Plan) nur, wenn der Fahrlehrer sagt, was geübt oder gefahren wurde. Nimm die Nummer des passenden Punkts aus ausbildung_lesen (am besten mit suche). Passt kein Punkt eindeutig, frag nach. wert ist der neue Stand; ohne wert zählt die App ein Mal dazu.
 - Daraus folgt nie eine Aussage über Prüfungsreife oder Leistung.
 
+SUPPORT
+- Fragen zur Bedienung der App (wo finde ich etwas, wie geht etwas), Fehler, Konto, Abo und Datenschutz beantwortet der Allindrive-Support mit seinem Wissen über die App. Ruf dafür support_uebergeben mit der Frage auf und sag in einem Satz, dass der Support das beantwortet. Erklär die Bedienung nicht selbst aus dem Gedächtnis.
+
 ABSCHLIESSEN
 - Will der Fahrlehrer eine gefahrene Fahrstunde abschließen oder als gefahren erfassen: offene_abschluesse lesen und abschluss_oeffnen mit der Nummer des Termins aufrufen. Steht die Fahrstunde nicht im Kalender, abschluss_oeffnen mit schueler, datum, von und minuten: dann öffnet sich das Formular "Fahrstunde erfassen".
 - Danach in einem Satz sagen, welche Fahrstunde bereitliegt. Unter deiner Antwort erscheint ein Knopf zum Öffnen. Bewertung, Ausbildungsnachweis und Notizen trägt der Fahrlehrer im Abschluss selbst ein; frag nicht danach.
@@ -104,6 +110,7 @@ ANSICHT
 
 GRENZEN
 - Du bewertest keine Menschen: keinen Lernstand, keine Prüfungsreife, keine Leistung, Zuverlässigkeit oder Eignung von Schülern oder Fahrlehrern, keine Ranglisten. Wird danach gefragt, sag freundlich, dass das der Fahrlehrer selbst entscheidet, und biete die passenden Fakten an (Termine, gefahrene Stunden, Sonderfahrten, Einträge im Ausbildungsnachweis).
+- Fragt der Fahrlehrer, was ein Schüler als Nächstes üben sollte oder wo er Schwächen hat: nenn Fakten (offene Punkte aus ausbildung_lesen, fehlende Sonderfahrten aus schueler_stand) und biete mit seite_oeffnen den Ausbildungsnavigator an, der die nächste Stunde aus ADK und letzten Stunden plant, bzw. die Fahrstunden, wo die App „Wiederkehrend auffällig“ aus seinen eigenen Bewertungen zeigt. Eine eigene Empfehlung, was geübt werden soll, gibst du nicht.
 - Keine Gesundheitsangaben: frag nie danach und leite nichts dazu ab.
 - Keine Rechtsberatung. Angaben zu Pflichtfahrten nur so, wie die Werkzeuge sie liefern.
 
@@ -282,6 +289,30 @@ const WERKZEUGE = [
         von: { type: "string", description: "Beginn, HH:MM, nur ohne Termin" },
         minuten: { type: "integer", description: "Dauer in Minuten, nur ohne Termin" },
       },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "seite_oeffnen",
+    description: "Legt unter deine Antwort einen Knopf, der eine Seite der App öffnet - bei Seiten eines Schülers mit dessen Kürzel. Ändert nichts.",
+    input_schema: {
+      type: "object",
+      properties: {
+        ziel: { type: "string", enum: ["uebersicht", "navigator", "adk", "strecken", "fahrstunden", "schuelerdaten", "kosten", "schuelerliste", "kalender", "auswertung", "tagesgeschaeft", "einstellungen"],
+          description: "uebersicht, navigator, adk, strecken, fahrstunden, schuelerdaten und kosten brauchen schueler" },
+        schueler: { type: "string", description: "Kürzel des Schülers" },
+      },
+      required: ["ziel"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "support_uebergeben",
+    description: "Legt unter deine Antwort einen Knopf „Im Support fragen“: der Allindrive-Support beantwortet Fragen zur Bedienung der App, zu Fehlern, Konto, Abo und Datenschutz. frage ist die Frage des Fahrlehrers in einem Satz.",
+    input_schema: {
+      type: "object",
+      properties: { frage: { type: "string", description: "Die Frage, Kürzel statt Namen" } },
+      required: ["frage"],
       additionalProperties: false,
     },
   },

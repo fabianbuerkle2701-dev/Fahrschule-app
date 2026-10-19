@@ -77,7 +77,8 @@ async function schuleErlaubtKi(token) {
 }
 
 // Gibt { ok: true } zurueck, wenn der Aufruf erlaubt ist, sonst { ok: false, statusCode, error }.
-// opts (optional): { feature, limit } - eigenes Tageskontingent statt des gemeinsamen.
+// opts (optional): { feature, limit } - eigenes Tageskontingent statt des gemeinsamen;
+// ohneAbo: true - nie an der Abo-Pruefung scheitern (KI-Support: gerade bei Abo-Problemen noetig).
 async function subscriptionGate(uid, token, opts) {
   const o = opts || {};
   // Schul-Schalter vor dem Tageslimit, damit ein gesperrter Aufruf kein Kontingent verbraucht.
@@ -94,6 +95,8 @@ async function subscriptionGate(uid, token, opts) {
       error: "Tageslimit für KI-Funktionen erreicht. Ab morgen wieder verfügbar.",
     };
   }
+
+  if (o.ohneAbo) return { ok: true };
 
   // EBENE 1 (ABO-PRUEFUNG) TEMPORAER DEAKTIVIERT (Fabian, 25.8.2026): "Ich moechte vorerst alle
   // freischalten" - das Abo-Gate soll noch nicht scharf sein, waehrend die App/das Abo-Modell
