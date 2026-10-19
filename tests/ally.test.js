@@ -4,7 +4,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const k = require("./lade-app")(["ALLY_WERKZEUGE", "allyNeueKarte", "allyKuerzel", "allyNamenErsetzen", "allyKuerzelAufloesen", "allyGesundheit",
     "allyFreitext", "allyFilterPasst", "allyFilterLeer", "allyKontextZeile", "allyNamePasst", "allyWunschzeiten", "allyAntwortText", "allyDatumOk", "allyZeitOk",
-    "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText", "allyTagAusText", "allyGesundheitWort", "allyAbsageText", "allyPlanRueckfrage", "allyFolgefragen"]);
+    "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText", "allyTagAusText", "allyGesundheitWort", "allyAbsageText", "allyPlanRueckfrage", "allyFolgefragen",
+    "allyPlanKnopf", "allyRueckgaengigText"]);
 
 const PERSONEN = [
     { schluessel: "s:1", vorname: "Lena", nachname: "Weber", anzeige: "Lena Weber" },
@@ -112,7 +113,8 @@ test("Plan: Rückfrage zählt nur Abgehaktes ohne Problem, Verschieben geht einz
 });
 
 test("Plan: Arten passen zum Server, WhatsApp-Text zum Verschieben kommt aus der App", () => {
-    assert.deepEqual(Object.keys(k.ALLY_PLAN_ARTEN).sort(), ["ablehnen", "anbieten", "annehmen", "verschieben", "vorschlag"]);
+    assert.deepEqual(Object.keys(k.ALLY_PLAN_ARTEN).sort(), ["ablehnen", "anbieten", "annehmen", "eintragen", "verschieben", "vorschlag"]);
+    assert.equal(Object.keys(k.ALLY_PLAN_ARTEN)[0], "eintragen", "Fest eintragen steht oben");
     assert.equal(k.allyVerschiebenText("Lena", "Donnerstag, 23.10.", "10:00", "09:15"),
         "Hallo Lena, würde es dir passen, wenn deine Fahrstunde am Donnerstag, 23.10. um 09:15 Uhr statt um 10:00 Uhr beginnt? Gib mir bitte kurz Bescheid. Danke!");
     assert.match(k.allyVerschiebenText("", "Mo", "8:00", "9:00"), /^Hallo, /);
@@ -150,7 +152,27 @@ test("Plan: Rückfrage nennt Abzulehnende mit Namen, warnt und erklärt die Wart
     assert.match(alle.text, /sehen passende Schüler sofort/);
     const nurAnnehmen = k.allyPlanRueckfrage(punkte, new Set([0]));
     assert.equal(nurAnnehmen.gefahr, false);
+    assert.equal(nurAnnehmen.noetig, true, "eine Bestätigung lässt sich nicht zurücknehmen");
     assert.match(nurAnnehmen.text, /Von allein geht nichts raus/);
+    assert.equal(alle.noetig, true);
+});
+
+test("Plan v2.123.0: Eintragen und Vorschläge ohne Rückfrage, Knopf sagt, was passiert", () => {
+    const punkte = [{ art: "eintragen", titel: "Lena · Di 20.10. 14:00–15:30" }, { art: "eintragen", titel: "Werkstatt · Mi 21.10. 08:00–09:00" },
+        { art: "vorschlag" }, { art: "annehmen" }, { art: "eintragen", problem: "Überschneidet sich." }, { art: "verschieben" }];
+    assert.deepEqual(Array.from(k.allyPlanZeilen(punkte, new Set([0, 1, 2, 4]))), ["2 Termine werden fest eingetragen", "1 Terminvorschlag wird angelegt"]);
+    assert.equal(k.allyPlanRueckfrage(punkte, new Set([0, 1, 2])).noetig, false, "alles lässt sich zurücknehmen");
+    assert.equal(k.allyPlanRueckfrage(punkte, new Set([0, 3])).noetig, true);
+    assert.equal(k.allyPlanRueckfrage(punkte, new Set([4, 5])).noetig, false, "Probleme und Verschieben zählen nicht");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0])), "Eintragen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0, 1, 4])), "2 eintragen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([2])), "Vorschlag anlegen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0, 3])), "2 übernehmen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([4, 5])), "Nichts abgehakt");
+    assert.equal(k.allyRueckgaengigText([{ was: "Eingetragen" }, { was: "Eingetragen" }, { was: "Vorgeschlagen" }], [{}]),
+        "2 Termine eingetragen, 1 Vorschlag angelegt, 1 Anfrage abgelehnt");
+    assert.equal(k.allyRueckgaengigText([{ was: "Eingetragen" }], []), "1 Termin eingetragen");
+    assert.equal(k.allyRueckgaengigText([], []), "", "nur Bestätigungen: nichts zurückzunehmen");
 });
 
 test("Absage-Text und Folgefragen", () => {

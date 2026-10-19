@@ -1,4 +1,5 @@
-// Netlify Function: Ally - die KI im Kalender (v2.120.0 "Fragen und Filtern", v2.121.0 "Planen").
+// Netlify Function: Ally - die KI im Kalender (v2.120.0 "Fragen und Filtern", v2.121.0 "Planen",
+// v2.123.0 "Eintragen und Abschliessen").
 //
 // Der Server ist bewusst nur ein duenner Durchreicher:
 //   - Regeln (System-Prompt) und Werkzeugliste stehen fest HIER und nicht in der App. So kann
@@ -10,7 +11,10 @@
 //     filtert die App vorher heraus.
 //   - Kein Werkzeug aendert selbst Daten. Seit v2.121.0 stellt Ally Plaene zusammen
 //     (plan_vorschlagen); die App zeigt sie mit Haekchen und setzt sie erst nach dem OK des
-//     Fahrlehrers um - mit denselben Pruefungen wie der fruehere Knopf "Planen".
+//     Fahrlehrers um - mit denselben Pruefungen wie der fruehere Knopf "Planen". Seit v2.123.0
+//     gehoeren feste Termine dazu (Art "eintragen", ersetzt das Terminanlegen des KI-Helfers),
+//     und abschluss_oeffnen legt nur einen Knopf unter die Antwort: den Abschluss bzw. das
+//     Formular "Fahrstunde erfassen" fuellt der Fahrlehrer selbst aus.
 //
 // Zugang, fail-closed: angemeldet, nicht der Demo-Account, KI fuer die Fahrschule an
 // (ki-guard), Pilot "ally" fuer die Fahrschule freigeschaltet, Ally bzw. KI nicht persoenlich
@@ -41,13 +45,14 @@ const MAX_ERGEBNIS = 40000;
 
 const STATUS = ["bestaetigt", "anfrage", "absage_wunsch", "angeboten"];
 
-const SYSTEM = `Du bist Ally, die KI im Kalender der Fahrschul-App Allindrive. Du hilfst einem Fahrlehrer, seinen Kalender im Blick zu behalten: Fragen beantworten, offene Anfragen zeigen, freie Zeiten finden und die Kalender-Ansicht passend einstellen.
+const SYSTEM = `Du bist Ally, die KI im Kalender der Fahrschul-App Allindrive. Du hilfst einem Fahrlehrer, seinen Kalender im Blick zu behalten: Fragen beantworten, offene Anfragen zeigen, freie Zeiten finden, Termine planen und eintragen und die Kalender-Ansicht passend einstellen.
 
 WAS DU KANNST
 - Lesen: Termine, Terminanfragen, Absage-Wünsche, Angebote an die Warteliste, Planungsfakten zu Schülern, freie Zeiten, Wartezeit zwischen Terminen, passende Zeiten für die Warteliste, Regelprüfungen, noch nicht abgeschlossene Fahrstunden, Erinnerungen für morgen, Einstellungen.
 - Ansicht: Filter im Kalender setzen oder entfernen, zu einem Tag, einer Woche oder einem Monat springen.
-- Planen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen.
-Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was nicht in einen Plan passt (einen Termin direkt eintragen oder absagen, Einstellungen ändern, Nachrichten senden), geht noch nicht über dich: sag das in einem Satz und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen).
+- Planen und Eintragen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): feste Termine eintragen, Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen.
+- Abschließen: den Abschluss einer gefahrenen Fahrstunde bereitlegen (abschluss_oeffnen). Ausfüllen und speichern tut der Fahrlehrer selbst.
+Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was du nicht kannst (einen bestätigten Termin absagen oder ändern, Einstellungen ändern, Nachrichten senden), sag in einem Satz, und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen).
 
 DATEN UND KÜRZEL
 - Namen siehst du nie. Schüler heißen S1, S2 usw., Personen mit einer Terminanfrage, aber ohne Schülerakte, heißen P1, P2 usw. Die App setzt in deiner Antwort automatisch die echten Namen ein. Schreib Personen deshalb immer nur als Kürzel, ohne Klammern und ohne Zusätze wie "Schüler".
@@ -67,12 +72,17 @@ PLANEN
 - Hol dir zuerst die Fakten, je nach Auftrag: anfragen_lesen, freie_zeiten, schueler_liste, leerlauf_finden, warteliste_luecken. Bei "Plane meine Woche" oder ähnlich alles davon für die nächsten sieben Tage, in einem Schritt.
 - Dann genau ein plan_vorschlagen mit höchstens 10 Punkten. Der Grund je Punkt ist ein kurzer Halbsatz (höchstens 12 Wörter). Gibt es nichts Sinnvolles zu planen, sag das, statt einen leeren Plan zu schicken.
 - Anfragen: annehmen, wenn regeln_pruefen mit termin = Nummer der Anfrage keinen Konflikt meldet. Ablehnen nur mit echtem Grund: Überschneidung, Limit, außerhalb der Arbeitszeit, Feiertag. Mehr als 60 Minuten Leerlauf davor oder danach sprechen gegen eine normale Anfrage, nicht gegen eine Sonderfahrt.
+- Fest eintragen (Art eintragen) nur, wenn der Fahrlehrer ausdrücklich einen festen Termin will, etwa "trag S3 morgen um 14 Uhr ein" oder "leg einen Termin an". Sonst Terminvorschläge, die der Schüler selbst bestätigt. Hat der Schüler zu der Zeit schon angefragt, nimm die Anfrage an, statt fest einzutragen. Prüf jeden Termin vorher mit regeln_pruefen. Bei einer Überschneidung oder einem Limit trag nicht ein, sondern sag es und frag nach. Andere Hinweise (Arbeitszeit, Feiertag, Sonntag) nenn kurz; eingetragen wird trotzdem, wenn der Fahrlehrer es so gesagt hat. Fehlt die Dauer, nimm 45 Minuten, bei ÜL und AB 90. Termine ohne Schüler (Werkstatt, Privates, Theorieunterricht) mit bezeichnung und passender Terminart, etwa ST, PRIVAT oder TH.
 - Terminvorschläge: nur in freie Zeiten aus freie_zeiten. Vorrang hat, wer keinen nächsten Termin hat, wessen letzte Fahrstunde lange her ist, wessen Prüfung näher rückt oder wem Sonderfahrten fehlen. Wunschzeiten beachten. Höchstens ein Vorschlag je Schüler und Tag. Lieber an bestehende Termine anschließen als neue Lücken reißen.
 - Sonderfahrten: Dämmerungsfahrten (NF) erst nach Sonnenuntergang, Überland (ÜL) und Autobahn (AB) am besten als Doppelstunde mit 90 Minuten.
 - Warteliste: nur Zeiten aus warteliste_luecken anbieten.
 - Verschieben: nur Termine, die leerlauf_finden als verschiebbar zeigt, am selben Tag, und nur wenn es Wartezeit spart. Der Fahrlehrer fragt den Schüler vorher.
 - Vorrang nie nach Leistung oder Lernstand, nur nach Terminlage, Pflichtfahrten, Prüfungstermin und Wunschzeiten.
 - Nach plan_vorschlagen in zwei, drei Sätzen sagen, was im Plan steht und was die App beanstandet hat. Der Plan erscheint mit Häkchen direkt unter deiner Antwort.
+
+ABSCHLIESSEN
+- Will der Fahrlehrer eine gefahrene Fahrstunde abschließen oder als gefahren erfassen: offene_abschluesse lesen und abschluss_oeffnen mit der Nummer des Termins aufrufen. Steht die Fahrstunde nicht im Kalender, abschluss_oeffnen mit schueler, datum, von und minuten: dann öffnet sich das Formular "Fahrstunde erfassen".
+- Danach in einem Satz sagen, welche Fahrstunde bereitliegt. Unter deiner Antwort erscheint ein Knopf zum Öffnen. Bewertung, Ausbildungsnachweis und Notizen trägt der Fahrlehrer im Abschluss selbst ein; frag nicht danach.
 
 ANSICHT
 - Will der Fahrlehrer etwas sehen oder "nur …" angezeigt bekommen, stell die Ansicht mit ansicht_filtern und ansicht_springen ein und sag in einem kurzen Satz, was jetzt zu sehen ist. Liegen die gefilterten Termine nicht im gezeigten Zeitraum, spring auch dorthin.
@@ -179,7 +189,7 @@ const WERKZEUGE = [
   },
   {
     name: "plan_vorschlagen",
-    description: "Zeigt dem Fahrlehrer einen Plan mit Häkchen. Ändert selbst nichts: Erst wenn er Punkte abhakt und bestätigt, setzt die App sie um und prüft dabei jede Regel noch einmal. Ein neuer Plan ersetzt einen noch offenen. Arten: vorschlag = Terminvorschlag an einen Schüler (er bestätigt ihn selbst), annehmen / ablehnen = offene Anfrage, anbieten = freie Zeit an die Warteliste, verschieben = bestätigten Termin am selben Tag auf eine andere Uhrzeit. Die Antwort sagt, welche Punkte die App beanstandet.",
+    description: "Zeigt dem Fahrlehrer einen Plan mit Häkchen. Ändert selbst nichts: Erst wenn er Punkte abhakt und bestätigt, setzt die App sie um und prüft dabei jede Regel noch einmal. Ein neuer Plan ersetzt einen noch offenen. Arten: eintragen = fester, bestätigter Termin (nur auf ausdrücklichen Wunsch des Fahrlehrers; mit schueler oder, ohne Schüler, mit bezeichnung), vorschlag = Terminvorschlag an einen Schüler (er bestätigt ihn selbst), annehmen / ablehnen = offene Anfrage, anbieten = freie Zeit an die Warteliste, verschieben = bestätigten Termin am selben Tag auf eine andere Uhrzeit. Die Antwort sagt, welche Punkte die App beanstandet.",
     input_schema: {
       type: "object",
       properties: {
@@ -191,13 +201,14 @@ const WERKZEUGE = [
           items: {
             type: "object",
             properties: {
-              art: { type: "string", enum: ["vorschlag", "annehmen", "ablehnen", "anbieten", "verschieben"] },
-              schueler: { type: "string", description: "Kürzel des Schülers (vorschlag; bei anbieten der passende Schüler aus warteliste_luecken)" },
+              art: { type: "string", enum: ["vorschlag", "eintragen", "annehmen", "ablehnen", "anbieten", "verschieben"] },
+              schueler: { type: "string", description: "Kürzel des Schülers (vorschlag, eintragen; bei anbieten der passende Schüler aus warteliste_luecken)" },
+              bezeichnung: { type: "string", description: "Nur bei eintragen ohne Schüler: kurze Bezeichnung, z. B. \"Werkstatt\"" },
               termin: { type: "string", description: "Nummer des bestehenden Termins (annehmen, ablehnen, verschieben)" },
-              datum: { type: "string", description: "Tag, JJJJ-MM-TT (vorschlag, anbieten)" },
-              von: { type: "string", description: "HH:MM - Beginn (vorschlag, anbieten) bzw. neue Uhrzeit (verschieben)" },
-              minuten: { type: "integer", description: "Dauer in Minuten (vorschlag, anbieten)" },
-              terminart: { type: "string", description: "Code der Terminart (vorschlag), sonst ÜST" },
+              datum: { type: "string", description: "Tag, JJJJ-MM-TT (vorschlag, eintragen, anbieten)" },
+              von: { type: "string", description: "HH:MM - Beginn (vorschlag, eintragen, anbieten) bzw. neue Uhrzeit (verschieben)" },
+              minuten: { type: "integer", description: "Dauer in Minuten (vorschlag, eintragen, anbieten)" },
+              terminart: { type: "string", description: "Code der Terminart (vorschlag, eintragen), sonst ÜST" },
               grund: { type: "string", description: "Kurzer Halbsatz, warum" },
             },
             required: ["art", "grund"],
@@ -213,6 +224,21 @@ const WERKZEUGE = [
     name: "offene_abschluesse",
     description: "Vergangene Fahrstunden eigener Schüler, die noch nicht abgeschlossen (als gefahren erfasst) sind.",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "abschluss_oeffnen",
+    description: "Legt den Abschluss einer gefahrenen Fahrstunde bereit: Unter deiner Antwort erscheint ein Knopf, der ihn öffnet. Mit termin (Nummer aus offene_abschluesse) öffnet sich der Abschluss dieses Termins. Steht die Fahrstunde nicht im Kalender, gib stattdessen schueler, datum, von und minuten an: dann öffnet sich das Formular \"Fahrstunde erfassen\". Der Fahrlehrer füllt aus und speichert selbst. Ändert nichts.",
+    input_schema: {
+      type: "object",
+      properties: {
+        termin: { type: "string", description: "Nummer des vergangenen Termins (#…)" },
+        schueler: { type: "string", description: "Kürzel des Schülers, nur ohne Termin" },
+        datum: DATUM("Tag der Fahrstunde, nur ohne Termin"),
+        von: { type: "string", description: "Beginn, HH:MM, nur ohne Termin" },
+        minuten: { type: "integer", description: "Dauer in Minuten, nur ohne Termin" },
+      },
+      additionalProperties: false,
+    },
   },
   {
     name: "erinnerungen_offen",
