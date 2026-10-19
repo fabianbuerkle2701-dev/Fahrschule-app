@@ -4315,7 +4315,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.125.0";
+const APP_VERSION = "2.125.1";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4469,6 +4469,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.125.1", date: "Oktober 2026", changes: [
+            "Fehler behoben: Ist die Warteliste ausgeschaltet, fragt die App nach einer kurzfristigen Absage jetzt trotzdem, ob du eine Ausfallgebühr buchen möchtest",
+        ] },
     { v: "2.125.0", date: "Oktober 2026", changes: [
             "Neu: der Allindrive-Support. Unter Mehr › Einstellungen › Hilfe & Support beantwortet eine KI deine Fragen zur App sofort – rund um die Uhr, mit Schritt-für-Schritt-Anleitung und einem Knopf, der die richtige Stelle öffnet",
             "Kann der Support etwas nicht selbst lösen, gibt er es an Allindrive weiter. Die Antwort findest du später unter „Anfragen“ im Support",
@@ -33091,8 +33094,16 @@ function App() {
         maybeOfferWaitlist(next, rest);
     }
     async function maybeOfferWaitlist(freedAppt, queue, extra) {
-        // Funktionen ein/aus: ohne Warteliste kein Angebot an Wartende (die Absage selbst läuft normal)
-        if (!bereichAn("warteliste")) { offerNextInQueue(queue); return; }
+        // Funktionen ein/aus: ohne Warteliste kein Angebot an Wartende (die Absage selbst läuft normal).
+        // Eine offene Ausfallgebühr (kurzfristig bestätigte Stornierung) fragt dasselbe Fenster aber
+        // trotzdem ab, nur ohne Wartelisten-Teil (nurGebuehr) - bis v2.125.0 fiel sie hier still weg.
+        if (!bereichAn("warteliste")) {
+            if (extra && extra.gebuehr)
+                setWaitlistOffer({ appt: freedAppt, candidates: [], betroffen: null, queue: queue || [], ...extra, nurGebuehr: true });
+            else
+                offerNextInQueue(queue);
+            return;
+        }
         if (!freedAppt || freedAppt.status !== "confirmed" || !freedAppt.student_id) {
             offerNextInQueue(queue);
             return;
@@ -45517,7 +45528,7 @@ function App() {
             React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, background: "var(--card)", borderRadius: "18px 18px 0 0",
                     padding: "18px 16px calc(env(safe-area-inset-bottom,0px) + 16px)", maxHeight: "85dvh", overflowY: "auto" } },
                 React.createElement("div", { style: { width: 38, height: 4, borderRadius: 2, background: "var(--line)", margin: "0 auto 16px" } }),
-                waitlistOffer.queue && waitlistOffer.queue.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } },
+                !waitlistOffer.nurGebuehr && waitlistOffer.queue && waitlistOffer.queue.length > 0 && React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "var(--muted)", marginBottom: 6 } },
                     "Noch " + waitlistOffer.queue.length + (waitlistOffer.queue.length === 1 ? " weiterer freier Termin danach" : " weitere freie Termine danach")),
                 waitlistOffer.gebuehr && (() => {
                     const g = waitlistOffer.gebuehr;
@@ -45544,11 +45555,12 @@ function App() {
                                     React.createElement("button", { type: "button", className: "btn btn-ghost", style: { minHeight: 44 }, onClick: () => setG({ status: "kulanz" }) }, "Kulanz")),
                         g.fehler && React.createElement("div", { role: "alert", style: { fontSize: 12.5, color: "var(--red-ink)", marginTop: 6 } }, g.fehler));
                 })(),
-                React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
+                // Warteliste ausgeschaltet (nurGebuehr): nur die Gebührenfrage oben, kein Wartelisten-Teil.
+                !waitlistOffer.nurGebuehr && React.createElement("div", { style: { fontFamily: "var(--font-d)", fontWeight: 800, fontSize: 17, marginBottom: 4 } },
                     waitlistOffer.candidates.length
                         ? (waitlistOffer.candidates.length + (waitlistOffer.candidates.length === 1 ? " Schüler wartet auf einen früheren Termin" : " Schüler warten auf einen früheren Termin"))
                         : "Termin ist frei geworden"),
-                React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
+                !waitlistOffer.nurGebuehr && React.createElement("div", { style: { fontSize: 13, color: "var(--muted)", marginBottom: 16 } },
                     fmtDLong(waitlistOffer.appt.start_at) + ", " + hm(waitlistOffer.appt.start_at) + " Uhr ist frei geworden. Passt das für die Warteliste?"),
                 // Der Schueler, dessen Termin ausgefallen ist: er braucht selbst einen Ersatz,
                 // taucht aber in den Kandidaten bewusst nicht auf. Steht deshalb zuerst.
@@ -45611,7 +45623,10 @@ function App() {
                                 e && e.grund && React.createElement("div", { style: { fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.45, marginTop: 4, paddingLeft: 31 } }, e.grund));
                         }));
                 })(),
-                React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => waitlistSchliessen() }, "Nicht anbieten"))),
+                waitlistOffer.nurGebuehr
+                    ? React.createElement("button", { className: "btn btn-ghost btn-block", onClick: () => waitlistSchliessen() },
+                        waitlistOffer.gebuehr && waitlistOffer.gebuehr.status ? "Fertig" : "Schließen")
+                    : React.createElement("button", { className: "btn btn-ghost btn-block", style: { marginTop: 14 }, onClick: () => waitlistSchliessen() }, "Nicht anbieten"))),
         // Willkommensnachricht nach Übernahme einer Anmeldung - gleiches Muster wie waitlistOffer:
         // fertiger Text, ein Klick öffnet WhatsApp, die App verschickt nichts von allein.
         welcomeOffer && React.createElement("div", { onClick: () => setWelcomeOffer(null), className: "modal-overlay", role: "dialog", "aria-modal": "true", style: { position: "fixed", inset: 0, background: "rgba(43,34,27,.45)", zIndex: 1250, display: "flex",
