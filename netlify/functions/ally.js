@@ -1,5 +1,6 @@
 // Netlify Function: Ally - die KI im Kalender (v2.120.0 "Fragen und Filtern", v2.121.0 "Planen",
-// v2.123.0 "Eintragen und Abschliessen").
+// v2.123.0 "Eintragen und Abschliessen", v2.124.0 "Zahlungen und Ausbildungsnachweis" - ersetzt
+// seitdem den alten KI-Helfer, wo Ally an ist).
 //
 // Der Server ist bewusst nur ein duenner Durchreicher:
 //   - Regeln (System-Prompt) und Werkzeugliste stehen fest HIER und nicht in der App. So kann
@@ -14,7 +15,9 @@
 //     Fahrlehrers um - mit denselben Pruefungen wie der fruehere Knopf "Planen". Seit v2.123.0
 //     gehoeren feste Termine dazu (Art "eintragen", ersetzt das Terminanlegen des KI-Helfers),
 //     und abschluss_oeffnen legt nur einen Knopf unter die Antwort: den Abschluss bzw. das
-//     Formular "Fahrstunde erfassen" fuellt der Fahrlehrer selbst aus.
+//     Formular "Fahrstunde erfassen" fuellt der Fahrlehrer selbst aus. Seit v2.124.0 liest Ally
+//     auch offene Betraege und den Ausbildungsnachweis (ADK/Strecken) - beides mit Kuerzeln, und
+//     beides in der App einzeln abschaltbar - und bereitet Zahlungen und Haken als Planpunkte vor.
 //
 // Zugang, fail-closed: angemeldet, nicht der Demo-Account, KI fuer die Fahrschule an
 // (ki-guard), Pilot "ally" fuer die Fahrschule freigeschaltet, Ally bzw. KI nicht persoenlich
@@ -45,14 +48,15 @@ const MAX_ERGEBNIS = 40000;
 
 const STATUS = ["bestaetigt", "anfrage", "absage_wunsch", "angeboten"];
 
-const SYSTEM = `Du bist Ally, die KI im Kalender der Fahrschul-App Allindrive. Du hilfst einem Fahrlehrer, seinen Kalender im Blick zu behalten: Fragen beantworten, offene Anfragen zeigen, freie Zeiten finden, Termine planen und eintragen und die Kalender-Ansicht passend einstellen.
+const SYSTEM = `Du bist Ally, die KI-Assistentin der Fahrschul-App Allindrive. Du hilfst einem Fahrlehrer mit Kalender, Zahlungen und Ausbildungsnachweis: Fragen beantworten, offene Anfragen zeigen, freie Zeiten finden, Termine planen und eintragen, Zahlungen und Haken im Ausbildungsnachweis vorbereiten und die Kalender-Ansicht passend einstellen.
 
 WAS DU KANNST
-- Lesen: Termine, Terminanfragen, Absage-Wünsche, Angebote an die Warteliste, Planungsfakten zu Schülern, freie Zeiten, Wartezeit zwischen Terminen, passende Zeiten für die Warteliste, Regelprüfungen, noch nicht abgeschlossene Fahrstunden, Erinnerungen für morgen, Einstellungen.
+- Lesen: Termine, Terminanfragen, Absage-Wünsche, Angebote an die Warteliste, Planungsfakten zu Schülern, freie Zeiten, Wartezeit zwischen Terminen, passende Zeiten für die Warteliste, Regelprüfungen, noch nicht abgeschlossene Fahrstunden, Erinnerungen für morgen, Einstellungen, offene Beträge und Zahlungen, ADK- und Streckenpunkte eines Schülers.
 - Ansicht: Filter im Kalender setzen oder entfernen, zu einem Tag, einer Woche oder einem Monat springen.
-- Planen und Eintragen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): feste Termine eintragen, Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen.
+- Planen und Eintragen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): feste Termine eintragen, Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen, erhaltene Zahlungen erfassen, ADK- und Streckenpunkte abhaken.
 - Abschließen: den Abschluss einer gefahrenen Fahrstunde bereitlegen (abschluss_oeffnen). Ausfüllen und speichern tut der Fahrlehrer selbst.
-Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was du nicht kannst (einen bestätigten Termin absagen oder ändern, Einstellungen ändern, Nachrichten senden), sag in einem Satz, und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen).
+Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was du nicht kannst (einen bestätigten Termin absagen oder ändern, Kontaktdaten oder Notizen eines Schülers ändern, Rechnungen schreiben, Einstellungen ändern, Nachrichten senden), sag in einem Satz, und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen, die Schülerakte öffnen).
+Steht in der Zeile der App "Aus: …", sind diese Bereiche für dich ausgeschaltet: nutz ihre Werkzeuge nicht, sondern sag, dass der Fahrlehrer sie unter Einstellungen › Funktionen einschalten kann.
 
 DATEN UND KÜRZEL
 - Namen siehst du nie. Schüler heißen S1, S2 usw., Personen mit einer Terminanfrage, aber ohne Schülerakte, heißen P1, P2 usw. Die App setzt in deiner Antwort automatisch die echten Namen ein. Schreib Personen deshalb immer nur als Kürzel, ohne Klammern und ohne Zusätze wie "Schüler".
@@ -64,7 +68,7 @@ DATEN UND KÜRZEL
 GENAUIGKEIT
 - Antworte nur mit dem, was die Werkzeuge liefern. Erfinde keine Termine, Uhrzeiten, Zahlen oder Personen. Ist ein Ergebnis leer, sag das.
 - Rechne freie Zeiten, Überschneidungen und Limits nie selbst aus, sondern nimm freie_zeiten und regeln_pruefen. Sag nur dann, dass ein Termin passt, wenn regeln_pruefen keinen Konflikt meldet.
-- Jede Nachricht des Fahrlehrers beginnt mit einer Zeile der App: aktuelles Datum, Uhrzeit und was der Kalender gerade zeigt. Leite "heute", "morgen", "nächsten Dienstag" usw. daraus ab. Werkzeuge bekommen Daten immer als JJJJ-MM-TT und Uhrzeiten als HH:MM.
+- Jede Nachricht des Fahrlehrers beginnt mit einer Zeile der App: aktuelles Datum, Uhrzeit, was der Kalender gerade zeigt und, falls offen, welche Schülerakte er gerade ansieht. Leite "heute", "morgen", "nächsten Dienstag" usw. daraus ab; "er", "sie" oder "hier" meinen dann meist diesen Schüler. Werkzeuge bekommen Daten immer als JJJJ-MM-TT und Uhrzeiten als HH:MM.
 - Fehlt dir etwas Wichtiges, frag kurz nach, statt zu raten.
 - Brauchst du mehrere Werkzeuge unabhängig voneinander, ruf sie im selben Schritt auf. Lies lieber einmal einen längeren Zeitraum als viele einzelne Tage.
 
@@ -80,6 +84,16 @@ PLANEN
 - Vorrang nie nach Leistung oder Lernstand, nur nach Terminlage, Pflichtfahrten, Prüfungstermin und Wunschzeiten.
 - Nach plan_vorschlagen in zwei, drei Sätzen sagen, was im Plan steht und was die App beanstandet hat. Der Plan erscheint mit Häkchen direkt unter deiner Antwort.
 
+ZAHLUNGEN
+- Offene Beträge, Guthaben und Zahlungen nur aus geld_lesen. offen über 0 heißt: der Schüler schuldet noch; unter 0 ist Guthaben. Rechne nichts selbst nach.
+- Eine Zahlung erfassen (Art zahlung im Plan) nur, wenn der Fahrlehrer eine erhaltene Zahlung nennt. Betrag und Zahlart müssen aus seinem Text kommen. Fehlt die Zahlart, frag kurz nach (bar oder Überweisung), denn sie entscheidet über Kasse oder Bank. Ohne Datum gilt heute.
+- Keine Mahnungen und keine Urteile über Zahlungsmoral.
+
+AUSBILDUNGSNACHWEIS
+- ausbildung_lesen liefert die ADK- und Streckenpunkte eines Schülers mit Ist und Soll. Das sind Einträge des Fahrlehrers, keine Bewertung. Nenne Punkte mit ihrer Bezeichnung, nie mit ihrer Nummer.
+- Abhaken (Arten adk und strecke im Plan) nur, wenn der Fahrlehrer sagt, was geübt oder gefahren wurde. Nimm die Nummer des passenden Punkts aus ausbildung_lesen (am besten mit suche). Passt kein Punkt eindeutig, frag nach. wert ist der neue Stand; ohne wert zählt die App ein Mal dazu.
+- Daraus folgt nie eine Aussage über Prüfungsreife oder Leistung.
+
 ABSCHLIESSEN
 - Will der Fahrlehrer eine gefahrene Fahrstunde abschließen oder als gefahren erfassen: offene_abschluesse lesen und abschluss_oeffnen mit der Nummer des Termins aufrufen. Steht die Fahrstunde nicht im Kalender, abschluss_oeffnen mit schueler, datum, von und minuten: dann öffnet sich das Formular "Fahrstunde erfassen".
 - Danach in einem Satz sagen, welche Fahrstunde bereitliegt. Unter deiner Antwort erscheint ein Knopf zum Öffnen. Bewertung, Ausbildungsnachweis und Notizen trägt der Fahrlehrer im Abschluss selbst ein; frag nicht danach.
@@ -89,7 +103,7 @@ ANSICHT
 - Filter bleiben stehen, bis der Fahrlehrer sie entfernt oder dich darum bittet. Er sieht sie als Chips über dem Kalender.
 
 GRENZEN
-- Du bewertest keine Menschen: keinen Lernstand, keine Prüfungsreife, keine Leistung, Zuverlässigkeit oder Eignung von Schülern oder Fahrlehrern, keine Ranglisten. Wird danach gefragt, sag freundlich, dass das der Fahrlehrer selbst entscheidet, und biete die passenden Fakten an (Termine, gefahrene Stunden, Sonderfahrten).
+- Du bewertest keine Menschen: keinen Lernstand, keine Prüfungsreife, keine Leistung, Zuverlässigkeit oder Eignung von Schülern oder Fahrlehrern, keine Ranglisten. Wird danach gefragt, sag freundlich, dass das der Fahrlehrer selbst entscheidet, und biete die passenden Fakten an (Termine, gefahrene Stunden, Sonderfahrten, Einträge im Ausbildungsnachweis).
 - Keine Gesundheitsangaben: frag nie danach und leite nichts dazu ab.
 - Keine Rechtsberatung. Angaben zu Pflichtfahrten nur so, wie die Werkzeuge sie liefern.
 
@@ -189,7 +203,7 @@ const WERKZEUGE = [
   },
   {
     name: "plan_vorschlagen",
-    description: "Zeigt dem Fahrlehrer einen Plan mit Häkchen. Ändert selbst nichts: Erst wenn er Punkte abhakt und bestätigt, setzt die App sie um und prüft dabei jede Regel noch einmal. Ein neuer Plan ersetzt einen noch offenen. Arten: eintragen = fester, bestätigter Termin (nur auf ausdrücklichen Wunsch des Fahrlehrers; mit schueler oder, ohne Schüler, mit bezeichnung), vorschlag = Terminvorschlag an einen Schüler (er bestätigt ihn selbst), annehmen / ablehnen = offene Anfrage, anbieten = freie Zeit an die Warteliste, verschieben = bestätigten Termin am selben Tag auf eine andere Uhrzeit. Die Antwort sagt, welche Punkte die App beanstandet.",
+    description: "Zeigt dem Fahrlehrer einen Plan mit Häkchen. Ändert selbst nichts: Erst wenn er Punkte abhakt und bestätigt, setzt die App sie um und prüft dabei jede Regel noch einmal. Ein neuer Plan ersetzt einen noch offenen. Arten: eintragen = fester, bestätigter Termin (nur auf ausdrücklichen Wunsch des Fahrlehrers; mit schueler oder, ohne Schüler, mit bezeichnung), vorschlag = Terminvorschlag an einen Schüler (er bestätigt ihn selbst), annehmen / ablehnen = offene Anfrage, anbieten = freie Zeit an die Warteliste, verschieben = bestätigten Termin am selben Tag auf eine andere Uhrzeit, zahlung = erhaltene Zahlung erfassen (schueler, betrag, zahlart, datum), adk / strecke = Punkt im Ausbildungsnachweis abhaken (schueler, punkt, wert). Die Antwort sagt, welche Punkte die App beanstandet.",
     input_schema: {
       type: "object",
       properties: {
@@ -201,14 +215,18 @@ const WERKZEUGE = [
           items: {
             type: "object",
             properties: {
-              art: { type: "string", enum: ["vorschlag", "eintragen", "annehmen", "ablehnen", "anbieten", "verschieben"] },
-              schueler: { type: "string", description: "Kürzel des Schülers (vorschlag, eintragen; bei anbieten der passende Schüler aus warteliste_luecken)" },
+              art: { type: "string", enum: ["vorschlag", "eintragen", "annehmen", "ablehnen", "anbieten", "verschieben", "zahlung", "adk", "strecke"] },
+              schueler: { type: "string", description: "Kürzel des Schülers (vorschlag, eintragen, zahlung, adk, strecke; bei anbieten der passende Schüler aus warteliste_luecken)" },
               bezeichnung: { type: "string", description: "Nur bei eintragen ohne Schüler: kurze Bezeichnung, z. B. \"Werkstatt\"" },
               termin: { type: "string", description: "Nummer des bestehenden Termins (annehmen, ablehnen, verschieben)" },
-              datum: { type: "string", description: "Tag, JJJJ-MM-TT (vorschlag, eintragen, anbieten)" },
+              datum: { type: "string", description: "Tag, JJJJ-MM-TT (vorschlag, eintragen, anbieten, zahlung)" },
               von: { type: "string", description: "HH:MM - Beginn (vorschlag, eintragen, anbieten) bzw. neue Uhrzeit (verschieben)" },
               minuten: { type: "integer", description: "Dauer in Minuten (vorschlag, eintragen, anbieten)" },
               terminart: { type: "string", description: "Code der Terminart (vorschlag, eintragen), sonst ÜST" },
+              betrag: { type: "number", description: "Betrag in Euro (zahlung)" },
+              zahlart: { type: "string", description: "Zahlart, wie der Fahrlehrer sie nennt, z. B. bar oder Überweisung (zahlung)" },
+              punkt: { type: "string", description: "Nummer des Punkts aus ausbildung_lesen (adk, strecke)" },
+              wert: { type: "integer", description: "Neuer Stand des Punkts (adk, strecke); weglassen = ein Mal mehr" },
               grund: { type: "string", description: "Kurzer Halbsatz, warum" },
             },
             required: ["art", "grund"],
@@ -224,6 +242,33 @@ const WERKZEUGE = [
     name: "offene_abschluesse",
     description: "Vergangene Fahrstunden eigener Schüler, die noch nicht abgeschlossen (als gefahren erfasst) sind.",
     input_schema: { type: "object", properties: {}, additionalProperties: false },
+  },
+  {
+    name: "geld_lesen",
+    description: "Offene Beträge der eigenen Schüler: berechnet, bezahlt und offen in Euro (offen über 0 = Schüler schuldet noch, unter 0 = Guthaben) und die letzte Zahlung. Für Fragen wie \"Wer hat noch offene Beträge?\" oder \"Hat S3 schon bezahlt?\".",
+    input_schema: {
+      type: "object",
+      properties: {
+        schueler: { type: "string", description: "Kürzel, nur dieser Schüler" },
+        nur_offen: { type: "boolean", description: "true = nur Schüler, die noch etwas schulden" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ausbildung_lesen",
+    description: "Ausbildungsnachweis eines Schülers: ADK-Punkte und Streckenpunkte seiner Klasse mit Nummer, Abschnitt, Bezeichnung, Ist und Soll. Reine Einträge des Fahrlehrers, keine Bewertung. Grundlage für Fragen nach dem Stand und für die Nummer beim Abhaken.",
+    input_schema: {
+      type: "object",
+      properties: {
+        schueler: { type: "string", description: "Kürzel, z. B. S3" },
+        bereich: { type: "string", enum: ["adk", "strecken"], description: "Nur ADK oder nur Strecken" },
+        suche: { type: "string", description: "Wort aus der Bezeichnung, z. B. Kreisverkehr" },
+        nur_offen: { type: "boolean", description: "true = nur Punkte, bei denen Ist unter Soll liegt" },
+      },
+      required: ["schueler"],
+      additionalProperties: false,
+    },
   },
   {
     name: "abschluss_oeffnen",

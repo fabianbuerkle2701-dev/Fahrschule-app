@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const k = require("./lade-app")(["ALLY_WERKZEUGE", "allyNeueKarte", "allyKuerzel", "allyNamenErsetzen", "allyKuerzelAufloesen", "allyGesundheit",
     "allyFreitext", "allyFilterPasst", "allyFilterLeer", "allyKontextZeile", "allyNamePasst", "allyWunschzeiten", "allyAntwortText", "allyDatumOk", "allyZeitOk",
     "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText", "allyTagAusText", "allyGesundheitWort", "allyAbsageText", "allyPlanRueckfrage", "allyFolgefragen",
-    "allyPlanKnopf", "allyRueckgaengigText"]);
+    "allyPlanKnopf", "allyRueckgaengigText", "allyZahlart", "allyPunktWert"]);
 
 const PERSONEN = [
     { schluessel: "s:1", vorname: "Lena", nachname: "Weber", anzeige: "Lena Weber" },
@@ -73,6 +73,8 @@ test("Kontextzeile: Berliner Datum und Uhrzeit, Ansicht und Filter", () => {
     assert.equal(k.allyKontextZeile(new Date("2026-10-18T08:15:00Z"), "Woche 13.10.–19.10.2026", ""),
         "[App] Jetzt: Sonntag, 18.10.2026, 10:15 Uhr. Kalender zeigt: Woche 13.10.–19.10.2026. Filter: keine.");
     assert.match(k.allyKontextZeile(new Date("2026-12-24T16:00:00Z"), "Tag", "Lena Weber · Anfragen"), /24\.12\.2026, 17:00 Uhr.*Filter: Lena Weber · Anfragen\./);
+    assert.match(k.allyKontextZeile(new Date("2026-12-24T16:00:00Z"), "Tag", "", { schueler: "S3", aus: ["Zahlungen"] }), /Filter: keine\. Geöffnet: Schülerakte von S3\. Aus: Zahlungen\.$/);
+    assert.doesNotMatch(k.allyKontextZeile(new Date("2026-12-24T16:00:00Z"), "Tag", "", { schueler: "", aus: [] }), /Geöffnet|Aus:/);
 });
 
 test("Namenssuche der KI verzeiht Tippfehler, aber nicht alles", () => {
@@ -113,7 +115,7 @@ test("Plan: Rückfrage zählt nur Abgehaktes ohne Problem, Verschieben geht einz
 });
 
 test("Plan: Arten passen zum Server, WhatsApp-Text zum Verschieben kommt aus der App", () => {
-    assert.deepEqual(Object.keys(k.ALLY_PLAN_ARTEN).sort(), ["ablehnen", "anbieten", "annehmen", "eintragen", "verschieben", "vorschlag"]);
+    assert.deepEqual(Object.keys(k.ALLY_PLAN_ARTEN).sort(), ["ablehnen", "adk", "anbieten", "annehmen", "eintragen", "strecke", "verschieben", "vorschlag", "zahlung"]);
     assert.equal(Object.keys(k.ALLY_PLAN_ARTEN)[0], "eintragen", "Fest eintragen steht oben");
     assert.equal(k.allyVerschiebenText("Lena", "Donnerstag, 23.10.", "10:00", "09:15"),
         "Hallo Lena, würde es dir passen, wenn deine Fahrstunde am Donnerstag, 23.10. um 09:15 Uhr statt um 10:00 Uhr beginnt? Gib mir bitte kurz Bescheid. Danke!");
@@ -173,6 +175,34 @@ test("Plan v2.123.0: Eintragen und Vorschläge ohne Rückfrage, Knopf sagt, was 
         "2 Termine eingetragen, 1 Vorschlag angelegt, 1 Anfrage abgelehnt");
     assert.equal(k.allyRueckgaengigText([{ was: "Eingetragen" }], []), "1 Termin eingetragen");
     assert.equal(k.allyRueckgaengigText([], []), "", "nur Bestätigungen: nichts zurückzunehmen");
+});
+
+test("Plan v2.124.0: Zahlungen und Haken – ohne Rückfrage, mit Rückgängig", () => {
+    const punkte = [{ art: "zahlung" }, { art: "zahlung" }, { art: "adk" }, { art: "strecke" }, { art: "annehmen" }];
+    assert.deepEqual(Array.from(k.allyPlanZeilen(punkte, new Set([0, 1, 2, 3]))), ["2 Zahlungen werden erfasst", "1 ADK-Punkt wird abgehakt", "1 Streckenpunkt wird abgehakt"]);
+    assert.equal(k.allyPlanRueckfrage(punkte, new Set([0, 2, 3])).noetig, false, "lässt sich zurücknehmen");
+    assert.equal(k.allyPlanRueckfrage(punkte, new Set([0, 4])).noetig, true);
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0])), "Erfassen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0, 1])), "2 erfassen");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([2, 3])), "2 abhaken");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([3])), "Abhaken");
+    assert.equal(k.allyPlanKnopf(punkte, new Set([0, 2])), "2 übernehmen");
+    assert.equal(k.allyRueckgaengigText([{ was: "Erfasst" }, { was: "Abgehakt" }, { was: "Abgehakt" }], []), "1 Zahlung erfasst, 2 Punkte abgehakt");
+});
+
+test("Zahlart in der Schreibweise des Formulars (Kasse oder Bank im DATEV-Export)", () => {
+    for (const [ein, aus] of [["bar", "Bar"], ["in bar", "Bar"], ["Bargeld", "Bar"], ["Überweisung", "Überweisung"], ["überwiesen", "Überweisung"],
+        ["EC-Karte", "Karte"], ["Karte", "Karte"], ["PayPal", "PayPal"], ["SEPA-Lastschrift", "Lastschrift"], ["", ""], ["Scheck", "Scheck"]])
+        assert.equal(k.allyZahlart(ein), aus, ein);
+});
+
+test("Stand eines Punkts: Zahl, alte Einträge, gedeckelt auf Soll", () => {
+    assert.equal(k.allyPunktWert(1, 2), 1);
+    assert.equal(k.allyPunktWert(5, 2), 2);
+    assert.equal(k.allyPunktWert(undefined, 2), 0);
+    assert.equal(k.allyPunktWert({ level: 3 }, 2), 2);
+    assert.equal(k.allyPunktWert({ level: 2 }, 2), 1);
+    assert.equal(k.allyPunktWert({ level: 1 }, 2), 0);
 });
 
 test("Absage-Text und Folgefragen", () => {
