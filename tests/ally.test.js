@@ -4,7 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const k = require("./lade-app")(["ALLY_WERKZEUGE", "allyNeueKarte", "allyKuerzel", "allyNamenErsetzen", "allyKuerzelAufloesen", "allyGesundheit",
     "allyFreitext", "allyFilterPasst", "allyFilterLeer", "allyKontextZeile", "allyNamePasst", "allyWunschzeiten", "allyAntwortText", "allyDatumOk", "allyZeitOk",
-    "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText"]);
+    "ALLY_PLAN_ARTEN", "allyPlanZeilen", "allyVerschiebenText", "allyTagAusText", "allyGesundheitWort", "allyAbsageText", "allyPlanRueckfrage", "allyFolgefragen"]);
 
 const PERSONEN = [
     { schluessel: "s:1", vorname: "Lena", nachname: "Weber", anzeige: "Lena Weber" },
@@ -116,4 +116,47 @@ test("Plan: Arten passen zum Server, WhatsApp-Text zum Verschieben kommt aus der
     assert.equal(k.allyVerschiebenText("Lena", "Donnerstag, 23.10.", "10:00", "09:15"),
         "Hallo Lena, würde es dir passen, wenn deine Fahrstunde am Donnerstag, 23.10. um 09:15 Uhr statt um 10:00 Uhr beginnt? Gib mir bitte kurz Bescheid. Danke!");
     assert.match(k.allyVerschiebenText("", "Mo", "8:00", "9:00"), /^Hallo, /);
+});
+
+test("Krank-Tag: heute, morgen, übermorgen, Wochentag oder Datum – sonst null", () => {
+    const jetzt = new Date("2026-10-19T08:00:00Z"); // Montag
+    assert.equal(k.allyTagAusText("Ich bin morgen krank", jetzt), "2026-10-20");
+    assert.equal(k.allyTagAusText("heute krank", jetzt), "2026-10-19");
+    assert.equal(k.allyTagAusText("Übermorgen beim Arzt", jetzt), "2026-10-21");
+    assert.equal(k.allyTagAusText("Am Freitag krank", jetzt), "2026-10-23");
+    assert.equal(k.allyTagAusText("Montag krank", jetzt), "2026-10-19", "heute eingeschlossen");
+    assert.equal(k.allyTagAusText("Arzt am 3.11.", jetzt), "2026-11-03");
+    assert.equal(k.allyTagAusText("Ich bin krank", jetzt), null);
+    assert.equal(k.allyTagAusText("am Morgen krank", jetzt), null, "der Morgen ist kein Tag");
+    assert.equal(k.allyTagAusText("31.02. krank", jetzt), null, "kein echtes Datum");
+});
+
+test("Gesundheitsfilter: Fahrschulwörter und Orte schlagen nicht mehr an, das Wort wird genannt", () => {
+    for (const t of ["Panikbremsung üben", "Abholung am Klinikum", "Kooperation mit der Schule", "Fehlerdiagnose am Auto"])
+        assert.equal(k.allyGesundheit(t), false, t);
+    for (const t of ["Operation am Knie", "Diagnose kam heute", "Ich bin krank"])
+        assert.equal(k.allyGesundheit(t), true, t);
+    assert.equal(k.allyGesundheitWort("Lena hat einen Arzttermin"), "Arzttermin");
+    assert.equal(k.allyGesundheitWort("Ich bin morgen krank"), "krank");
+    assert.equal(k.allyGesundheitWort("Was steht morgen an?"), "");
+});
+
+test("Plan: Rückfrage nennt Abzulehnende mit Namen, warnt und erklärt die Warteliste ehrlich", () => {
+    const punkte = [{ art: "annehmen", titel: "Mia Hoffmann · Mi 21.10. 10:00–10:45" }, { art: "ablehnen", titel: "Lena Berger · Fr 23.10. 10:00–10:45" }, { art: "anbieten", titel: "Mo 19.10. 15:00–15:45" }];
+    const alle = k.allyPlanRueckfrage(punkte, new Set([0, 1, 2]));
+    assert.equal(alle.gefahr, true);
+    assert.match(alle.text, /Abgelehnt und gelöscht wird:\n• Lena Berger · Fr 23\.10\./);
+    assert.match(alle.text, /rückgängig/);
+    assert.match(alle.text, /sehen passende Schüler sofort/);
+    const nurAnnehmen = k.allyPlanRueckfrage(punkte, new Set([0]));
+    assert.equal(nurAnnehmen.gefahr, false);
+    assert.match(nurAnnehmen.text, /Von allein geht nichts raus/);
+});
+
+test("Absage-Text und Folgefragen", () => {
+    assert.equal(k.allyAbsageText("Lena", "Freitag, 23.10.", "10:00", ""),
+        "Hallo Lena, deinen Terminwunsch am Freitag, 23.10. um 10:00 Uhr kann ich leider nicht annehmen. Schick mir gern einen anderen Termin. Danke für dein Verständnis!");
+    assert.match(k.allyAbsageText("", "Mo", "8:00", "https://x"), /^Hallo, .*Such dir gern einen anderen Termin aus: https:\/\/x/);
+    assert.deepEqual(Array.from(k.allyFolgefragen("Plane meine Woche")), ["Was ist noch offen?", "Was steht morgen an?"]);
+    assert.equal(Array.from(k.allyFolgefragen("Was steht morgen an?")).indexOf("Was steht morgen an?"), -1);
 });
