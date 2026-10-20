@@ -4511,6 +4511,7 @@ const CHANGELOG = [
             "Neue Anfragen landen automatisch unter Interessenten, jetzt auch mit E-Mail-Adresse",
             "Was die KI selbst darf, stellst du ein: selbst antworten ja oder nein, höchstens wie viele Antworten am Tag, Interessenten anlegen, Abholen pausieren",
             "Gesundheitsangaben gehen nie an die KI – solche E-Mails liegen direkt bei dir",
+            "Mit Ally: Frag „Was liegt im Posteingang?“ – Ally fasst zusammen und öffnet den Posteingang. Absender gehen dabei nur als Kürzel an die KI",
         ] },
     { v: "2.125.2", date: "Oktober 2026", changes: [
             "Löschst du einen Termin, den ein Schüler kurzfristig absagen möchte, fragt die App jetzt ebenfalls nach der Ausfallgebühr",
@@ -12783,7 +12784,7 @@ function abschlussTerminEnde(appt, minuten) {
    Ausbildungsnachweis (ausbildung_lesen) lesen, Zahlungen und ADK-/Streckenhaken als Planpunkte -
    beides mit eigenem Schalter (ally-geld, ally-adk). Kontaktdaten und Notizen bleiben draußen. */
 const ALLY_WERKZEUGE = ["kalender_lesen", "anfragen_lesen", "schueler_stand", "schueler_liste", "freie_zeiten", "regeln_pruefen",
-    "leerlauf_finden", "warteliste_luecken", "plan_vorschlagen", "offene_abschluesse", "geld_lesen", "ausbildung_lesen", "abschluss_oeffnen", "seite_oeffnen",
+    "leerlauf_finden", "warteliste_luecken", "plan_vorschlagen", "offene_abschluesse", "geld_lesen", "ausbildung_lesen", "posteingang_lesen", "abschluss_oeffnen", "seite_oeffnen",
     "support_uebergeben", "erinnerungen_offen", "einstellungen_lesen", "ansicht_filtern", "ansicht_springen"];
 // Termin-Status der Datenbank -> Wort für die KI und die Filter-Chips
 const ALLY_STATUS = { confirmed: "bestaetigt", pending: "anfrage", cancel_requested: "absage_wunsch", offered: "angeboten" };
@@ -35831,6 +35832,40 @@ function App() {
                 schueler: zeilen.slice(0, 80).map(z => ({ schueler: allyKuerzel(karte, "s:" + z.x.id, dispName(z.x)), berechnet: z.berechnet, bezahlt: z.bezahlt, offen: z.offen,
                     letzteZahlung: z.letzte ? { datum: z.letzte.date, betrag: r2(Number(z.letzte.amount) || 0) } : null, archiviert: z.x.archived ? true : undefined })) };
         }
+        // Posteingang (v2.126.0): nur die Kurzfassungen der Posteingang-KI, kein Mailtext. Absender und
+        // Schüler gehen als Kürzel raus, Gesundheitsangaben als „[privat]“.
+        if (name === "posteingang_lesen") {
+            if (!posteingangAn())
+                throw new Error("Den Posteingang sehen nur Fahrschul-Admin und Büro, und nur wenn er unter Funktionen ein/aus an ist.");
+            const tage = Math.max(1, Math.min(30, Math.round(Number(ein.tage) || 7)));
+            const filter = ["braucht_dich", "ki_beantwortet", "alle"].indexOf(ein.filter) >= 0 ? ein.filter : "braucht_dich";
+            const seit = Date.now() - tage * 86400000;
+            let roh;
+            if (IS_DEMO())
+                roh = posteingangDemo().liste;
+            else {
+                const { data, error } = await sb.from("posteingang").select("status,kategorie,von_name,von_email,zusammenfassung,grund,empfangen_am")
+                    .eq("school_id", school.id).gte("empfangen_am", new Date(seit).toISOString()).order("empfangen_am", { ascending: false }).limit(100);
+                if (error)
+                    throw new Error("Der Posteingang ließ sich gerade nicht laden.");
+                roh = data || [];
+            }
+            roh = roh.filter(a => new Date(a.empfangen_am).getTime() >= seit);
+            const passt = { braucht_dich: postBraucht, ki_beantwortet: a => a.status === "beantwortet_ki", alle: () => true }[filter];
+            const mails = roh.filter(passt).slice(0, 40).map(a => {
+                const anzeige = String(a.von_name || a.von_email || "").trim() || "Unbekannt";
+                const teile = String(a.von_name || "").trim().split(/\s+/).filter(Boolean);
+                const p = { schluessel: "p:mail:" + String(a.von_email || anzeige).toLowerCase(), vorname: teile[0] || "", nachname: teile.slice(1).join(" "), anzeige };
+                const leute = personen.concat([p]);
+                const privat = /gesundheit/i.test(a.grund || "");
+                const d = new Date(a.empfangen_am);
+                return { von: allyKuerzel(karte, p.schluessel, anzeige), art: POST_KATEGORIEN[a.kategorie] || "nicht eingeordnet", status: POST_STATUS[a.status] || a.status,
+                    eingang: ymd(d) + " " + hm(d), kurzfassung: privat ? "[privat]" : allyFreitext(a.zusammenfassung, leute, karte, 200),
+                    warum: postBraucht(a) ? (privat ? "[privat]" : allyFreitext(a.grund, leute, karte, 200)) : undefined };
+            });
+            return { tage, filter, anzahl: mails.length, brauchenDich: roh.filter(postBraucht).length, vonKiBeantwortet: roh.filter(a => a.status === "beantwortet_ki").length, mails,
+                hinweis: "Antworten, senden und erledigen geht nur im Posteingang - seite_oeffnen mit ziel posteingang." };
+        }
         // Ausbildungsnachweis (v2.124.0): die Haken, wie der Fahrlehrer sie gesetzt hat - ohne Prozente
         // und ohne Ampel, damit daraus kein Urteil über den Schüler wird.
         if (name === "ausbildung_lesen") {
@@ -35982,7 +36017,7 @@ function App() {
     }
     const ALLY_SCHRITT = { kalender_lesen: "liest den Kalender", anfragen_lesen: "sieht die Anfragen durch", schueler_stand: "schaut beim Schüler nach",
         schueler_liste: "geht die Schüler durch", freie_zeiten: "sucht freie Zeiten", regeln_pruefen: "prüft die Regeln", offene_abschluesse: "sucht offene Abschlüsse",
-        erinnerungen_offen: "schaut nach Erinnerungen", abschluss_oeffnen: "legt den Abschluss bereit", geld_lesen: "schaut in die Kasse", ausbildung_lesen: "schaut in den Ausbildungsnachweis", seite_oeffnen: "sucht die Seite", support_uebergeben: "fragt den Support", einstellungen_lesen: "liest deine Einstellungen", ansicht_filtern: "stellt den Kalender ein", ansicht_springen: "blättert im Kalender",
+        erinnerungen_offen: "schaut nach Erinnerungen", abschluss_oeffnen: "legt den Abschluss bereit", geld_lesen: "schaut in die Kasse", ausbildung_lesen: "schaut in den Ausbildungsnachweis", posteingang_lesen: "schaut in den Posteingang", seite_oeffnen: "sucht die Seite", support_uebergeben: "fragt den Support", einstellungen_lesen: "liest deine Einstellungen", ansicht_filtern: "stellt den Kalender ein", ansicht_springen: "blättert im Kalender",
         leerlauf_finden: "sucht Wartezeit zwischen Terminen", warteliste_luecken: "schaut auf die Warteliste", plan_vorschlagen: "stellt den Plan zusammen" };
     // Teil-Schalter (v2.124.0): Zahlungen nur mit Kasse, Ausbildungsnachweis nur mit ADK oder Strecken
     function allyGeldAn() { return bereichAn("ally-geld") && bereichAn("rechnungen"); }

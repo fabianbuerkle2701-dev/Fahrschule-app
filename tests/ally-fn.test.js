@@ -54,7 +54,7 @@ test("Anfrage an Anthropic: Sonnet 5.5, niedrige Denkstufe, Caching, feste Regel
     assert.equal(p.thinking, undefined, "thinking: disabled gäbe auf Sonnet 5.5 einen 400");
     assert.equal(typeof p.system, "string");
     assert.doesNotMatch(p.system, /20\d\d-\d\d-\d\d/, "kein Datum im System-Prompt, sonst greift das Caching nicht");
-    assert.equal(p.tools.length, 19);
+    assert.equal(p.tools.length, 20);
     assert.ok(["seite_oeffnen", "support_uebergeben"].every(n => p.tools.some(w => w.name === n)), "Seite öffnen und an den Support übergeben (v2.125.0)");
     assert.ok(["geld_lesen", "ausbildung_lesen"].every(n => p.tools.some(w => w.name === n)), "Zahlungen und Ausbildungsnachweis (v2.124.0)");
     assert.ok(p.tools.some(w => w.name === "abschluss_oeffnen"), "Abschluss bereitlegen (v2.123.0)");
@@ -67,7 +67,8 @@ test("Anfrage an Anthropic: Sonnet 5.5, niedrige Denkstufe, Caching, feste Regel
     const block = html.slice(html.indexOf("const ALLY_SEITEN = {"), html.indexOf("};", html.indexOf("const ALLY_SEITEN = {")));
     assert.deepEqual([...block.matchAll(/(\w+): "/g)].map(m => m[1]).sort(), [...seiten].sort());
     assert.ok(seiten.includes("posteingang"));
-    assert.match(p.system, /E-Mails der Fahrschule siehst du nicht/);
+    assert.match(p.system, /posteingang_lesen zeigt Art, Status und Kurzfassung/);
+    assert.ok(p.tools.some(w => w.name === "posteingang_lesen"), "Posteingang lesen (v2.126.0)");
     assert.match(p.system, /Selbst ändern kannst du nichts/);
     assert.ok(p.tools.every(w => w.input_schema && w.input_schema.type === "object"));
     assert.deepEqual(sdk.gate, { feature: "ally", limit: 300 }, "eigenes Tageskontingent");
