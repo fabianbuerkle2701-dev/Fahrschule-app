@@ -124,7 +124,8 @@ async function neueMails(cfg, passwort, letzteUid, uidValidity, max) {
       if (uidNext - 1 <= neuerStand.letzteUid)
         return { mails, letzteUid: neuerStand.letzteUid, uidValidity: validity, neuGestartet: false };
       const kandidaten = [];
-      for await (const m of c.fetch({ uid: (neuerStand.letzteUid + 1) + ":*" }, { uid: true, size: true }, { uid: true })) {
+      // UID-Bereich "n:*" - liegt n über der höchsten UID, liefert IMAP die letzte Mail (deshalb der Filter)
+      for await (const m of c.fetch((neuerStand.letzteUid + 1) + ":*", { uid: true, size: true }, { uid: true })) {
         if (Number(m.uid) > neuerStand.letzteUid)
           kandidaten.push({ uid: Number(m.uid), size: Number(m.size) || 0 });
       }

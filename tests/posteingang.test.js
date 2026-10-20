@@ -6,10 +6,21 @@ const path = require("path");
 const Module = require("module");
 
 // IMAP nachbauen, bevor lib/postfach.js geladen wird (ImapFlow wird dort beim Laden ausgepackt)
-const imap = { ordner: [{ path: "INBOX" }, { path: "Gesendet", specialUse: "\\Sent" }], abgelegt: [], verbindungen: 0 };
+// Ein kleines Postfach: Nachrichten mit UID, Größe und Quelltext; uidValidity als BigInt wie bei imapflow
+const imap = { ordner: [{ path: "INBOX" }, { path: "Gesendet", specialUse: "\\Sent" }], abgelegt: [], verbindungen: 0, nachrichten: [], uidValidity: 7n, abrufe: [] };
 class FakeImapFlow {
     constructor(o) { this.o = o; }
-    async connect() { imap.verbindungen++; }
+    async connect() { imap.verbindungen++; if (imap.anmeldungFalsch) { const e = new Error("Command failed"); e.authenticationFailed = true; throw e; } }
+    async status() { return { uidNext: (imap.nachrichten.reduce((m, n) => Math.max(m, n.uid), 0) || 0) + 1, uidValidity: imap.uidValidity }; }
+    async getMailboxLock() { this.mailbox = { uidNext: (imap.nachrichten.reduce((m, n) => Math.max(m, n.uid), 0) || 0) + 1, uidValidity: imap.uidValidity }; return { release() { } }; }
+    async *fetch(bereich, frage, optionen) {
+        imap.abrufe.push({ bereich, optionen });
+        const [von] = String(bereich).split(":").map(Number);
+        const treffer = imap.nachrichten.filter(n => n.uid >= von);
+        // IMAP-Regel: "n:*" mit n über der höchsten UID liefert die letzte Mail
+        for (const n of (treffer.length ? treffer : imap.nachrichten.slice(-1))) yield { uid: n.uid, size: n.source.length };
+    }
+    async fetchOne(uid, frage) { const n = imap.nachrichten.find(x => String(x.uid) === String(uid)); return frage.source ? { uid: n.uid, source: n.source } : { uid: n.uid, envelope: { subject: "groß", from: [{ address: "x@y.de" }] }, headers: Buffer.from("") }; }
     async list() { return imap.ordner; }
     async append(pfad, roh, flags) { imap.abgelegt.push({ pfad, roh: String(roh), flags }); }
     async logout() { }
@@ -231,4 +242,40 @@ test("Tagesbeginn in Berlin (Sommer- und Winterzeit)", () => {
     assert.equal(berlinTagesbeginn(new Date("2026-10-20T10:00:00Z")), "2026-10-19T22:00:00.000Z");
     assert.equal(berlinTagesbeginn(new Date("2026-12-01T23:30:00Z")), "2026-12-01T23:00:00.000Z");
     assert.equal(berlinTagesbeginn(new Date("2026-12-01T22:59:00Z")), "2026-11-30T23:00:00.000Z");
+});
+
+test("Neue Mails holen: nur Neues, höchstens N, große Mails nur mit Umschlag, Postfach neu angelegt → ohne Altlasten weiter", async () => {
+    const cfg = PF.konfiguration({ anbieter: "ionos", email: "info@fahrschule.de" }).cfg;
+    const mail = (uid, text) => ({ uid, source: Buffer.from("From: a@b.de\r\nSubject: " + uid + "\r\n\r\n" + text) });
+    imap.nachrichten = [mail(40, "alt"), mail(41, "eins"), mail(42, "zwei"), mail(43, "drei")];
+    imap.uidValidity = 7n;
+    let r = await PF.neueMails(cfg, "geheim", 40, 7, 2);
+    assert.deepEqual(r.mails.map(m => m.uid), [41, 42]);
+    assert.equal(r.letzteUid, 42);
+    assert.equal(r.uidValidity, 7);
+    assert.equal(imap.abrufe.slice(-1)[0].bereich, "41:*");
+    assert.deepEqual(imap.abrufe.slice(-1)[0].optionen, { uid: true });
+    r = await PF.neueMails(cfg, "geheim", 42, 7, 10);
+    assert.deepEqual(r.mails.map(m => m.uid), [43]);
+    // Nichts Neues: kein Abruf der Liste nötig, Stand bleibt
+    r = await PF.neueMails(cfg, "geheim", 43, 7, 10);
+    assert.deepEqual(r.mails, []);
+    assert.equal(r.letzteUid, 43);
+    // Große Mail (über 1,5 MB): nur Umschlag
+    imap.nachrichten.push({ uid: 44, source: Buffer.alloc(1600000, 65) });
+    r = await PF.neueMails(cfg, "geheim", 43, 7, 10);
+    assert.equal(r.mails[0].source, null);
+    assert.ok(r.mails[0].envelope);
+    // UIDVALIDITY geändert: neu anfangen, alte Mails nicht nachholen
+    imap.uidValidity = 99n;
+    r = await PF.neueMails(cfg, "geheim", 44, 7, 10);
+    assert.deepEqual(r.mails, []);
+    assert.equal(r.neuGestartet, true);
+    assert.equal(r.uidValidity, 99);
+    assert.equal(r.letzteUid, 44);
+    // Falsches Passwort: verständlicher Fehler
+    imap.anmeldungFalsch = true;
+    await assert.rejects(PF.neueMails(cfg, "falsch", 44, 99, 10), (e) => e.eigen && e.anmeldung && /Anmeldung abgelehnt/.test(e.message));
+    await assert.rejects(PF.postfachPruefen(cfg, "falsch"), (e) => e.eigen && /Anmeldung abgelehnt/.test(e.message));
+    imap.anmeldungFalsch = false;
 });
