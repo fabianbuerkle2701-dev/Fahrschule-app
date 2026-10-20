@@ -241,7 +241,7 @@ test("KI: Schüler, Rechnung, Lücken, Autopilot aus, Tageslimit, alte Mail → 
         if (f.ki) { const j = kiJson(f.ki); sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(j) }], stop_reason: "end_turn" }); }
         if (f.regeln) T.postfaecher[0].regeln = { ...T.postfaecher[0].regeln, ...f.regeln };
         if (f.pause) T.postfaecher[0].aktiv = false;
-        for (let i = 0; i < (f.heute || 0); i++) mail({ status: "beantwortet_ki", gesendet_am: jetzt(), message_id: "<alt" + i + "@x>" });
+        for (let i = 0; i < (f.heute || 0); i++) mail({ status: "beantwortet_ki", gesendet_am: jetzt(), message_id: "<alt" + i + "@x>", von_email: "alt" + i + "@example.org" });
         const m = mail(f.alt ? { empfangen_am: new Date(Date.now() - 4 * 86400000).toISOString() } : {});
         await KI().handler(cron(), zeit());
         assert.equal(netz.gesendet.length, 0, String(grund));
@@ -409,6 +409,45 @@ test("Abruf: neue Mails landen im Posteingang, Automatisches als Info, Stand wir
     const r2 = await ABRUF().handler(cron());
     assert.deepEqual(JSON.parse(r2.body), { postfaecher: 1, neu: 0 });
     assert.equal(T.posteingang.length, 2);
+});
+
+test("Abruf und KI: gefälschter Absender (SPF/DMARC fehlgeschlagen) bekommt nie eine automatische Antwort", async () => {
+    neu();
+    netz.mails = { letzteUid: 41, uidValidity: 7, neuGestartet: false, mails: [
+        { uid: 41, source: roh(["From: Bank <service@bank.example>", "Subject: Anfrage", "Message-ID: <f1@bank.example>", "Authentication-Results: mx.ionos.de; spf=fail smtp.mailfrom=bank.example"], "Was kostet Klasse B?") },
+    ] };
+    await ABRUF().handler(cron());
+    const m = T.posteingang[0];
+    assert.equal(m.status, "neu");
+    assert.equal(m.aktionen[0].unsicher, true);
+    m.versuche = 0;
+    await KI().handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 0);
+    assert.equal(m.status, "braucht_dich");
+    assert.match(m.grund, /nicht bestätigt/);
+    assert.ok(m.entwurf_text.length > 0);
+});
+
+test("KI: fremder Link im Entwurf oder schon zwei Antworten an denselben Absender → nur Entwurf", async () => {
+    neu();
+    sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(kiJson({ antwort: "Hallo,\nbitte hier zahlen: https://bezahl-sicher.example/konto\nViele Grüße" })) }], stop_reason: "end_turn" });
+    const m = mail();
+    await KI().handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 0);
+    assert.match(m.grund, /Link, der nicht im Steckbrief steht/);
+    neu();
+    sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(kiJson({ antwort: "Hallo,\nanmelden geht hier: https://allindrive.netlify.app/?buchen=ABC123\nViele Grüße" })) }], stop_reason: "end_turn" });
+    const m1 = mail();
+    await KI().handler(cron(), zeit());
+    assert.equal(m1.status, "beantwortet_ki", "der Buchungslink aus den Fakten ist erlaubt");
+    neu();
+    mail({ status: "beantwortet_ki", gesendet_am: new Date(Date.now() - 3600000).toISOString(), message_id: "<a1@x>" });
+    mail({ status: "beantwortet_ki", gesendet_am: new Date(Date.now() - 7200000).toISOString(), message_id: "<a2@x>" });
+    const m2 = mail({ message_id: "<a3@x>" });
+    await KI().handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 0);
+    assert.equal(m2.status, "braucht_dich");
+    assert.match(m2.grund, /zwei automatische Antworten/);
 });
 
 test("Abruf: KI aus → nichts abholen; Fehler → vermerkt, nach drei Tagen pausiert", async () => {

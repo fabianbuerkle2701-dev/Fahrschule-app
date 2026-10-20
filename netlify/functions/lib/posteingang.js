@@ -45,6 +45,25 @@ function automatischeNachricht(vonEmail, headers, eigeneEmail) {
   return "";
 }
 
+// Absender nicht bestätigt: Der Mailserver der Fahrschule hat SPF oder DMARC als fehlgeschlagen
+// vermerkt - der Absender ist vermutlich gefälscht. Dann nie automatisch antworten, sonst ließe sich
+// das Postfach der Fahrschule nutzen, um Dritten Mails zu schicken.
+function absenderUnsicher(headers) {
+  const a = String((headers && headers["authentication-results"]) || "").toLowerCase();
+  return /\b(spf|dmarc)=fail\b/.test(a);
+}
+
+// Links im Entwurf, die nicht in FAKTEN oder STECKBRIEF stehen (die KI könnte sie aus der Mail übernommen haben)
+function fremdeLinks(antwort, erlaubt) {
+  const ok = String(erlaubt || "").toLowerCase();
+  const links = String(antwort || "").match(/\b(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi) || [];
+  return links.map(l => l.replace(/[.,;:!?]+$/, "")).filter(l => {
+    const kurz = l.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/+$/, "");
+    const host = kurz.split(/[/?#]/)[0];
+    return !(ok.indexOf(kurz) >= 0 || (host && ok.indexOf(host) >= 0 && kurz === host));
+  });
+}
+
 // Text säubern: zitierten Verlauf und Signatur abschneiden, Länge begrenzen.
 function textSaeubern(text, max) {
   let t = String(text || "").replace(/\r\n?/g, "\n");
@@ -221,6 +240,12 @@ function entscheiden(o) {
     return { status: "braucht_dich", grund: "Der Absender heißt wie ein Schüler – geht nur mit deinem OK raus." };
   if (!ki.vollstaendig || /\[bitte ergänzen/i.test(ki.antwort) || !ki.antwort)
     return { status: "braucht_dich", grund: ki.hinweis || "Im Entwurf fehlen Angaben – ergänze sie oder den Steckbrief." };
+  if (o.unsicher)
+    return { status: "braucht_dich", grund: "Der Absender ist nicht bestätigt (die Mail könnte gefälscht sein) – bitte selbst prüfen." };
+  if (o.fremdeLinks && o.fremdeLinks.length)
+    return { status: "braucht_dich", grund: "Der Entwurf enthält einen Link, der nicht im Steckbrief steht – bitte prüfen." };
+  if ((Number(o.antwortenAnAbsender) || 0) >= 2)
+    return { status: "braucht_dich", grund: "Dieser Absender hat heute schon zwei automatische Antworten bekommen – bitte selbst ansehen." };
   if (o.alt)
     return { status: "braucht_dich", grund: "Älter als drei Tage – bitte selbst prüfen, ob die Antwort noch passt." };
   if (o.ohnePostfach)
@@ -234,5 +259,5 @@ function entscheiden(o) {
 
 module.exports = {
   KATEGORIEN, KATEGORIE_TEXT, SYSTEM, SCHEMA, STANDARD_REGELN, OHNE_POSTFACH,
-  enthaeltGesundheit, automatischeNachricht, textSaeubern, faktenText, nachricht, kiErgebnisPruefen, istSchueler, kiHinweis, antwortBetreff, entscheiden,
+  enthaeltGesundheit, automatischeNachricht, absenderUnsicher, fremdeLinks, textSaeubern, faktenText, nachricht, kiErgebnisPruefen, istSchueler, kiHinweis, antwortBetreff, entscheiden,
 };

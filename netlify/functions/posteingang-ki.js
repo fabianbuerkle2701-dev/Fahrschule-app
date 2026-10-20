@@ -135,13 +135,14 @@ async function bearbeiten(db, client, z, context) {
   }
 
   let ki = null;
+  const fakten = P.faktenText(schule, await buchungsLink(db, pf, schule));
   try {
     const msg = await client.messages.create({
       model: MODELL,
       max_tokens: 3000,
       output_config: { effort: "low", format: { type: "json_schema", schema: P.SCHEMA } },
       system: P.SYSTEM,
-      messages: [{ role: "user", content: P.nachricht(P.faktenText(schule, await buchungsLink(db, pf, schule)), schule.ki_steckbrief, z) }],
+      messages: [{ role: "user", content: P.nachricht(fakten, schule.ki_steckbrief, z) }],
     }, { signal: kiSignal(context) });
     if (msg.stop_reason === "refusal") {
       ki = null;
@@ -163,12 +164,20 @@ async function bearbeiten(db, client, z, context) {
   const schueler = ki && ki.kategorie === "interessent" && konten.length
     ? (await db.lesen("students?owner=in.(" + konten.join(",") + ")&select=vorname:data->>vorname,name:data->>name&limit=5000")) || []
     : [];
-  const heute = ki && ki.kategorie === "interessent"
+  const interessent = !!(ki && ki.kategorie === "interessent");
+  const heute = interessent
     ? await db.zaehlen("posteingang?school_id=eq." + z.school_id + "&status=eq.beantwortet_ki&gesendet_am=gte." + encodeURIComponent(berlinTagesbeginn()))
+    : 0;
+  // Schutz vor Schleifen und Missbrauch: höchstens zwei automatische Antworten je Absender in 24 Stunden
+  const anAbsender = interessent && z.von_email
+    ? await db.zaehlen("posteingang?school_id=eq." + z.school_id + "&von_email=eq." + encodeURIComponent(z.von_email) + "&status=eq.beantwortet_ki&gesendet_am=gte." + encodeURIComponent(new Date(Date.now() - 86400000).toISOString()))
     : 0;
   const e = P.entscheiden({
     ki, regeln: pf && pf.regeln, absenderIstSchueler: P.istSchueler(z.von_name, schueler),
     alt: Date.now() - new Date(z.empfangen_am).getTime() > 72 * 3600000, ohnePostfach: !pf || !pf.aktiv, heuteAutomatisch: heute,
+    unsicher: aktionen.some((a) => a && a.art === "abgeholt" && a.unsicher),
+    fremdeLinks: ki ? P.fremdeLinks(ki.antwort, fakten + "\n" + (schule.ki_steckbrief || "")) : [],
+    antwortenAnAbsender: anAbsender,
   });
   const neu = {
     status: e.status, grund: e.grund, kategorie: ki ? ki.kategorie : "", zusammenfassung: ki ? ki.zusammenfassung : "",

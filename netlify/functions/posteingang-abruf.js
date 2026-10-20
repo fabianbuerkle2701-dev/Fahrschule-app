@@ -8,7 +8,7 @@
 
 const { dienst } = require("./lib/dienst");
 const { neueMails, mailZerlegen } = require("./lib/postfach");
-const { automatischeNachricht, textSaeubern } = require("./lib/posteingang");
+const { automatischeNachricht, absenderUnsicher, textSaeubern } = require("./lib/posteingang");
 
 const ZEITBUDGET_MS = 8000;
 
@@ -64,7 +64,8 @@ exports.handler = async function (event) {
           text: textSaeubern(z.text) + (z.anhaenge ? "\n\n(" + z.anhaenge + (z.anhaenge === 1 ? " Anhang" : " Anhänge") + " – bitte im Postfach ansehen.)" : ""),
           empfangen_am: new Date(Number.isFinite(datum) ? Math.min(datum, Date.now()) : Date.now()).toISOString(),
           status: unlesbar ? "braucht_dich" : automatisch ? "info" : "neu", grund: unlesbar ? "Ließ sich nicht lesen – bitte im Postfach ansehen." : automatisch || "",
-          aktionen: [{ art: "abgeholt", zeit: jetzt }],
+          // Absender laut Mailserver nicht bestätigt (SPF/DMARC): merken - dann antwortet die KI nie selbst
+          aktionen: [{ art: "abgeholt", zeit: jetzt, ...(!unlesbar && absenderUnsicher(z.headers) ? { unsicher: true } : {}) }],
         };
         // Schon vorhanden (gleiche Message-ID in diesem Postfach): überspringen. Der eindeutige
         // Index ist partiell, deshalb meldet PostgREST den Doppelten als 409 statt ihn still zu ignorieren.

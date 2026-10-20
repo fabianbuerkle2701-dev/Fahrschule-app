@@ -49,6 +49,25 @@ test("entscheiden: nur vollständige Interessenten-Antworten gehen automatisch r
     assert.equal(P.entscheiden({ ki: kiAntwort(), regeln: { tageslimit: 0 } }).status, "braucht_dich");
 });
 
+test("Schutz vor Missbrauch: unbestätigter Absender, fremde Links, zu viele Antworten an denselben Absender", () => {
+    assert.equal(P.absenderUnsicher({ "authentication-results": "mx.ionos.de; spf=fail smtp.mailfrom=bank.example; dkim=none" }), true);
+    assert.equal(P.absenderUnsicher({ "authentication-results": "mx.ionos.de; dmarc=fail (p=reject) header.from=example.org" }), true);
+    assert.equal(P.absenderUnsicher({ "authentication-results": "mx.ionos.de; spf=pass; dkim=pass; dmarc=pass" }), false);
+    assert.equal(P.absenderUnsicher({ "authentication-results": "spf=softfail" }), false);
+    assert.equal(P.absenderUnsicher({}), false);
+    const erlaubt = "Online-Anmeldung: https://allindrive.netlify.app/?buchen=ABC\nWebseite www.fahrschule-test.de";
+    assert.deepEqual(P.fremdeLinks("Melden Sie sich an: https://allindrive.netlify.app/?buchen=ABC.", erlaubt), []);
+    assert.deepEqual(P.fremdeLinks("Mehr auf www.fahrschule-test.de!", erlaubt), []);
+    assert.deepEqual(P.fremdeLinks("Hier zahlen: https://bezahl-sicher.example/konto", erlaubt), ["https://bezahl-sicher.example/konto"]);
+    assert.deepEqual(P.fremdeLinks("Siehe https://allindrive.netlify.app/anderes", erlaubt), ["https://allindrive.netlify.app/anderes"]);
+    assert.deepEqual(P.fremdeLinks("Kein Link hier.", erlaubt), []);
+    assert.match(P.entscheiden({ ki: kiAntwort(), unsicher: true }).grund, /nicht bestätigt/);
+    assert.match(P.entscheiden({ ki: kiAntwort(), fremdeLinks: ["https://x.example"] }).grund, /Link/);
+    assert.equal(P.entscheiden({ ki: kiAntwort(), fremdeLinks: [] }).status, "zu_senden");
+    assert.equal(P.entscheiden({ ki: kiAntwort(), antwortenAnAbsender: 1 }).status, "zu_senden");
+    assert.match(P.entscheiden({ ki: kiAntwort(), antwortenAnAbsender: 2 }).grund, /zwei automatische Antworten/);
+});
+
 test("Automatische Nachrichten erkennen (sonst antworten sich zwei Autopiloten gegenseitig)", () => {
     assert.equal(P.automatischeNachricht("", {}), "Kein Absender");
     assert.equal(P.automatischeNachricht("info@fahrschule.de", {}, "Info@Fahrschule.de"), "Von der eigenen Adresse");
