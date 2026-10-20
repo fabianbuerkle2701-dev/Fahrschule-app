@@ -28,7 +28,7 @@ Die Leiste hat fünf Plätze: **Schüler · Ausbildung · + · Kalender · Mehr*
 - **+** (Mitte): heißt „Neuer Termin“. Steht man in einer Ausbildungsansicht mit gewähltem Schüler, heißt er „Neue Fahrstunde“ und legt einen Fahrtenbuch-Eintrag an.
 - **Kalender**: eine rote Zahl am Reiter zeigt offene Terminvorschläge und Storno-Anfragen.
 - **Mehr**: Blatt mit drei aufklappbaren Gruppen und einem Direkteintrag:
-  - Fahrschule: Fahrschul-Dashboard und Team-Kalender (nur Fahrschul-Admin und Büro), Auswertung, Fuhrpark, Ausgaben & Gewinn (nur Fahrschul-Admin), Tagesgeschäft, Interessenten
+  - Fahrschule: Fahrschul-Dashboard und Team-Kalender (nur Fahrschul-Admin und Büro), Auswertung, Fuhrpark, Ausgaben & Gewinn (nur Fahrschul-Admin), Tagesgeschäft, Interessenten, Posteingang (nur Fahrschul-Admin und Büro, mit Zahl der E-Mails, die warten)
   - Schüler: Übersicht, Schülerdaten
   - Lernen: Videos, Theoriepilot
   - Einstellungen
@@ -43,7 +43,7 @@ Statt der unteren Leiste gibt es links eine feste Seitenleiste:
 - Fahrlehrer ▾: Theoriepilot (nur wenn der Theoriepilot an ist)
 - Übersicht (Schülerakte des gewählten Schülers)
 - Kalender (mit Zähler für offene Anfragen)
-- Mehr ▾: Fahrschul-Dashboard, Team-Kalender (beide nur Fahrschul-Admin/Büro), Schülerdaten, Fuhrpark, Ausgaben & Gewinn (nur Fahrschul-Admin), Auswertung, Tagesgeschäft, Interessenten, Einstellungen, Videos
+- Mehr ▾: Fahrschul-Dashboard, Team-Kalender (beide nur Fahrschul-Admin/Büro), Schülerdaten, Fuhrpark, Ausgaben & Gewinn (nur Fahrschul-Admin), Auswertung, Tagesgeschäft, Interessenten, Posteingang (nur Fahrschul-Admin/Büro), Einstellungen, Videos
 
 Kopfzeile (alle Geräte, am Computer ausführlicher): Suchfeld „Schüler, Termin oder Einstellung suchen…“ (⌘K bzw. Strg+K), Tageszeile „Heute · N Fahrstunden · nächster …“ (führt zum Kalender), Wetter (abschaltbar) und die Speicheranzeige (siehe 6.3).
 
@@ -105,7 +105,7 @@ Oben „Einstellung suchen…“, dann:
 - **Darstellung**: Dark Mode, Schriftgröße (A− / A+).
 - **Mein Bereich**: Profil, Arbeit & Ausbildung, Meine Unterlagen, Daten & Sicherung (für Nicht-Admins zusätzlich Funktionen ein/aus).
 - **Fahrschule** (nur Fahrschul-Admin), in vier Gruppen:
-  - Identität & Team: Meine Fahrschule, Team & Einladung, Standorte, Personalunterlagen, Fahrschul-Dashboard
+  - Identität & Team: Meine Fahrschule, Team & Einladung, Standorte, Personalunterlagen, Posteingang (KI) (öffnet den Posteingang), Fahrschul-Dashboard
   - Ausbildung & Struktur: Führerscheinklassen, Ausbildungsfahrt-Arten, Sonderfahrten-Soll, Funktionen ein/aus
   - Geld & Abrechnung: Kosten, Rechnungsdaten, DATEV-Export, Geschenkgutscheine, Fuhrpark & Auswertung
   - Recht & Datenschutz: Führerschein-Reform 2027, Löschprotokoll
@@ -441,11 +441,23 @@ Mehr › Fahrschule › Auswertung („Zu Abschnitt springen“: Statistik, Prü
 
 ### Interessenten
 Mehr › Fahrschule › Interessenten (Funktion „Interessenten“):
-1. „+ Interessent“ (oder „Interessent aus Screenshot“, KI): Vorname, Nachname, Telefon, Klasse (Interesse), Status (Offen, Kontaktiert, Angemeldet, Abgesagt), „Warum abgesagt?“, „Wie kam die Anfrage?“, „Nächster Kontakt (optional)“, Notiz.
+1. „+ Interessent“ (oder „Interessent aus Screenshot“, KI): Vorname, Nachname, Telefon, E-Mail, Klasse (Interesse), Status (Offen, Kontaktiert, Angemeldet, Abgesagt), „Warum abgesagt?“, „Wie kam die Anfrage?“, „Nächster Kontakt (optional)“, Notiz.
 2. „✨ Nachricht vorschlagen“ (KI) und „In WhatsApp öffnen“.
 3. Wird er Schüler: „Als Schüler übernehmen“ – danach zeigt die App die nächsten Schritte (PIN vergeben und Zugang schicken, Unterlagen anfordern, Ausbildungsvertrag erstellen, erste Fahrstunde planen).
 - Fällige Wiedervorlagen erscheinen auf der Startseite. Rückruf-Wünsche aus dem Buchungs-Chat landen hier.
 - Fahrschul-Admin und Büro pflegen im Fahrschul-Dashboard die Interessenten der ganzen Fahrschule und übergeben sie einem Fahrlehrer (Feld „Zuständiger Fahrlehrer“).
+- Anfragen per E-Mail legt der Posteingang automatisch als Interessent an (Herkunft „E-Mail“, beim Fahrschul-Admin, der das Postfach verbunden hat), wenn die Regel „Interessenten anlegen“ an ist.
+
+### Posteingang (KI)
+Mehr › Fahrschule › Posteingang – nur Fahrschul-Admin und Büro, Funktion „Posteingang (KI)“ an und KI der Fahrschule an (auch: Einstellungen › Fahrschule › „Posteingang (KI)“, Schnellsuche „Posteingang“):
+1. Postfach verbinden (nur Fahrschul-Admin): Anbieter wählen (IONOS, STRATO, Telekom, GMX, WEB.DE, Gmail oder „Anderer Anbieter“ mit Server und Port für IMAP und SMTP), E-Mail-Adresse, Passwort des Postfachs, Absendername › „Verbinden“. Die App prüft Abholen und Senden sofort. Gmail braucht ein App-Passwort; bei GMX und WEB.DE muss „POP3/IMAP-Abruf“ im Postfach erlaubt sein; bei T-Online das E-Mail-Passwort aus dem Kundencenter. Outlook/Microsoft 365 geht noch nicht.
+2. Steckbrief ausfüllen („Einstellungen“ im Posteingang › „Steckbrief für die KI“): Angebot, Theoriezeiten, Anmeldung, Unterlagen, Preise, Zahlung, Bürozeiten, Telefon. Preise, Pakete, Standorte und Klassen aus den Einstellungen kennt die KI schon. Nur damit beantwortet sie Anfragen selbst.
+3. Die App holt alle fünf Minuten neue E-Mails ab (nur was nach dem Verbinden eingeht). Die KI ordnet jede ein (Interessent, Fahrschüler, Eltern, Rechnung & Zahlung, Prüfung & Behörde, Bewerbung, Geschäftlich, Werbung, Sonstiges) und schreibt einen Entwurf.
+4. Selbst antwortet die KI nur auf allgemeine Anfragen von Interessenten, die der Steckbrief vollständig beantwortet – mit einem Hinweis unter der Antwort, dass sie von einer KI stammt. Nicht automatisch: alles mit Schülern, Eltern, Geld, Prüfungen, Absender, die wie ein Schüler heißen, E-Mails älter als drei Tage, Lücken im Entwurf, Gesundheitsangaben (gehen gar nicht an die KI), Autopilot aus oder Tageslimit erreicht.
+5. Filter: „Braucht dich“, „KI hat geantwortet“, „Alle“, „Erledigt“. Antippen zeigt die E-Mail, warum sie bei dir liegt und den Entwurf: anpassen › „Senden“ (geht über euer Postfach an den Absender; eine Kopie legt die App, wenn der Anbieter es zulässt, im Ordner „Gesendet“ ab). Stellen mit „[bitte ergänzen …]“ müssen vorher ersetzt werden. Außerdem „Erledigt“, „Spam“, „Wieder vorlegen“, bei beantworteten „Noch einmal antworten“.
+6. „Einstellungen“ im Posteingang (nur Fahrschul-Admin): „KI antwortet selbst“, „Interessenten anlegen“, „Höchstens am Tag“ (5 bis 100 automatische Antworten), „E-Mails abholen“ (aus = pausiert), „Neu verbinden“ (z. B. nach Passwortwechsel), „Postfach trennen“ (löscht das gespeicherte Passwort, bisherige E-Mails bleiben sichtbar).
+- Probleme: Zeigt der Posteingang „Abholen klappt gerade nicht …“, stimmt meist das Passwort nicht mehr › „Neu verbinden“. Nach drei Tagen mit Fehlern pausiert das Abholen von selbst; „Fortsetzen“ oder „Neu verbinden“ startet es wieder. Kommen keine E-Mails an: prüfen, ob „E-Mails abholen“ an ist und die Mails im Posteingang-Ordner (nicht in Unterordnern) liegen. Automatische Antworten, Rückläufer und Newsletter beantwortet die KI nie.
+- Die Startseite zeigt „N E-Mails im Posteingang brauchen dich“, ein reines Büro-Konto sieht den Hinweis oben im Fahrschul-Cockpit.
 
 ### Rundnachricht
 1. Schülerliste › Megafon-Symbol („Nachricht an Schüler senden“).
@@ -605,11 +617,13 @@ Einstellungen › Daten & Sicherung:
 
 **KI-Support** (Mehr › Einstellungen › „Hilfe & Support“): beantwortet Fragen zur Bedienung, zu Fehlern, Konto und Abo sofort, öffnet die passende Stelle und gibt Ungelöstes an Allindrive weiter (Antwort unter „Anfragen“). Er ersetzt die frühere FAQ-Liste. Ist die KI der Fahrschule aus, geht die Nachricht ohne KI an Allindrive.
 
-**KI-Schalter der Fahrschule** (Einstellungen › Kosten, nur Fahrschul-Admin): Aus sperrt KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen für alle Konten der Fahrschule auf dem Server; es gehen keine Daten an den KI-Anbieter. Dann fehlen alle KI-Knöpfe, auch Ally. Persönlich lässt sich die KI unter Funktionen ein/aus › „KI-Helfer“ ausblenden.
+**Posteingang (KI-Verwaltung)**: Die KI bearbeitet die E-Mails der Fahrschule (siehe „Posteingang (KI)“ in Abschnitt 2). Sie liest jede neue E-Mail mit den Angaben der Fahrschule und dem Steckbrief, schreibt Entwürfe und beantwortet nur allgemeine Interessenten-Anfragen selbst, mit KI-Hinweis. Was automatisch rausgeht, entscheiden feste Regeln in der App, nicht die KI.
+
+**KI-Schalter der Fahrschule** (Einstellungen › Kosten, nur Fahrschul-Admin): Aus sperrt KI-Helfer, Briefings, Foto-Erfassung, Buchungs-Chat und Theorie-Erklärungen für alle Konten der Fahrschule auf dem Server; es gehen keine Daten an den KI-Anbieter. Dann fehlen alle KI-Knöpfe, auch Ally und der Posteingang (es werden keine E-Mails mehr abgeholt). Persönlich lässt sich die KI unter Funktionen ein/aus › „KI-Helfer“ ausblenden.
 
 **Ally (Pilot)**: Ally arbeitet mit Claude von Anthropic. Sie beantwortet Fragen zum Kalender („Was steht morgen an?“), filtert den Kalender („Kalender gefiltert“, „Alle zeigen“), plant die Woche („Planen“ bzw. „Plane meine Woche“: Anfragen annehmen/ablehnen, Terminvorschläge, Warteliste – erst nach Abhaken und „Übernehmen“), trägt Termine ein („Eintragen“), bereitet Abschlüsse vor, nennt offene Beträge und legt Zahlungen bereit („Ally: Zahlungen“), hakt ADK-Punkte ab („Abhaken“, „Ally: ADK und Strecken“) und öffnet die Krankmeldung. Eingetragenes lässt sich gleich danach rückgängig machen. Verschiebungen laufen einzeln, nachdem der Schüler gefragt wurde. Ally bewertet keine Menschen – Lernstand und Prüfungsreife beurteilt der Fahrlehrer. Telefonnummer, Anschrift und Notizen ändert man direkt in der Schülerakte.
 
-**Datenschutz laut App**: Namen gehen nur als Kürzel an die KI, Kontaktdaten und Gesundheitsangaben (z. B. Sehhilfe) gar nicht. Das Ally-Gespräch speichert Allindrive nicht. Beim Support gehen Nachricht und technische Angaben (App-Version, Gerätetyp, geöffnete Seite, Rolle) an die KI; Fragen und Antworten speichert Allindrive 12 Monate, damit bei Bedarf jemand weiterhelfen kann. Die KI ist Claude von Anthropic. Beim Excel-Import bleibt alles auf dem Gerät, außer Überschriften und fünf Beispielzeilen, wenn keine Namensspalte erkannt wird. KI kann sich irren – Wichtiges im Kalender bzw. in der Akte prüfen.
+**Datenschutz laut App**: Namen gehen nur als Kürzel an die KI, Kontaktdaten und Gesundheitsangaben (z. B. Sehhilfe) gar nicht. Das Ally-Gespräch speichert Allindrive nicht. Beim Support gehen Nachricht und technische Angaben (App-Version, Gerätetyp, geöffnete Seite, Rolle) an die KI; Fragen und Antworten speichert Allindrive 12 Monate, damit bei Bedarf jemand weiterhelfen kann. Die KI ist Claude von Anthropic. Im Posteingang gehen E-Mails (Absender, Betreff, Text) mit den Angaben der Fahrschule an die KI, E-Mails mit Gesundheitsangaben nicht; Kopien speichert Allindrive 12 Monate, das Original bleibt im Postfach, das Postfach-Passwort liegt verschlüsselt und ist nur für den Server lesbar. Beim Excel-Import bleibt alles auf dem Gerät, außer Überschriften und fünf Beispielzeilen, wenn keine Namensspalte erkannt wird. KI kann sich irren – Wichtiges im Kalender bzw. in der Akte prüfen.
 
 ---
 
@@ -697,6 +711,7 @@ Feste Ziele der Schnellsuche (⌘K) aus der Funktion \`befehlsZiele()\` – dies
 | tagesgeschaeft | Tagesgeschäft - Tagesabschluss, Lücken, krank melden | nur wenn Funktion „Tagesgeschäft“ an |
 | papierkorb | Papierkorb - gelöschte Schüler und Interessenten (30 Tage) | alle |
 | interessenten | Interessenten | nur wenn Funktion „Interessenten“ an |
+| posteingang | Posteingang – E-Mails mit KI | nur Fahrschul-Admin und Büro, Funktion „Posteingang (KI)“ an, KI der Fahrschule an |
 | einstellungen | Einstellungen | alle |
 | videos | Videos | immer gelistet; ist „Lernvideos“ aus, springt die App zur Startseite |
 | set-profil | Profil | alle |

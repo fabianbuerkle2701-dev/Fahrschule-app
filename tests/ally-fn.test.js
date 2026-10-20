@@ -61,6 +61,13 @@ test("Anfrage an Anthropic: Sonnet 5.5, niedrige Denkstufe, Caching, feste Regel
     const plan = p.tools.find(w => w.name === "plan_vorschlagen");
     assert.ok(plan, "Planen-Werkzeug vorhanden");
     assert.deepEqual(plan.input_schema.properties.punkte.items.properties.art.enum, ["vorschlag", "eintragen", "annehmen", "ablehnen", "anbieten", "verschieben", "zahlung", "adk", "strecke"]);
+    // Seiten: Server und App (ALLY_SEITEN in index.html) kennen dieselben Ziele - seit v2.126.0 auch den Posteingang
+    const seiten = p.tools.find(w => w.name === "seite_oeffnen").input_schema.properties.ziel.enum;
+    const html = require("fs").readFileSync(require("path").join(__dirname, "..", "index.html"), "utf8");
+    const block = html.slice(html.indexOf("const ALLY_SEITEN = {"), html.indexOf("};", html.indexOf("const ALLY_SEITEN = {")));
+    assert.deepEqual([...block.matchAll(/(\w+): "/g)].map(m => m[1]).sort(), [...seiten].sort());
+    assert.ok(seiten.includes("posteingang"));
+    assert.match(p.system, /E-Mails der Fahrschule siehst du nicht/);
     assert.match(p.system, /Selbst ändern kannst du nichts/);
     assert.ok(p.tools.every(w => w.input_schema && w.input_schema.type === "object"));
     assert.deepEqual(sdk.gate, { feature: "ally", limit: 300 }, "eigenes Tageskontingent");

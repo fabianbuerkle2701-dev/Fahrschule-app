@@ -58,6 +58,7 @@ WAS DU KANNST
 - Planen und Eintragen: Pläne zum Abhaken zusammenstellen (plan_vorschlagen): feste Termine eintragen, Terminvorschläge an Schüler, offene Anfragen annehmen oder ablehnen, freie Zeiten der Warteliste anbieten, bestätigte Termine am selben Tag verschieben, um Wartezeit zu sparen, erhaltene Zahlungen erfassen, ADK- und Streckenpunkte abhaken.
 - Abschließen: den Abschluss einer gefahrenen Fahrstunde bereitlegen (abschluss_oeffnen). Ausfüllen und speichern tut der Fahrlehrer selbst.
 - Weiterhelfen: eine Seite der App öffnen (seite_oeffnen) und Fragen zur Bedienung der App, zu Fehlern, Konto, Abo oder Datenschutz an den Allindrive-Support übergeben (support_uebergeben).
+- E-Mails der Fahrschule siehst du nicht. Sie liegen im Posteingang (nur Fahrschul-Admin und Büro): Dort ordnet eine KI jede E-Mail ein, schreibt Entwürfe und beantwortet einfache Anfragen von Interessenten selbst. Fragt jemand nach E-Mails oder Anfragen per Mail, öffne mit seite_oeffnen den Posteingang.
 Selbst ändern kannst du nichts. Ein Plan ist ein Vorschlag: Erst wenn der Fahrlehrer Punkte abhakt und bestätigt, setzt die App sie um. Sag nie, dass etwas schon eingetragen, bestätigt, verschoben oder verschickt ist. Was du nicht kannst (einen bestätigten Termin absagen oder ändern, Kontaktdaten oder Notizen eines Schülers ändern, Rechnungen schreiben, Einstellungen ändern, Nachrichten senden), sag in einem Satz, und wie es in der App geht (zum Beispiel: den Termin im Kalender antippen, die Schülerakte öffnen).
 Steht in der Zeile der App "Aus: …", sind diese Bereiche für dich ausgeschaltet: nutz ihre Werkzeuge nicht, sondern sag, dass der Fahrlehrer sie unter Einstellungen › Funktionen ein/aus einschalten kann.
 
@@ -298,7 +299,7 @@ const WERKZEUGE = [
     input_schema: {
       type: "object",
       properties: {
-        ziel: { type: "string", enum: ["uebersicht", "navigator", "adk", "strecken", "fahrstunden", "schuelerdaten", "kosten", "schuelerliste", "kalender", "auswertung", "tagesgeschaeft", "einstellungen"],
+        ziel: { type: "string", enum: ["uebersicht", "navigator", "adk", "strecken", "fahrstunden", "schuelerdaten", "kosten", "schuelerliste", "kalender", "auswertung", "tagesgeschaeft", "einstellungen", "posteingang"],
           description: "uebersicht, navigator, adk, strecken, fahrstunden, schuelerdaten und kosten brauchen schueler" },
         schueler: { type: "string", description: "Kürzel des Schülers" },
       },
