@@ -177,7 +177,7 @@ exports.handler = async function (event) {
   }
 
   // 3) Empfänger aus den gespeicherten Daten - eine Adresse aus der Anfrage zählt nie
-  let an, schonHeute = false;
+  let an, schonHeute;
   if (erinnerung) {
     const rechnung = (Array.isArray(ziel.invoices) ? ziel.invoices : []).find((r) => r && String(r.id) === a.invoice_id);
     if (!rechnung) return antwort(404, { error: "Diese Rechnung gibt es nicht mehr." });
@@ -185,6 +185,9 @@ exports.handler = async function (event) {
       return antwort(409, { error: "Diese Rechnung ist storniert. Dazu geht keine Zahlungserinnerung raus." });
     const heute = berlinDatum(0);
     schonHeute = (Array.isArray(ziel.reminders) ? ziel.reminders : []).some((r) => r && String(r.invoiceId) === a.invoice_id && r.date === heute);
+    // Jede gesendete Erinnerung soll im Protokoll stehen – das erlaubt eine je Rechnung und Tag. Deshalb lieber
+    // gar nicht senden als eine Mail ohne Vermerk (z. B. wenn heute schon angerufen oder per WhatsApp erinnert wurde).
+    if (schonHeute) return antwort(409, { error: "Zu dieser Rechnung ist heute schon eine Erinnerung vermerkt. Die nächste geht frühestens morgen raus." });
     const firma = ziel.firmenkunde === true ? String(ziel.firma_email || "").trim() : "";
     an = firma || String(ziel.email || "").trim();
     if (!an) return antwort(400, { error: "Für diesen Schüler ist keine E-Mail-Adresse hinterlegt." });
@@ -264,9 +267,7 @@ exports.handler = async function (event) {
   if (vermerk) return antwort(200, { ok: true, an, vermerk: true });
   const hinweis = !erinnerung
     ? "Die E-Mail ist raus. Status und nächster Kontakt ließen sich aber nicht speichern – bitte trag beides beim Interessenten von Hand ein."
-    : schonHeute
-      ? "Die E-Mail ist raus. Im Erinnerungs-Protokoll steht für heute schon eine Erinnerung zu dieser Rechnung, deshalb wurde diese nicht zusätzlich vermerkt."
-      : "Die E-Mail ist raus, steht aber noch nicht im Erinnerungs-Protokoll. Bitte vermerke sie bei der Rechnung von Hand (Weg: E-Mail).";
+    : "Die E-Mail ist raus, steht aber noch nicht im Erinnerungs-Protokoll. Bitte vermerke sie bei der Rechnung von Hand (Weg: E-Mail).";
   return antwort(200, { ok: true, an, vermerk: false, hinweis });
 };
 

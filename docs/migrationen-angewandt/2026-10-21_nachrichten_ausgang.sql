@@ -13,7 +13,11 @@
 -- der Server (service_role) – authenticated hat kein insert/update/delete, anon gar keinen Zugriff.
 -- Rein additiv.
 --
--- Stand 21.10.2026: geschrieben, noch NICHT eingespielt – erst nach Prüfung.
+-- Aufbewahrung: 12 Monate wie der Posteingang (Job nachrichten-ausgang-aufraeumen). Die Erinnerung selbst bleibt
+-- im Erinnerungs-Protokoll des Schülers.
+-- Dazu: school_rechnungen liefert die E-Mail des Schülers (data.email), damit der Autopilot „Per E-Mail senden“
+-- auch ohne Firmenkunde anbietet (gezielte Ersetzung per DO-Block mit Anker).
+-- Eingespielt am 21.10.2026 nach Prüfung.
 
 create table if not exists public.nachrichten_ausgang (
   id uuid primary key default gen_random_uuid(),
@@ -40,3 +44,20 @@ revoke all on public.nachrichten_ausgang from anon, authenticated;
 grant select on public.nachrichten_ausgang to authenticated;
 drop policy if exists nachrichten_ausgang_lesen on public.nachrichten_ausgang;
 create policy nachrichten_ausgang_lesen on public.nachrichten_ausgang for select to authenticated using (public._darf_schulweit(school_id));
+
+select cron.schedule('nachrichten-ausgang-aufraeumen', '50 3 * * *', $job$
+  delete from public.nachrichten_ausgang where created_at < now() - interval '12 months';
+$job$);
+
+do $mig$
+declare alt text; neu text;
+begin
+  alt := pg_get_functiondef('public.school_rechnungen(uuid)'::regprocedure);
+  if position('''email'', coalesce(s.data->>''email''' in alt) > 0 then return; end if;
+  neu := replace(alt, '''anschrift'', coalesce(s.data->>''anschrift'', ''''),', '''anschrift'', coalesce(s.data->>''anschrift'', ''''),' || chr(10) || '             ''email'', coalesce(s.data->>''email'', ''''),');
+  if neu = alt then raise exception 'Anker fehlt (school_rechnungen)'; end if;
+  execute neu;
+end $mig$;
+
+-- Proben nach dem Einspielen (21.10.2026, verworfene Transaktion, 0 Reste): Admin sieht nur Zeilen der eigenen
+-- Fahrschule und darf nicht schreiben · anon gesperrt · school_rechnungen liefert das Feld email · Aufräum-Job da.

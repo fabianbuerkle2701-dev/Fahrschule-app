@@ -508,14 +508,15 @@ test("Vermerk scheitert nach dem Versand: trotzdem ok mit vermerk false und Hinw
     r = await senden("admin-1", erinnerung());
     assert.equal(r.daten.schon, true);
     assert.equal(smtp.gesendet.length, 1);
-    // Heute steht schon eine Erinnerung im Protokoll (z. B. per WhatsApp): die Mail geht raus, der Hinweis sagt, warum kein Vermerk
+    // Heute steht schon eine Erinnerung im Protokoll (z. B. per WhatsApp): keine Mail ohne Vermerk – 409, nichts gesendet
     neu();
     T.students[0].data.reminders = [{ date: berlinHeute(), stage: 1, amount: 120.5, invoiceId: "inv1", kanal: "whatsapp" }];
     r = await senden("admin-1", erinnerung());
-    assert.equal(r.status, 200);
-    assert.equal(r.daten.vermerk, false);
-    assert.match(r.daten.hinweis, /heute schon eine Erinnerung/);
-    assert.equal(smtp.gesendet.length, 1);
+    assert.equal(r.status, 409);
+    assert.match(r.daten.error, /heute schon eine Erinnerung/);
+    satz(r.daten.error);
+    assert.equal(smtp.gesendet.length, 0);
+    assert.equal(T.nachrichten_ausgang.length, 0);
     // Nachfassen: Speichern scheitert
     neu({ speichernFehler: true });
     r = await senden("admin-1", nachfassen());
@@ -566,6 +567,7 @@ test("Eingaben: Art, Kennung, Betreff 1–200, Text 1–8000, Stufe, Betrag; sto
     // Genau an den Grenzen geht es; ein Zeilenumbruch im Betreff schleust keine Kopfzeile ein
     r = await senden("admin-1", erinnerung({ betreff: "B".repeat(200), text: "T".repeat(8000) }));
     assert.equal(r.status, 200);
+    T.students[0].data.reminders = []; // die erste Mail hat heute schon eine Erinnerung vermerkt
     r = await senden("admin-1", erinnerung({ schluessel: K(40), betreff: " Zahlung\r\nBcc: x@y.de ", text: "Zeile 1\r\nZeile 2" }));
     assert.equal(r.status, 200);
     const m = smtp.gesendet[1].m;
