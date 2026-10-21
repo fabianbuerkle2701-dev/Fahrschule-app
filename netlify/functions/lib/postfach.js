@@ -263,6 +263,8 @@ async function antwortSenden(cfg, passwort, a) {
     inReplyTo: a.antwortAuf || undefined, references: [a.referenzen, a.antwortAuf].filter(Boolean).join(" ") || undefined,
     // RFC 3834: automatische Antworten „auto-replied“, automatisch erzeugte Mails (z. B. Erinnerungen) „auto-generated“
     headers: { "Auto-Submitted": a.automatisch ? "auto-replied" : a.erzeugt ? "auto-generated" : "no" },
+    // Anhänge (z. B. die Rechnung als PDF): [{ name, daten (Buffer), typ }]
+    ...(Array.isArray(a.anhaenge) && a.anhaenge.length ? { attachments: a.anhaenge.map((x) => ({ filename: String(x.name || "anhang"), content: x.daten, contentType: x.typ || "application/octet-stream" })) } : {}),
   };
   let info;
   try {

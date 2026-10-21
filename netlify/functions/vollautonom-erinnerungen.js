@@ -16,6 +16,7 @@ const { dienst } = require("./lib/dienst");
 const { antwortSenden, emailGueltig } = require("./lib/postfach");
 const { autonomieAn } = require("./lib/pakete");
 const R = require("./lib/rechnungen");
+const M = require("./lib/rechnung-mail");
 
 const MAX_JE_SCHULE = 10;
 const TAGESLIMIT = 100;
@@ -79,7 +80,11 @@ async function schuleBearbeiten(db, schule, b, context, protokoll) {
   const heuteGesendet = await db.zaehlen("nachrichten_ausgang?school_id=eq." + schule.id + "&status=eq.gesendet&created_at=gte." + encodeURIComponent(b.tagesbeginn));
   if (heuteGesendet >= TAGESLIMIT) return "tageslimit";
   const konten = R.kontenAus(await db.rpc("school_rechnungen", { p_school_id: schule.id }));
-  const liste = kandidaten(R.positionen(konten, R.zahlungsziel(schule), b.datum)).filter((p) => empfaenger(p));
+  // Rechnungen, die der Autopilot nicht verschicken konnte, hat der Schüler nie bekommen – daran nicht erinnern
+  const ausgang = (await db.lesen("nachrichten_ausgang?school_id=eq." + schule.id + "&art=eq.rechnung&created_at=gte." + encodeURIComponent(new Date(b.ms - 90 * 86400000).toISOString())
+    + "&select=art,bezug,status,fehler,created_at")) || [];
+  const ungesendet = M.nichtVerschickt(ausgang);
+  const liste = kandidaten(R.positionen(konten, R.zahlungsziel(schule), b.datum)).filter((p) => empfaenger(p) && !ungesendet.has(p.konto.student_id + ":" + p.rechnung.id));
   if (!liste.length) return "nichts";
   const passwort = await db.rpc("postfach_passwort", { p_postfach: pf.id });
   if (!passwort) return "kein_postfach";

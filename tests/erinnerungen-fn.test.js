@@ -172,6 +172,18 @@ test("Doppelt ist schlimmer als gar nicht: eine Erinnerung der letzten Tage im A
     assert.equal(vermerke.length, 0);
 });
 
+test("Keine Erinnerung an eine Rechnung, die der Autopilot nicht verschicken konnte", async () => {
+    neu();
+    T.nachrichten_ausgang.push({ id: "x", school_id: "schule-1", art: "rechnung", bezug: "s-001:inv-s-001", status: "fehler",
+        fehler: "Rechnung RE-2026-0001 erstellt, aber nicht verschickt: Anmeldung fehlgeschlagen", schluessel: "y", created_at: new Date("2026-10-01T09:00:00Z").toISOString() });
+    await F.handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 0);
+    // Von Hand nachgeschickt: dann wieder normal
+    T.nachrichten_ausgang.push({ id: "z", school_id: "schule-1", art: "rechnung", bezug: "s-001:inv-s-001", status: "gesendet", schluessel: "w", created_at: new Date("2026-10-02T09:00:00Z").toISOString() });
+    await F.handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 1);
+});
+
 test("Rechenregeln: Schlüssel je Rechnung und Tag, Auswahl sortiert nach Dringlichkeit", () => {
     assert.equal(F.schluesselFuer("a:b", "2026-10-21"), F.schluesselFuer("a:b", "2026-10-21"));
     assert.notEqual(F.schluesselFuer("a:b", "2026-10-21"), F.schluesselFuer("a:b", "2026-10-22"));
