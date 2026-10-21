@@ -162,7 +162,7 @@ async function bearbeiten(db, client, z, context) {
 
   const konten = ((await db.lesen("profiles?school_id=eq." + z.school_id + "&select=id")) || []).map((p) => p.id).filter(Boolean);
   const schueler = ki && ki.kategorie === "interessent" && konten.length
-    ? (await db.lesen("students?owner=in.(" + konten.join(",") + ")&select=vorname:data->>vorname,name:data->>name&limit=5000")) || []
+    ? (await db.lesen("students?owner=in.(" + konten.join(",") + ")&select=vorname:data->>vorname,name:data->>name,email:data->>email,firmaEmail:data->>firmaEmail&limit=5000")) || []
     : [];
   const interessent = !!(ki && ki.kategorie === "interessent");
   const heute = interessent
@@ -173,7 +173,7 @@ async function bearbeiten(db, client, z, context) {
     ? await db.zaehlen("posteingang?school_id=eq." + z.school_id + "&von_email=eq." + encodeURIComponent(z.von_email) + "&status=eq.beantwortet_ki&gesendet_am=gte." + encodeURIComponent(new Date(Date.now() - 86400000).toISOString()))
     : 0;
   const e = P.entscheiden({
-    ki, regeln: pf && pf.regeln, absenderIstSchueler: P.istSchueler(z.von_name, schueler),
+    ki, regeln: pf && pf.regeln, absenderIstSchueler: P.istSchueler(z.von_name, schueler, z.von_email),
     alt: Date.now() - new Date(z.empfangen_am).getTime() > 72 * 3600000, ohnePostfach: !pf || !pf.aktiv, heuteAutomatisch: heute,
     unsicher: aktionen.some((a) => a && a.art === "abgeholt" && a.unsicher),
     fremdeLinks: ki ? P.fremdeLinks(ki.antwort, fakten + "\n" + (schule.ki_steckbrief || "")) : [],

@@ -100,6 +100,14 @@ test("Gesundheitsangaben gehen nie an die KI – Fahrschulwörter sind keine", (
     assert.equal(P.enthaeltGesundheit("Die Kooperation mit der Schule"), false);
 });
 
+test("Gesundheitsfilter (Prüfung 21.10.2026): Unfall, Klinik, Sucht, Sehhilfe & Co. – ohne Fehlalarm bei „versucht“", () => {
+    for (const t of ["Unfall, jetzt mit Gips im Bett", "seit Montag in der Klinik", "wegen Drogen zur MPU", "Sehschwäche, neue Brille",
+        "Ich trage ein Hörgerät", "Bandscheibenvorfall", "Ich sitze im Rollstuhl", "Mein Sohn hat Autismus", "Er ist alkoholabhängig", "Die Sucht ist vorbei"])
+        assert.equal(P.enthaeltGesundheit(t), true, t);
+    for (const t of ["Ich habe versucht anzurufen", "Wir haben Sie besucht", "Gesucht: Termin am Samstag"])
+        assert.equal(P.enthaeltGesundheit(t), false, t);
+});
+
 test("Text säubern: Zitat, Verlauf und Signatur fallen weg, Länge ist begrenzt", () => {
     const t = "Hallo,\nwas kostet Klasse B?\n\nAm 19.10.2026 um 10:00 schrieb Fahrschule <info@x.de>:\n> alte Mail\n> noch mehr";
     assert.equal(P.textSaeubern(t), "Hallo,\nwas kostet Klasse B?");
@@ -118,6 +126,11 @@ test("Schüler am Absendernamen erkennen (Vor- und Nachname, Umlaute egal)", () 
     assert.equal(P.istSchueler("Lisa Wunder", schueler), false);
     assert.equal(P.istSchueler("Ohne", schueler), false);
     assert.equal(P.istSchueler("", schueler), false);
+    // Auch an der Adresse: eigene E-Mail oder die der Firma, Groß-/Kleinschreibung egal – dann keine automatische Antwort
+    const mitMail = [{ vorname: "Tim", name: "Becker", email: "Tim.Becker@Web.de" }, { vorname: "Paul", name: "Wagner", firmaEmail: "buchhaltung@firma.de" }];
+    assert.equal(P.istSchueler("Tim", mitMail, "tim.becker@web.de"), true);
+    assert.equal(P.istSchueler("", mitMail, "Buchhaltung@Firma.de"), true);
+    assert.equal(P.istSchueler("Lisa", mitMail, "lisa@example.org"), false);
 });
 
 test("KI-Ergebnis: Struktur prüfen, Längen begrenzen, unbekannte Kategorie wird sonstiges", () => {
@@ -168,6 +181,10 @@ test("Postfach-Einstellungen: Vorlagen, Prüfung der Eingaben, keine lokalen Ser
     assert.deepEqual(cfg, { email: "info@web.de", benutzer: "Info@Web.de", imap_host: "imap.web.de", imap_port: 993, imap_tls: true,
         smtp_host: "smtp.web.de", smtp_port: 587, smtp_tls: false, absender_name: "Fahrschule Test" });
     assert.match(PF.konfiguration({ email: "kein-at" }).fehler, /gültige E-Mail/);
+    // Prüfung 21.10.2026: keine IP-Adressen, nur übliche Ports
+    assert.match(PF.konfiguration({ email: "a@b.de", imap_host: "127.0.0.1", smtp_host: "smtp.b.de" }).fehler, /keine IP-Adresse/);
+    assert.match(PF.konfiguration({ email: "a@b.de", imap_host: "imap.b.de", smtp_host: "smtp.b.de", imap_port: 22 }).fehler, /Port/);
+    assert.ok(PF.konfiguration({ email: "a@b.de", imap_host: "imap.b.de", smtp_host: "smtp.b.de", imap_port: 993, smtp_port: 587 }).cfg);
     assert.match(PF.konfiguration({ email: "a@b.de", imap_host: "imap", smtp_host: "smtp.b.de" }).fehler, /Server/);
     assert.match(PF.konfiguration({ email: "a@b.de", imap_host: "mail.intern.local", smtp_host: "smtp.b.de" }).fehler, /nicht erlaubt/);
     assert.match(PF.konfiguration({ email: "a@b.de", imap_host: "imap.b.de", smtp_host: "smtp.b.de", smtp_port: 70000 }).fehler, /Port/);
@@ -278,4 +295,15 @@ test("Neue Mails holen: nur Neues, höchstens N, große Mails nur mit Umschlag, 
     await assert.rejects(PF.neueMails(cfg, "falsch", 44, 99, 10), (e) => e.eigen && e.anmeldung && /Anmeldung abgelehnt/.test(e.message));
     await assert.rejects(PF.postfachPruefen(cfg, "falsch"), (e) => e.eigen && /Anmeldung abgelehnt/.test(e.message));
     imap.anmeldungFalsch = false;
+});
+
+test("Postfach: nur öffentliche Ziele (keine internen Netze, kein Server selbst)", async () => {
+    for (const ip of ["127.0.0.1", "10.1.2.3", "169.254.169.254", "172.16.0.1", "192.168.1.10", "100.64.0.1", "0.0.0.0", "::1", "fd00::1", "fe80::1", "::ffff:127.0.0.1"])
+        assert.equal(PF.privateAdresse(ip), true, ip);
+    for (const ip of ["212.227.15.1", "8.8.8.8", "2a01:238:20a:202::1"])
+        assert.equal(PF.privateAdresse(ip), false, ip);
+    assert.equal(await PF.hostErlaubt("intern.example.de", async () => [{ address: "10.0.0.5" }]), false);
+    assert.equal(await PF.hostErlaubt("mail.example.de", async () => [{ address: "212.227.15.1" }, { address: "::1" }]), false);
+    assert.equal(await PF.hostErlaubt("mail.example.de", async () => [{ address: "212.227.15.1" }]), true);
+    assert.equal(await PF.hostErlaubt("imap.ionos.de", async () => { throw new Error("Vorlagen nicht nachschlagen"); }), true);
 });

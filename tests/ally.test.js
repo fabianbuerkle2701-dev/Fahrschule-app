@@ -144,6 +144,12 @@ test("Gesundheitsfilter: Fahrschulwörter und Orte schlagen nicht mehr an, das W
     assert.equal(k.allyGesundheitWort("Ich bin morgen krank"), "krank");
     assert.equal(k.allyGesundheitWort("Was steht morgen an?"), "");
 });
+test("Gesundheitsfilter: eindeutige Wörter (Hörgerät, Rollstuhl, Sehhilfe …), Fahrschulstoff bleibt frei", () => {
+    for (const t of ["Tim fährt mit Hörgerät", "Sie sitzt im Rollstuhl", "Sehhilfe nicht vergessen", "Kontaktlinsen vergessen", "Bandscheibenvorfall", "Er hat Autismus"])
+        assert.equal(k.allyGesundheit(t), true, t);
+    for (const t of ["Verhalten an der Unfallstelle", "Alkohol am Steuer besprochen", "Abholung am Klinikum"])
+        assert.equal(k.allyGesundheit(t), false, t);
+});
 
 test("Plan: Rückfrage nennt Abzulehnende mit Namen, warnt und erklärt die Warteliste ehrlich", () => {
     const punkte = [{ art: "annehmen", titel: "Mia Hoffmann · Mi 21.10. 10:00–10:45" }, { art: "ablehnen", titel: "Lena Berger · Fr 23.10. 10:00–10:45" }, { art: "anbieten", titel: "Mo 19.10. 15:00–15:45" }];

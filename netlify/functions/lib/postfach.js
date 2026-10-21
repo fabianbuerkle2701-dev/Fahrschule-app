@@ -20,6 +20,37 @@ const ANBIETER = {
 
 const HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/i;
 const EMAIL = /^[^\s@<>"]{1,64}@[^\s@<>"]{3,190}$/;
+const IMAP_PORTS = [143, 993];
+const SMTP_PORTS = [25, 465, 587, 2525];
+// Server der Vorlagen sind bekannt und öffentlich - die brauchen keine Namensauflösung
+const BEKANNT = new Set(Object.values(ANBIETER).flatMap(a => [a.imap[0], a.smtp[0]]));
+
+// Nur öffentliche Ziele (Prüfung 21.10.2026): Über „Sonstiger Anbieter“ soll niemand mit einer eigenen
+// Fahrschule interne Dienste abtasten können - auf Netlify nicht und erst recht nicht nach dem Umzug auf netcup.
+function privateAdresse(ip) {
+  const a = String(ip || "").toLowerCase();
+  if (a.startsWith("::ffff:"))
+    return privateAdresse(a.slice(7));
+  if (a.includes(":"))
+    return a === "::" || a === "::1" || /^f[cd]/.test(a) || /^fe[89ab]/.test(a);
+  const t = a.split(".").map(Number);
+  if (t.length !== 4 || t.some(x => !(x >= 0 && x <= 255)))
+    return true;
+  return t[0] === 0 || t[0] === 10 || t[0] === 127 || (t[0] === 169 && t[1] === 254) || (t[0] === 172 && t[1] >= 16 && t[1] <= 31)
+    || (t[0] === 192 && t[1] === 168) || (t[0] === 100 && t[1] >= 64 && t[1] <= 127) || t[0] >= 224;
+}
+async function hostErlaubt(host, nachschlagen = (h) => require("dns").promises.lookup(h, { all: true, verbatim: true })) {
+  if (BEKANNT.has(host))
+    return true;
+  let adressen;
+  try { adressen = await nachschlagen(host); }
+  catch (e) { return true; } // gibt es nicht: das meldet der Verbindungsversuch verständlich
+  return Array.isArray(adressen) && adressen.length > 0 && !adressen.some(x => privateAdresse(x && x.address));
+}
+async function zielPruefen(host) {
+  if (!(await hostErlaubt(host)))
+    throw Object.assign(new Error("Der Server " + host + " ist nicht erlaubt."), { eigen: true });
+}
 
 // Eingaben der App prüfen und vereinheitlichen. Liefert { cfg } oder { fehler }.
 function konfiguration(e) {
@@ -47,6 +78,10 @@ function konfiguration(e) {
   // Gleiche Ziele wie lokale Netze ausschließen - die Function soll kein Werkzeug zum Abtasten werden
   if ([cfg.imap_host, cfg.smtp_host].some(h => /^(localhost|.*\.local|.*\.internal)$/.test(h)))
     return { fehler: "Dieser Server ist nicht erlaubt." };
+  if ([cfg.imap_host, cfg.smtp_host].some(h => /^\d{1,3}(\.\d{1,3}){3}$/.test(h)))
+    return { fehler: "Bitte den Namen des Servers eingeben (z. B. imap.ionos.de), keine IP-Adresse." };
+  if (IMAP_PORTS.indexOf(cfg.imap_port) < 0 || SMTP_PORTS.indexOf(cfg.smtp_port) < 0)
+    return { fehler: "Ungewöhnlicher Port. Üblich sind 993 oder 143 zum Abholen (IMAP) und 465, 587 oder 25 zum Senden (SMTP)." };
   return { cfg };
 }
 
@@ -82,6 +117,8 @@ function fehlerText(e, wo) {
 
 // Verbindung testen: IMAP anmelden (Posteingang-Stand lesen) und SMTP prüfen
 async function postfachPruefen(cfg, passwort) {
+  await zielPruefen(cfg.imap_host);
+  await zielPruefen(cfg.smtp_host);
   const c = imapClient(cfg, passwort);
   let stand;
   try {
@@ -107,6 +144,7 @@ async function postfachPruefen(cfg, passwort) {
 // Neue Mails seit letzteUid holen (höchstens max, große Mails nur mit Kopfzeilen). Ändert sich die
 // UIDVALIDITY (Postfach neu angelegt), beginnt die Zählung neu, ohne Altes nachzuholen.
 async function neueMails(cfg, passwort, letzteUid, uidValidity, max) {
+  await zielPruefen(cfg.imap_host);
   const c = imapClient(cfg, passwort);
   const mails = [];
   let neuerStand = { letzteUid: Number(letzteUid) || 0, uidValidity };
@@ -177,6 +215,7 @@ async function mailZerlegen(m) {
 // Postfach inzwischen neu angelegt (UIDVALIDITY anders) oder die Mail nicht mehr im Posteingang, kommt null.
 // Eingebettete Bilder (Logos, Signaturen) zählen nicht als Anhang.
 async function mailAnhaenge(cfg, passwort, uid, uidValidity) {
+  await zielPruefen(cfg.imap_host);
   const c = imapClient(cfg, passwort);
   try {
     await c.connect();
@@ -217,6 +256,7 @@ async function mailAnhaenge(cfg, passwort, uid, uidValidity) {
 async function antwortSenden(cfg, passwort, a) {
   if (!EMAIL.test(String(a.an || "")))
     throw Object.assign(new Error("Keine gültige Empfänger-Adresse."), { eigen: true });
+  await zielPruefen(cfg.smtp_host);
   const mail = {
     from: { name: cfg.absender_name || cfg.email, address: cfg.email },
     to: a.an, subject: String(a.betreff || "").replace(/[\r\n]+/g, " ").slice(0, 250), text: String(a.text || ""),
@@ -236,6 +276,7 @@ async function antwortSenden(cfg, passwort, a) {
   if (a.ablegen !== false) {
     try {
       const roh = await new MailComposer({ ...mail, messageId: info && info.messageId }).compile().build();
+      await zielPruefen(cfg.imap_host);
       const c = imapClient(cfg, passwort);
       await c.connect();
       try {
@@ -267,4 +308,4 @@ function emailGueltig(adresse) {
   return EMAIL.test(a) && !/[,;]/.test(a);
 }
 
-module.exports = { ANBIETER, konfiguration, fehlerText, postfachPruefen, neueMails, mailZerlegen, mailAnhaenge, antwortSenden, nachrichtSenden, emailGueltig };
+module.exports = { ANBIETER, konfiguration, privateAdresse, hostErlaubt, fehlerText, postfachPruefen, neueMails, mailZerlegen, mailAnhaenge, antwortSenden, nachrichtSenden, emailGueltig };

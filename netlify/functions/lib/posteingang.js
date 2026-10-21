@@ -12,9 +12,10 @@ const KATEGORIE_TEXT = {
   bewerbung: "Bewerbung", geschaeft: "Geschäftlich", werbung: "Werbung", sonstiges: "Sonstiges",
 };
 
-// Gesundheitsangaben (Art. 9 DSGVO) gehen nie an die KI - dieselbe Liste wie ALLY_GESUNDHEIT in
-// index.html, samt Ausnahmen für Fahrschulwörter. Solche Mails legt die App ohne KI vor.
-const GESUNDHEIT = /(krank|erkält|grippe|fieber|corona|covid|infekt|virus|arzt|ärzt|notaufnahme|therap|physio|psych|depress|burnout|angst|panik|migräne|schmerz|verletz|gebrochen|(?:^|[^a-zäöüß])operation|operiert|\bop\b|\breha\b|schwanger|medikament|tablette|(?:^|[^a-zäöüß])diagnose|attest|arbeitsunfähig|quarantäne|übelkeit|erbrech|allergi|asthma|diabet|epilep|herzinfarkt|schlaganfall|krebs|chemo|adhs|legasthen|behinder|impf|blutdruck|blutzucker)/i;
+// Gesundheitsangaben (Art. 9 DSGVO) gehen nie an die KI - die Liste von ALLY_GESUNDHEIT in index.html,
+// samt Ausnahmen für Fahrschulwörter, und dazu strenger (Prüfung 21.10.2026): Mails kommen von außen und
+// erzählen eher von Unfall, Klinik, Sucht oder MPU als Notizen von Fahrlehrern. Solche Mails legt die App ohne KI vor.
+const GESUNDHEIT = /(krank|unfall|gips|klinik|sehschw|sehhilfe|sehstör|kontaktlins|brille|hörgerät|schwerhörig|gehörlos|rollstuhl|bandscheib|lähm|prothese|amputi|autis|demenz|alkohol|(?:^|[^a-zäöüß])sucht|süchtig|drogen|\bmpu\b|erkält|grippe|fieber|corona|covid|infekt|virus|arzt|ärzt|notaufnahme|therap|physio|psych|depress|burnout|angst|panik|migräne|schmerz|verletz|gebrochen|(?:^|[^a-zäöüß])operation|operiert|\bop\b|\breha\b|schwanger|medikament|tablette|(?:^|[^a-zäöüß])diagnose|attest|arbeitsunfähig|quarantäne|übelkeit|erbrech|allergi|asthma|diabet|epilep|herzinfarkt|schlaganfall|krebs|chemo|adhs|legasthen|behinder|impf|blutdruck|blutzucker)/i;
 function gesundheitText(text) {
   return String(text || "").replace(/vorfahrt\w*\s*verletz\w*|vorfahrtsverletz\w*|verkehrs\w*behinder\w*|behinderung des verkehrs|panikbrems\w*|gefahrbrems\w*/gi, " ");
 }
@@ -192,14 +193,17 @@ function kiErgebnisPruefen(e) {
   };
 }
 
-// Ist der Absender (Anzeigename) ein Schüler dieser Fahrschule? Vor- und Nachname müssen beide
-// vorkommen, Groß-/Kleinschreibung und Umlaute egal ("Jörg" = "Joerg" = "Jorg"). Im Zweifel lieber
-// ein Treffer zu viel: dann liegt die Mail nur zur Prüfung vor, statt automatisch beantwortet zu werden.
+// Ist der Absender ein Schüler dieser Fahrschule? Erst die Adresse (eigene E-Mail oder die der Firma), dann der
+// Anzeigename: Vor- und Nachname müssen beide vorkommen, Groß-/Kleinschreibung und Umlaute egal ("Jörg" = "Joerg" = "Jorg").
+// Im Zweifel lieber ein Treffer zu viel: dann liegt die Mail nur zur Prüfung vor, statt automatisch beantwortet zu werden.
 function norm(t) {
   return String(t || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/ß/g, "ss").replace(/([aou])e/g, "$1")
     .replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
 }
-function istSchueler(vonName, schueler) {
+function istSchueler(vonName, schueler, vonEmail) {
+  const adresse = String(vonEmail || "").trim().toLowerCase();
+  if (adresse && (schueler || []).some(s => s && [s.email, s.firmaEmail].some(e => String(e || "").trim().toLowerCase() === adresse)))
+    return true;
   const v = " " + norm(vonName) + " ";
   if (v.trim().length < 3)
     return false;
