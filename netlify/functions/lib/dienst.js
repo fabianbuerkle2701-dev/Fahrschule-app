@@ -70,7 +70,16 @@ async function rpcAlsBenutzer(token, name, args) {
   return r.json().catch(() => null);
 }
 
+// Wie rpcAlsBenutzer, aber mit der Meldung der Datenbank bei einem Fehler (für Sätze wie „Das Fahrzeug ist … verplant.“)
+async function rpcAlsBenutzerMitMeldung(token, name, args) {
+  const r = await fetch(SUPABASE_URL + "/rest/v1/rpc/" + name, { method: "POST",
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: "Bearer " + token, "Content-Type": "application/json" }, body: JSON.stringify(args || {}) });
+  const daten = await r.json().catch(() => null);
+  if (r.ok) return { ok: true, daten };
+  return { ok: false, status: r.status, meldung: String((daten && daten.message) || "") };
+}
+
 // Öffentliche Basis-Adresse der App (Buchungslink im Steckbrief der KI)
 const APP_URL = "https://allindrive.netlify.app";
 
-module.exports = { dienst, benutzerAusToken, rpcAlsBenutzer, SUPABASE_URL, APP_URL };
+module.exports = { dienst, benutzerAusToken, rpcAlsBenutzer, rpcAlsBenutzerMitMeldung, SUPABASE_URL, APP_URL };

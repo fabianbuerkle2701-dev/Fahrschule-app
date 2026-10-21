@@ -17,6 +17,8 @@ const { dienst, APP_URL } = require("./lib/dienst");
 const { antwortSenden } = require("./lib/postfach");
 const P = require("./lib/posteingang");
 const { PAKET_SPALTEN, paketGilt, autonomieAn } = require("./lib/pakete");
+const W = require("./lib/werkstatt");
+const WN = require("./lib/werkstatt-netz");
 
 const MODELL = "claude-sonnet-5-5";
 const MAX_JE_LAUF = 3;
@@ -26,7 +28,7 @@ const SENDEN_RESTZEIT_MS = 4000;
 function restzeit(context) {
   return context && typeof context.getRemainingTimeInMillis === "function" ? Number(context.getRemainingTimeInMillis()) : 25000;
 }
-const SCHUL_FELDER = "name,subtitle,locations,klassen,price_hour,price_grundgebuehr,price_lehrmaterial,price_sonderfahrt,price_pruefungsvorstellung,packages,ki_steckbrief,ki_aus,bereiche_aus," + PAKET_SPALTEN;
+const SCHUL_FELDER = "id,name,subtitle,locations,klassen,price_hour,price_grundgebuehr,price_lehrmaterial,price_sonderfahrt,price_pruefungsvorstellung,packages,ki_steckbrief,ki_aus,bereiche_aus,invoice_settings,vehicles," + PAKET_SPALTEN;
 
 // Beginn des heutigen Tages in Berlin als ISO-Zeit (für das Tageslimit des Autopiloten)
 function berlinTagesbeginn(jetzt) {
@@ -117,6 +119,73 @@ async function interessentAnlegen(db, z, ki, pf, konten) {
   return true;
 }
 
+// Antwort einer Werkstatt auf unsere Terminanfrage (Fabian 21.10.2026): Die KI liest nur den Termin heraus
+// (lib/werkstatt.js). Vollautonom mit Schalter „werkstatt_termine“: ein eindeutiger Termin wird eingetragen, wenn das
+// Fahrzeug frei ist, und der Werkstatt bestätigt. Sonst (Teilautonom, unklar, belegt) liegt die Mail beim Admin.
+async function werkstattAntwort(db, client, z, anfrage, schule, pf, context, aktionen) {
+  const zeit = () => new Date().toISOString();
+  let a = null;
+  try {
+    const msg = await client.messages.create({
+      model: MODELL,
+      max_tokens: 800,
+      output_config: { effort: "low", format: { type: "json_schema", schema: W.SCHEMA } },
+      system: W.SYSTEM,
+      messages: [{ role: "user", content: W.nachricht({ anlass: anfrage.anlass, vorschlaege: anfrage.vorschlaege, gesendetAm: anfrage.created_at,
+        empfangenAm: z.empfangen_am, betreff: z.betreff, text: P.textSaeubern(z.text, 6000) }) }],
+    }, { signal: kiSignal(context) });
+    if (msg.stop_reason !== "refusal") {
+      const block = (msg.content || []).find((b) => b && b.type === "text");
+      a = W.antwortPruefen(JSON.parse(block ? block.text : ""), anfrage.vorschlaege);
+    }
+  } catch (e) {
+    if ((Number(z.versuche) || 0) < 3) {
+      if (e && e.status) console.error("posteingang-ki: Anthropic " + e.status);
+      return "ki_fehler";
+    }
+  }
+  await db.aendern("werkstatt_anfragen", "id=eq." + anfrage.id + "&status=in.(gesendet,antwort)",
+    { status: "antwort", antwort: a || {}, antwort_mail_id: z.id, updated_at: zeit() });
+  const fahrzeug = WN.fahrzeugAus(schule, anfrage.fahrzeug_id) || { name: "" };
+  const basis = { kategorie: "geschaeft", zusammenfassung: a ? a.zusammenfassung : "" };
+
+  if (a && W.eindeutig(a) && autonomieAn(schule, "werkstatt_termine")) {
+    let gebucht = false;
+    try { gebucht = !!(await db.rpc("werkstatt_termin_eintragen", { p_anfrage: anfrage.id, p_start: a.start, p_ende: a.ende })); }
+    catch (e) { gebucht = false; }
+    if (!gebucht) {
+      await setzen(db, z, "neu", { ...basis, status: "braucht_dich", grund: "Die Werkstatt nennt " + W.zeitKurz(a.start, a.ende) + " – da ist das Fahrzeug verplant. Bitte selbst klären.",
+        aktionen: [...aktionen, { art: "werkstatt", anfrage: anfrage.id, ergebnis: "belegt", zeit: zeit() }] });
+      return "werkstatt_belegt";
+    }
+    let bestaetigt = false;
+    try {
+      const passwort = pf && pf.aktiv ? await db.rpc("postfach_passwort", { p_postfach: pf.id }) : null;
+      if (passwort) {
+        const werkstatt = anfrage.werkstatt_id ? ((await db.lesen("fahrzeug_werkstaetten?id=eq." + anfrage.werkstatt_id + "&select=*")) || [])[0] : null;
+        await antwortSenden(pf, passwort, {
+          an: z.von_email, betreff: P.antwortBetreff(z.betreff, ""), automatisch: true,
+          text: W.bestaetigungText({ schule, werkstatt, fahrzeug, start: a.start, ende: a.ende }) + "\n\n—\nDiese Bestätigung hat der Autopilot der Fahrschule automatisch verschickt.",
+          antwortAuf: /^uid:/.test(z.message_id || "") ? "" : z.message_id, referenzen: z.referenzen,
+        });
+        bestaetigt = true;
+      }
+    } catch (e) {
+      console.error("posteingang-ki: Bestätigung an die Werkstatt nicht gesendet");
+    }
+    await setzen(db, z, "neu", { ...basis, status: "info",
+      grund: "Termin bei der Werkstatt eingetragen: " + W.zeitKurz(a.start, a.ende) + (bestaetigt ? " – Bestätigung gesendet." : " – bitte der Werkstatt kurz bestätigen."),
+      aktionen: [...aktionen, { art: "werkstatt", anfrage: anfrage.id, ergebnis: "gebucht", vollautonom: "werkstatt_termine", zeit: zeit() }] });
+    return "werkstatt_gebucht";
+  }
+  const grund = !a ? "Antwort der Werkstatt zur Terminanfrage – bitte selbst ansehen."
+    : a.absage ? "Die Werkstatt hat abgesagt – im Fuhrpark eine neue Anfrage senden."
+    : (a.zusage || a.gegenvorschlag) && a.start ? "Die Werkstatt " + (a.zusage ? "hat zugesagt: " : "schlägt vor: ") + W.zeitKurz(a.start, a.ende) + " – im Fuhrpark eintragen."
+    : "Antwort der Werkstatt mit Rückfrage – bitte selbst ansehen.";
+  await setzen(db, z, "neu", { ...basis, status: "braucht_dich", grund, aktionen: [...aktionen, { art: "werkstatt", anfrage: anfrage.id, zeit: zeit() }] });
+  return "werkstatt_antwort";
+}
+
 async function bearbeiten(db, client, z, context) {
   const aktionen = Array.isArray(z.aktionen) ? z.aktionen.slice() : [];
   const zeit = () => new Date().toISOString();
@@ -140,6 +209,10 @@ async function bearbeiten(db, client, z, context) {
     await setzen(db, z, "neu", { status: e.status, grund: e.grund, aktionen: [...aktionen, { art: "vorgelegt", grund: "gesundheit", zeit: zeit() }] });
     return "gesundheit";
   }
+
+  // Antwort auf eine Terminanfrage an eine Werkstatt? Dann nur den Termin lesen
+  const anfrage = await WN.anfrageZuMail(db, z).catch(() => null);
+  if (anfrage) return werkstattAntwort(db, client, z, anfrage, schule, pf, context, aktionen);
 
   let ki = null;
   const fakten = P.faktenText(schule, await buchungsLink(db, pf, schule));
