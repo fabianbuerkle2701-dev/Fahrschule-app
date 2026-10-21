@@ -173,6 +173,43 @@ async function mailZerlegen(m) {
   };
 }
 
+// Anhänge einer schon abgeholten Mail (für Belege): die Mail per UID neu laden und zerlegen. Ist das
+// Postfach inzwischen neu angelegt (UIDVALIDITY anders) oder die Mail nicht mehr im Posteingang, kommt null.
+// Eingebettete Bilder (Logos, Signaturen) zählen nicht als Anhang.
+async function mailAnhaenge(cfg, passwort, uid, uidValidity) {
+  const c = imapClient(cfg, passwort);
+  try {
+    await c.connect();
+    const lock = await c.getMailboxLock("INBOX", { readOnly: true });
+    try {
+      const mb = c.mailbox || {};
+      if (uidValidity != null && mb.uidValidity != null && Number(mb.uidValidity) !== Number(uidValidity))
+        return null;
+      const m = await c.fetchOne(String(uid), { uid: true, source: true }, { uid: true });
+      if (!m || !m.source)
+        return null;
+      if (m.source.length > 15 * 1024 * 1024)
+        throw Object.assign(new Error("Die E-Mail ist zu groß, um den Anhang zu holen."), { eigen: true });
+      const p = await simpleParser(m.source, { skipImageLinks: true, skipTextToHtml: true, skipTextLinks: true });
+      // Logos und Signatur-Bildchen (eingebettet oder winzig) sind keine Belege; eingefügte Fotos schon
+      return (p.attachments || []).filter(a => a && a.content && !a.related
+          && !(String(a.contentType || "").toLowerCase().indexOf("image/") === 0 && (Number(a.size) || a.content.length) < 15000))
+        .map(a => ({ name: String(a.filename || "").slice(0, 120), typ: String(a.contentType || "").toLowerCase(), groesse: Number(a.size) || a.content.length, inhalt: a.content }));
+    }
+    finally {
+      lock.release();
+    }
+  }
+  catch (e) {
+    if (e && e.eigen)
+      throw e;
+    throw Object.assign(new Error(fehlerText(e, cfg.imap_host)), { eigen: true });
+  }
+  finally {
+    try { await c.logout(); } catch (e) { }
+  }
+}
+
 // Antwort senden: nur an den ursprünglichen Absender, als Antwort im selben Verlauf, reiner Text.
 // a.gesendet (optional): wird direkt nach dem erfolgreichen Senden abgewartet - dort vermerkt der
 // Aufrufer den Versand, bevor die Kopie in den Ordner „Gesendet“ gelegt wird (bricht die Function
@@ -215,4 +252,4 @@ async function antwortSenden(cfg, passwort, a) {
   return { messageId: (info && info.messageId) || "" };
 }
 
-module.exports = { ANBIETER, konfiguration, fehlerText, postfachPruefen, neueMails, mailZerlegen, antwortSenden };
+module.exports = { ANBIETER, konfiguration, fehlerText, postfachPruefen, neueMails, mailZerlegen, mailAnhaenge, antwortSenden };

@@ -64,6 +64,8 @@ exports.handler = async function (event) {
           text: textSaeubern(z.text) + (z.anhaenge ? "\n\n(" + z.anhaenge + (z.anhaenge === 1 ? " Anhang" : " Anhänge") + " – bitte im Postfach ansehen.)" : ""),
           empfangen_am: new Date(Number.isFinite(datum) ? Math.min(datum, Date.now()) : Date.now()).toISOString(),
           status: unlesbar ? "braucht_dich" : automatisch ? "info" : "neu", grund: unlesbar ? "Ließ sich nicht lesen – bitte im Postfach ansehen." : automatisch || "",
+          // Für Belege: woher die Mail kam, damit der Anhang später gezielt geholt werden kann
+          imap_uid: m.uid, imap_validity: erg.uidValidity == null ? null : erg.uidValidity, anhaenge: Number(z.anhaenge) || 0,
           // Absender laut Mailserver nicht bestätigt (SPF/DMARC): merken - dann antwortet die KI nie selbst
           aktionen: [{ art: "abgeholt", zeit: jetzt, ...(!unlesbar && absenderUnsicher(z.headers) ? { unsicher: true } : {}) }],
         };

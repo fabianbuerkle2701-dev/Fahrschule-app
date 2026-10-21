@@ -25,6 +25,20 @@ function dienst(serviceKey) {
     // Ändern; mitZeilen: die geänderten Zeilen zurückgeben (leer = der Filter traf nichts mehr)
     aendern: async (tabelle, filter, daten, mitZeilen) => pruefe(await fetch(SUPABASE_URL + "/rest/v1/" + tabelle + "?" + filter, {
       method: "PATCH", headers: kopf({ Prefer: mitZeilen ? "return=representation" : "return=minimal" }), body: JSON.stringify(daten) }), "aendern " + tabelle),
+    // Datei im Speicher ablegen bzw. holen (z. B. Bucket "belege", Pfad "<school_id>/datei.pdf")
+    speichern: async (bucket, pfad, daten, typ) => {
+      const r = await fetch(SUPABASE_URL + "/storage/v1/object/" + bucket + "/" + String(pfad).split("/").map(encodeURIComponent).join("/"), {
+        method: "POST", headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey, "Content-Type": typ, "x-upsert": "false" }, body: daten });
+      if (!r.ok)
+        throw Object.assign(new Error("speichern " + r.status), { status: r.status });
+    },
+    laden: async (bucket, pfad) => {
+      const r = await fetch(SUPABASE_URL + "/storage/v1/object/" + bucket + "/" + String(pfad).split("/").map(encodeURIComponent).join("/"), {
+        headers: { apikey: serviceKey, Authorization: "Bearer " + serviceKey } });
+      if (!r.ok)
+        throw Object.assign(new Error("laden " + r.status), { status: r.status });
+      return Buffer.from(await r.arrayBuffer());
+    },
     // Einfügen; doppelte (laut eindeutigem Index) werden still übersprungen
     einfuegen: async (tabelle, daten, ignorieren) => pruefe(await fetch(SUPABASE_URL + "/rest/v1/" + tabelle, {
       method: "POST", headers: kopf({ Prefer: "return=representation" + (ignorieren ? ",resolution=ignore-duplicates" : "") }), body: JSON.stringify(daten) }), "einfuegen " + tabelle),

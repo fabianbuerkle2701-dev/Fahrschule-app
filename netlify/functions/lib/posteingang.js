@@ -142,7 +142,8 @@ SICHERHEIT
 FÜR DIE FAHRSCHULE
 - zusammenfassung: ein Satz, was der Absender will.
 - hinweis: ein kurzer Satz an die Fahrschule, was zu tun ist oder was im Entwurf fehlt (leer, wenn nichts).
-- interessent: Kontaktdaten eines Interessenten, nur was in der E-Mail steht (sonst leere Texte).`;
+- interessent: Kontaktdaten eines Interessenten, nur was in der E-Mail steht (sonst leere Texte).
+- eingangsrechnung: true, wenn die E-Mail eine Rechnung, Quittung oder Gutschrift an die Fahrschule enthält, die sie selbst bezahlen muss oder bezahlt hat (Lieferant, Werkstatt, Vermieter, Versicherung, Software, Werbung …), meist als Anhang. false bei Rechnungen der Fahrschule an Schüler, bei Mahnungen ohne Rechnung, Werbung und Angeboten.`;
 
 const SCHEMA = {
   type: "object",
@@ -154,6 +155,7 @@ const SCHEMA = {
     betreff: { type: "string" },
     antwort: { type: "string" },
     hinweis: { type: "string" },
+    eingangsrechnung: { type: "boolean" },
     interessent: {
       type: "object",
       properties: { vorname: { type: "string" }, name: { type: "string" }, telefon: { type: "string" }, klasse: { type: "string" }, wunsch: { type: "string" } },
@@ -161,7 +163,7 @@ const SCHEMA = {
       additionalProperties: false,
     },
   },
-  required: ["kategorie", "zusammenfassung", "antwort_noetig", "vollstaendig", "betreff", "antwort", "hinweis", "interessent"],
+  required: ["kategorie", "zusammenfassung", "antwort_noetig", "vollstaendig", "betreff", "antwort", "hinweis", "eingangsrechnung", "interessent"],
   additionalProperties: false,
 };
 
@@ -185,6 +187,7 @@ function kiErgebnisPruefen(e) {
     betreff: t(e.betreff, 200),
     antwort: t(e.antwort, 6000),
     hinweis: t(e.hinweis, 400),
+    eingangsrechnung: e.eingangsrechnung === true,
     interessent: { vorname: t(i.vorname, 60), name: t(i.name, 80), telefon: t(i.telefon, 40), klasse: t(i.klasse, 10), wunsch: t(i.wunsch, 300) },
   };
 }

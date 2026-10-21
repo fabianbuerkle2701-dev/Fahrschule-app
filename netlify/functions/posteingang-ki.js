@@ -179,14 +179,26 @@ async function bearbeiten(db, client, z, context) {
     fremdeLinks: ki ? P.fremdeLinks(ki.antwort, fakten + "\n" + (schule.ki_steckbrief || "")) : [],
     antwortenAnAbsender: anAbsender,
   });
+  // Rechnung an die Fahrschule mit Anhang: als Beleg für die Buchhaltung vormerken (Allindrive Autopilot).
+  // Geholt und ausgelesen wird er von buchhaltung-ki.js; gebucht wird erst nach dem OK des Admins.
+  const bAus = Array.isArray(schule.bereiche_aus) ? schule.bereiche_aus : [];
+  const belegVormerken = !!(ki && ki.eingangsrechnung && Number(z.anhaenge) > 0 && z.imap_uid != null && pf && bAus.indexOf("ausgaben") < 0);
   const neu = {
-    status: e.status, grund: e.grund, kategorie: ki ? ki.kategorie : "", zusammenfassung: ki ? ki.zusammenfassung : "",
+    status: e.status, grund: belegVormerken && e.status === "info" ? "Rechnung erkannt – der Beleg liegt in der Buchhaltung zur Prüfung bereit." : e.grund,
+    kategorie: ki ? ki.kategorie : "", zusammenfassung: ki ? ki.zusammenfassung : "",
     entwurf_betreff: ki && ki.antwort_noetig ? P.antwortBetreff(z.betreff, ki.betreff) : "",
     entwurf_text: ki && ki.antwort_noetig ? ki.antwort : "",
     aktionen: [...aktionen, { art: "ki", status: e.status, zeit: zeit() }],
   };
   if (!(await setzen(db, z, "neu", neu))) return "inzwischen_bearbeitet";
 
+  if (belegVormerken) {
+    try {
+      await db.einfuegen("beleg_vorschlaege", { school_id: z.school_id, posteingang_id: z.id, quelle: "email", status: "holen" }, true);
+    } catch (err) {
+      if (!(err && err.status === 409)) console.error("posteingang-ki: Beleg " + (err && err.status));
+    }
+  }
   const regeln = { ...P.STANDARD_REGELN, ...((pf && pf.regeln) || {}) };
   if (ki && ki.kategorie === "interessent" && regeln.interessenten_anlegen !== false && e.status !== "spam") {
     try { await interessentAnlegen(db, z, ki, pf, konten); } catch (err) { console.error("posteingang-ki: Interessent " + (err && err.status)); }
