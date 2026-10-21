@@ -60,6 +60,27 @@ test("entscheiden: nur vollständige Interessenten-Antworten gehen automatisch r
     assert.equal(P.entscheiden({ ki: kiAntwort(), regeln: { tageslimit: 0 } }).status, "braucht_dich");
 });
 
+test("entscheiden: Vollautonom „Alle E-Mails“ – auch Schüler, Eltern und Rechnungsfragen, sonst dieselben Sperren", () => {
+    for (const k of ["schueler", "eltern", "rechnung"])
+        assert.equal(P.entscheiden({ ki: kiAntwort({ kategorie: k }), alleMails: true }).status, "zu_senden", k);
+    // Nie automatisch: Prüfung & Behörde, Bewerbung, Personal, Geschäftliches (Werkstatt), Sonstiges
+    for (const k of ["pruefung", "bewerbung", "personal", "geschaeft", "sonstiges"])
+        assert.equal(P.entscheiden({ ki: kiAntwort({ kategorie: k }), alleMails: true }).status, "braucht_dich", k);
+    assert.equal(P.entscheiden({ ki: kiAntwort(), absenderIstSchueler: true, alleMails: true }).status, "zu_senden");
+    // Alles andere sperrt weiter – auch mit „Alle E-Mails“
+    const schueler = (extra) => P.entscheiden({ ki: kiAntwort({ kategorie: "schueler" }), alleMails: true, ...extra });
+    assert.equal(P.entscheiden({ ki: kiAntwort({ kategorie: "schueler", vollstaendig: false }), alleMails: true }).status, "braucht_dich");
+    assert.equal(P.entscheiden({ ki: kiAntwort({ kategorie: "eltern", antwort: "Ihr Termin ist am [bitte ergänzen: Datum]." }), alleMails: true }).status, "braucht_dich");
+    assert.equal(schueler({ gesundheit: true }).status, "braucht_dich");
+    assert.equal(schueler({ unsicher: true }).status, "braucht_dich");
+    assert.equal(schueler({ fremdeLinks: ["https://x.example"] }).status, "braucht_dich");
+    assert.equal(schueler({ antwortenAnAbsender: 2 }).status, "braucht_dich");
+    assert.equal(schueler({ alt: true }).status, "braucht_dich");
+    assert.equal(schueler({ ohnePostfach: true }).status, "braucht_dich");
+    assert.equal(schueler({ regeln: { autopilot: false } }).status, "braucht_dich", "„KI antwortet selbst“ bleibt der Hauptschalter");
+    assert.equal(schueler({ heuteAutomatisch: 20 }).status, "braucht_dich");
+});
+
 test("Schutz vor Missbrauch: unbestätigter Absender, fremde Links, zu viele Antworten an denselben Absender", () => {
     assert.equal(P.absenderUnsicher({ "authentication-results": "mx.ionos.de; spf=fail smtp.mailfrom=bank.example; dkim=none" }), true);
     assert.equal(P.absenderUnsicher({ "authentication-results": "mx.ionos.de; dmarc=fail (p=reject) header.from=example.org" }), true);

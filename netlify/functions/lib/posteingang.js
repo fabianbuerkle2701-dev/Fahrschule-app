@@ -5,6 +5,9 @@
 // KI selbst: nur allgemeine Anfragen von Interessenten, die der Steckbrief vollständig beantwortet,
 // mit eingeschaltetem Autopilot und unter dem Tageslimit. Alles mit Schülern, Eltern, Geld,
 // Prüfungen oder Unklarem liegt als Entwurf beim Fahrschul-Admin bzw. Büro.
+// Paket Vollautonom mit Schalter „Alle E-Mails selbst beantworten“ (Fabian 21.10.2026): dann auch Schüler, Eltern
+// und Fragen zu Rechnungen & Zahlung – mit denselben Sperren (vollständig aus FAKTEN/STECKBRIEF, Tageslimit, …).
+// Die KI kennt keine Schülerdaten: Anliegen zu einzelnen Terminen oder Rechnungen bleiben unvollständig = Entwurf.
 
 const KATEGORIEN = ["interessent", "schueler", "eltern", "rechnung", "pruefung", "bewerbung", "personal", "geschaeft", "werbung", "sonstiges"];
 const KATEGORIE_TEXT = {
@@ -253,6 +256,13 @@ const OHNE_POSTFACH = "Das Postfach ist pausiert oder nicht verbunden – die An
 
 // Die Entscheidung der App: Was passiert mit der Mail? Liefert { status, grund }.
 // status: zu_senden (automatisch), braucht_dich (Entwurf zum Prüfen), info (keine Antwort nötig), spam
+// Kategorien, die die KI mit „Alle E-Mails selbst beantworten“ (Vollautonom) selbst beantworten darf.
+// Nie: Prüfung & Behörde, Bewerbung, Personal & Lohn, Geschäftliches (z. B. Werkstatt) und Sonstiges.
+const ALLE_MAILS_KATEGORIEN = ["interessent", "schueler", "eltern", "rechnung"];
+function automatischErlaubt(kategorie, alleMails) {
+  return kategorie === "interessent" || (!!alleMails && ALLE_MAILS_KATEGORIEN.indexOf(kategorie) >= 0);
+}
+
 function entscheiden(o) {
   const r = { ...STANDARD_REGELN, ...((o && o.regeln) || {}) };
   const ki = o && o.ki;
@@ -266,9 +276,9 @@ function entscheiden(o) {
     return { status: "spam", grund: ki.hinweis || "Werbung oder Spam" };
   if (!ki.antwort_noetig)
     return { status: "info", grund: ki.hinweis || "Keine Antwort nötig" };
-  if (ki.kategorie !== "interessent")
+  if (!automatischErlaubt(ki.kategorie, o.alleMails))
     return { status: "braucht_dich", grund: ki.hinweis || ("Betrifft " + (KATEGORIE_TEXT[ki.kategorie] || "etwas") + " – geht nur mit deinem OK raus.") };
-  if (o.absenderIstSchueler)
+  if (o.absenderIstSchueler && !o.alleMails)
     return { status: "braucht_dich", grund: "Der Absender heißt wie ein Schüler – geht nur mit deinem OK raus." };
   if (!ki.vollstaendig || /\[bitte ergänzen/i.test(ki.antwort) || !ki.antwort)
     return { status: "braucht_dich", grund: ki.hinweis || "Im Entwurf fehlen Angaben – ergänze sie oder den Steckbrief." };
@@ -290,6 +300,6 @@ function entscheiden(o) {
 }
 
 module.exports = {
-  KATEGORIEN, KATEGORIE_TEXT, SYSTEM, SCHEMA, STANDARD_REGELN, OHNE_POSTFACH, absenderPasst, nurAdmin,
+  KATEGORIEN, KATEGORIE_TEXT, SYSTEM, SCHEMA, STANDARD_REGELN, OHNE_POSTFACH, ALLE_MAILS_KATEGORIEN, automatischErlaubt, absenderPasst, nurAdmin,
   enthaeltGesundheit, automatischeNachricht, absenderUnsicher, fremdeLinks, textSaeubern, faktenText, nachricht, kiErgebnisPruefen, istSchueler, kiHinweis, antwortBetreff, entscheiden,
 };

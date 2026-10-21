@@ -16,7 +16,7 @@ const { kiSignal } = require("./lib/ki-timeout");
 const { dienst, APP_URL } = require("./lib/dienst");
 const { antwortSenden } = require("./lib/postfach");
 const P = require("./lib/posteingang");
-const { PAKET_SPALTEN, paketGilt } = require("./lib/pakete");
+const { PAKET_SPALTEN, paketGilt, autonomieAn } = require("./lib/pakete");
 
 const MODELL = "claude-sonnet-5-5";
 const MAX_JE_LAUF = 3;
@@ -172,11 +172,14 @@ async function bearbeiten(db, client, z, context) {
     ? (await db.lesen("students?owner=in.(" + konten.join(",") + ")&select=vorname:data->>vorname,name:data->>name,email:data->>email,firmaEmail:data->>firmaEmail&limit=5000")) || []
     : [];
   const interessent = !!(ki && ki.kategorie === "interessent");
-  const heute = interessent
+  // Vollautonom „Alle E-Mails selbst beantworten“: auch Schüler, Eltern, Rechnungsfragen (KI ist hier schon geprüft an)
+  const alleMails = autonomieAn(schule, "mails_alle");
+  const automatisch = !!(ki && P.automatischErlaubt(ki.kategorie, alleMails));
+  const heute = automatisch
     ? await db.zaehlen("posteingang?school_id=eq." + z.school_id + "&status=eq.beantwortet_ki&gesendet_am=gte." + encodeURIComponent(berlinTagesbeginn()))
     : 0;
   // Schutz vor Schleifen und Missbrauch: höchstens zwei automatische Antworten je Absender in 24 Stunden
-  const anAbsender = interessent && z.von_email
+  const anAbsender = automatisch && z.von_email
     ? await db.zaehlen("posteingang?school_id=eq." + z.school_id + "&von_email=eq." + encodeURIComponent(z.von_email) + "&status=eq.beantwortet_ki&gesendet_am=gte." + encodeURIComponent(new Date(Date.now() - 86400000).toISOString()))
     : 0;
   const e = P.entscheiden({
@@ -184,7 +187,7 @@ async function bearbeiten(db, client, z, context) {
     alt: Date.now() - new Date(z.empfangen_am).getTime() > 72 * 3600000, ohnePostfach: !pf || !pf.aktiv, heuteAutomatisch: heute,
     unsicher: aktionen.some((a) => a && a.art === "abgeholt" && a.unsicher),
     fremdeLinks: ki ? P.fremdeLinks(ki.antwort, fakten + "\n" + (schule.ki_steckbrief || "")) : [],
-    antwortenAnAbsender: anAbsender,
+    antwortenAnAbsender: anAbsender, alleMails,
   });
   // Rechnung an die Fahrschule mit Anhang: als Beleg für die Buchhaltung vormerken (Allindrive Autopilot).
   // Geholt und ausgelesen wird er von buchhaltung-ki.js; gebucht wird erst nach dem OK des Admins.
@@ -196,7 +199,7 @@ async function bearbeiten(db, client, z, context) {
     nur_admin: !!(z.nur_admin || P.nurAdmin({ kategorie: ki && ki.kategorie, vonEmail: z.von_email, betreff: z.betreff, text: z.text, regeln: pf && pf.regeln })),
     entwurf_betreff: ki && ki.antwort_noetig ? P.antwortBetreff(z.betreff, ki.betreff) : "",
     entwurf_text: ki && ki.antwort_noetig ? ki.antwort : "",
-    aktionen: [...aktionen, { art: "ki", status: e.status, zeit: zeit() }],
+    aktionen: [...aktionen, { art: "ki", status: e.status, zeit: zeit(), ...(alleMails && e.status === "zu_senden" && !interessent ? { vollautonom: "mails_alle" } : {}) }],
   };
   if (!(await setzen(db, z, "neu", neu))) return "inzwischen_bearbeitet";
 

@@ -204,6 +204,43 @@ test("KI: Absender heißt wie ein Schüler → nur Entwurf, nichts gesendet", as
     assert.equal(m.entwurf_betreff, "Re: Anfrage Klasse B");
 });
 
+test("KI: Vollautonom „Alle E-Mails“ – Schüler bekommt die Antwort, aber nur mit Paket, Schalter und eingeschalteter KI", async () => {
+    const schuelerMail = () => {
+        sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(kiJson({ kategorie: "schueler", zusammenfassung: "Fragt nach der Theorie.",
+            antwort: "Hallo Jörg,\n\ndie Theorie ist dienstags und donnerstags um 18 Uhr.\n\nViele Grüße\nFahrschule Test" })) }], stop_reason: "end_turn" });
+        return mail({ von_name: "Joerg Gross", von_email: "jg@example.org", betreff: "Theorie", text: "Wann ist nochmal Theorie?" });
+    };
+    // Vollautonom + Schalter: geht raus, im Verlauf als Vollautonom vermerkt
+    neu();
+    Object.assign(T.schools[0], { autopilot_paket: "vollautonom", ki_autonomie: { mails_alle: true } });
+    let m = schuelerMail();
+    await KI().handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 1);
+    assert.equal(netz.gesendet[0].a.an, "jg@example.org");
+    assert.match(netz.gesendet[0].a.text, /KI-Assistenz der Fahrschule Test automatisch erstellt/);
+    assert.equal(m.status, "beantwortet_ki");
+    assert.equal(m.aktionen.find((x) => x.art === "ki").vollautonom, "mails_alle");
+    assert.equal(T.interessenten.length, 0, "ein Schüler wird kein Interessent");
+    // Ohne Schalter, mit Teilautonom oder abgelaufenem Vollautonom: nur Entwurf
+    for (const stand of [{ autopilot_paket: "vollautonom", ki_autonomie: {} }, { autopilot_paket: "teilautonom", ki_autonomie: { mails_alle: true } },
+        { autopilot_paket: "vollautonom", autopilot_paket_bis: new Date(Date.now() - 1000).toISOString(), ki_autonomie: { mails_alle: true } }]) {
+        neu();
+        Object.assign(T.schools[0], stand);
+        m = schuelerMail();
+        await KI().handler(cron(), zeit());
+        assert.equal(netz.gesendet.length, 0, JSON.stringify(stand));
+        assert.equal(m.status, "braucht_dich");
+    }
+    // Prüfstelle bleibt beim Menschen – auch mit „Alle E-Mails“
+    neu();
+    Object.assign(T.schools[0], { autopilot_paket: "vollautonom", ki_autonomie: { mails_alle: true } });
+    sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(kiJson({ kategorie: "pruefung" })) }], stop_reason: "end_turn" });
+    m = mail({ von_name: "TÜV", von_email: "termine@tuev.example", betreff: "Prüftermine" });
+    await KI().handler(cron(), zeit());
+    assert.equal(netz.gesendet.length, 0);
+    assert.equal(m.status, "braucht_dich");
+});
+
 test("KI: Gesundheitsangaben und ausgeschaltete KI – kein Aufruf bei Anthropic", async () => {
     neu();
     const m = mail({ text: "Ich bin krank, kann ich die Stunde morgen absagen?" });
