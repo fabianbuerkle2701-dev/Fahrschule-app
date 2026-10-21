@@ -252,4 +252,19 @@ async function antwortSenden(cfg, passwort, a) {
   return { messageId: (info && info.messageId) || "" };
 }
 
-module.exports = { ANBIETER, konfiguration, fehlerText, postfachPruefen, neueMails, mailZerlegen, mailAnhaenge, antwortSenden };
+// Neue Nachricht senden (Allindrive Autopilot: Zahlungserinnerung, Nachfassen). Reiner Text an genau eine
+// Adresse, ohne Bezug auf eine frühere Mail (kein In-Reply-To, keine References), ohne HTML und Anhänge,
+// von einem Menschen geschrieben (Auto-Submitted: no). Sonst wie antwortSenden: a.gesendet läuft direkt
+// nach dem SMTP-Erfolg, danach kommt die Kopie in den Ordner „Gesendet“.
+function nachrichtSenden(cfg, passwort, a) {
+  return antwortSenden(cfg, passwort, { an: a.an, betreff: a.betreff, text: a.text, automatisch: false, gesendet: a.gesendet });
+}
+
+// Genau eine Empfänger-Adresse, wie antwortSenden sie annimmt. Komma und Semikolon liest nodemailer als
+// Trenner mehrerer Empfänger - so eine Angabe gilt deshalb nicht als eine Adresse.
+function emailGueltig(adresse) {
+  const a = String(adresse == null ? "" : adresse);
+  return EMAIL.test(a) && !/[,;]/.test(a);
+}
+
+module.exports = { ANBIETER, konfiguration, fehlerText, postfachPruefen, neueMails, mailZerlegen, mailAnhaenge, antwortSenden, nachrichtSenden, emailGueltig };
