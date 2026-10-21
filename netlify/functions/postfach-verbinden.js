@@ -42,10 +42,11 @@ exports.handler = async function (event) {
   if (!profil || !profil.school_id || !(profil.school_admin === true || nutzer.id === ADMIN_UID))
     return antwort(403, { error: "Nur der Fahrschul-Admin kann das Postfach verbinden." });
 
-  // KI-Schalter der Fahrschule und Kontingent gegen Durchprobieren (20 Versuche am Tag)
-  const gate = await require("./lib/ki-guard").subscriptionGate(nutzer.id, token, { feature: "postfach", limit: 20, ohneAbo: true });
+  // Kontingent gegen Durchprobieren (20 Versuche am Tag). Der KI-Schalter zählt hier nicht: Der Posteingang geht
+  // auch ohne KI (dann liest und antwortet niemand automatisch), Verbinden schickt nichts an die KI.
+  const gate = await require("./lib/ki-guard").subscriptionGate(nutzer.id, token, { feature: "postfach", limit: 20, ohneAbo: true, ohneKiSchalter: true });
   if (!gate.ok)
-    return antwort(gate.statusCode, { error: gate.statusCode === 403 ? "Die KI ist für deine Fahrschule ausgeschaltet – der Posteingang braucht sie." : gate.error });
+    return antwort(gate.statusCode, { error: gate.error });
 
   const { cfg, fehler } = konfiguration(body);
   if (fehler) return antwort(400, { error: fehler });

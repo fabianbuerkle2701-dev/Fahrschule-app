@@ -8,7 +8,7 @@
 
 const { dienst } = require("./lib/dienst");
 const { neueMails, mailZerlegen } = require("./lib/postfach");
-const { automatischeNachricht, absenderUnsicher, textSaeubern } = require("./lib/posteingang");
+const { automatischeNachricht, absenderUnsicher, textSaeubern, nurAdmin } = require("./lib/posteingang");
 
 const ZEITBUDGET_MS = 8000;
 
@@ -35,10 +35,11 @@ exports.handler = async function (event) {
     if (Date.now() - start > ZEITBUDGET_MS - 3000) break;
     const jetzt = new Date().toISOString();
     try {
-      const schule = ((await db.lesen("schools?id=eq." + pf.school_id + "&select=ki_aus,bereiche_aus")) || [])[0] || {};
+      // Ohne KI wird trotzdem abgeholt (Fabian 21.10.2026): Die Mails liegen dann ohne Entwurf bei „Braucht dich“
+      const schule = ((await db.lesen("schools?id=eq." + pf.school_id + "&select=bereiche_aus")) || [])[0] || {};
       const bereiche = Array.isArray(schule.bereiche_aus) ? schule.bereiche_aus : [];
-      if (schule.ki_aus === true || bereiche.indexOf("posteingang") >= 0 || bereiche.indexOf("ki") >= 0) {
-        await db.aendern("postfaecher", "id=eq." + pf.id, { letzter_abruf: jetzt, letzter_fehler: "Die KI oder der Posteingang ist für die Fahrschule ausgeschaltet – es wird nichts abgeholt." });
+      if (bereiche.indexOf("posteingang") >= 0) {
+        await db.aendern("postfaecher", "id=eq." + pf.id, { letzter_abruf: jetzt, letzter_fehler: "Der Posteingang ist für die Fahrschule ausgeschaltet – es wird nichts abgeholt." });
         continue;
       }
       const passwort = await db.rpc("postfach_passwort", { p_postfach: pf.id });
@@ -58,6 +59,8 @@ exports.handler = async function (event) {
         const datum = new Date(z.datum).getTime();
         const zeile = {
           school_id: pf.school_id, postfach_id: pf.id, quelle: "email",
+          // Lohnpost nur für den Admin (Absenderliste, Stichworte); die KI kann später noch „personal“ ergänzen
+          nur_admin: !unlesbar && nurAdmin({ vonEmail: z.von_email, betreff: z.betreff, text: z.text, regeln: pf.regeln }),
           message_id: z.message_id || ("uid:" + (erg.uidValidity || "") + ":" + m.uid),
           antwort_auf: z.antwort_auf || "", referenzen: z.referenzen || "",
           von_name: z.von_name || "", von_email: z.von_email || "", betreff: z.betreff || "",

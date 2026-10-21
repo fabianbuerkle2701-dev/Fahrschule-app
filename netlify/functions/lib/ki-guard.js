@@ -79,10 +79,12 @@ async function schuleErlaubtKi(token) {
 // Gibt { ok: true } zurueck, wenn der Aufruf erlaubt ist, sonst { ok: false, statusCode, error }.
 // opts (optional): { feature, limit } - eigenes Tageskontingent statt des gemeinsamen;
 // ohneAbo: true - nie an der Abo-Pruefung scheitern (KI-Support: gerade bei Abo-Problemen noetig).
+// ohneKiSchalter: true - nur das Kontingent, ohne KI-Schalter der Schule (für Aufrufe, die nichts an die KI
+// schicken, z. B. Postfach verbinden: der Posteingang geht auch ohne KI, Fabian 21.10.2026).
 async function subscriptionGate(uid, token, opts) {
   const o = opts || {};
   // Schul-Schalter vor dem Tageslimit, damit ein gesperrter Aufruf kein Kontingent verbraucht.
-  if (!(await schuleErlaubtKi(token))) {
+  if (!o.ohneKiSchalter && !(await schuleErlaubtKi(token))) {
     return { ok: false, statusCode: 403, error: "KI-Funktionen sind für deine Fahrschule ausgeschaltet." };
   }
 

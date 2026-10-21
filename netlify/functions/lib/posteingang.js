@@ -6,10 +6,10 @@
 // mit eingeschaltetem Autopilot und unter dem Tageslimit. Alles mit Schülern, Eltern, Geld,
 // Prüfungen oder Unklarem liegt als Entwurf beim Fahrschul-Admin bzw. Büro.
 
-const KATEGORIEN = ["interessent", "schueler", "eltern", "rechnung", "pruefung", "bewerbung", "geschaeft", "werbung", "sonstiges"];
+const KATEGORIEN = ["interessent", "schueler", "eltern", "rechnung", "pruefung", "bewerbung", "personal", "geschaeft", "werbung", "sonstiges"];
 const KATEGORIE_TEXT = {
   interessent: "Interessent", schueler: "Fahrschüler", eltern: "Eltern", rechnung: "Rechnung & Zahlung", pruefung: "Prüfung & Behörde",
-  bewerbung: "Bewerbung", geschaeft: "Geschäftlich", werbung: "Werbung", sonstiges: "Sonstiges",
+  bewerbung: "Bewerbung", personal: "Personal & Lohn", geschaeft: "Geschäftlich", werbung: "Werbung", sonstiges: "Sonstiges",
 };
 
 // Gesundheitsangaben (Art. 9 DSGVO) gehen nie an die KI - die Liste von ALLY_GESUNDHEIT in index.html,
@@ -121,6 +121,7 @@ EINORDNEN (kategorie)
 - rechnung: Rechnungen, Zahlungen, Mahnungen, Erstattungen.
 - pruefung: TÜV, DEKRA, Führerscheinstelle, Prüfungstermine.
 - bewerbung: Bewerbungen und Jobanfragen.
+- personal: Lohn- und Gehaltsabrechnungen, Lohnbüro oder Steuerberater zur Lohnbuchhaltung, Personalangelegenheiten der eigenen Mitarbeiter (Arbeitsverträge, Gehalt). Nicht: Bewerbungen.
 - geschaeft: Werkstatt, Versicherung, Leasing, Lieferanten, Behörden außer Prüfung, Geschäftspartner.
 - werbung: Werbung, Newsletter, Spam, Phishing, Benachrichtigungen ohne Handlungsbedarf.
 - sonstiges: alles andere.
@@ -223,7 +224,31 @@ function antwortBetreff(betreff, kiBetreff) {
   return /^(re|aw|antw|wg)\s*:/i.test(b) ? b : "Re: " + b;
 }
 
-const STANDARD_REGELN = { autopilot: true, interessenten_anlegen: true, tageslimit: 20 };
+const STANDARD_REGELN = { autopilot: true, interessenten_anlegen: true, tageslimit: 20, nur_admin_absender: [] };
+
+// Lohnpost sieht nur der Fahrschul-Admin, nicht das Büro (Fabian 21.10.2026). Ohne KI greifen die Absenderliste
+// der Postfach-Regeln und feste Stichworte, mit KI zusätzlich die Kategorie „personal“.
+const LOHNPOST = /(lohnabrechnung|gehaltsabrechnung|entgeltabrechnung|lohnjournal|lohnsteuer|lohnbüro|lohnbuchhaltung|lohn- und gehalt|gehaltserhöhung|gehaltsvorschuss|lohnvorschuss|sozialversicherungsmeldung|personalakte)/i;
+// Eintrag mit @ in der Mitte = genau diese Adresse; sonst Domain (auch Unterdomains), „@steuer.de“ oder „steuer.de“
+function absenderPasst(vonEmail, liste) {
+  const a = String(vonEmail || "").trim().toLowerCase();
+  if (!a || !Array.isArray(liste))
+    return false;
+  return liste.some(e => {
+    const x = String(e || "").trim().toLowerCase();
+    if (!x)
+      return false;
+    if (x.indexOf("@") > 0)
+      return a === x;
+    const domain = x.replace(/^@/, "");
+    return !!domain && (a.endsWith("@" + domain) || a.endsWith("." + domain));
+  });
+}
+function nurAdmin(m) {
+  const x = m || {};
+  return x.kategorie === "personal" || absenderPasst(x.vonEmail, x.regeln && x.regeln.nur_admin_absender)
+    || LOHNPOST.test(String(x.betreff || "") + "\n" + String(x.text || ""));
+}
 const OHNE_POSTFACH = "Das Postfach ist pausiert oder nicht verbunden – die Antwort bitte selbst senden.";
 
 // Die Entscheidung der App: Was passiert mit der Mail? Liefert { status, grund }.
@@ -265,6 +290,6 @@ function entscheiden(o) {
 }
 
 module.exports = {
-  KATEGORIEN, KATEGORIE_TEXT, SYSTEM, SCHEMA, STANDARD_REGELN, OHNE_POSTFACH,
+  KATEGORIEN, KATEGORIE_TEXT, SYSTEM, SCHEMA, STANDARD_REGELN, OHNE_POSTFACH, absenderPasst, nurAdmin,
   enthaeltGesundheit, automatischeNachricht, absenderUnsicher, fremdeLinks, textSaeubern, faktenText, nachricht, kiErgebnisPruefen, istSchueler, kiHinweis, antwortBetreff, entscheiden,
 };

@@ -51,6 +51,9 @@ exports.handler = async function (event) {
   if (!z) return antwort(404, { error: "Diese Nachricht gibt es nicht mehr." });
   if ((await rpcAlsBenutzer(token, "_darf_posteingang", { p_school: z.school_id })) !== true)
     return antwort(403, { error: "Nur Fahrschul-Admin und Büro können aus dem Posteingang antworten." });
+  // Lohnpost sieht und beantwortet nur der Fahrschul-Admin (Fabian 21.10.2026)
+  if (z.nur_admin && (await rpcAlsBenutzer(token, "_ist_schul_admin", { p_school_id: z.school_id })) !== true)
+    return antwort(403, { error: "Diese E-Mail sieht und beantwortet nur der Fahrschul-Admin." });
   if (z.status === "zu_senden") return antwort(409, { error: "Die KI sendet diese Antwort gerade. Lade den Posteingang gleich neu." });
   if (!z.von_email) return antwort(400, { error: "Diese Nachricht hat keinen Absender, an den man antworten kann." });
 

@@ -93,6 +93,7 @@ function neu(o) {
             }
             if (name === "postfach_passwort") return antwortObj(200, opt.ohnePasswort ? null : "geheim");
             if (name === "_darf_posteingang") return antwortObj(200, opt.darf === undefined ? true : opt.darf);
+            if (name === "_ist_schul_admin") return antwortObj(200, opt.admin === undefined ? true : opt.admin);
             if (name === "postfach_speichern") return antwortObj(200, "pf-1");
             throw new Error("RPC unbekannt " + name);
         }
@@ -450,13 +451,20 @@ test("KI: fremder Link im Entwurf oder schon zwei Antworten an denselben Absende
     assert.match(m2.grund, /zwei automatische Antworten/);
 });
 
-test("Abruf: KI aus → nichts abholen; Fehler → vermerkt, nach drei Tagen pausiert", async () => {
+test("Abruf: Posteingang aus → nichts abholen, KI aus → trotzdem abholen; Fehler → vermerkt, nach drei Tagen pausiert", async () => {
     neu();
-    T.schools[0].bereiche_aus = ["ki"];
+    T.schools[0].bereiche_aus = ["posteingang"];
     await ABRUF().handler(cron());
     assert.equal(netz.abruf, null);
     assert.match(T.postfaecher[0].letzter_fehler, /ausgeschaltet/);
     assert.equal(T.posteingang.length, 0);
+    // Fabian 21.10.2026: Der Posteingang geht auch ohne KI
+    neu();
+    T.schools[0].ki_aus = true;
+    T.schools[0].bereiche_aus = ["ki"];
+    await ABRUF().handler(cron());
+    assert.notEqual(netz.abruf, null);
+    assert.equal(T.postfaecher[0].letzter_fehler || null, null);
     neu();
     netz.abrufFehler = Object.assign(new Error("Anmeldung abgelehnt. Prüfe E-Mail-Adresse und Passwort."), { eigen: true });
     await ABRUF().handler(cron());
@@ -487,14 +495,15 @@ test("Verbinden: nur Fahrschul-Admin, mit Kontingent; Passwort geht nur an den T
     assert.equal(r.statusCode, 403);
     assert.match(JSON.parse(r.body).error, /Nur der Fahrschul-Admin/);
     neu({ uid: "admin-1" });
-    gate.ergebnis = { ok: false, statusCode: 403, error: "KI aus" };
+    gate.ergebnis = { ok: false, statusCode: 429, error: "Tageslimit für KI-Funktionen erreicht. Ab morgen wieder verfügbar." };
     r = await VERBINDEN().handler(nutzer(body));
-    assert.equal(r.statusCode, 403);
-    assert.match(JSON.parse(r.body).error, /KI ist für deine Fahrschule ausgeschaltet/);
+    assert.equal(r.statusCode, 429);
+    assert.match(JSON.parse(r.body).error, /Tageslimit/);
     neu({ uid: "admin-1" });
     r = await VERBINDEN().handler(nutzer({ ...body, passwort: "" }));
     assert.equal(r.statusCode, 400);
-    assert.deepEqual(gate.aufrufe[0], { feature: "postfach", limit: 20, ohneAbo: true });
+    // Nur das Kontingent zählt, nicht der KI-Schalter: der Posteingang geht auch ohne KI
+    assert.deepEqual(gate.aufrufe[0], { feature: "postfach", limit: 20, ohneAbo: true, ohneKiSchalter: true });
     netz.pruefenFehler = Object.assign(new Error("Anmeldung abgelehnt. Prüfe E-Mail-Adresse und Passwort."), { eigen: true });
     r = await VERBINDEN().handler(nutzer(body));
     assert.equal(r.statusCode, 400);
@@ -584,4 +593,17 @@ test("Von Hand senden: Rechte, Lücken, laufende KI, gleichzeitiges Senden, Send
     r = await SENDEN().handler(nutzer({ id: m.id, text: "Hallo" }));
     assert.equal(r.statusCode, 409);
     assert.match(JSON.parse(r.body).error, /kein Postfach verbunden/);
+});
+
+test("Lohnpost: Büro darf nicht antworten, Admin schon", async () => {
+    neu({ uid: "buero-1", darf: true, admin: false });
+    let m = mail({ status: "braucht_dich", nur_admin: true });
+    let r = await SENDEN().handler(nutzer({ id: m.id, text: "Hallo" }));
+    assert.equal(r.statusCode, 403);
+    assert.match(JSON.parse(r.body).error, /nur der Fahrschul-Admin/);
+    assert.equal(netz.gesendet.length, 0);
+    neu({ uid: "admin-1", darf: true, admin: true });
+    m = mail({ status: "braucht_dich", nur_admin: true });
+    r = await SENDEN().handler(nutzer({ id: m.id, text: "Danke, erhalten." }));
+    assert.equal(r.statusCode, 200);
 });

@@ -186,6 +186,7 @@ async function bearbeiten(db, client, z, context) {
   const neu = {
     status: e.status, grund: belegVormerken && e.status === "info" ? "Rechnung erkannt – der Beleg liegt in der Buchhaltung zur Prüfung bereit." : e.grund,
     kategorie: ki ? ki.kategorie : "", zusammenfassung: ki ? ki.zusammenfassung : "",
+    nur_admin: !!(z.nur_admin || P.nurAdmin({ kategorie: ki && ki.kategorie, vonEmail: z.von_email, betreff: z.betreff, text: z.text, regeln: pf && pf.regeln })),
     entwurf_betreff: ki && ki.antwort_noetig ? P.antwortBetreff(z.betreff, ki.betreff) : "",
     entwurf_text: ki && ki.antwort_noetig ? ki.antwort : "",
     aktionen: [...aktionen, { art: "ki", status: e.status, zeit: zeit() }],

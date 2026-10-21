@@ -307,3 +307,15 @@ test("Postfach: nur öffentliche Ziele (keine internen Netze, kein Server selbst
     assert.equal(await PF.hostErlaubt("mail.example.de", async () => [{ address: "212.227.15.1" }]), true);
     assert.equal(await PF.hostErlaubt("imap.ionos.de", async () => { throw new Error("Vorlagen nicht nachschlagen"); }), true);
 });
+
+test("Lohnpost nur für den Admin: Absenderliste, Stichworte und KI-Kategorie", () => {
+    const regeln = { nur_admin_absender: ["lohnbuero@steuer-kanzlei.de", "@datev.de", "lohn.example.org"] };
+    assert.equal(P.nurAdmin({ vonEmail: "Lohnbuero@Steuer-Kanzlei.de", betreff: "Unterlagen", regeln }), true, "genaue Adresse");
+    assert.equal(P.nurAdmin({ vonEmail: "noreply@mail.datev.de", betreff: "Hinweis", regeln }), true, "Domain mit Unterdomain");
+    assert.equal(P.nurAdmin({ vonEmail: "info@lohn.example.org", betreff: "Hallo", regeln }), true, "Domain ohne @");
+    assert.equal(P.nurAdmin({ vonEmail: "lea@example.org", betreff: "Ihre Lohnabrechnung Oktober", regeln }), true, "Stichwort ohne KI");
+    assert.equal(P.nurAdmin({ vonEmail: "lea@example.org", betreff: "Anfrage", kategorie: "personal" }), true, "KI-Kategorie");
+    assert.equal(P.nurAdmin({ vonEmail: "lea@example.org", betreff: "Was kostet Klasse B? Es lohnt sich bestimmt", regeln }), false);
+    assert.equal(P.nurAdmin({ vonEmail: "kanzlei@steuer-kanzlei.de", betreff: "Hallo", regeln }), false, "andere Adresse derselben Domain");
+    assert.ok(P.KATEGORIEN.includes("personal"));
+});
