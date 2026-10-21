@@ -261,7 +261,8 @@ async function antwortSenden(cfg, passwort, a) {
     from: { name: cfg.absender_name || cfg.email, address: cfg.email },
     to: a.an, subject: String(a.betreff || "").replace(/[\r\n]+/g, " ").slice(0, 250), text: String(a.text || ""),
     inReplyTo: a.antwortAuf || undefined, references: [a.referenzen, a.antwortAuf].filter(Boolean).join(" ") || undefined,
-    headers: { "Auto-Submitted": a.automatisch ? "auto-replied" : "no" },
+    // RFC 3834: automatische Antworten „auto-replied“, automatisch erzeugte Mails (z. B. Erinnerungen) „auto-generated“
+    headers: { "Auto-Submitted": a.automatisch ? "auto-replied" : a.erzeugt ? "auto-generated" : "no" },
   };
   let info;
   try {
