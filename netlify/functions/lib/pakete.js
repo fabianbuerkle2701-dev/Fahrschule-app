@@ -35,4 +35,21 @@ function paketAusAbo(abo) {
   };
 }
 
-module.exports = { PAKETE, AUTONOMIE, preisCent, rueckweg, paketAusAbo };
+// Welches Paket gilt für diese Fahrschule gerade? (wie autopilot_paket_aktiv in der Datenbank; abgelaufen = keins)
+// Braucht die Spalten autopilot_paket und autopilot_paket_bis.
+const PAKET_SPALTEN = "autopilot_paket,autopilot_paket_bis,ki_autonomie";
+function paketGilt(schule, jetzt) {
+  const p = schule && schule.autopilot_paket;
+  if (!PAKETE[p]) return null;
+  const bis = schule.autopilot_paket_bis;
+  if (bis && !(Date.parse(bis) > (jetzt || Date.now()))) return null;
+  return p;
+}
+// Darf die KI das in Vollautonom selbst erledigen? Paket Vollautonom UND Schalter des Admins ausdrücklich an.
+// (Die eingeschaltete KI der Fahrschule prüft jede Function zusätzlich selbst.)
+function autonomieAn(schule, id, jetzt) {
+  return AUTONOMIE.indexOf(id) >= 0 && paketGilt(schule, jetzt) === "vollautonom" &&
+    !!(schule.ki_autonomie && typeof schule.ki_autonomie === "object" && schule.ki_autonomie[id] === true);
+}
+
+module.exports = { PAKETE, AUTONOMIE, PAKET_SPALTEN, preisCent, rueckweg, paketAusAbo, paketGilt, autonomieAn };

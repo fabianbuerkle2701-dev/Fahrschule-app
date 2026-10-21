@@ -8,6 +8,7 @@ const crypto = require("crypto");
 const B = require("./buchhaltung");
 const { mailAnhaenge } = require("./postfach");
 const { kiSignal } = require("./ki-timeout");
+const { paketGilt } = require("./pakete");
 
 const MODELL = "claude-sonnet-5-5";
 
@@ -67,6 +68,11 @@ async function lesen(db, client, v, schule, context) {
   const bAus = Array.isArray(schule && schule.bereiche_aus) ? schule.bereiche_aus : [];
   if (!schule || schule.ki_aus === true || bAus.indexOf("ki") >= 0) {
     await setzen(db, v, "lesen", { status: "fehler", grund: "Die KI ist für deine Fahrschule ausgeschaltet – bitte die Werte selbst eintragen." });
+    return "fehler";
+  }
+  // Die KI im Autopilot gibt es nur mit KI-Paket (Fabian 21.10.2026: Verwaltung frei, KI kostet)
+  if (!paketGilt(schule)) {
+    await setzen(db, v, "lesen", { status: "fehler", grund: "Ohne KI-Paket liest die KI keine Belege – bitte die Werte selbst eintragen." });
     return "fehler";
   }
   if (B.BELEG_TYPEN.indexOf(v.beleg_typ) < 0 || !v.beleg_pfad) {

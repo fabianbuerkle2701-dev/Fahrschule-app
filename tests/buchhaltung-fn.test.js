@@ -58,7 +58,7 @@ function neu(o) {
     sdk.aufrufe = [];
     sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(belegJson()) }], stop_reason: "end_turn" });
     T = {
-        schools: [{ id: "schule-1", name: "Fahrschule Test", ki_aus: false, bereiche_aus: [], price_hour: 65, ki_steckbrief: "" }],
+        schools: [{ id: "schule-1", name: "Fahrschule Test", ki_aus: false, bereiche_aus: [], price_hour: 65, ki_steckbrief: "", autopilot_paket: "teilautonom", autopilot_paket_bis: null }],
         profiles: [{ id: "admin-1", school_id: "schule-1", school_admin: true }, { id: "lehrer-2", school_id: "schule-1", school_admin: false },
             { id: "fremd-9", school_id: "schule-2", school_admin: true }],
         students: [], interessenten: [],
@@ -230,6 +230,14 @@ test("Zeitjob lesen: kein Beleg, Betrag unklar, KI aus, KI-Fehler mit Wiederholu
     assert.equal(v3.status, "fehler");
     assert.match(v3.grund, /KI ist für deine Fahrschule ausgeschaltet/);
     neu();
+    T.schools[0].autopilot_paket = null;
+    speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+    const v5 = vorschlag();
+    await KI().handler(cron(), zeit());
+    assert.equal(sdk.aufrufe.length, 0, "ohne KI-Paket geht nichts an die KI");
+    assert.equal(v5.status, "fehler");
+    assert.match(v5.grund, /Ohne KI-Paket/);
+    neu();
     speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
     sdk.antwort = () => { throw new APIError(529); };
     const v4 = vorschlag();
@@ -298,6 +306,17 @@ test("Sofort lesen: KI der Fahrschule aus, Zeitjob liest schon, KI überlastet",
     assert.equal(r.statusCode, 202);
     assert.match(JSON.parse(r.body).hinweis, /in einer Minute/);
     assert.equal(v.status, "lesen");
+    // Ohne KI-Paket: kein Kontingent, keine KI – der Beleg ist gleich zum Selbst-Eintragen bereit
+    neu({ uid: "admin-1" });
+    T.schools[0].autopilot_paket = null;
+    speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+    v = vorschlag();
+    r = await LESEN().handler(nutzer({ id: v.id }));
+    assert.equal(r.statusCode, 200);
+    assert.equal(JSON.parse(r.body).vorschlag.status, "fehler");
+    assert.match(JSON.parse(r.body).vorschlag.grund, /Ohne KI-Paket/);
+    assert.equal(gate.aufrufe.length, 0);
+    assert.equal(sdk.aufrufe.length, 0);
 });
 
 // ── Posteingang: Rechnungen vormerken ──

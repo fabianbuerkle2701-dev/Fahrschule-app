@@ -65,6 +65,21 @@ test("Bausteine: Preis in Cent, Rückweg nur zu bekannten Adressen, Paket aus de
     assert.ok(P.AUTONOMIE.includes("werkstatt_termine"));
 });
 
+test("Paket gilt nur ungekündigt und nicht abgelaufen; Vollautonom-Schalter nur ausdrücklich an", () => {
+    const jetzt = Date.parse("2026-10-21T12:00:00Z");
+    assert.equal(P.paketGilt({ autopilot_paket: "teilautonom", autopilot_paket_bis: null }, jetzt), "teilautonom");
+    assert.equal(P.paketGilt({ autopilot_paket: "vollautonom", autopilot_paket_bis: "2026-10-21T12:00:01Z" }, jetzt), "vollautonom");
+    assert.equal(P.paketGilt({ autopilot_paket: "vollautonom", autopilot_paket_bis: "2026-10-21T12:00:00Z" }, jetzt), null);
+    assert.equal(P.paketGilt({ autopilot_paket: "luxus" }, jetzt), null);
+    assert.equal(P.paketGilt(null, jetzt), null);
+    const voll = { autopilot_paket: "vollautonom", autopilot_paket_bis: null, ki_autonomie: { erinnerungen: true, abrechnen: "ja" } };
+    assert.equal(P.autonomieAn(voll, "erinnerungen", jetzt), true);
+    assert.equal(P.autonomieAn(voll, "abrechnen", jetzt), false, "nur true zählt");
+    assert.equal(P.autonomieAn(voll, "mails_alle", jetzt), false);
+    assert.equal(P.autonomieAn({ ...voll, autopilot_paket: "teilautonom" }, "erinnerungen", jetzt), false);
+    assert.equal(P.autonomieAn({ ...voll, ki_autonomie: { unbekannt: true } }, "unbekannt", jetzt), false);
+});
+
 test("Buchen: nur Admin, ohne Schlüssel „noch nicht eingerichtet“, ohne Preis kein Checkout", async () => {
     neu({ uid: null });
     assert.equal((await BUCHEN().handler(anfrage({ paket: "teilautonom" }))).statusCode, 401);

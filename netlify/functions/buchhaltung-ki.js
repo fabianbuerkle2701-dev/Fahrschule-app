@@ -8,6 +8,7 @@
 const Anthropic = require("@anthropic-ai/sdk").default;
 const { dienst } = require("./lib/dienst");
 const { holen, lesen } = require("./lib/belege");
+const { PAKET_SPALTEN } = require("./lib/pakete");
 
 const MAX_JE_LAUF = 3;
 const RESTZEIT_MS = 8500;
@@ -42,7 +43,7 @@ exports.handler = async function (event, context) {
       if (v.status === "holen")
         e = await holen(db, v);
       else {
-        const schule = ((await db.lesen("schools?id=eq." + v.school_id + "&select=ki_aus,bereiche_aus")) || [])[0];
+        const schule = ((await db.lesen("schools?id=eq." + v.school_id + "&select=ki_aus,bereiche_aus," + PAKET_SPALTEN)) || [])[0];
         const r = await lesen(db, client, v, schule, context);
         e = typeof r === "string" ? r : "gelesen";
       }

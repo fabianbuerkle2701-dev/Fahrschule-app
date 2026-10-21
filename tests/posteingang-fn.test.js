@@ -65,7 +65,7 @@ function neu(o) {
     sdk.aufrufe = [];
     sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(kiJson()) }], stop_reason: "end_turn" });
     T = {
-        schools: [{ id: "schule-1", name: "Fahrschule Test", subtitle: "", price_hour: 65, price_grundgebuehr: 390, packages: [], klassen: ["B"], ki_aus: false, bereiche_aus: [],
+        schools: [{ id: "schule-1", name: "Fahrschule Test", subtitle: "", price_hour: 65, price_grundgebuehr: 390, packages: [], klassen: ["B"], ki_aus: false, bereiche_aus: [], autopilot_paket: "teilautonom", autopilot_paket_bis: null,
             locations: [{ name: "Mitte", street: "Hauptstr. 1", zip: "10115", city: "Berlin", phone: "030 123" }], ki_steckbrief: "Theorie dienstags und donnerstags um 18 Uhr." }],
         profiles: [{ id: "admin-1", school_id: "schule-1", school_admin: true, booking_code: "ABC123" }, { id: "lehrer-2", school_id: "schule-1", school_admin: false },
             { id: "fremd-9", school_id: "schule-2", school_admin: true }],
@@ -224,6 +224,17 @@ test("KI: Gesundheitsangaben und ausgeschaltete KI – kein Aufruf bei Anthropic
     await KI().handler(cron(), zeit());
     assert.equal(sdk.aufrufe.length, 0);
     assert.equal(m3.status, "braucht_dich");
+    // Ohne KI-Paket (nie gebucht oder abgelaufen) liest die KI nicht mit – die Mail kommt ungelesen zum Admin
+    for (const ohne of [{ autopilot_paket: null }, { autopilot_paket: "vollautonom", autopilot_paket_bis: new Date(Date.now() - 60000).toISOString() }]) {
+        neu();
+        Object.assign(T.schools[0], ohne);
+        const m4 = mail();
+        await KI().handler(cron(), zeit());
+        assert.equal(sdk.aufrufe.length, 0);
+        assert.equal(m4.status, "braucht_dich");
+        assert.match(m4.grund, /Ohne KI-Paket/);
+        assert.equal(netz.gesendet.length, 0);
+    }
 });
 
 test("KI: Schüler, Rechnung, Lücken, Autopilot aus, Tageslimit, alte Mail → Entwurf liegt bereit", async () => {

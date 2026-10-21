@@ -2,11 +2,13 @@
 // Der Fahrschul-Admin lädt im Autopilot ein Foto oder PDF hoch (Speicher „belege“, RPC
 // beleg_vorschlag_anlegen) und ruft dann diese Function mit der Vorschlags-ID auf - so steht das
 // Ergebnis nach Sekunden da statt nach dem nächsten Zeitjob. Läuft der Zeitjob schon am selben Beleg,
-// liefert sie einfach den aktuellen Stand. Gebucht wird hier nie.
+// liefert sie einfach den aktuellen Stand. Gebucht wird hier nie. Ohne KI-Paket wird nicht gelesen:
+// der Beleg ist dann gleich zum Selbst-Eintragen bereit.
 
 const Anthropic = require("@anthropic-ai/sdk").default;
 const { dienst, benutzerAusToken } = require("./lib/dienst");
 const { lesen } = require("./lib/belege");
+const { PAKET_SPALTEN, paketGilt } = require("./lib/pakete");
 
 const ADMIN_UID = "96530a9f-28ae-4ac6-9cfa-26de392ecf05";
 const DEMO_UID = "114d1f0a-9947-459d-8009-06282799ca44";
@@ -50,6 +52,19 @@ exports.handler = async function (event, context) {
   if (!darf) return antwort(403, { error: "Belege sieht nur der Fahrschul-Admin." });
   if (v.status !== "lesen") return antwort(200, { vorschlag: v });
 
+  let schule;
+  try {
+    schule = ((await db.lesen("schools?id=eq." + v.school_id + "&select=ki_aus,bereiche_aus," + PAKET_SPALTEN)) || [])[0];
+  } catch (e) {
+    return antwort(503, { error: "Die Buchhaltung ist gerade nicht erreichbar. Bitte gleich noch einmal versuchen." });
+  }
+  // Ohne KI-Paket liest die KI nichts: der Beleg ist gleich zum Selbst-Eintragen bereit (kein Kontingent verbraucht)
+  if (!paketGilt(schule)) {
+    await lesen(db, null, v, schule, context);
+    const jetzt = ((await db.lesen("beleg_vorschlaege?id=eq." + id + "&select=" + SPALTEN)) || [])[0];
+    return antwort(200, { vorschlag: jetzt || v });
+  }
+
   const gate = await require("./lib/ki-guard").subscriptionGate(nutzer.id, token, { feature: "beleg", limit: 200 });
   if (!gate.ok)
     return antwort(gate.statusCode, { error: gate.statusCode === 403 ? "Die KI ist für deine Fahrschule ausgeschaltet – trag die Werte bitte selbst ein." : gate.error });
@@ -61,7 +76,6 @@ exports.handler = async function (event, context) {
     const jetzt = ((await db.lesen("beleg_vorschlaege?id=eq." + id + "&select=" + SPALTEN)) || [])[0];
     return antwort(200, { vorschlag: jetzt || v });
   }
-  const schule = ((await db.lesen("schools?id=eq." + v.school_id + "&select=ki_aus,bereiche_aus")) || [])[0];
   const client = new Anthropic({ apiKey, maxRetries: 0 });
   const r = await lesen(db, client, reserviert[0], schule, context);
   if (r === "nochmal")

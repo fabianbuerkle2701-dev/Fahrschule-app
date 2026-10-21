@@ -2,7 +2,7 @@
 // Aufruf jede Minute durch den pg_cron-Job "posteingang-ki" (nur wenn etwas wartet), mit
 // x-cron-secret wie die Push-Jobs. Je Lauf bis zu drei Einträge, einzeln reserviert über
 // posteingang_naechster (zählt versuche hoch; nach drei Versuchen legt die App die Mail vor):
-//  - status neu: Gesundheitsangaben und ausgeschaltete KI gehen ohne KI an den Admin. Sonst ordnet
+//  - status neu: Gesundheitsangaben, ausgeschaltete KI und Schulen ohne KI-Paket gehen ohne KI an den Admin. Sonst ordnet
 //    Claude die Mail ein und schreibt einen Entwurf (feste JSON-Form, lib/posteingang.js SCHEMA).
 //    Was damit passiert, entscheidet allein entscheiden() - nie die KI. Neue Interessenten legt
 //    die Function an (Herkunft E-Mail), wenn die Regel dafür an ist.
@@ -16,6 +16,7 @@ const { kiSignal } = require("./lib/ki-timeout");
 const { dienst, APP_URL } = require("./lib/dienst");
 const { antwortSenden } = require("./lib/postfach");
 const P = require("./lib/posteingang");
+const { PAKET_SPALTEN, paketGilt } = require("./lib/pakete");
 
 const MODELL = "claude-sonnet-5-5";
 const MAX_JE_LAUF = 3;
@@ -25,7 +26,7 @@ const SENDEN_RESTZEIT_MS = 4000;
 function restzeit(context) {
   return context && typeof context.getRemainingTimeInMillis === "function" ? Number(context.getRemainingTimeInMillis()) : 25000;
 }
-const SCHUL_FELDER = "name,subtitle,locations,klassen,price_hour,price_grundgebuehr,price_lehrmaterial,price_sonderfahrt,price_pruefungsvorstellung,packages,ki_steckbrief,ki_aus,bereiche_aus";
+const SCHUL_FELDER = "name,subtitle,locations,klassen,price_hour,price_grundgebuehr,price_lehrmaterial,price_sonderfahrt,price_pruefungsvorstellung,packages,ki_steckbrief,ki_aus,bereiche_aus," + PAKET_SPALTEN;
 
 // Beginn des heutigen Tages in Berlin als ISO-Zeit (für das Tageslimit des Autopiloten)
 function berlinTagesbeginn(jetzt) {
@@ -127,6 +128,12 @@ async function bearbeiten(db, client, z, context) {
   if (kiAus(schule)) {
     await setzen(db, z, "neu", { status: "braucht_dich", grund: "Die KI ist für deine Fahrschule ausgeschaltet – bitte selbst ansehen.", aktionen: [...aktionen, { art: "vorgelegt", grund: "ki_aus", zeit: zeit() }] });
     return "ki_aus";
+  }
+  // Die KI im Autopilot gibt es nur mit KI-Paket (Fabian 21.10.2026: Verwaltung frei, KI kostet) – ohne Paket
+  // kommt die Mail wie bei ausgeschalteter KI ungelesen zum Admin
+  if (!paketGilt(schule)) {
+    await setzen(db, z, "neu", { status: "braucht_dich", grund: "Ohne KI-Paket liest die KI nicht mit – bitte selbst ansehen.", aktionen: [...aktionen, { art: "vorgelegt", grund: "kein_paket", zeit: zeit() }] });
+    return "kein_paket";
   }
   if (P.enthaeltGesundheit(z.betreff + "\n" + z.text)) {
     const e = P.entscheiden({ gesundheit: true });
