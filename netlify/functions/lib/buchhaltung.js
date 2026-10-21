@@ -1,8 +1,10 @@
 // Allindrive Autopilot · KI-Buchhaltung (21.10.2026): Belege auslesen - Regeln, Prompt und Schema, ohne Netz.
 //
 // Die KI liest aus einer Rechnung oder Quittung nur, was draufsteht (Lieferant, Rechnungsnummer, Datum,
-// Fälligkeit, Bruttobetrag, Umsatzsteuer-Satz, Zahlart) und schlägt eine Kategorie vor. Gebucht wird nie
+// Fälligkeit, Bruttobetrag, Umsatzsteuer-Satz, Zahlart) und schlägt eine Kategorie vor. Gebucht wird nicht
 // automatisch: Der Fahrschul-Admin übernimmt den Vorschlag (RPC beleg_vorschlag_uebernehmen) oder verwirft ihn.
+// Ausnahme Vollautonom mit Schalter „Sicher gelesene Belege buchen“: dann bucht die KI selbst, aber nur, was
+// sicherZumBuchen() durchlässt (RPC beleg_vorschlag_ki_buchen prüft dazu auf Dubletten).
 
 // Dieselben Kategorien wie AUSGABEN_KATEGORIEN in Fahrschule-app/index.html (ein Test prüft die Gleichheit)
 const AUSGABEN_KATEGORIEN = ["Miete & Nebenkosten", "Versicherungen", "Lehrmaterial & Lernsoftware", "Telefon, Internet & Software",
@@ -101,6 +103,20 @@ function lesenErgebnis(b) {
   return { status: "bereit", grund: "" };
 }
 
+// Vollautonom „Sicher gelesene Belege buchen“: nur ein eindeutig gelesener, gewöhnlicher Beleg bis KI_BUCHEN_MAX.
+// Kein Hinweis der KI (Gutschrift, mehrere Steuersätze, schon bezahlt, Fahrzeugkosten …), Steuersatz und Kategorie
+// erkannt, Datum nicht in der Zukunft und höchstens ein Jahr alt. Alles andere entscheidet der Mensch.
+const KI_BUCHEN_MAX = 1000;
+function sicherZumBuchen(b, heute) {
+  if (!b || !b.ist_beleg || b.betrag == null || !b.datum || !b.lieferant) return false;
+  if (!(b.betrag > 0 && b.betrag <= KI_BUCHEN_MAX)) return false;
+  if (b.ust_satz == null || b.kategorie === "Sonstiges" || AUSGABEN_KATEGORIEN.indexOf(b.kategorie) < 0) return false;
+  if (b.hinweis) return false;
+  const h = heute || new Date().toISOString().slice(0, 10);
+  const vorEinemJahr = new Date(Date.parse(h + "T12:00:00Z") - 365 * 86400000).toISOString().slice(0, 10);
+  return b.datum <= h && b.datum >= vorEinemJahr;
+}
+
 // Beschreibung für die Ausgabe: Lieferant · Rechnungsnummer · Was
 function belegBeschreibung(b) {
   return [b.lieferant, b.rechnungsnummer && "Rechnung " + b.rechnungsnummer, b.beschreibung].filter(Boolean).join(" · ").slice(0, 200);
@@ -118,4 +134,4 @@ function endungFuer(typ) {
   return { "application/pdf": "pdf", "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp" }[typ] || "bin";
 }
 
-module.exports = { AUSGABEN_KATEGORIEN, ZAHLARTEN, BELEG_TYPEN, MAX_BELEG_BYTES, SYSTEM, SCHEMA, belegInhalt, belegPruefen, lesenErgebnis, belegBeschreibung, belegAnhangWaehlen, endungFuer };
+module.exports = { AUSGABEN_KATEGORIEN, ZAHLARTEN, BELEG_TYPEN, MAX_BELEG_BYTES, KI_BUCHEN_MAX, SYSTEM, SCHEMA, belegInhalt, belegPruefen, lesenErgebnis, sicherZumBuchen, belegBeschreibung, belegAnhangWaehlen, endungFuer };

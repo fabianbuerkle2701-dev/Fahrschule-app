@@ -75,6 +75,26 @@ test("Nach dem Lesen: bereit mit Grund, wenn etwas fehlt; Fehler, wenn nichts le
     assert.equal(B.lesenErgebnis(null).status, "fehler");
 });
 
+test("Vollautonom: nur eindeutig gelesene, gewöhnliche Belege bis 1.000 € bucht die KI selbst", () => {
+    const b = B.belegPruefen({ ist_beleg: true, lieferant: "Druckerei Muster GmbH", rechnungsnummer: "RE-4711", datum: "2026-10-14", faellig_am: "", betrag_brutto: 238,
+        betrag_erkannt: true, ust_satz: "19", zahlart: "Überweisung", kategorie: "Werbung", beschreibung: "Flyer", hinweis: "" });
+    const heute = "2026-10-21";
+    assert.equal(B.sicherZumBuchen(b, heute), true);
+    assert.equal(B.sicherZumBuchen({ ...b, betrag: 1000 }, heute), true);
+    assert.equal(B.sicherZumBuchen({ ...b, betrag: 1000.01 }, heute), false, "über 1.000 € entscheidet der Mensch");
+    assert.equal(B.sicherZumBuchen({ ...b, hinweis: "Gutschrift" }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, ust_satz: null }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, kategorie: "Sonstiges" }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, lieferant: "" }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, ist_beleg: false }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, betrag: null }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, datum: null }, heute), false);
+    assert.equal(B.sicherZumBuchen({ ...b, datum: "2026-10-22" }, heute), false, "Datum in der Zukunft");
+    assert.equal(B.sicherZumBuchen({ ...b, datum: "2025-10-21" }, heute), true);
+    assert.equal(B.sicherZumBuchen({ ...b, datum: "2025-10-20" }, heute), false, "älter als ein Jahr");
+    assert.equal(B.sicherZumBuchen(null, heute), false);
+});
+
 test("Den richtigen Anhang wählen: PDF vor Foto, „Rechnung“ zuerst, keine AGB, nichts zu Großes", () => {
     const a = (name, typ, groesse) => ({ name, typ, groesse: groesse || 1000 });
     assert.equal(B.belegAnhangWaehlen([a("AGB.pdf", "application/pdf"), a("Rechnung_4711.pdf", "application/pdf"), a("foto.jpg", "image/jpeg")]).name, "Rechnung_4711.pdf");

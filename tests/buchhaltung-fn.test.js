@@ -65,8 +65,9 @@ function neu(o) {
         postfaecher: [{ id: "pf-1", school_id: "schule-1", email: "info@fahrschule-test.de", benutzer: "info@fahrschule-test.de", imap_host: "imap.ionos.de", imap_port: 993,
             imap_tls: true, smtp_host: "smtp.ionos.de", smtp_port: 465, smtp_tls: true, absender_name: "Fahrschule Test", aktiv: true,
             regeln: { autopilot: true, interessenten_anlegen: true, tageslimit: 20 }, letzte_uid: 40, uid_validity: 7, letzter_abruf: null, letzter_fehler: "", fehler_seit: null, verbunden_von: "admin-1" }],
-        posteingang: [], beleg_vorschlaege: [],
+        posteingang: [], beleg_vorschlaege: [], ausgaben: [],
     };
+    kiBuchen.aufrufe = [];
     global.fetch = async (url, init) => {
         const u = new URL(String(url));
         const methode = (init && init.method) || "GET";
@@ -93,6 +94,19 @@ function neu(o) {
                 return antwortObj(200, [JSON.parse(JSON.stringify(z))]);
             }
             if (name === "postfach_passwort") return antwortObj(200, opt.ohnePasswort ? null : "geheim");
+            if (name === "beleg_vorschlag_ki_buchen") {
+                // Wie die Datenbank: nur „bereit“, Dubletten (gleicher Betrag und gleiche Rechnungsnummer) nicht
+                const args = JSON.parse(init.body);
+                kiBuchen.aufrufe.push(args.p_id);
+                const v = T.beleg_vorschlaege.find(r => r.id === args.p_id);
+                if (!v || v.status !== "bereit") return antwortObj(200, null);
+                if (T.ausgaben.some(a => a.betrag === v.betrag && v.rechnungsnummer && (a.beschreibung || "").includes(v.rechnungsnummer))) return antwortObj(200, null);
+                const a = { id: "aus-" + (T.ausgaben.length + 1), school_id: v.school_id, datum: v.datum, betrag: v.betrag, kategorie: v.kategorie, beschreibung: v.beschreibung,
+                    ust_satz: v.ust_satz, zahlart: v.zahlart, beleg_pfad: v.beleg_pfad, von_ki: true, erfasst_von: null };
+                T.ausgaben.push(a);
+                Object.assign(v, { status: "uebernommen", ausgabe_id: a.id, grund: "Von der KI gebucht" });
+                return antwortObj(200, a.id);
+            }
             throw new Error("RPC unbekannt " + name);
         }
         const tabelle = u.pathname.slice(9);
@@ -118,6 +132,8 @@ function neu(o) {
     process.env.ANTHROPIC_API_KEY = "nur-fuer-den-test";
     process.env.CRON_SECRET = "cron-test";
 }
+const kiBuchen = { aufrufe: [] };
+const vorTagen = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
 function belegJson(extra) {
     return { ist_beleg: true, lieferant: "Druckerei Muster GmbH", rechnungsnummer: "RE-4711", datum: "2026-10-14", faellig_am: "2026-10-28", betrag_brutto: 238, betrag_erkannt: true,
         ust_satz: "19", zahlart: "Überweisung", kategorie: "Werbung", beschreibung: "Flyer Schulstart", hinweis: "", ...(extra || {}) };
@@ -249,6 +265,59 @@ test("Zeitjob lesen: kein Beleg, Betrag unklar, KI aus, KI-Fehler mit Wiederholu
     r = await KI().handler(cron(), zeit());
     assert.equal(v4.status, "fehler");
     assert.match(v4.grund, /nicht lesen/);
+});
+
+test("Vollautonom „Sicher gelesene Belege buchen“: die KI bucht eindeutige Belege selbst – sonst bleibt alles beim Admin", async () => {
+    const voll = () => Object.assign(T.schools[0], { autopilot_paket: "vollautonom", ki_autonomie: { belege_buchen: true } });
+    neu();
+    voll();
+    speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+    sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(belegJson({ datum: vorTagen(3) })) }], stop_reason: "end_turn" });
+    const v1 = vorschlag();
+    await KI().handler(cron(), zeit());
+    assert.equal(v1.status, "uebernommen");
+    assert.equal(v1.grund, "Von der KI gebucht");
+    assert.equal(T.ausgaben.length, 1);
+    assert.deepEqual({ betrag: T.ausgaben[0].betrag, kategorie: T.ausgaben[0].kategorie, von_ki: T.ausgaben[0].von_ki, ust: T.ausgaben[0].ust_satz },
+        { betrag: 238, kategorie: "Werbung", von_ki: true, ust: 19 });
+    // Dieselbe Rechnung kommt noch einmal: nicht doppelt buchen, sondern vorlegen
+    const v2 = vorschlag({ beleg_pfad: "schule-1/beleg.pdf" });
+    await KI().handler(cron(), zeit());
+    assert.equal(v2.status, "bereit");
+    assert.match(v2.grund, /schon gebuchter Beleg/);
+    assert.equal(T.ausgaben.length, 1);
+    // Unsicher (Gutschrift, über 1.000 €, Steuersatz unklar): bleibt beim Admin, ohne Buchungsversuch
+    for (const extra of [{ hinweis: "Gutschrift" }, { betrag_brutto: 1500 }, { ust_satz: "unklar" }]) {
+        neu();
+        voll();
+        speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+        sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(belegJson({ datum: vorTagen(3), ...extra })) }], stop_reason: "end_turn" });
+        const v = vorschlag();
+        await KI().handler(cron(), zeit());
+        assert.equal(v.status, "bereit", JSON.stringify(extra));
+        assert.equal(kiBuchen.aufrufe.length, 0, JSON.stringify(extra));
+    }
+    // Ohne Schalter oder nur Teilautonom: nie selbst gebucht
+    for (const stand of [{ autopilot_paket: "vollautonom", ki_autonomie: {} }, { autopilot_paket: "teilautonom", ki_autonomie: { belege_buchen: true } }]) {
+        neu();
+        Object.assign(T.schools[0], stand);
+        speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+        sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(belegJson({ datum: vorTagen(3) })) }], stop_reason: "end_turn" });
+        const v = vorschlag();
+        await KI().handler(cron(), zeit());
+        assert.equal(v.status, "bereit", JSON.stringify(stand));
+        assert.equal(kiBuchen.aufrufe.length, 0, JSON.stringify(stand));
+    }
+    // Sofort lesen nach dem Hochladen: das Ergebnis kommt als „von der KI gebucht“ zurück
+    neu({ uid: "admin-1" });
+    voll();
+    speicher["belege/schule-1/beleg.pdf"] = { daten: PDF };
+    sdk.antwort = () => ({ content: [{ type: "text", text: JSON.stringify(belegJson({ datum: vorTagen(1) })) }], stop_reason: "end_turn" });
+    const v3 = vorschlag();
+    const r = await LESEN().handler(nutzer({ id: v3.id }));
+    assert.equal(r.statusCode, 200);
+    assert.equal(JSON.parse(r.body).vorschlag.status, "uebernommen");
+    assert.equal(T.ausgaben.length, 1);
 });
 
 // ── beleg-lesen ──

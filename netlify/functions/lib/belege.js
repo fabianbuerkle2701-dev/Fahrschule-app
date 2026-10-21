@@ -8,7 +8,7 @@ const crypto = require("crypto");
 const B = require("./buchhaltung");
 const { mailAnhaenge } = require("./postfach");
 const { kiSignal } = require("./ki-timeout");
-const { paketGilt } = require("./pakete");
+const { paketGilt, autonomieAn } = require("./pakete");
 
 const MODELL = "claude-sonnet-5-5";
 
@@ -114,7 +114,18 @@ async function lesen(db, client, v, schule, context) {
   const felder = b ? { lieferant: b.lieferant, rechnungsnummer: b.rechnungsnummer, datum: b.datum, faellig_am: b.faellig_am, betrag: b.betrag,
     ust_satz: b.ust_satz, kategorie: b.kategorie, beschreibung: B.belegBeschreibung(b), zahlart: b.zahlart, hinweis: b.hinweis } : {};
   const neu = await setzen(db, v, "lesen", { status: r.status, grund: r.grund, ...felder });
-  return neu || "fehler";
+  if (!neu) return "fehler";
+  // Vollautonom „Sicher gelesene Belege buchen“: Paket, Schalter und (oben) KI an – und der Beleg ist eindeutig
+  if (neu.status === "bereit" && autonomieAn(schule, "belege_buchen") && B.sicherZumBuchen(b)) {
+    try {
+      const ausgabe = await db.rpc("beleg_vorschlag_ki_buchen", { p_id: v.id });
+      if (ausgabe) return { ...neu, status: "uebernommen", ausgabe_id: ausgabe, grund: "Von der KI gebucht" };
+      return (await setzen(db, neu, "bereit", { grund: "Sieht aus wie ein schon gebuchter Beleg – bitte prüfen." })) || neu;
+    } catch (e) {
+      console.error("belege: KI-Buchung " + ((e && e.status) || "Fehler"));
+    }
+  }
+  return neu;
 }
 
 module.exports = { holen, lesen, MODELL };
