@@ -7,7 +7,9 @@ const PAKETE = {
   vollautonom: { name: "Vollautonom", rang: 2 },
 };
 // Was die KI in Vollautonom selbst erledigen darf – einzeln vom Admin einzuschalten (schools.ki_autonomie), Start: alles aus
-const AUTONOMIE = ["mails_alle", "erinnerungen", "zahlungen_buchen", "belege_buchen", "abrechnen", "werkstatt_termine"];
+const AUTONOMIE = ["mails_alle", "erinnerungen", "zahlungen_buchen", "belege_buchen", "abrechnen", "werkstatt_termine",
+  // seit 24.10.2026 (Fabian: „Die KI soll noch viel mehr übernehmen“)
+  "interessenten_nachfassen", "anmeldungen_uebernehmen", "unterlagen_erinnern"];
 
 // Preis in Cent aus den Einstellungen (Euro je Monat); null, wenn keiner festgelegt ist
 function preisCent(preise, paket) {
