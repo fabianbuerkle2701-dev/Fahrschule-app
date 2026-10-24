@@ -123,6 +123,23 @@ function lessonBillables(s, stdPrice) {
   });
 }
 
+// Kontostand wie in der App (sumCharges/sumPayments): Fahrstunden (je eigener Preis, abzüglich Paket-Guthaben) und freie Posten
+// gegen alle Zahlungen – unabhängig davon, ob schon eine Rechnung geschrieben ist (Fabian 23.10.2026: „offene Beträge“)
+function lessonsCharge(s, stdPrice) {
+  return lessonBillables(s, stdPrice).reduce((sum, b) => sum + (Number.isFinite(b.amount) ? b.amount : 0), 0);
+}
+function sumCharges(s, pricePerUE) {
+  const auto = lessonsCharge(s, pricePerUE);
+  const free = (s.costItems || []).reduce((sum, it) => sum + (Number(it.amount) || 0), 0);
+  return auto + free;
+}
+function sumPayments(s) {
+  return (s.payments || []).reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+}
+function lessonUE(s) {
+  return (s.drivenLessons || []).reduce((sum, l) => sum + (Number(l.minutes) || 0), 0) / 45;
+}
+
 // "offen" = Rechnung über erbrachte Leistungen; "guthaben" = vorab aufgeladen, Leistungen werden nie zusätzlich berechnet
 function abrechnungsModell(s, standard) {
   const eigen = s && s.abrechnungsModell;
@@ -199,4 +216,4 @@ function rechnungKleinunternehmer(s, inv, fallback) {
   return quelle && quelle.kleinunternehmer != null ? !!quelle.kleinunternehmer : !!fallback;
 }
 
-module.exports = { eurFmt, lessonPricePerUE, packageCreditUE, rekonstruierteDeckungUE, abgerechneterStandardpreis, lessonBillables, abrechnungsModell, rechnungsEntwurfZeilen, rechnungsPostenAusZeilen, rechnungsSchnappschuss, rechnungsLeistungszeitraum, rechnungKleinunternehmer };
+module.exports = { eurFmt, lessonPricePerUE, packageCreditUE, rekonstruierteDeckungUE, abgerechneterStandardpreis, lessonBillables, lessonsCharge, sumCharges, sumPayments, lessonUE, abrechnungsModell, rechnungsEntwurfZeilen, rechnungsPostenAusZeilen, rechnungsSchnappschuss, rechnungsLeistungszeitraum, rechnungKleinunternehmer };
