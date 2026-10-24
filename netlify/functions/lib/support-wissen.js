@@ -2,7 +2,8 @@
 // zwischengespeichert - Änderungen hier wirken mit dem nächsten Deploy. Bei neuen Funktionen,
 // geänderten Menüs oder Bezeichnungen hier nachziehen, sonst erklärt der Support alte Wege
 // (siehe Obsidian „KI-Support“). Die Navigationsziele müssen zu befehlsZiele() in index.html passen.
-// Stand: v2.125.2, zusammengestellt aus dem Code am 19.10.2026. Keine personenbezogenen Daten.
+// Stand: v2.125.2, zusammengestellt aus dem Code am 19.10.2026; Umzug der Verwaltung in den Autopilot (v2.127.0, 24.10.2026)
+// als Grundregel ergänzt. Keine personenbezogenen Daten.
 
 const WISSEN = `# Allindrive – Wissensbuch für den Support
 
@@ -11,6 +12,7 @@ Stand: App-Version 2.125.2 (Oktober 2026). Alle Menüpfade, Reiter und Knöpfe s
 Grundregeln für Antworten:
 - Viele Bereiche lassen sich abschalten (Einstellungen › Funktionen ein/aus). Findet jemand etwas nicht, ist eine ausgeschaltete Funktion der häufigste Grund – persönlich oder für die ganze Fahrschule.
 - Manche Bereiche sieht nur der Fahrschul-Admin (Inhaber) oder das Büro. Pilotfunktionen wie Ally gibt es nur in Fahrschulen, für die Allindrive sie freigeschaltet hat.
+- **Seit Version 2.127.0 (24.10.2026) verwalten Fahrschul-Admin und Büro die Fahrschule im Allindrive Autopilot** (autopilot.allindrive.app, dieselben Zugangsdaten, am Computer): Fahrschul-Dashboard, Team-Kalender, Ausgaben & Gewinn, die Einstellungen unter Einstellungen › Fahrschule (Meine Fahrschule, Team & Einladung, Standorte, Personalunterlagen, Führerscheinklassen, Fahrstunden-Arten, Sonderfahrten-Soll, Reform, Fuhrpark, Preise, Rechnungsdaten, DATEV, Gutscheine, Löschprotokoll) und die Auswertung der ganzen Fahrschule stehen für sie nicht mehr in der App. Wo dieses Wissensbuch dafür Wege in der App beschreibt, gilt für Admin und Büro: im Autopilot – die Einträge in der App öffnen ihn. Was ein Admin als Fahrlehrer selbst unterrichtet (eigene Schüler, Termine, Fahrstunden und deren Rechnungen), bleibt in der App. Fahrlehrer ohne Admin-Rolle betrifft das nicht.
 - Fast alles, was mit Schülern zu tun hat, hängt am gerade gewählten Schüler. Ohne gewählten Schüler zeigen Übersicht, ADK, Strecken und Fahrstunden „Kein Schüler ausgewählt“ mit dem Knopf „Zur Schülerliste“.
 
 ---
@@ -449,7 +451,6 @@ Mehr › Fahrschule › Interessenten (Funktion „Interessenten“):
 - Anfragen per E-Mail legt der Posteingang automatisch als Interessent an (Herkunft „E-Mail“, beim Fahrschul-Admin, der das Postfach verbunden hat), wenn die Regel „Interessenten anlegen“ an ist.
 
 ### Allindrive Autopilot (Verwaltung mit KI)
-STAND 21.10.2026: Der Autopilot ist noch nicht freigeschaltet – in der App sind die Wege dorthin noch ausgeblendet. Wer danach fragt: Er kommt in Kürze; bis dahin geht alles wie gewohnt in der App. (Zeile entfernen, sobald AUTOPILOT_LIVE an ist.)
 Der Autopilot ist eine eigene Web-App für den Computer im Büro – nur Fahrschul-Admin und Büro, Anmeldung mit denselben Zugangsdaten wie in der App. In der App öffnet ihn: Mehr › Fahrschule › „Autopilot“, Einstellungen › Fahrschule › „Allindrive Autopilot“, Schnellsuche „Autopilot“ oder der Hinweis „N E-Mails im Autopilot brauchen dich“ auf der Startseite (ein reines Büro-Konto sieht ihn oben im Fahrschul-Cockpit). Bearbeitet werden E-Mails und Belege nur im Autopilot, nicht in der App.
 Posteingang im Autopilot (Funktion „Posteingang im Autopilot (KI)“ an; ist die KI der Fahrschule aus, kommen die E-Mails trotzdem an – nur ohne Einordnung und Entwürfe, beantworten tut man selbst). Lohnpost (Lohn- und Gehaltsabrechnungen, Lohnbüro, Absender auf der Liste „Nur für den Admin“ unter Einstellungen › Regeln) sieht nur der Fahrschul-Admin, das Büro nicht:
 1. Postfach verbinden (nur Fahrschul-Admin, im Autopilot unter Einstellungen › Postfach): Anbieter wählen (IONOS, STRATO, Telekom, GMX, WEB.DE, Gmail oder „Anderer Anbieter“ mit Server und Port für IMAP und SMTP), E-Mail-Adresse, Passwort des Postfachs, Absendername › „Verbinden“. Abholen und Senden werden sofort geprüft. Gmail braucht ein App-Passwort; bei GMX und WEB.DE muss „POP3/IMAP-Abruf“ im Postfach erlaubt sein; bei T-Online das E-Mail-Passwort aus dem Kundencenter. Outlook/Microsoft 365 geht noch nicht.
