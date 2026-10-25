@@ -4315,7 +4315,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.127.0";
+const APP_VERSION = "2.128.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4469,6 +4469,9 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.128.0", date: "Oktober 2026", changes: [
+            "Die Suche in „Meine Schüler“ läuft flüssiger: der getippte Text steht sofort im Feld, die Liste sortiert sich erst nach einer kurzen Tipppause neu. Vorher wurde sie bei jedem Buchstaben komplett neu aufgebaut und flackerte – bei vielen Schülern merkbar. Löschst du das Feld oder tippst du auf „Suche und Filter zurücksetzen“, ist die ganze Liste sofort wieder da",
+        ] },
     { v: "2.127.0", date: "Oktober 2026", changes: [
             "Neu: der Allindrive Autopilot unter autopilot.allindrive.app – die Verwaltung eurer Fahrschule mit KI, für Fahrschul-Admin und Büro am Computer. Anmelden mit denselben Zugangsdaten wie hier",
             "Für Fahrschul-Admin und Büro: Fahrschul-Dashboard, Team-Kalender, Ausgaben & Gewinn, die Einstellungen der Fahrschule und die Auswertung der ganzen Fahrschule findest du jetzt im Autopilot. Die Knöpfe hier in der App öffnen ihn",
@@ -19518,7 +19521,32 @@ function App() {
         }
         catch (e) { }
     }, [theme, school, session == null]);
+    // Suchfeld der Schülerliste: der getippte Text (search) steht sofort im Feld, gefiltert wird
+    // aber erst mit sucheFilter nach einer kurzen Tipppause. Bei gut hundert Schülern rechnet
+    // renderListe sonst bei JEDEM Buchstaben die ganze Liste neu durch (Ampel, Gesamtfortschritt,
+    // offene Beträge je Schüler) - das Tippen hakt und die Liste flackert.
     const [search, setSearch] = useState("");
+    const [sucheFilter, setSucheFilter] = useState("");
+    const sucheTimerRef = useRef(null);
+    // Über diesen Setzer laufen ALLE Schreibzugriffe aufs Suchfeld (Tippen, Löschkreuz,
+    // "Suche und Filter zurücksetzen", Sprung von der Startseite). Leeren wirkt sofort: auf
+    // "zurücksetzen" soll die vollständige Liste nicht erst eine Drittelsekunde später aufklappen.
+    const sucheSetzen = useCallback(wert => {
+        setSearch(wert);
+        if (sucheTimerRef.current) {
+            clearTimeout(sucheTimerRef.current);
+            sucheTimerRef.current = null;
+        }
+        if (!wert.trim()) {
+            setSucheFilter("");
+            return;
+        }
+        sucheTimerRef.current = setTimeout(() => { sucheTimerRef.current = null; setSucheFilter(wert); }, 300);
+    }, []);
+    // Beim Verlassen der App den offenen Timer abräumen, damit er nicht in eine abgebaute
+    // Komponente hinein setzt.
+    useEffect(() => () => { if (sucheTimerRef.current)
+        clearTimeout(sucheTimerRef.current); }, []);
     const [saved, setSaved] = useState(true);
     // null = alles geschrieben. Sonst der Schüler, dessen letzter Schreibversuch fehlschlug -
     // die Speicheranzeige wird damit gleichzeitig zum Wiederholen-Knopf (Designprüfung 2026-09-14).
@@ -27703,7 +27731,7 @@ function App() {
             weekItems.push({ key: "uebergabe", icon: icClock, accent: true, onClick: () => setFaktenblatt(neuUebergeben[0].id),
                 text: neuUebergeben.length === 1 ? dispName(neuUebergeben[0]) + " ist neu bei dir – Faktenblatt lesen" : neuUebergeben.length + " Schüler neu bei dir – Faktenblatt lesen" });
         if (testfahrtBereit.length > 0)
-            weekItems.push({ key: "testfahrt", icon: icClock, accent: true, onClick: () => { setSearch(""); setListFilter("reif"); setView("liste"); },
+            weekItems.push({ key: "testfahrt", icon: icClock, accent: true, onClick: () => { sucheSetzen(""); setListFilter("reif"); setView("liste"); },
                 text: testfahrtBereit.length === 1 ? "1 Schüler bereit für die Testfahrt zur Prüfungsreife" : testfahrtBereit.length + " Schüler bereit für die Testfahrt zur Prüfungsreife" });
         const unterlagenFehlen = unterlagenFehlenListe();
         if (unterlagenFehlen.length > 0)
@@ -28075,7 +28103,7 @@ function App() {
     }
     function renderListe() {
         const pendingList = students.filter(s => s.pending && s._isMine);
-        const q = search.trim().toLowerCase();
+        const q = sucheFilter.trim().toLowerCase();
         let filtered = q ? students.filter(s => dispName(s).toLowerCase().includes(q)) : students.slice();
         // Filter-Pillen (spec 7): "aktiv" = weder archiviert noch Anmeldung offen, "reif" = grüne
         // Ampel (dieselbe Definition wie die Status-Gruppen unten), "offen" = offener Betrag > 0.
@@ -28151,9 +28179,9 @@ function App() {
             // ist. Sonst blieb nach dem Löschen/Archivieren auf 3 Schüler ein Filter unsichtbar
             // eingeschaltet und die Liste leer, ohne Weg, ihn zurückzusetzen.
             (students.length > 3 || search || listFilter !== "alle") && React.createElement("div", { style: { position: "relative", marginBottom: 12 } },
-                React.createElement("input", { value: search, onChange: e => setSearch(e.target.value), placeholder: "Sch\u00FCler suchen\u2026", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 999, padding: "12px 42px 12px 18px",
+                React.createElement("input", { value: search, onChange: e => sucheSetzen(e.target.value), placeholder: "Sch\u00FCler suchen\u2026", "aria-label": "Sch\u00FCler suchen", style: { width: "100%", border: "1.5px solid var(--line)", borderRadius: 999, padding: "12px 42px 12px 18px",
                         fontSize: 16, background: "var(--card)" } }),
-                search && React.createElement("button", { onClick: () => setSearch(""), "aria-label": "Suche l\u00F6schen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
+                search && React.createElement("button", { onClick: () => sucheSetzen(""), "aria-label": "Suche l\u00F6schen", style: { position: "absolute", right: 8, top: "50%", transform: "translateY(-50%)", color: "var(--muted)",
                         fontSize: 20, fontWeight: 700, padding: "4px 8px" } }, "\u00D7")),
             // Filter-Pillen (spec 7). Die Status-Gruppen weiter unten bleiben erhalten - die Pillen
             // schr\u00E4nken nur ein, welche Sch\u00FCler \u00FCberhaupt in den Gruppen landen.
@@ -28215,10 +28243,10 @@ function App() {
                 const archivZusatz = zusatzTeile.length ? " \u2013 " + zusatzTeile.join(", ") + "." : ".";
                 return React.createElement("div", { style: { textAlign: "center", marginTop: 20 } },
                     React.createElement("p", { style: { fontSize: 14, color: "var(--muted)", marginBottom: 10 } },
-                        q ? kein + " gefunden f\u00FCr \u201E" + search.trim() + "\u201C" + (listFilter !== "alle" ? " mit diesem Filter" : "") + archivZusatz
+                        q ? kein + " gefunden f\u00FCr \u201E" + sucheFilter.trim() + "\u201C" + (listFilter !== "alle" ? " mit diesem Filter" : "") + archivZusatz
                             : kein + " passt zu diesem Filter" + archivZusatz),
                     imArchiv > 0 && !showArchived && React.createElement("button", { className: "btn btn-ghost", style: { marginRight: 8 }, onClick: () => setShowArchived(true) }, "Archiv anzeigen"),
-                    React.createElement("button", { className: "btn btn-ghost", onClick: () => { setSearch(""); setListFilter("alle"); } }, "Suche und Filter zur\u00FCcksetzen"));
+                    React.createElement("button", { className: "btn btn-ghost", onClick: () => { sucheSetzen(""); setListFilter("alle"); } }, "Suche und Filter zur\u00FCcksetzen"));
             })(),
             // Aufräumen (v2.63.0, Produktplan #27): bestandene und lange inaktive Schüler zum Archivieren
             // vorschlagen. Archiviert wird nur auf Tipp; die Bitte um eine Bewertung bleibt beim
