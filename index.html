@@ -4315,7 +4315,7 @@ function tonKarte(farbe, nurRand) {
     const rand = { border: "1.5px solid color-mix(in srgb, " + farbe + " 38%, var(--line))" };
     return nurRand ? rand : Object.assign(rand, { background: "color-mix(in srgb, " + farbe + " 7%, var(--card))" });
 }
-const APP_VERSION = "2.127.0";
+const APP_VERSION = "2.128.0";
 // Master-Schalter für "Theorie üben" als kostenpflichtiges Zusatzpaket. Bleibt bewusst false:
 // seit August 2026 liegen zwar 930 amtliche Fragen in der Datenbank (nur Fragentext, siehe
 // TheoryPractice), aber ohne Bildlizenz fehlen zwei komplette Sachgebiete ("Vorfahrt, Vorrang"
@@ -4469,6 +4469,11 @@ function practiceRatingInfo(id) { return PRACTICE_RATINGS.find(r => r.id === id)
 const PRACTICE_RATING_STATUSES = ["geuebt", "gekonnt"];
 // Änderungsverlauf: neueste Version oben. Bei jedem Update hier ergänzen.
 const CHANGELOG = [
+    { v: "2.128.0", date: "Oktober 2026", changes: [
+            "Streckenaufzeichnung: Lehnt das Gerät die Standortfreigabe ab, steht jetzt dabei, wie du sie wieder einschaltest – und der Hinweis bleibt so lange stehen wie andere Fehlermeldungen, statt nach drei Sekunden zu verschwinden",
+            "Startet eine Streckenaufzeichnung nicht, erscheint ein verständlicher Satz statt der technischen Meldung des Geräts",
+            "Die Warnung bei einer Terminüberschneidung ist beim Anlegen, Speichern und Bestätigen eines Termins jetzt überall gleich formuliert",
+        ] },
     { v: "2.127.0", date: "Oktober 2026", changes: [
             "Neu: der Allindrive Autopilot unter autopilot.allindrive.app – die Verwaltung eurer Fahrschule mit KI, für Fahrschul-Admin und Büro am Computer. Anmelden mit denselben Zugangsdaten wie hier",
             "Für Fahrschul-Admin und Büro: Fahrschul-Dashboard, Team-Kalender, Ausgaben & Gewinn, die Einstellungen der Fahrschule und die Auswertung der ganzen Fahrschule findest du jetzt im Autopilot. Die Knöpfe hier in der App öffnen ihn",
@@ -11987,6 +11992,17 @@ function fehlerText(e) {
         return "Der Server hat zu lange gebraucht. Bitte erneut versuchen.";
     return m ? "Unerwarteter Fehler. Bitte erneut versuchen.\n(" + m.slice(0, 120) + ")" : "Unerwarteter Fehler. Bitte erneut versuchen.";
 }
+// Die drei Meldungen der Streckenaufzeichnung an einem Ort. Sie standen vorher als fünf wörtliche
+// Meldungen in startRecording() - Signalverlust und abgelehnte Freigabe jeweils doppelt, einmal im
+// native- und einmal im Browser-Zweig -, und der Startfehler hängte die rohe Plugin-Meldung an,
+// also genau das, was fehlerText() sonst überall abfängt (Büro-Auftrag #24).
+const GPS_MELDUNG = {
+    // Kein Abbruch: die Aufzeichnung läuft weiter und schließt die Lücke, sobald das Signal zurück ist.
+    signal: "GPS-Signal gerade schwach oder nicht verfügbar – Aufzeichnung läuft weiter.",
+    // Abbruch, deshalb mit dem nächsten Schritt: ohne Freigabe hilft ein erneuter Versuch nicht.
+    freigabe: "Standortfreigabe wurde abgelehnt – Aufzeichnung gestoppt.\nGib den Standort in den Einstellungen deines Geräts frei, dann lässt sich die Strecke wieder aufzeichnen.",
+    start: (e) => "Streckenaufzeichnung konnte nicht starten.\n" + fehlerText(e),
+};
 // Verben, an denen ein Bestätigungsdialog als zerstörerisch erkannt wird, mit der Beschriftung,
 // die der Knopf dann trägt. Reihenfolge = Priorität (erster Treffer gewinnt).
 const CONFIRM_VERBEN = [
@@ -12663,6 +12679,21 @@ function findOverlaps(appts, startISO, endISO, ignoreId) {
         const ae = a.end_at ? new Date(a.end_at).getTime() : as + 45 * 60000;
         return s < ae && as < e; // echte Überlappung
     });
+}
+// Rückfragetext zu einem von findOverlaps() gefundenen Konflikt. Stand vorher dreimal fast
+// wortgleich im File - beim Speichern eines Termins, beim Bestätigen eines Vorschlags und beim
+// Anlegen über den KI-Helfer -, mit drei verschiedenen Einleitungen für denselben Fall
+// (Büro-Auftrag #24: wortgleiche Meldungen). Die Frage am Ende bleibt je Aufrufstelle eigen,
+// weil die Handlung selbst eine andere ist (anlegen / bestätigen / speichern).
+// Der Name kommt als Parameter, weil apptStudentName() in der Komponente sitzt, nicht hier.
+function terminKonfliktText(konflikt, name, frage) {
+    const c = konflikt || {};
+    const kopf = c.status === "pending"
+        ? "Achtung: Zu dieser Zeit liegt eine offene Terminanfrage:"
+        : "Achtung: Diese Zeit überschneidet sich mit einem bestehenden Termin:";
+    return kopf + "\n\n"
+        + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + (name || "Termin")
+        + "\n\n" + frage;
 }
 // Prüfungsreife: was fehlt noch?
 function pruefungsreife(stu, adk, strecken, sonderfahrtenSoll) {
@@ -24340,10 +24371,7 @@ function App() {
             const clash = findOverlaps(appts, start.toISOString(), end.toISOString(), null);
             if (clash.length) {
                 const c = clash[0];
-                const cname = apptStudentName(c) || c.title || "Termin";
-                const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine offene Terminanfrage:\n\n" : "Achtung: Diese Zeit überschneidet sich mit einem bestehenden Termin:\n\n")
-                    + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
-                    + "\n\nTrotzdem anlegen?";
+                const txt = terminKonfliktText(c, apptStudentName(c) || c.title, "Trotzdem anlegen?");
                 if (!await askConfirm({ message: txt }))
                     return;
             }
@@ -25098,7 +25126,7 @@ function App() {
             }, (location, err) => {
                 if (err) {
                     if (err.code === "NOT_AUTHORIZED") {
-                        showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
+                        showToast(GPS_MELDUNG.freigabe, "error");
                         stopRecording(false);
                     }
                     else {
@@ -25109,7 +25137,7 @@ function App() {
                         const now = Date.now();
                         if (now - recSignalWarnRef.current > 30000) {
                             recSignalWarnRef.current = now;
-                            showToast("GPS-Signal gerade schwach oder nicht verfügbar - Aufzeichnung läuft weiter.");
+                            showToast(GPS_MELDUNG.signal);
                         }
                     }
                     return;
@@ -25124,21 +25152,21 @@ function App() {
                 // C1, 22.9.2026). Denselben Weg wie beim NOT_AUTHORIZED-Fall im Callback nehmen:
                 // Hinweis zeigen und die bereits optimistisch gesetzten Aufzeichnungs-States
                 // (recActiveRef/recUi/recSession/localStorage-Puffer) sauber zuruecknehmen.
-                showToast("Streckenaufzeichnung konnte nicht starten" + (e && e.message ? "\n" + e.message : ""), "error");
+                showToast(GPS_MELDUNG.start(e), "error");
                 stopRecording(false);
             });
         }
         else {
             recWatchRef.current = navigator.geolocation.watchPosition(pos => onPoint(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy), err => {
                 if (err && err.code === 1) {
-                    showToast("Standortfreigabe wurde abgelehnt. Aufzeichnung gestoppt.");
+                    showToast(GPS_MELDUNG.freigabe, "error");
                     stopRecording(false);
                 }
                 else if (err) {
                     const now = Date.now();
                     if (now - recSignalWarnRef.current > 30000) {
                         recSignalWarnRef.current = now;
-                        showToast("GPS-Signal gerade schwach oder nicht verfügbar - Aufzeichnung läuft weiter.");
+                        showToast(GPS_MELDUNG.signal);
                     }
                 }
             }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 20000 });
@@ -26692,10 +26720,7 @@ function App() {
             const clash = findOverlaps(liste, appt.start_at, appt.end_at, id);
             if (clash.length) {
                 const c = clash[0];
-                const cname = apptStudentName(c) || c.title || "Termin";
-                const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine weitere offene Terminanfrage:\n\n" : "Achtung: Dieser Vorschlag überschneidet sich mit einem bestehenden Termin:\n\n")
-                    + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
-                    + "\n\nTrotzdem bestätigen?";
+                const txt = terminKonfliktText(c, apptStudentName(c) || c.title, "Trotzdem bestätigen?");
                 if (!await askConfirm({ message: txt }))
                     return null;
             }
@@ -35316,10 +35341,7 @@ function App() {
         const clash = findOverlaps(appts, startISO, endISO, f.id);
         if (clash.length) {
             const c = clash[0];
-            const cname = apptStudentName(c) || c.title || "Termin";
-            const txt = (c.status === "pending" ? "Achtung: Zu dieser Zeit liegt eine offene Terminanfrage:\n\n" : "Achtung: Dieser Termin überschneidet sich mit einem bestehenden:\n\n")
-                + fmtDLong(c.start_at) + ", " + hm(c.start_at) + (c.end_at ? " – " + hm(c.end_at) : "") + " Uhr · " + cname
-                + "\n\nTrotzdem speichern?";
+            const txt = terminKonfliktText(c, apptStudentName(c) || c.title, "Trotzdem speichern?");
             if (!await askConfirm({ message: txt }))
                 return;
         }
